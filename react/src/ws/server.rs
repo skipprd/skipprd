@@ -924,6 +924,7 @@ fn summarize_step(step: &ThreadStep) -> String {
 		| ThreadStep::SwitchAgent { agent, .. }
 		| ThreadStep::User { agent, .. }
 		| ThreadStep::Tool { agent, .. }
+		| ThreadStep::LlmCall { agent, .. }
 		| ThreadStep::Phase { agent, .. }
 		| ThreadStep::GuardBlock { agent, .. }
 		| ThreadStep::ArtifactFocus { agent, .. }

@@ -1,6 +1,8 @@
 use react_core::agent::AgentCtx;
 use crate::config::ReactResolvedConfig;
 use react_core::llm::ChatMessage;
+use react_core::llm_observability::{self, PartInput};
+use react_core::session::{Observation, ThreadStep};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -8,6 +10,105 @@ use std::collections::{BTreeMap, BTreeSet as StdBTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use react_core::providers::{DatasetCatalogProvider, DatasetId};
 use std::sync::Arc;
+
+async fn record_llm_call_observability_async(
+    ctx: &AgentCtx,
+    phase: &str,
+    model: &str,
+    messages: &[ChatMessage],
+    parts: &[PartInput],
+    response_raw: &str,
+    ok: bool,
+) {
+    if !llm_observability::llm_calls_enabled() {
+        return;
+    }
+    let Some(thread_id) = ctx.thread_id.as_deref() else { return };
+    let Some(store) = ctx.thread_store.as_ref() else { return };
+    let agent = ctx
+        .agent_name
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let call_id = llm_observability::next_call_id(thread_id);
+    let prompt_hash = llm_observability::prompt_hash_for_messages(messages);
+    let built = llm_observability::build_parts_for_thread(thread_id, parts);
+    let response_hash = llm_observability::sha256_hex_str(response_raw);
+    let response_text = if llm_observability::llm_response_text_enabled() {
+        Some(llm_observability::redact_common_secrets(response_raw))
+    } else {
+        None
+    };
+
+    tracing::debug!(
+        "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_hash={} response_hash={}",
+        thread_id,
+        call_id,
+        agent,
+        phase,
+        model,
+        prompt_hash,
+        response_hash
+    );
+    for p in built.parts.iter() {
+        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+        let hash = p.get("hash").and_then(|v| v.as_str()).unwrap_or("-");
+        let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        tracing::debug!(
+            "LLM_PART thread_id={} call_id={} name={} hash={} text={}",
+            thread_id,
+            call_id,
+            name,
+            hash,
+            text
+        );
+    }
+    if let Some(txt) = response_text.as_deref() {
+        tracing::debug!("LLM_RESPONSE thread_id={} call_id={} text={}", thread_id, call_id, txt);
+    }
+
+    let _ = store
+        .append_step(
+            thread_id,
+            ThreadStep::LlmCall {
+                call_id,
+                model: model.to_string(),
+                phase: phase.to_string(),
+                prompt_hash,
+                parts: built.parts,
+                part_hashes: built.part_hashes,
+                response_hash,
+                response_text,
+                observation: if ok { Observation::ok() } else { Observation::fail(vec!["llm_call_failed".to_string()]) },
+                ts: chrono::Utc::now().to_rfc3339(),
+                agent,
+            },
+        )
+        .await;
+}
+
+fn record_llm_call_observability(
+    ctx: &AgentCtx,
+    phase: &str,
+    model: &str,
+    messages: &[ChatMessage],
+    parts: &[PartInput],
+    response_raw: &str,
+    ok: bool,
+) {
+    // For non-async call sites: best-effort spawn when inside a tokio runtime.
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let ctx = ctx.clone();
+        let phase = phase.to_string();
+        let model = model.to_string();
+        let messages = messages.to_vec();
+        let parts = parts.to_vec();
+        let response_raw = response_raw.to_string();
+        handle.spawn(async move {
+            record_llm_call_observability_async(&ctx, &phase, &model, &messages, &parts, &response_raw, ok).await;
+        });
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct RemediationChange {
@@ -260,13 +361,27 @@ pub fn llm_should_remediate_sql(
     })
     .to_string();
 
-    let resp_text = ctx
-        .llm
-        .chat(&[
-            ChatMessage { role: "system".to_string(), content: sys },
-            ChatMessage { role: "user".to_string(), content: user },
-        ])
-        .map_err(|e| format!("llm should_remediate call failed: {}", e))?;
+    let messages = vec![
+        ChatMessage { role: "system".to_string(), content: sys.clone() },
+        ChatMessage { role: "user".to_string(), content: user.clone() },
+    ];
+    let parts: Vec<PartInput> = vec![
+        PartInput { name: "system".to_string(), text: sys.clone() },
+        PartInput { name: "user.phase".to_string(), text: phase.to_string() },
+        PartInput { name: "user.error_brief".to_string(), text: error_brief.to_string() },
+        PartInput { name: "user.payload".to_string(), text: user.clone() },
+    ];
+    let resp_text = match ctx.llm.chat(&messages) {
+        Ok(t) => {
+            record_llm_call_observability(ctx, phase, "unknown", &messages, &parts, &t, true);
+            t
+        }
+        Err(e) => {
+            let raw = format!("LLM_ERROR: {}", e);
+            record_llm_call_observability(ctx, phase, "unknown", &messages, &parts, &raw, false);
+            return Err(format!("llm should_remediate call failed: {}", e));
+        }
+    };
     let v = parse_json_from_llm(&resp_text)?;
     let mut parsed: LlmRemediationDecision =
         serde_json::from_value(v).map_err(|e| format!("failed to parse remediation decision JSON: {}", e))?;
@@ -390,13 +505,26 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
         })
         .to_string();
 
-        let resp_text = ctx
-            .llm
-            .chat(&[
-                ChatMessage { role: "system".to_string(), content: sys },
-                ChatMessage { role: "user".to_string(), content: user },
-            ])
-            .map_err(|e| format!("dialect remediation LLM call failed: {}", e))?;
+        let messages = vec![
+            ChatMessage { role: "system".to_string(), content: sys.clone() },
+            ChatMessage { role: "user".to_string(), content: user.clone() },
+        ];
+        let parts: Vec<PartInput> = vec![
+            PartInput { name: "system".to_string(), text: sys.clone() },
+            PartInput { name: "user.phase".to_string(), text: phase.to_string() },
+            PartInput { name: "user.files".to_string(), text: serde_json::to_string_pretty(&input_files).unwrap_or_else(|_| "[]".to_string()) },
+        ];
+        let resp_text = match ctx.llm.chat(&messages) {
+            Ok(t) => {
+                record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &t, true).await;
+                t
+            }
+            Err(e) => {
+                let raw = format!("LLM_ERROR: {}", e);
+                record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &raw, false).await;
+                return Err(format!("dialect remediation LLM call failed: {}", e));
+            }
+        };
 
         let v = parse_json_from_llm(&resp_text)?;
         let parsed: LlmRemediationResponse =
@@ -848,13 +976,30 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
     })
     .to_string();
 
-    let resp_text = ctx
-        .llm
-        .chat(&[
-            ChatMessage { role: "system".to_string(), content: sys },
-            ChatMessage { role: "user".to_string(), content: user },
-        ])
-        .map_err(|e| format!("grounded dbt repair LLM call failed: {}", e))?;
+    let messages = vec![
+        ChatMessage { role: "system".to_string(), content: sys.clone() },
+        ChatMessage { role: "user".to_string(), content: user.clone() },
+    ];
+    let parts: Vec<PartInput> = vec![
+        PartInput { name: "system".to_string(), text: sys.clone() },
+        PartInput { name: "user.phase".to_string(), text: phase.to_string() },
+        PartInput { name: "user.dbt_error_brief".to_string(), text: error_brief.clone() },
+        PartInput { name: "user.errors".to_string(), text: serde_json::to_string_pretty(&errors).unwrap_or_else(|_| "[]".to_string()) },
+        PartInput { name: "user.files".to_string(), text: serde_json::to_string_pretty(&files).unwrap_or_else(|_| "[]".to_string()) },
+        PartInput { name: "user.sources".to_string(), text: serde_json::to_string_pretty(&sources).unwrap_or_else(|_| "[]".to_string()) },
+        PartInput { name: "user.ref_models".to_string(), text: serde_json::to_string_pretty(&ref_models).unwrap_or_else(|_| "[]".to_string()) },
+    ];
+    let resp_text = match ctx.llm.chat(&messages) {
+        Ok(t) => {
+            record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &t, true).await;
+            t
+        }
+        Err(e) => {
+            let raw = format!("LLM_ERROR: {}", e);
+            record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &raw, false).await;
+            return Err(format!("grounded dbt repair LLM call failed: {}", e));
+        }
+    };
 
     let v = parse_json_from_llm(&resp_text)?;
     let parsed: GroundedRepairResponse =
@@ -1193,13 +1338,29 @@ pub async fn remediate_unresolved_columns_with_llm(
     })
     .to_string();
 
-    let resp_text = ctx
-        .llm
-        .chat(&[
-            ChatMessage { role: "system".to_string(), content: sys },
-            ChatMessage { role: "user".to_string(), content: user },
-        ])
-        .map_err(|e| format!("unresolved-column remediation LLM call failed: {}", e))?;
+    let messages = vec![
+        ChatMessage { role: "system".to_string(), content: sys.clone() },
+        ChatMessage { role: "user".to_string(), content: user.clone() },
+    ];
+    let parts: Vec<PartInput> = vec![
+        PartInput { name: "system".to_string(), text: sys.clone() },
+        PartInput { name: "user.phase".to_string(), text: phase.to_string() },
+        PartInput { name: "user.dbt_error_brief".to_string(), text: error_brief.clone() },
+        PartInput { name: "user.unresolved_columns".to_string(), text: serde_json::to_string_pretty(&unresolved_columns).unwrap_or_else(|_| "[]".to_string()) },
+        PartInput { name: "user.files".to_string(), text: serde_json::to_string_pretty(&candidates).unwrap_or_else(|_| "[]".to_string()) },
+        PartInput { name: "user.ref_models".to_string(), text: serde_json::to_string_pretty(&ref_models).unwrap_or_else(|_| "[]".to_string()) },
+    ];
+    let resp_text = match ctx.llm.chat(&messages) {
+        Ok(t) => {
+            record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &t, true).await;
+            t
+        }
+        Err(e) => {
+            let raw = format!("LLM_ERROR: {}", e);
+            record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &raw, false).await;
+            return Err(format!("unresolved-column remediation LLM call failed: {}", e));
+        }
+    };
 
     let v = parse_json_from_llm(&resp_text)?;
     let parsed: LlmUnresolvedColumnsResponse =

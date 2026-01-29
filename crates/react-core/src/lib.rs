@@ -16,4 +16,5 @@ pub mod discover;
 pub mod helpers;
 pub mod session;
 pub mod agent;
+pub mod llm_observability;
 

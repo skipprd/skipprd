@@ -189,4 +189,3 @@ where 1=1 and '{{ ref("stg_orders") }}' != ''
         assert!(extract_ref_calls(sql).is_empty());
     }
 }
-

@@ -6,6 +6,7 @@ use std::any::Any;
 use crate::tools::ToolRegistry;
 use crate::llm::ChatMessage;
 use crate::session::{Observation, ThreadStore, ThreadStep, ThreadResult, ToolObservation};
+use crate::llm_observability::{PartInput};
 use crate::keyspace::Keyspace;
 use crate::providers::{QueryProvider, DbtProvider, VectorStore};
 use crate::storage::StorageAdapter;
@@ -287,10 +288,131 @@ impl Agent {
 
     async fn llm_chat_once(ctx: &AgentCtx, prompt: String) -> Result<String, String> {
         let model = ctx.llm.clone();
-        tokio::task::spawn_blocking(move || model.chat(&[ChatMessage { role: "user".into(), content: prompt }]))
+
+        let thread_id_opt = ctx.thread_id.clone();
+        let store_opt = ctx.thread_store.clone();
+        let agent = ctx
+            .agent_name
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let ts = chrono::Utc::now().to_rfc3339();
+
+        let messages = vec![ChatMessage { role: "user".into(), content: prompt.clone() }];
+
+        // LLM call observability (stdout + persisted thread step).
+        let obs_enabled = crate::llm_observability::llm_calls_enabled() && thread_id_opt.is_some();
+        let (call_id_opt, phase, prompt_hash, parts_built) = if obs_enabled {
+            let thread_id = thread_id_opt.as_ref().unwrap();
+            let call_id = crate::llm_observability::next_call_id(thread_id);
+            let prompt_hash = crate::llm_observability::prompt_hash_for_messages(&messages);
+
+            // Best-effort: derive phase from persisted thread log.
+            let phase = if let (Some(store), Some(tid)) = (store_opt.as_ref(), thread_id_opt.as_ref()) {
+                match store.get(tid).await {
+                    Ok(log) => {
+                        let mut found = "react_loop".to_string();
+                        for step in log.steps.iter().rev() {
+                            if let ThreadStep::Phase { phase, .. } = step {
+                                let t = phase.trim();
+                                if !t.is_empty() {
+                                    found = t.to_string();
+                                    break;
+                                }
+                            }
+                        }
+                        found
+                    }
+                    Err(_) => "react_loop".to_string(),
+                }
+            } else {
+                "react_loop".to_string()
+            };
+
+            let built = crate::llm_observability::build_parts_for_thread(
+                thread_id,
+                &[PartInput { name: "user".to_string(), text: prompt.clone() }],
+            );
+
+            // Stdout debug logs: print each part in full if changed, else "unchanged".
+            tracing::debug!(
+                "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_hash={} response_pending=1",
+                thread_id,
+                call_id,
+                agent,
+                phase,
+                "unknown",
+                prompt_hash
+            );
+            for p in built.parts.iter() {
+                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+                let hash = p.get("hash").and_then(|v| v.as_str()).unwrap_or("-");
+                let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                tracing::debug!("LLM_PART thread_id={} call_id={} name={} hash={} text={}", thread_id, call_id, name, hash, text);
+            }
+
+            (Some(call_id), phase, prompt_hash, Some(built))
+        } else {
+            (None, "react_loop".to_string(), String::new(), None)
+        };
+
+        let res = tokio::task::spawn_blocking(move || model.chat(&messages))
             .await
             .map_err(|e| format!("LLM execution failed: {}", e))?
-            .map_err(|e| format!("LLM request failed: {}", e))
+            .map_err(|e| format!("LLM request failed: {}", e));
+
+        // Persist `llm_call` step after the response (success or failure), if enabled.
+        if let (Some(call_id), Some(thread_id), Some(store), Some(built)) =
+            (call_id_opt, thread_id_opt.as_ref().cloned(), store_opt.as_ref().cloned(), parts_built)
+        {
+            let (ok, response_raw) = match res.as_ref() {
+                Ok(txt) => (true, txt.as_str()),
+                Err(e) => (false, e.as_str()),
+            };
+            let response_hash = crate::llm_observability::sha256_hex_str(response_raw);
+            let response_text = if crate::llm_observability::llm_response_text_enabled() {
+                Some(crate::llm_observability::redact_common_secrets(response_raw))
+            } else {
+                None
+            };
+
+            if crate::llm_observability::llm_response_text_enabled() {
+                tracing::debug!(
+                    "LLM_RESPONSE thread_id={} call_id={} response_hash={} response_text={}",
+                    thread_id,
+                    call_id,
+                    response_hash,
+                    response_text.as_deref().unwrap_or("")
+                );
+            } else {
+                tracing::debug!(
+                    "LLM_RESPONSE thread_id={} call_id={} response_hash={} response_text=disabled",
+                    thread_id,
+                    call_id,
+                    response_hash
+                );
+            }
+
+            let _ = store
+                .append_step(
+                    &thread_id,
+                    ThreadStep::LlmCall {
+                        call_id,
+                        model: "unknown".to_string(),
+                        phase,
+                        prompt_hash,
+                        parts: built.parts,
+                        part_hashes: built.part_hashes,
+                        response_hash,
+                        response_text,
+                        observation: if ok { Observation::ok() } else { Observation::fail(vec!["llm_call_failed".to_string()]) },
+                        ts,
+                        agent,
+                    },
+                )
+                .await;
+        }
+
+        res
     }
 
     async fn llm_action_via_chunked_errors(

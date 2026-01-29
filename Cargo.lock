@@ -6966,6 +6966,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap 5.5.3",
+ "hex",
  "once_cell",
  "serde",
  "serde_json",

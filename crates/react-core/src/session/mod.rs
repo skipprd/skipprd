@@ -136,6 +136,34 @@ pub enum ThreadStep {
         ts: String,
         agent: String,
     },
+    /// LLM call observability (hashed/deduped prompt parts + response).
+    ///
+    /// Notes:
+    /// - `parts` MUST constitute the entire prompt (including system prompts, hardcoded strings, etc.).
+    /// - Each element of `parts` is a JSON object with (at minimum) `{name, hash, text}` where
+    ///   `text` is either the full (redacted) part content or the literal string `"unchanged"`.
+    /// - `prompt_hash` is sha256 over the exact serialized message list used in the call.
+    LlmCall {
+        call_id: u64,
+        /// Best-effort model identifier (provider/model name).
+        model: String,
+        /// Best-effort phase identifier (suite phase or core react loop label).
+        phase: String,
+        /// sha256 hex of the exact serialized message list (system/user/tool).
+        prompt_hash: String,
+        /// Prompt parts in order; each part may include `"text":"unchanged"` when deduped.
+        parts: Vec<Value>,
+        /// Stable part hashes keyed by part name.
+        part_hashes: BTreeMap<String, String>,
+        /// sha256 hex of the raw response text.
+        response_hash: String,
+        /// Full (redacted) response text when enabled.
+        #[serde(default)]
+        response_text: Option<String>,
+        observation: Observation,
+        ts: String,
+        agent: String,
+    },
     Phase {
         phase: String,
         from_phase: Option<String>,
@@ -211,6 +239,7 @@ impl ThreadStep {
             ThreadStep::SwitchAgent { ts, .. } => ts,
             ThreadStep::User { ts, .. } => ts,
             ThreadStep::Tool { ts, .. } => ts,
+            ThreadStep::LlmCall { ts, .. } => ts,
             ThreadStep::Phase { ts, .. } => ts,
             ThreadStep::GuardBlock { ts, .. } => ts,
             ThreadStep::ArtifactFocus { ts, .. } => ts,
@@ -501,5 +530,76 @@ mod tests {
             "title_finalized": false
         });
         assert!(serde_json::from_value::<ThreadLog>(bad).is_err());
+    }
+
+    #[test]
+    fn thread_log_round_trips_with_llm_call_step() {
+        let log = ThreadLog {
+            schema_version: THREAD_SCHEMA_VERSION,
+            steps: vec![ThreadStep::LlmCall {
+                call_id: 1,
+                model: "unknown".to_string(),
+                phase: "test".to_string(),
+                prompt_hash: "p".to_string(),
+                parts: vec![serde_json::json!({"name":"system","hash":"h","text":"hello"})],
+                part_hashes: BTreeMap::from([("system".to_string(), "h".to_string())]),
+                response_hash: "r".to_string(),
+                response_text: Some("ok".to_string()),
+                observation: Observation::ok(),
+                ts: "t".to_string(),
+                agent: "a".to_string(),
+            }],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        let v = serde_json::to_value(&log).unwrap();
+        let parsed: ThreadLog = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed.schema_version, THREAD_SCHEMA_VERSION);
+        assert_eq!(parsed.steps.len(), 1);
+        match &parsed.steps[0] {
+            ThreadStep::LlmCall { call_id, phase, response_text, .. } => {
+                assert_eq!(*call_id, 1);
+                assert_eq!(phase, "test");
+                assert_eq!(response_text.as_deref(), Some("ok"));
+            }
+            _ => panic!("expected llm_call step"),
+        }
+    }
+
+    #[test]
+    fn thread_log_serializes_and_deserializes_llm_call_step() {
+        let step = ThreadStep::LlmCall {
+            call_id: 1,
+            model: "m".to_string(),
+            phase: "p".to_string(),
+            prompt_hash: "ph".to_string(),
+            parts: vec![serde_json::json!({"name":"system","hash":"h","text":"x"})],
+            part_hashes: BTreeMap::from([("system".to_string(), "h".to_string())]),
+            response_hash: "rh".to_string(),
+            response_text: Some("resp".to_string()),
+            observation: Observation::ok(),
+            ts: "t".to_string(),
+            agent: "a".to_string(),
+        };
+        let log = ThreadLog {
+            schema_version: THREAD_SCHEMA_VERSION,
+            steps: vec![step],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        let v = serde_json::to_value(&log).unwrap();
+        let parsed: ThreadLog = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed.steps.len(), 1);
+        match &parsed.steps[0] {
+            ThreadStep::LlmCall { call_id, model, phase, response_text, .. } => {
+                assert_eq!(*call_id, 1);
+                assert_eq!(model, "m");
+                assert_eq!(phase, "p");
+                assert_eq!(response_text.as_deref(), Some("resp"));
+            }
+            _ => panic!("expected llm_call"),
+        }
     }
 }

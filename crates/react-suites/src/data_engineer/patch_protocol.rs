@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
 use react_core::llm::ChatMessage;
+use react_core::llm_observability::{self, PartInput};
+use react_core::session::{Observation, ThreadStep};
 use react_core::providers::DatasetCatalogProvider;
 
 use crate::data_engineer::project_fs;
@@ -211,10 +213,126 @@ pub async fn llm_patch_loop_single_file(
 
     let mut last_err: Option<String> = None;
     for attempt in 1..=max_iters {
-        let resp_text = ctx
-            .llm
-            .chat(&messages)
-            .map_err(|e| format!("LLM patch authoring call failed: {}", e))?;
+        let resp = ctx.llm.chat(&messages);
+        let resp_text = match resp {
+            Ok(t) => t,
+            Err(e) => {
+                // Persist LLM observability even on failure.
+                if llm_observability::llm_calls_enabled() {
+                    if let (Some(thread_id), Some(store)) = (ctx.thread_id.as_deref(), ctx.thread_store.as_ref()) {
+                        let call_id = llm_observability::next_call_id(thread_id);
+                        let prompt_hash = llm_observability::prompt_hash_for_messages(&messages);
+                        let parts = vec![
+                            PartInput { name: "system".to_string(), text: messages.get(0).map(|m| m.content.clone()).unwrap_or_default() },
+                            PartInput { name: "user".to_string(), text: messages.get(1).map(|m| m.content.clone()).unwrap_or_default() },
+                        ];
+                        let built = llm_observability::build_parts_for_thread(thread_id, &parts);
+                        let response_hash = llm_observability::sha256_hex_str(&e);
+                        let response_text = if llm_observability::llm_response_text_enabled() {
+                            Some(llm_observability::redact_common_secrets(&e))
+                        } else {
+                            None
+                        };
+                        let phase = format!("patch_protocol:{}:attempt_{}", expected_rel_path, attempt);
+                        tracing::debug!(
+                            "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_hash={} response_hash={}",
+                            thread_id,
+                            call_id,
+                            ctx.agent_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                            phase,
+                            "unknown",
+                            prompt_hash,
+                            response_hash
+                        );
+                        for p in built.parts.iter() {
+                            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+                            let hash = p.get("hash").and_then(|v| v.as_str()).unwrap_or("-");
+                            let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            tracing::debug!("LLM_PART thread_id={} call_id={} name={} hash={} text={}", thread_id, call_id, name, hash, text);
+                        }
+                        if let Some(txt) = response_text.as_deref() {
+                            tracing::debug!("LLM_RESPONSE thread_id={} call_id={} text={}", thread_id, call_id, txt);
+                        }
+                        let _ = store
+                            .append_step(
+                                thread_id,
+                                ThreadStep::LlmCall {
+                                    call_id,
+                                    model: "unknown".to_string(),
+                                    phase,
+                                    prompt_hash,
+                                    parts: built.parts,
+                                    part_hashes: built.part_hashes,
+                                    response_hash,
+                                    response_text,
+                                    observation: Observation::fail(vec!["llm_call_failed".to_string()]),
+                                    ts: chrono::Utc::now().to_rfc3339(),
+                                    agent: ctx.agent_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                                },
+                            )
+                            .await;
+                    }
+                }
+                return Err(format!("LLM patch authoring call failed: {}", e));
+            }
+        };
+
+        // Persist observability for successful calls.
+        if llm_observability::llm_calls_enabled() {
+            if let (Some(thread_id), Some(store)) = (ctx.thread_id.as_deref(), ctx.thread_store.as_ref()) {
+                let call_id = llm_observability::next_call_id(thread_id);
+                let prompt_hash = llm_observability::prompt_hash_for_messages(&messages);
+                let parts = vec![
+                    PartInput { name: "system".to_string(), text: messages.get(0).map(|m| m.content.clone()).unwrap_or_default() },
+                    PartInput { name: "user".to_string(), text: messages.get(1).map(|m| m.content.clone()).unwrap_or_default() },
+                ];
+                let built = llm_observability::build_parts_for_thread(thread_id, &parts);
+                let response_hash = llm_observability::sha256_hex_str(&resp_text);
+                let response_text = if llm_observability::llm_response_text_enabled() {
+                    Some(llm_observability::redact_common_secrets(&resp_text))
+                } else {
+                    None
+                };
+                let phase = format!("patch_protocol:{}:attempt_{}", expected_rel_path, attempt);
+                tracing::debug!(
+                    "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_hash={} response_hash={}",
+                    thread_id,
+                    call_id,
+                    ctx.agent_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                    phase,
+                    "unknown",
+                    prompt_hash,
+                    response_hash
+                );
+                for p in built.parts.iter() {
+                    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+                    let hash = p.get("hash").and_then(|v| v.as_str()).unwrap_or("-");
+                    let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    tracing::debug!("LLM_PART thread_id={} call_id={} name={} hash={} text={}", thread_id, call_id, name, hash, text);
+                }
+                if let Some(txt) = response_text.as_deref() {
+                    tracing::debug!("LLM_RESPONSE thread_id={} call_id={} text={}", thread_id, call_id, txt);
+                }
+                let _ = store
+                    .append_step(
+                        thread_id,
+                        ThreadStep::LlmCall {
+                            call_id,
+                            model: "unknown".to_string(),
+                            phase,
+                            prompt_hash,
+                            parts: built.parts,
+                            part_hashes: built.part_hashes,
+                            response_hash,
+                            response_text,
+                            observation: Observation::ok(),
+                            ts: chrono::Utc::now().to_rfc3339(),
+                            agent: ctx.agent_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                        },
+                    )
+                    .await;
+            }
+        }
         let parsed = parse_llm_patch_response(&resp_text)?;
 
         let mut provided = 0usize;

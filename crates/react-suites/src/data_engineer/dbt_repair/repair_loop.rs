@@ -640,6 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn repair_loop_attempts_unresolved_column_remediation_on_run_failure() {
+        std::env::set_var("REACT_LOG_LLM_CALLS", "1");
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         // Seed a staging SQL file that uses struct dereference (will fail if the raw column is literal dotted).
         let base_key = "t/w/p/dbt/models/staging/stg_src_events.sql";
@@ -684,6 +685,11 @@ mod tests {
             thread_store: None,
             runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
+        // Attach a thread store so llm_call steps can be persisted.
+        let store = react_core::session::ThreadStore::new(storage.clone(), scope.clone(), Arc::new(DefaultKeyspace::new("b".to_string())));
+        let mut ctx = ctx;
+        ctx.thread_id = Some("th1".to_string());
+        ctx.thread_store = Some(store);
 
         struct RunFailThenOkDbt {
             calls: Mutex<usize>,
@@ -750,6 +756,14 @@ mod tests {
         let bytes = storage.get_bytes(base_key).await.unwrap();
         let got = String::from_utf8_lossy(&bytes);
         assert!(got.contains("\"context.session.id\""));
+
+        // And we should have recorded at least one llm_call step in the persisted thread log.
+        let store = ctx.thread_store.as_ref().unwrap();
+        let log = store.get("th1").await.unwrap();
+        assert!(
+            log.steps.iter().any(|s| matches!(s, react_core::session::ThreadStep::LlmCall { .. })),
+            "expected at least one llm_call step"
+        );
     }
 
     #[tokio::test]
