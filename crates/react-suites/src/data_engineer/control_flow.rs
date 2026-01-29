@@ -387,6 +387,145 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
     out
 }
 
+/// Derive dbt `--select` terms for a fast, targeted validation pre-check based on the most recent
+/// successful `dbt_files op=patch` (non-preview) step in the thread.
+///
+/// Strategy:
+/// - Prefer manifest-based mapping from patched file path -> model name (when manifest is available)
+/// - Fall back to dbt path selectors: `path:<rel_path>`
+/// - If the patch touched global-impact files (macros/, packages.yml, dbt_project.yml), return an
+///   empty list to indicate we should skip targeted validation and do full validation instead.
+pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Vec<String> {
+    // Find the most recent successful dbt_files patch (non-preview).
+    let mut patched_paths: Vec<String> = Vec::new();
+    for step in log.steps.iter().rev() {
+        let ThreadStep::Tool { name, args, observation, .. } = step else { continue };
+        if name != "dbt_files" || !observation.ok {
+            continue;
+        }
+        let preview = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+        if preview {
+            continue;
+        }
+        let is_patch = args
+            .get("op")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "patch")
+            .unwrap_or(false);
+        if !is_patch {
+            continue;
+        }
+
+        if let Some(arr) = observation.extra.get("results").and_then(|v| v.as_array()) {
+            for it in arr {
+                if let Some(p) = it.get("path").and_then(|v| v.as_str()) {
+                    let p = p.trim();
+                    if !p.is_empty() {
+                        patched_paths.push(p.to_string());
+                    }
+                }
+            }
+        }
+
+        // If tool didn't return results[] for some reason, fall back to args.path (single-file).
+        if patched_paths.is_empty() {
+            if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                let p = p.trim();
+                if !p.is_empty() {
+                    patched_paths.push(p.to_string());
+                }
+            }
+        }
+        break;
+    }
+
+    if patched_paths.is_empty() {
+        return Vec::new();
+    }
+
+    // Global-impact files: skip targeted checks (selection isn't reliable / can be too broad).
+    for p in patched_paths.iter() {
+        let pl = p.to_ascii_lowercase();
+        if pl == "packages.yml"
+            || pl == "dbt_project.yml"
+            || pl.starts_with("macros/")
+        {
+            return Vec::new();
+        }
+    }
+
+    // Only target model SQL paths (dbt path selector expects project-relative paths).
+    let mut model_paths: Vec<String> = patched_paths
+        .into_iter()
+        .filter(|p| p.starts_with("models/") && p.ends_with(".sql"))
+        .collect();
+    model_paths.sort();
+    model_paths.dedup();
+
+    if model_paths.is_empty() {
+        return Vec::new();
+    }
+
+    // Attempt manifest mapping (best-effort).
+    let mut path_to_model_name: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    {
+        let base = ctx.keyspace.dbt_prefix(&ctx.scope);
+        let base = base.trim_end_matches('/').to_string() + "/";
+        let manifest_key = format!("{}target/manifest.json", base);
+        if let Ok(bytes) = ctx.storage.get_bytes(&manifest_key).await {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(nodes) = v.get("nodes").and_then(|n| n.as_object()) {
+                    for (_uid, node) in nodes.iter() {
+                        let rt = node
+                            .get("resource_type")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("");
+                        if rt != "model" {
+                            continue;
+                        }
+                        let fp = node
+                            .get("original_file_path")
+                            .and_then(|x| x.as_str())
+                            .or_else(|| node.get("path").and_then(|x| x.as_str()))
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if fp.is_empty() {
+                            continue;
+                        }
+                        if !model_paths.iter().any(|p| p == &fp) {
+                            continue;
+                        }
+                        let name = node.get("name").and_then(|x| x.as_str()).unwrap_or("").trim();
+                        if !name.is_empty() {
+                            path_to_model_name.insert(fp, name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Default: include parents to catch upstream dependency breakage early.
+    let include_parents = true;
+    let mut out: Vec<String> = Vec::new();
+    for p in model_paths.iter() {
+        let sel = if let Some(name) = path_to_model_name.get(p) {
+            name.clone()
+        } else {
+            format!("path:{}", p)
+        };
+        if include_parents {
+            out.push(format!("+{}", sel));
+        } else {
+            out.push(sel);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[derive(Clone, Debug)]
 pub enum AuthoringGate {
     Allow,
@@ -519,6 +658,8 @@ impl DeterministicDbtValidateOnce {
                     target: gen.target,
                     run,
                     build,
+                    select: None,
+                    exclude: None,
                 },
             )
             .await?;
@@ -538,6 +679,62 @@ impl DeterministicDbtValidateOnce {
             if let Some(ds) = dataset_ids {
                 obj.insert("dataset_ids".to_string(), serde_json::json!(ds));
             }
+        }
+        Ok(v)
+    }
+}
+
+/// Deterministic, fail-fast dbt validation for a targeted selection set (no repair loop).
+///
+/// Intended for quick pre-checks after patching a small set of dbt files/models.
+pub struct DeterministicDbtValidateTargetedOnce;
+
+impl DeterministicDbtValidateTargetedOnce {
+    pub async fn run(
+        ctx: &AgentCtx,
+        select_terms: &[String],
+        build: bool,
+        run: bool,
+    ) -> Result<Value, String> {
+        let dbt = ctx.dbt.as_ref().ok_or_else(|| "dbt provider missing".to_string())?;
+        let Some(cfg) = config::resolved_config_from_ctx(ctx) else {
+            return Err("resolved_config missing (needed to generate profiles.yml deterministically)".to_string());
+        };
+        let threads = ctx.query.as_ref().map(|q| q.max_concurrency());
+        let gen = dbt::profile::generate_profiles_yml(cfg, threads)?;
+        let td = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let profiles_dir = td.path().to_string_lossy().to_string();
+        let profiles_path = td.path().join("profiles.yml");
+        std::fs::write(&profiles_path, gen.profiles_yml.as_bytes()).map_err(|e| e.to_string())?;
+
+        let res = dbt
+            .validate_project(
+                &ctx.scope,
+                &DbtValidateArgs {
+                    project_name: "data_engineer".to_string(),
+                    profiles_dir: Some(profiles_dir),
+                    target: gen.target,
+                    run,
+                    build,
+                    select: Some(select_terms.to_vec()),
+                    exclude: None,
+                },
+            )
+            .await?;
+
+        let mut v = serde_json::to_value(res)
+            .unwrap_or_else(|_| serde_json::json!({"ok": false, "error": "failed to serialize result"}));
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "dialect".to_string(),
+                serde_json::json!(crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg)),
+            );
+            // Keep parity with dbt_validate tool output, but do NOT mutate/repair here.
+            let rf = crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(
+                &obj.get("logs").cloned().unwrap_or(Value::Null),
+            );
+            obj.insert("runtime_failures".to_string(), serde_json::json!(rf));
+            obj.insert("select".to_string(), serde_json::json!(select_terms));
         }
         Ok(v)
     }
@@ -982,6 +1179,112 @@ mod tests {
         assert!(from_phase.is_none());
         assert!(reason_code.is_none());
         assert!(reason_detail.is_none());
+    }
+
+    fn make_minimal_ctx(storage: std::sync::Arc<dyn react_core::storage::StorageAdapter>) -> AgentCtx {
+        use react_core::agent::DefaultPolicy;
+        use react_core::keyspace::DefaultKeyspace;
+        use react_core::llm::NullModel;
+        use react_core::scope::RequestScope;
+        use react_core::keyspace::Keyspace;
+
+        let keyspace: std::sync::Arc<dyn Keyspace> = std::sync::Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 1,
+            thread_id: None,
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: std::sync::Arc::new(DefaultPolicy),
+            llm: std::sync::Arc::new(NullModel {}),
+            storage,
+            scope,
+            keyspace,
+            query: None,
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            runtime: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn derive_targeted_select_terms_falls_back_to_path_selectors_when_manifest_missing() {
+        use react_core::storage::InMemoryStorageAdapter;
+
+        let storage: std::sync::Arc<dyn react_core::storage::StorageAdapter> =
+            std::sync::Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_minimal_ctx(storage);
+        let log = ThreadLog {
+            steps: vec![step(
+                "dbt_files",
+                serde_json::json!({"op":"patch"}),
+                serde_json::json!({"ok": true, "results":[{"path":"models/staging/stg_a.sql","mutated":true}]}),
+            )],
+            ..Default::default()
+        };
+        let sel = derive_targeted_select_terms(&ctx, &log).await;
+        assert_eq!(sel, vec!["+path:models/staging/stg_a.sql".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn derive_targeted_select_terms_prefers_manifest_model_names_when_available() {
+        use react_core::storage::InMemoryStorageAdapter;
+
+        let storage: std::sync::Arc<dyn react_core::storage::StorageAdapter> =
+            std::sync::Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_minimal_ctx(storage.clone());
+
+        // Seed manifest.json under the standard dbt target key.
+        let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/";
+        let manifest_key = format!("{}target/manifest.json", base);
+        let manifest = serde_json::json!({
+            "nodes": {
+                "model.data_engineer.stg_a": {
+                    "resource_type": "model",
+                    "name": "stg_a",
+                    "original_file_path": "models/staging/stg_a.sql"
+                }
+            }
+        });
+        ctx.storage
+            .put_bytes(&manifest_key, manifest.to_string().as_bytes(), "application/json")
+            .await
+            .unwrap();
+
+        let log = ThreadLog {
+            steps: vec![step(
+                "dbt_files",
+                serde_json::json!({"op":"patch"}),
+                serde_json::json!({"ok": true, "results":[{"path":"models/staging/stg_a.sql","mutated":true}]}),
+            )],
+            ..Default::default()
+        };
+        let sel = derive_targeted_select_terms(&ctx, &log).await;
+        assert_eq!(sel, vec!["+stg_a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn derive_targeted_select_terms_skips_when_global_impact_files_touched() {
+        use react_core::storage::InMemoryStorageAdapter;
+
+        let storage: std::sync::Arc<dyn react_core::storage::StorageAdapter> =
+            std::sync::Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_minimal_ctx(storage);
+        let log = ThreadLog {
+            steps: vec![step(
+                "dbt_files",
+                serde_json::json!({"op":"patch"}),
+                serde_json::json!({"ok": true, "results":[{"path":"packages.yml","mutated":true},{"path":"models/staging/stg_a.sql","mutated":true}]}),
+            )],
+            ..Default::default()
+        };
+        let sel = derive_targeted_select_terms(&ctx, &log).await;
+        assert!(sel.is_empty());
     }
 }
  

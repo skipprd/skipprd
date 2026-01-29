@@ -110,6 +110,8 @@ impl Tool for DbtValidateTool {
                 target: target.clone(),
                 run,
                 build,
+                select: None,
+                exclude: None,
             },
             max_iters,
             self.datasets.as_ref(),

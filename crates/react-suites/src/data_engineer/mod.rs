@@ -2364,20 +2364,115 @@ impl DataEngineerSuite {
 
                 Phase::CleanseValidate | Phase::ModelValidate => {
                     let actx = Self::agent_tool_ctx(thread_id, sctx);
-                    // Deterministic validate (NO repair loop / no mutation).
-                    let obs = control_flow::DeterministicDbtValidateOnce::run(&actx, true, false, None).await?;
-                    let _ = thread_store
-                        .append_step(
-                            thread_id,
-                            react_core::session::ThreadStep::Tool {
-                                name: "dbt_validate".to_string(),
-                                args: serde_json::json!({"build": true}),
-                                observation: react_core::session::ToolObservation::normalize(obs.clone()),
-                                ts: chrono::Utc::now().to_rfc3339(),
-                                agent: "agent".to_string(),
-                            }
+                    let emit_trace = |ctx: &react_core::agent::AgentCtx, line: &str| {
+                        if let Some(tx) = ctx.trace_tx.as_ref() {
+                            let _ = tx.send(line.to_string());
+                        }
+                    };
+
+                    // Targeted pre-check (compile selected, then build selected) based on most recent patch.
+                    // If it fails, we skip full validation and proceed with the standard failure handling.
+                    let mut obs: serde_json::Value;
+                    let log_now = thread_store.get(thread_id).await.ok();
+                    let select_terms: Vec<String> = if let Some(l) = log_now.as_ref() {
+                        control_flow::derive_targeted_select_terms(&actx, l).await
+                    } else {
+                        Vec::new()
+                    };
+                    if !select_terms.is_empty() {
+                        emit_trace(&actx, "targeted compile started");
+                        let obs_compile = control_flow::DeterministicDbtValidateTargetedOnce::run(
+                            &actx,
+                            &select_terms,
+                            false,
+                            false,
                         )
-                        .await;
+                        .await?;
+                        let _ = thread_store
+                            .append_step(
+                                thread_id,
+                                react_core::session::ThreadStep::Tool {
+                                    name: "dbt_validate".to_string(),
+                                    args: serde_json::json!({"build": false, "run": false, "select": select_terms.clone(), "targeted": true, "targeted_step": "compile"}),
+                                    observation: react_core::session::ToolObservation::normalize(obs_compile.clone()),
+                                    ts: chrono::Utc::now().to_rfc3339(),
+                                    agent: "agent".to_string(),
+                                },
+                            )
+                            .await;
+                        let ok = obs_compile.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let compile_ok = obs_compile
+                            .get("compile_ok")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if !(ok && compile_ok) {
+                            emit_trace(&actx, "targeted compile failed");
+                            obs = obs_compile;
+                        } else {
+                            emit_trace(&actx, "targeted compile ok");
+                            emit_trace(&actx, "targeted build started");
+                            let obs_build = control_flow::DeterministicDbtValidateTargetedOnce::run(
+                                &actx,
+                                &select_terms,
+                                true,
+                                false,
+                            )
+                            .await?;
+                            let _ = thread_store
+                                .append_step(
+                                    thread_id,
+                                    react_core::session::ThreadStep::Tool {
+                                        name: "dbt_validate".to_string(),
+                                        args: serde_json::json!({"build": true, "run": false, "select": select_terms.clone(), "targeted": true, "targeted_step": "build"}),
+                                        observation: react_core::session::ToolObservation::normalize(obs_build.clone()),
+                                        ts: chrono::Utc::now().to_rfc3339(),
+                                        agent: "agent".to_string(),
+                                    },
+                                )
+                                .await;
+                            let ok = obs_build.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let compile_ok = obs_build
+                                .get("compile_ok")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let run_ok = obs_build.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                            if !(ok && compile_ok && run_ok) {
+                                emit_trace(&actx, "targeted build failed");
+                                obs = obs_build;
+                            } else {
+                                emit_trace(&actx, "targeted build ok");
+                                // Deterministic full validate (NO repair loop / no mutation).
+                                obs = control_flow::DeterministicDbtValidateOnce::run(&actx, true, false, None).await?;
+                                let _ = thread_store
+                                    .append_step(
+                                        thread_id,
+                                        react_core::session::ThreadStep::Tool {
+                                            name: "dbt_validate".to_string(),
+                                            args: serde_json::json!({"build": true}),
+                                            observation: react_core::session::ToolObservation::normalize(obs.clone()),
+                                            ts: chrono::Utc::now().to_rfc3339(),
+                                            agent: "agent".to_string(),
+                                        },
+                                    )
+                                    .await;
+                            }
+                        }
+                    } else {
+                        // Deterministic full validate (NO repair loop / no mutation).
+                        obs = control_flow::DeterministicDbtValidateOnce::run(&actx, true, false, None).await?;
+                        let _ = thread_store
+                            .append_step(
+                                thread_id,
+                                react_core::session::ThreadStep::Tool {
+                                    name: "dbt_validate".to_string(),
+                                    args: serde_json::json!({"build": true}),
+                                    observation: react_core::session::ToolObservation::normalize(obs.clone()),
+                                    ts: chrono::Utc::now().to_rfc3339(),
+                                    agent: "agent".to_string(),
+                                },
+                            )
+                            .await;
+                    }
 
                     let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     let compile_ok = obs.get("compile_ok").and_then(|v| v.as_bool()).unwrap_or(false);

@@ -510,6 +510,8 @@ impl DbtProvider for DbtProjectProvider {
 
         let run = args.run;
         let build = args.build;
+        let select_terms = args.select.as_ref().filter(|v| !v.is_empty());
+        let exclude_terms = args.exclude.as_ref().filter(|v| !v.is_empty());
 
         let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
         let root = tmp.path().join(project_name.clone());
@@ -615,22 +617,70 @@ impl DbtProvider for DbtProjectProvider {
         } else {
             run_cmd_labeled("dbt", &["parse"], &root, &envs, "parse")
         };
-        let compile_res = if use_docker {
-            run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["compile", "--target", &target], &envs, "compile")
-        } else {
-            run_cmd_labeled("dbt", &["compile", "--target", &target], &root, &envs, "compile")
+        let compile_res = {
+            let mut argv: Vec<String> = vec!["compile".to_string(), "--target".to_string(), target.clone()];
+            if let Some(sel) = select_terms {
+                for t in sel.iter() {
+                    argv.push("--select".to_string());
+                    argv.push(t.clone());
+                }
+            }
+            if let Some(ex) = exclude_terms {
+                for t in ex.iter() {
+                    argv.push("--exclude".to_string());
+                    argv.push(t.clone());
+                }
+            }
+            let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+            if use_docker {
+                run_cmd_docker_labeled(&self.runner, &root, profiles_path, &argv_refs, &envs, "compile")
+            } else {
+                run_cmd_labeled("dbt", &argv_refs, &root, &envs, "compile")
+            }
         };
         let run_or_build_res = if build {
-            Some(if use_docker {
-                run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["build", "--target", &target], &envs, "build")
-            } else {
-                run_cmd_labeled("dbt", &["build", "--target", &target], &root, &envs, "build")
+            Some({
+                let mut argv: Vec<String> = vec!["build".to_string(), "--target".to_string(), target.clone()];
+                if let Some(sel) = select_terms {
+                    for t in sel.iter() {
+                        argv.push("--select".to_string());
+                        argv.push(t.clone());
+                    }
+                }
+                if let Some(ex) = exclude_terms {
+                    for t in ex.iter() {
+                        argv.push("--exclude".to_string());
+                        argv.push(t.clone());
+                    }
+                }
+                let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+                if use_docker {
+                    run_cmd_docker_labeled(&self.runner, &root, profiles_path, &argv_refs, &envs, "build")
+                } else {
+                    run_cmd_labeled("dbt", &argv_refs, &root, &envs, "build")
+                }
             })
         } else if run {
-            Some(if use_docker {
-                run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["run", "--target", &target], &envs, "run")
-            } else {
-                run_cmd_labeled("dbt", &["run", "--target", &target], &root, &envs, "run")
+            Some({
+                let mut argv: Vec<String> = vec!["run".to_string(), "--target".to_string(), target.clone()];
+                if let Some(sel) = select_terms {
+                    for t in sel.iter() {
+                        argv.push("--select".to_string());
+                        argv.push(t.clone());
+                    }
+                }
+                if let Some(ex) = exclude_terms {
+                    for t in ex.iter() {
+                        argv.push("--exclude".to_string());
+                        argv.push(t.clone());
+                    }
+                }
+                let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+                if use_docker {
+                    run_cmd_docker_labeled(&self.runner, &root, profiles_path, &argv_refs, &envs, "run")
+                } else {
+                    run_cmd_labeled("dbt", &argv_refs, &root, &envs, "run")
+                }
             })
         } else {
             None
