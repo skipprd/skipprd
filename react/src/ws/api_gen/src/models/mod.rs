@@ -25,6 +25,9 @@ pub use review_response::ReviewResponse;
 pub mod trace_response;
 pub use trace_response::TraceResponse;
 
+pub mod trace_status;
+pub use trace_status::TraceStatus;
+
 pub mod suite_progress_response;
 pub use suite_progress_response::SuiteProgressResponse;
 

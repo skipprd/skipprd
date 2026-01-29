@@ -80,6 +80,35 @@ pub fn extract_source_calls(sql: &str) -> Vec<(String, String)> {
     out.into_iter().collect()
 }
 
+/// Extract `ref('<model>')` calls from SQL/Jinja text.
+///
+/// This is intentionally minimal and robust (not a full SQL/Jinja parser).
+/// We accept common formats:
+/// - ref('a')
+/// - ref("a")
+/// - ref( 'a' )
+///
+/// Returns a de-duplicated list of model names (lowercased/trimmed).
+pub fn extract_ref_calls(sql: &str) -> Vec<String> {
+    let s = sql.to_ascii_lowercase();
+    let mut idx = 0usize;
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    while let Some(pos) = s[idx..].find("ref(") {
+        let mut j = idx + pos + "ref(".len();
+        j = skip_ws(&s, j);
+        let Some((name, j2)) = parse_quoted_string(&s, j) else {
+            idx = j;
+            continue;
+        };
+        let name = name.trim().to_string();
+        if !name.is_empty() {
+            out.insert(name);
+        }
+        idx = j2;
+    }
+    out.into_iter().collect()
+}
+
 pub fn contains_source_call(sql: &str) -> bool {
     !extract_source_calls(sql).is_empty()
 }
@@ -130,5 +159,34 @@ fn parse_quoted_string(s: &str, i: usize) -> Option<(String, usize)> {
     }
     let out = s[i + 1..j].to_string();
     Some((out, j + 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_ref_calls_basic() {
+        let sql = "select * from {{ ref('stg_orders') }}";
+        assert_eq!(extract_ref_calls(sql), vec!["stg_orders".to_string()]);
+    }
+
+    #[test]
+    fn extract_ref_calls_quotes_and_ws_and_dedup() {
+        let sql = r#"
+select * from {{ ref("stg_orders") }}
+join {{  ref( 'stg_users' ) }} u on 1=1
+-- repeated
+where 1=1 and '{{ ref("stg_orders") }}' != ''
+"#;
+        let refs = extract_ref_calls(sql);
+        assert_eq!(refs, vec!["stg_orders".to_string(), "stg_users".to_string()]);
+    }
+
+    #[test]
+    fn extract_ref_calls_ignores_unquoted() {
+        let sql = "select * from {{ ref(stg_orders) }}";
+        assert!(extract_ref_calls(sql).is_empty());
+    }
 }
 

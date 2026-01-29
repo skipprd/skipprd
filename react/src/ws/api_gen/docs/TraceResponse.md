@@ -11,6 +11,7 @@ Name | Type | Description | Notes
 **thread_id** | **String** |  | 
 **thread_seq** | Option<**i32**> |  | [optional]
 **for_cid** | Option<**String**> |  | [optional]
+**status** | [**models::TraceStatus**](TraceStatus.md) |  | 
 **text** | **String** | Lightweight trace line (tool call / observation), suitable for UI streaming. No prompts or hidden reasoning. | 
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)

@@ -67,6 +67,12 @@ fn resolve_direct_sql(args: &Value) -> Option<String> {
         .or_else(|| extract_string_arg(args, "expression"))
 }
 
+fn emit_trace(ctx: &AgentCtx, line: impl Into<String>) {
+    if let Some(tx) = ctx.trace_tx.as_ref() {
+        let _ = tx.send(line.into());
+    }
+}
+
 #[derive(Clone)]
 pub struct StagingModelTool {
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
@@ -442,7 +448,11 @@ impl Tool for StagingModelTool {
                 project_fs::PatchApplyKind::FullOverwrite,
             )
             .await?;
-            ctx.storage.put_bytes(&key, outcome.content.as_bytes(), "text/sql").await?;
+            if let Err(e) = ctx.storage.put_bytes(&key, outcome.content.as_bytes(), "text/sql").await {
+                emit_trace(ctx, format!("failed to save {}: {}", rel_path, e));
+                return Err(e.to_string());
+            }
+            emit_trace(ctx, format!("saved {}", rel_path));
             written.push(key);
             succeeded_dataset_ids.push(ds.clone());
 
@@ -546,7 +556,12 @@ impl Tool for StagingModelTool {
                 continue;
             }
 
-            ctx.storage.put_bytes(&key, outcome.content.as_bytes(), "text/sql").await?;
+            if let Err(e) = ctx.storage.put_bytes(&key, outcome.content.as_bytes(), "text/sql").await {
+                emit_trace(ctx, format!("failed to save {}: {}", rel_path, e));
+                errors.push(format!("{ds}: failed to write staging model: {e}"));
+                continue;
+            }
+            emit_trace(ctx, format!("saved {}", rel_path));
             written.push(key);
             succeeded_dataset_ids.push(ds.clone());
             for n in llm_notes {

@@ -4,6 +4,7 @@ use react_core::llm::ChatMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet as StdBTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use react_core::providers::{DatasetCatalogProvider, DatasetId};
 use std::sync::Arc;
@@ -585,6 +586,92 @@ fn errors_suggest_uncertainty(errors: &[String]) -> bool {
         || s.contains("cannot cast")
 }
 
+fn extract_run_model_schema_map(errors: &[String]) -> BTreeMap<String, String> {
+    // Best-effort parse of dbt run/build log lines like:
+    //   "52 of 58 START sql view model test_silver.stg_foo .... [RUN]"
+    //   "52 of 58 ERROR creating sql view model test_gold.fct_bar ... [ERROR]"
+    //
+    // We map model_name -> most frequent schema observed in the logs.
+    let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    for line in errors.join("\n").lines() {
+        let s = line.trim();
+        if s.is_empty() {
+            continue;
+        }
+        let lower = s.to_ascii_lowercase();
+        let Some(pos) = lower.find("model ") else {
+            continue;
+        };
+        let rest = s[pos + "model ".len()..].trim();
+        let Some(tok) = rest.split_whitespace().next() else {
+            continue;
+        };
+        let tok = tok.trim_matches(|c: char| c == '(' || c == ')' || c == '"' || c == '\'' || c == ',' || c == ';');
+        // Expect <schema>.<model_name>
+        let Some((schema, model)) = tok.split_once('.') else {
+            continue;
+        };
+        let schema = schema.trim().to_string();
+        let model = model.trim().to_string();
+        if schema.is_empty() || model.is_empty() {
+            continue;
+        }
+        *counts
+            .entry(model)
+            .or_default()
+            .entry(schema)
+            .or_insert(0) += 1;
+    }
+
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    for (model, by_schema) in counts.into_iter() {
+        let mut best: Option<(String, usize)> = None;
+        for (schema, n) in by_schema.into_iter() {
+            match best.as_ref() {
+                None => best = Some((schema, n)),
+                Some((_bs, bn)) if n > *bn => best = Some((schema, n)),
+                _ => {}
+            }
+        }
+        if let Some((schema, _n)) = best {
+            out.insert(model, schema);
+        }
+    }
+    out
+}
+
+fn infer_schema_for_ref(errors: &[String], ref_name: &str) -> Option<String> {
+    let ref_name = ref_name.trim();
+    if ref_name.is_empty() {
+        return None;
+    }
+    let map = extract_run_model_schema_map(errors);
+    if let Some(s) = map.get(ref_name) {
+        return Some(s.clone());
+    }
+    // Fallback: prefer a schema that appears to be silver for stg_* refs, otherwise gold if present.
+    let mut saw_silver: Option<String> = None;
+    let mut saw_gold: Option<String> = None;
+    for (_m, schema) in map.into_iter() {
+        let sl = schema.to_ascii_lowercase();
+        if saw_silver.is_none() && sl.contains("silver") {
+            saw_silver = Some(schema.clone());
+        }
+        if saw_gold.is_none() && sl.contains("gold") {
+            saw_gold = Some(schema.clone());
+        }
+    }
+    if ref_name.to_ascii_lowercase().starts_with("stg_") {
+        return saw_silver.or(saw_gold);
+    }
+    saw_gold.or(saw_silver)
+}
+
+async fn best_effort_schema_columns_for_relation(ctx: &AgentCtx, fqn: &str) -> Vec<(String, String)> {
+    let Some(q) = ctx.query.as_ref() else { return vec![] };
+    q.schema(fqn).await.ok().unwrap_or_default()
+}
+
 /// Single, grounded LLM repair pass for dbt failures.
 ///
 /// Contract:
@@ -610,6 +697,7 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         });
     };
     let dialect = active_provider_dialect(cfg);
+    let catalog = cfg.providers.athena.target_catalog.clone();
 
     let mut keys: Vec<String> = keys.iter().cloned().collect();
     keys.sort();
@@ -696,6 +784,34 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         }));
     }
 
+    // Preflight: for any ref() dependencies found in the provided files, attach live schema facts
+    // (when the warehouse relations exist) so the LLM does not invent columns like event_timestamp/session_id.
+    let mut ref_names: StdBTreeSet<String> = StdBTreeSet::new();
+    for f in files.iter() {
+        let Some(content) = f.get("content").and_then(|v| v.as_str()) else { continue };
+        for r in crate::data_engineer::naming::extract_ref_calls(content).into_iter() {
+            ref_names.insert(r);
+        }
+    }
+    let mut ref_models: Vec<Value> = Vec::new();
+    for ref_name in ref_names.into_iter().take(15) {
+        let Some(schema) = infer_schema_for_ref(errors, &ref_name) else { continue };
+        let fqn = format!("{}.{}.{}", catalog, schema, ref_name);
+        let cols = best_effort_schema_columns_for_relation(ctx, &fqn).await;
+        if cols.is_empty() {
+            continue;
+        }
+        let schema_columns: Vec<Value> = cols
+            .into_iter()
+            .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
+            .collect();
+        ref_models.push(serde_json::json!({
+            "ref_name": ref_name,
+            "relation": fqn,
+            "schema_columns": schema_columns,
+        }));
+    }
+
     let error_brief = crate::data_engineer::dbt_error::compact_brief(errors, 8, 2400);
 
     let sys = format!(
@@ -705,6 +821,7 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
          \n\
          IMMUTABLE FACTS:\n\
          - The warehouse schema facts in `sources[].schema_columns` are authoritative.\n\
+         - The warehouse schema facts in `ref_models[].schema_columns` (when present) are authoritative for model outputs.\n\
          - If `sources[].data_samples` is present, treat it as ground truth evidence of real data values/types.\n\
          \n\
          CRITICAL RULES:\n\
@@ -726,7 +843,8 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         "dbt_error_brief": error_brief,
         "errors": errors,
         "files": files,
-        "sources": sources
+        "sources": sources,
+        "ref_models": ref_models
     })
     .to_string();
 
@@ -932,6 +1050,7 @@ pub async fn remediate_unresolved_columns_with_llm(
         });
     };
     let dialect = active_provider_dialect(cfg);
+    let catalog = cfg.providers.athena.target_catalog.clone();
 
     let mut keys: Vec<String> = keys.iter().cloned().collect();
     keys.sort();
@@ -1018,6 +1137,33 @@ pub async fn remediate_unresolved_columns_with_llm(
 
     let error_brief = crate::data_engineer::dbt_error::compact_brief(errors, 6, 900);
 
+    // Preflight: attach live schema facts for any ref() dependencies mentioned in candidate files.
+    let mut ref_names: StdBTreeSet<String> = StdBTreeSet::new();
+    for f in candidates.iter() {
+        let Some(content) = f.get("content").and_then(|v| v.as_str()) else { continue };
+        for r in crate::data_engineer::naming::extract_ref_calls(content).into_iter() {
+            ref_names.insert(r);
+        }
+    }
+    let mut ref_models: Vec<Value> = Vec::new();
+    for ref_name in ref_names.into_iter().take(15) {
+        let Some(schema) = infer_schema_for_ref(errors, &ref_name) else { continue };
+        let fqn = format!("{}.{}.{}", catalog, schema, ref_name);
+        let cols = best_effort_schema_columns_for_relation(ctx, &fqn).await;
+        if cols.is_empty() {
+            continue;
+        }
+        let schema_columns: Vec<Value> = cols
+            .into_iter()
+            .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
+            .collect();
+        ref_models.push(serde_json::json!({
+            "ref_name": ref_name,
+            "relation": fqn,
+            "schema_columns": schema_columns,
+        }));
+    }
+
     // Strict JSON-only contract. LLM returns structured patch primitives; we apply patches deterministically.
     let sys = format!(
         "You are a meticulous dbt SQL auto-remediation assistant.\n\
@@ -1026,6 +1172,7 @@ pub async fn remediate_unresolved_columns_with_llm(
          Constraints:\n\
          - Only fix the unresolved column reference form; do not change business logic.\n\
          - Do not invent new tables/columns.\n\
+         - If `ref_models[].schema_columns` is present for a ref()'d model, treat it as authoritative.\n\
          - If the unresolved column token contains dots and schema_columns contains an EXACT matching column name, treat it as a literal column name and quote it as a single identifier (e.g. \\\"context.session.id\\\").\n\
          - Only use struct dereference (e.g. context.session.id) when schema_columns indicate a struct/row parent exists AND there is no exact dotted column name.\n\
          - Return ONLY valid JSON (no markdown, no commentary).\n\
@@ -1041,7 +1188,8 @@ pub async fn remediate_unresolved_columns_with_llm(
         "phase": phase,
         "dbt_error_brief": error_brief,
         "unresolved_columns": unresolved_columns,
-        "files": candidates
+        "files": candidates,
+        "ref_models": ref_models
     })
     .to_string();
 
@@ -1256,6 +1404,28 @@ mod tests {
             thread_store: None,
             runtime: Some(minimal_cfg_athena() as Arc<dyn std::any::Any + Send + Sync>),
         }
+    }
+
+    #[test]
+    fn extract_run_model_schema_map_parses_model_lines() {
+        let errors = vec![
+            "12:00:00  1 of 2 START sql view model test_silver.stg_orders ........ [RUN]".to_string(),
+            "12:00:01  2 of 2 START sql view model test_gold.fct_orders .......... [RUN]".to_string(),
+            "12:00:02  1 of 2 OK created sql view model test_silver.stg_orders ... [OK]".to_string(),
+            "12:00:03  2 of 2 ERROR creating sql view model test_gold.fct_orders . [ERROR]".to_string(),
+        ];
+        let map = super::extract_run_model_schema_map(&errors);
+        assert_eq!(map.get("stg_orders").cloned(), Some("test_silver".to_string()));
+        assert_eq!(map.get("fct_orders").cloned(), Some("test_gold".to_string()));
+    }
+
+    #[test]
+    fn infer_schema_for_ref_prefers_direct_match() {
+        let errors = vec!["1 of 1 START sql view model test_silver.stg_users .... [RUN]".to_string()];
+        assert_eq!(
+            super::infer_schema_for_ref(&errors, "stg_users"),
+            Some("test_silver".to_string())
+        );
     }
 
     #[tokio::test]

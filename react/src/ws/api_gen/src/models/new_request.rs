@@ -28,7 +28,7 @@ pub struct NewRequest {
     /// Agent/mode to use (ask | cleanse | model | kb | agent | review). Required.
     #[serde(rename = "agentType")]
     pub agent_type: AgentType,
-    /// If true, stream lightweight trace frames (tool activity) while the agent runs.
+    /// If true, stream `TraceResponse` frames while the agent runs. Each trace frame includes `text` plus a coarse `status` (pending|running|ok|failed).
     #[serde(rename = "trace", skip_serializing_if = "Option::is_none")]
     pub trace: Option<bool>,
 }

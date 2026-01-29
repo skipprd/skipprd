@@ -11,6 +11,12 @@ use react_core::tools::Tool;
 use crate::data_engineer::dbt_repair::remediate::active_provider_dialect;
 use crate::data_engineer::{naming, patch_protocol};
 
+fn emit_trace(ctx: &AgentCtx, line: impl Into<String>) {
+    if let Some(tx) = ctx.trace_tx.as_ref() {
+        let _ = tx.send(line.into());
+    }
+}
+
 fn normalize_folder(folder: Option<&str>) -> String {
     match folder.unwrap_or("marts").trim().to_lowercase().as_str() {
         "core" => "core".to_string(),
@@ -324,9 +330,16 @@ impl Tool for GoldModelTool {
                 errors.push(format!("{name}: unsupported SQL for provider '{provider_name}': {msg}"));
                 continue;
             }
-            ctx.storage
+            if let Err(e) = ctx
+                .storage
                 .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
-                .await?;
+                .await
+            {
+                emit_trace(ctx, format!("failed to save {}: {}", rel_path, e));
+                errors.push(format!("{name}: failed to write gold model: {e}"));
+                continue;
+            }
+            emit_trace(ctx, format!("saved {}", rel_path));
             written.push(outcome.key);
             succeeded_item_names.push(name.to_string());
 

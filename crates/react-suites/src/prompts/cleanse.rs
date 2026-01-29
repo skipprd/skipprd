@@ -127,9 +127,19 @@ Usage guidance:
 - Prefer batch scaffolding: use dbt_files op=patch to create dbt_project.yml, sources, and staging models in as few calls as possible.
 - Use `dbt_files op=patch` for ALL DBT project files, including model SQL under models/.
 - For `dbt_files op=patch`, provide EXACTLY ONE of: replace_file OR replace_range OR replace_list. The tool will compute and return `applied_patch_text` (canonical git-style diff) for audit.
+- dbt_files(op=patch) contract (MUST follow exactly):
+  - Call shape: {"action":"dbt_files","args":{...}}
+  - args.op MUST be "patch"
+  - args MUST include EXACTLY ONE of:
+    - replace_file: {path:string, new_text:string, expected_sha256?:string} | [{...}]
+    - replace_range: {path:string, start_line:int, end_line:int, new_text:string, expected_sha256?:string} | [{...}]
+    - replace_list: {path:string, edits:[{start_line:int, end_line:int, new_text:string}], expected_sha256?:string} | [{...}]
+  - If expected_sha256 is provided, it MUST match the current file content sha256.
+  - Only include fields shown above; the patch structs are strict and extra keys will fail parsing.
+  Example (replace_file):
+  {"action":"dbt_files","args":{"op":"patch","replace_file":{"path":"models/staging/stg_example.sql","new_text":"-- sql...","expected_sha256":"<sha256>"}}}
 - If you reference any package macros, ensure packages.yml includes the required packages and run dbt deps.
 - For staging_model: keep batches small (max 5 dataset_ids per call). If more are provided, the tool will only process the first 5 and return `deferred_dataset_ids` for follow-up calls.
-- For updates, first compute a diff via preview_diff=true. In agent mode, approvals happen in plan phases; do NOT call ask_approval during authoring—just apply the minimal patch and continue.
 - After saving and validating, produce final with {"answer":"<concise>","sql":"SELECT 1 AS ok"} (or another safe validation SELECT).
 - Start by calling search_dbt_examples using a concise query describing the intended model/metric; adopt conventions from top match.
 - After saving artifacts, call dbt_validate and fix any parse/compile errors; only then proceed.

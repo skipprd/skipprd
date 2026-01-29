@@ -27,13 +27,15 @@ pub struct TraceResponse {
     pub thread_seq: Option<i32>,
     #[serde(rename = "for_cid", skip_serializing_if = "Option::is_none")]
     pub for_cid: Option<String>,
+    #[serde(rename = "status")]
+    pub status: models::TraceStatus,
     /// Lightweight trace line (tool call / observation), suitable for UI streaming. No prompts or hidden reasoning.
     #[serde(rename = "text")]
     pub text: String,
 }
 
 impl TraceResponse {
-    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, thread_id: String, text: String) -> TraceResponse {
+    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, thread_id: String, status: models::TraceStatus, text: String) -> TraceResponse {
         TraceResponse {
             v,
             r#type,
@@ -42,6 +44,7 @@ impl TraceResponse {
             thread_id,
             thread_seq: None,
             for_cid: None,
+            status,
             text,
         }
     }

@@ -168,6 +168,29 @@ enum AllowedBatch {
 }
 
 impl DataEngineerSuite {
+    async fn authoring_complete_reason_detail(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+        has_proj: bool,
+        has_models: bool,
+    ) -> serde_json::Value {
+        let log_now = thread_store.get(thread_id).await.ok();
+        let guard = control_flow::derive_guard_state(log_now.as_ref());
+        serde_json::json!({
+            "invariants": {
+                "has_dbt_project_yml": has_proj,
+                "has_any_models": has_models,
+            },
+            "guard_state": {
+                "last_validate_failed": guard.last_validate_failed,
+                "mutated_since_fail": guard.mutated_since_fail,
+                "patched_since_fail": guard.patched_since_fail,
+                "mutation_failures_since_validate": guard.mutation_failures_since_validate,
+                "probe_required": guard.probe_required,
+                "probe_satisfied": guard.probe_satisfied,
+            }
+        })
+    }
     fn phase_start_idx(log: &react_core::session::ThreadLog, phase: control_flow::Phase) -> Option<usize> {
         for (i, step) in log.steps.iter().enumerate().rev() {
             if let react_core::session::ThreadStep::Phase { phase: p, .. } = step {
@@ -2319,6 +2342,8 @@ impl DataEngineerSuite {
                             }
 
                             let to_phase = if is_cleanse { Phase::CleanseValidate } else { Phase::ModelValidate };
+                            let reason_detail =
+                                Self::authoring_complete_reason_detail(&thread_store, thread_id, has_proj, has_models).await;
                             control_flow::append_phase_with_reason(
                                 &thread_store,
                                 thread_id,
@@ -2326,20 +2351,7 @@ impl DataEngineerSuite {
                                 Some(phase),
                                 to_phase,
                                 Some("authoring_complete"),
-                                Some(serde_json::json!({
-                                    "invariants": {
-                                        "has_dbt_project_yml": has_proj,
-                                        "has_any_models": has_models,
-                                    },
-                                    "guard_state": {
-                                        "last_validate_failed": guard.last_validate_failed,
-                                        "mutated_since_fail": guard.mutated_since_fail,
-                                        "patched_since_fail": guard.patched_since_fail,
-                                        "mutation_failures_since_validate": guard.mutation_failures_since_validate,
-                                        "probe_required": guard.probe_required,
-                                        "probe_satisfied": guard.probe_satisfied,
-                                    }
-                                })),
+                                Some(reason_detail),
                             )
                             .await?;
                             continue;
@@ -3406,6 +3418,70 @@ mod tests {
         assert!(q.contains("staging_model"), "should mention mutation action");
         assert!(q.contains("validate_pass"), "should include entry reason");
         assert!(q.contains("Original goal"), "should retain original goal section");
+    }
+
+    #[tokio::test]
+    async fn authoring_complete_reason_detail_uses_latest_log_state() {
+        use react_core::session::ThreadStep;
+
+        let sctx = SuiteCtx::default();
+        let store = ThreadStore::new(sctx.storage.clone(), sctx.scope.clone(), sctx.keyspace.clone());
+        let tid = "tid_guard_state";
+
+        // Seed a failing validation.
+        let _ = store
+            .append_step(
+                tid,
+                ThreadStep::Tool {
+                    name: "dbt_validate".to_string(),
+                    args: serde_json::json!({"build": true}),
+                    observation: react_core::session::ToolObservation::normalize(serde_json::json!({
+                        "ok": false,
+                        "compile_ok": true,
+                        "run_ok": false,
+                        "errors": ["fail"]
+                    })),
+                    ts: "t".to_string(),
+                    agent: "agent".to_string(),
+                },
+            )
+            .await;
+
+        let before = DataEngineerSuite::authoring_complete_reason_detail(&store, tid, true, true).await;
+        assert_eq!(
+            before
+                .get("guard_state")
+                .and_then(|v| v.get("patched_since_fail"))
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+
+        // Then a successful dbt_files patch (even if no-op) should flip patched_since_fail.
+        let _ = store
+            .append_step(
+                tid,
+                ThreadStep::Tool {
+                    name: "dbt_files".to_string(),
+                    args: serde_json::json!({"op": "patch"}),
+                    observation: react_core::session::ToolObservation::normalize(serde_json::json!({
+                        "ok": true,
+                        "mutated": false,
+                        "preview": false
+                    })),
+                    ts: "t".to_string(),
+                    agent: "agent".to_string(),
+                },
+            )
+            .await;
+
+        let after = DataEngineerSuite::authoring_complete_reason_detail(&store, tid, true, true).await;
+        assert_eq!(
+            after
+                .get("guard_state")
+                .and_then(|v| v.get("patched_since_fail"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 }
 

@@ -1854,17 +1854,50 @@ fn compact_schema_columns(fields: &[arrow::datatypes::FieldRef]) -> Vec<(String,
 	out
 }
 
-fn trace_line_to_text(line: &str) -> Option<String> {
+fn trace_line_to_text_and_status(line: &str) -> Option<(String, m::TraceStatus)> {
+	fn truncate_one_line(s: &str, max: usize) -> String {
+		let first = s.lines().next().unwrap_or("").trim();
+		// Collapse internal whitespace a bit (avoid huge multi-line dumps).
+		let collapsed = first
+			.split_whitespace()
+			.collect::<Vec<_>>()
+			.join(" ");
+		if collapsed.len() <= max {
+			return collapsed;
+		}
+		format!("{}…", &collapsed[..max])
+	}
+
 	// Avoid leaking prompts/tool-cards/system text; only stream toolcall/observation summaries.
 	let s = line.trim();
 	if s.starts_with("System:") || s.starts_with("Tools:") || s.starts_with("User:") {
 		return None;
 	}
+	// Suite/tool milestone lines (plain text).
+	// Keep this intentionally small and generic: allow only a few safe prefixes.
+	if s.starts_with("saved ") {
+		return Some((s.to_string(), m::TraceStatus::Ok));
+	}
+	if s.starts_with("failed ") || s.starts_with("failed to ") {
+		return Some((s.to_string(), m::TraceStatus::Failed));
+	}
+	if s.starts_with("publish awaiting approval") {
+		return Some((s.to_string(), m::TraceStatus::Pending));
+	}
+	if s.starts_with("publish finished") || s.starts_with("publish no change") {
+		return Some((s.to_string(), m::TraceStatus::Ok));
+	}
+	if s.starts_with("publish failed") {
+		return Some((s.to_string(), m::TraceStatus::Failed));
+	}
+	if s.starts_with("publish started") || s.starts_with("saving ") {
+		return Some((s.to_string(), m::TraceStatus::Running));
+	}
 	if let Some(rest) = s.strip_prefix("Assistant:") {
 		// Try to parse the action JSON and emit a compact tool call line.
 		if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest.trim()) {
 			if let Some(action) = v.get("action").and_then(|x| x.as_str()) {
-				return Some(format!("tool_call {action}"));
+				return Some((format!("tool_call {action}"), m::TraceStatus::Running));
 			}
 			if v.get("final").is_some() {
 				return None;
@@ -1877,14 +1910,19 @@ fn trace_line_to_text(line: &str) -> Option<String> {
 			let ok = v.get("ok").and_then(|x| x.as_bool());
 			let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
 			return Some(match ok {
-				Some(true) => "tool_ok".to_string(),
+				Some(true) => ("tool_ok".to_string(), m::TraceStatus::Ok),
 				Some(false) => {
-					if err.is_empty() { "tool_error".to_string() } else { format!("tool_error: {err}") }
+					let txt = if err.is_empty() {
+						"tool_error".to_string()
+					} else {
+						format!("tool_error: {}", truncate_one_line(err, 180))
+					};
+					(txt, m::TraceStatus::Failed)
 				}
-				None => "tool_observation".to_string(),
+				None => ("tool_observation".to_string(), m::TraceStatus::Running),
 			});
 		}
-		return Some("tool_observation".to_string());
+		return Some(("tool_observation".to_string(), m::TraceStatus::Running));
 	}
 	None
 }
@@ -2035,6 +2073,17 @@ async fn run_agent_with_processing_suite(
 				if !trace_enabled {
 					continue;
 				}
+				fn truncate_one_line(s: &str, max: usize) -> String {
+					let first = s.lines().next().unwrap_or("").trim();
+					let collapsed = first
+						.split_whitespace()
+						.collect::<Vec<_>>()
+						.join(" ");
+					if collapsed.len() <= max {
+						return collapsed;
+					}
+					format!("{}…", &collapsed[..max])
+				}
 				let store = state.thread_store();
 				let log = match store.get(thread_id).await {
 					Ok(l) => l,
@@ -2053,6 +2102,7 @@ async fn run_agent_with_processing_suite(
 							now_iso(),
 							state.next_seq(),
 							thread_id.to_string(),
+							m::TraceStatus::Running,
 							format!("tool_call {}", name),
 						);
 						tr.for_cid = Some(cid.to_string());
@@ -2071,7 +2121,11 @@ async fn run_agent_with_processing_suite(
 						let text = match ok {
 							true => "tool_ok".to_string(),
 							false => {
-								if err.is_empty() { "tool_error".to_string() } else { format!("tool_error: {err}") }
+								if err.is_empty() {
+									"tool_error".to_string()
+								} else {
+									format!("tool_error: {}", truncate_one_line(err, 180))
+								}
 							}
 						};
 						let mut tr = api::TraceResponse::new(
@@ -2080,6 +2134,7 @@ async fn run_agent_with_processing_suite(
 							now_iso(),
 							state.next_seq(),
 							thread_id.to_string(),
+							if ok { m::TraceStatus::Ok } else { m::TraceStatus::Failed },
 							text,
 						);
 						tr.for_cid = Some(cid.to_string());
@@ -2093,9 +2148,10 @@ async fn run_agent_with_processing_suite(
 			}
 			Some(line) = trace_rx.recv() => {
 				if !trace_enabled { continue; }
-				let Some(mut text) = trace_line_to_text(&line) else { continue };
-				if text.len() > 500 {
-					text = format!("{}…", &text[..500]);
+				let Some((mut text, status)) = trace_line_to_text_and_status(&line) else { continue };
+				// Keep trace frames lightweight; do not stream giant tool outputs (e.g. dbt stderr).
+				if text.len() > 220 {
+					text = format!("{}…", &text[..220]);
 				}
 				let mut tr = api::TraceResponse::new(
 					1,
@@ -2103,6 +2159,7 @@ async fn run_agent_with_processing_suite(
 					now_iso(),
 					state.next_seq(),
 					thread_id.to_string(),
+					status,
 					text,
 				);
 				tr.for_cid = Some(cid.to_string());
@@ -2618,18 +2675,27 @@ mod tests {
 
 	#[test]
 	fn trace_line_filter_does_not_leak_prompts() {
-		assert_eq!(trace_line_to_text("System: secret prompt"), None);
-		assert_eq!(trace_line_to_text("Tools: huge tool card"), None);
-		assert_eq!(trace_line_to_text("User: hello"), None);
+		assert_eq!(trace_line_to_text_and_status("System: secret prompt"), None);
+		assert_eq!(trace_line_to_text_and_status("Tools: huge tool card"), None);
+		assert_eq!(trace_line_to_text_and_status("User: hello"), None);
 
 		assert_eq!(
-			trace_line_to_text("Assistant: {\"action\":\"run_sql\",\"args\":{\"sql\":\"select 1\"}}").as_deref(),
+			trace_line_to_text_and_status("Assistant: {\"action\":\"run_sql\",\"args\":{\"sql\":\"select 1\"}}").map(|(t, _)| t).as_deref(),
 			Some("tool_call run_sql")
 		);
 
 		assert_eq!(
-			trace_line_to_text("Observation: {\"ok\":true}").as_deref(),
+			trace_line_to_text_and_status("Observation: {\"ok\":true}").map(|(t, _)| t).as_deref(),
 			Some("tool_ok")
+		);
+
+		assert_eq!(
+			trace_line_to_text_and_status("saved models/staging/stg_x.sql"),
+			Some(("saved models/staging/stg_x.sql".to_string(), m::TraceStatus::Ok))
+		);
+		assert_eq!(
+			trace_line_to_text_and_status("failed to save models/staging/stg_x.sql: boom"),
+			Some(("failed to save models/staging/stg_x.sql: boom".to_string(), m::TraceStatus::Failed))
 		);
 	}
 
@@ -2844,7 +2910,14 @@ mod tests {
 				match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
 					"suite_progress" => saw_suite_progress = true,
 					"plan_update" => saw_plan_update = true,
-					"trace" => saw_trace = true,
+					"trace" => {
+						saw_trace = true;
+						let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+						assert!(
+							matches!(status, "pending" | "running" | "ok" | "failed"),
+							"expected trace.status to be one of pending|running|ok|failed (got {status:?})"
+						);
+					},
 					_ => {}
 				}
 			}

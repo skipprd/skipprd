@@ -18,6 +18,12 @@ pub struct PublishDbtToProviderTool {
     pub catalog: Option<Arc<dyn CatalogProvider>>,
 }
 
+fn emit_trace(ctx: &AgentCtx, line: impl Into<String>) {
+    if let Some(tx) = ctx.trace_tx.as_ref() {
+        let _ = tx.send(line.into());
+    }
+}
+
 #[async_trait]
 impl Tool for PublishDbtToProviderTool {
     fn name(&self) -> &'static str {
@@ -25,6 +31,7 @@ impl Tool for PublishDbtToProviderTool {
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
+        emit_trace(ctx, "publish started");
         let cfg = resolved_config(ctx)?;
 
         let max_iters: usize = std::env::var("DBT_REPAIR_MAX_ITERS")
@@ -82,6 +89,7 @@ impl Tool for PublishDbtToProviderTool {
         .await?;
 
         if !compile_res.ok || !compile_res.compile_ok {
+            emit_trace(ctx, "publish failed");
             return Ok(serde_json::json!({
                 "ok": false,
                 "stage": "compile",
@@ -141,6 +149,7 @@ impl Tool for PublishDbtToProviderTool {
         }
 
         if last_published_digest.as_deref() == Some(plan_sha256.as_str()) {
+            emit_trace(ctx, "publish no change");
             return Ok(serde_json::json!({
                 "ok": true,
                 "stage": "no_change",
@@ -155,6 +164,7 @@ impl Tool for PublishDbtToProviderTool {
 
         // Always require approval before any dbt build/publish run.
         if !confirm {
+            emit_trace(ctx, "publish awaiting approval");
             let exists = check_existing_relations(query, cfg, &relations).await;
             let existing_list = exists
                 .iter()
@@ -218,6 +228,7 @@ impl Tool for PublishDbtToProviderTool {
         .await?;
 
         if !build_res.ok || build_res.run_ok == Some(false) {
+            emit_trace(ctx, "publish failed");
             return Ok(serde_json::json!({
                 "ok": false,
                 "stage": "build",
@@ -241,6 +252,7 @@ impl Tool for PublishDbtToProviderTool {
             }
         }
 
+        emit_trace(ctx, "publish finished");
         Ok(serde_json::json!({
             "ok": true,
             "stage": "published",
