@@ -25,6 +25,7 @@ pub mod naming;
 pub mod patch_protocol;
 pub mod project_files;
 pub mod plan;
+pub mod facts;
 
 fn lock_prompt_for_plan(
     kind: &str,
@@ -1614,6 +1615,22 @@ impl DataEngineerSuite {
                         q.push_str(bs);
                         q.push('\n');
                     }
+                    // Plan mode should be especially broad: include the full available relation list (bounded)
+                    // so planning never needs to guess table names.
+                    if let Some(ds) = sctx.datasets.as_ref() {
+                        if let Ok(items) = ds.list_datasets().await {
+                            let mut tables: Vec<String> = items.into_iter().map(|d| d.fqn()).collect();
+                            tables.sort();
+                            if !tables.is_empty() {
+                                q.push_str("\n\nIMMUTABLE FACTS (available_relations, bounded):\n");
+                                q.push_str(&serde_json::to_string_pretty(&serde_json::json!({
+                                    "tables": tables.into_iter().take(300).collect::<Vec<_>>()
+                                }))
+                                .unwrap_or_else(|_| "{}".to_string()));
+                                q.push('\n');
+                            }
+                        }
+                    }
 
                     match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q).await {
                         Ok(RunOutcome::Final { thread_id: _tid, result }) => {
@@ -1691,6 +1708,43 @@ impl DataEngineerSuite {
                                     "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
                                     "dbt_project_yml_etag": actx.storage.head_etag(&actx.keyspace.dbt_project_key(&actx.scope)).await.ok().flatten(),
                                 });
+                                // Persist schema facts observed during this plan phase (no ambiguity).
+                                if let Some(ref l) = log {
+                                    let start = Self::phase_start_idx(l, phase).unwrap_or(0);
+                                    let mut calls: Vec<serde_json::Value> = Vec::new();
+                                    for s in l.steps.iter().skip(start + 1) {
+                                        let react_core::session::ThreadStep::Tool { name, args, observation, .. } = s else {
+                                            continue;
+                                        };
+                                        if name != "sql_schema" || !observation.ok {
+                                            continue;
+                                        }
+                                        let table = args.get("table").and_then(|v| v.as_str()).map(|s| s.trim().to_string());
+                                        let mut rec = serde_json::json!({
+                                            "tool": "sql_schema",
+                                            "table": table,
+                                            "result": observation.extra,
+                                        });
+                                        // Keep deterministic ordering by dropping null table field when absent.
+                                        if rec.get("table").and_then(|v| v.as_str()).map(|s| s.is_empty()).unwrap_or(false) {
+                                            if let Some(obj) = rec.as_object_mut() {
+                                                obj.remove("table");
+                                            }
+                                        }
+                                        calls.push(rec);
+                                        if calls.len() >= 120 {
+                                            break;
+                                        }
+                                    }
+                                    if !calls.is_empty() {
+                                        if plan.project_snapshot.is_null() {
+                                            plan.project_snapshot = serde_json::json!({});
+                                        }
+                                        if let Some(obj) = plan.project_snapshot.as_object_mut() {
+                                            obj.insert("plan_schema_facts".to_string(), serde_json::json!({ "sql_schema_calls": calls }));
+                                        }
+                                    }
+                                }
                                 crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await?;
                                 let prompt = format!(
                                     "{}\n\nApprove this cleanse plan? Reply \"approve\" or \"reject\".\n\n(Plan saved to: {})",
@@ -1707,6 +1761,42 @@ impl DataEngineerSuite {
                                     "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
                                     "dbt_project_yml_etag": actx.storage.head_etag(&actx.keyspace.dbt_project_key(&actx.scope)).await.ok().flatten(),
                                 });
+                                // Persist schema facts observed during this plan phase (no ambiguity).
+                                if let Some(ref l) = log {
+                                    let start = Self::phase_start_idx(l, phase).unwrap_or(0);
+                                    let mut calls: Vec<serde_json::Value> = Vec::new();
+                                    for s in l.steps.iter().skip(start + 1) {
+                                        let react_core::session::ThreadStep::Tool { name, args, observation, .. } = s else {
+                                            continue;
+                                        };
+                                        if name != "sql_schema" || !observation.ok {
+                                            continue;
+                                        }
+                                        let table = args.get("table").and_then(|v| v.as_str()).map(|s| s.trim().to_string());
+                                        let mut rec = serde_json::json!({
+                                            "tool": "sql_schema",
+                                            "table": table,
+                                            "result": observation.extra,
+                                        });
+                                        if rec.get("table").and_then(|v| v.as_str()).map(|s| s.is_empty()).unwrap_or(false) {
+                                            if let Some(obj) = rec.as_object_mut() {
+                                                obj.remove("table");
+                                            }
+                                        }
+                                        calls.push(rec);
+                                        if calls.len() >= 120 {
+                                            break;
+                                        }
+                                    }
+                                    if !calls.is_empty() {
+                                        if plan.project_snapshot.is_null() {
+                                            plan.project_snapshot = serde_json::json!({});
+                                        }
+                                        if let Some(obj) = plan.project_snapshot.as_object_mut() {
+                                            obj.insert("plan_schema_facts".to_string(), serde_json::json!({ "sql_schema_calls": calls }));
+                                        }
+                                    }
+                                }
                                 crate::data_engineer::plan::save_model_plan(&actx, &plan).await?;
                                 let prompt = format!(
                                     "{}\n\nApprove this model plan? Reply \"approve\" or \"reject\".\n\n(Plan saved to: {})",
@@ -2107,6 +2197,88 @@ impl DataEngineerSuite {
                     q.push_str("\nIMPORTANT: This authoring phase is plan-driven. Follow the Plan context below. If it says to patch failing DBT files, do that first; if it provides a next batch, execute it. Do NOT ask for approval; approvals happen in plan phases.");
                     q.push_str("\n\nPlan context:\n");
                     q.push_str(&plan_context);
+                    // Auto-attach authoritative schema facts (no ambiguity) for this phase.
+                    // - In authoring, include ALL relations in the current approved batch.
+                    // - Also include any recent validate-fail facts snapshot if present.
+                    {
+                        let dialect = crate::config::resolved_config_from_ctx(&actx)
+                            .as_ref()
+                            .map(|cfg| crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg))
+                            .unwrap_or_else(|| "Unknown SQL dialect".to_string());
+                        let mut batch_relations: Vec<String> = Vec::new();
+                        let mut prior_validate_facts: Option<serde_json::Value> = None;
+                        if is_cleanse {
+                            if let Some(p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
+                                if let Some(ab) = allowed_batch.as_ref() {
+                                    if let AllowedBatch::CleanseDatasetIds(ds) = ab {
+                                        batch_relations = crate::data_engineer::facts::dataset_ids_to_fqns(ds);
+                                    }
+                                }
+                                // Prefer the last persisted validate_fail_facts snapshot (if any).
+                                if let Some(obj) = p.project_snapshot.as_object() {
+                                    if let Some(arr) = obj.get("validate_fail_facts").and_then(|v| v.as_array()) {
+                                        if let Some(last) = arr.last() {
+                                            prior_validate_facts = Some(last.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            if let Some(p) = crate::data_engineer::plan::load_model_plan(&actx).await {
+                                if let Some(ab) = allowed_batch.as_ref() {
+                                    if let AllowedBatch::ModelItemNames(names) = ab {
+                                        // Include relations for the models in the batch AND their declared inputs.
+                                        let mut want_names: Vec<String> = names.clone();
+                                        for n in names.iter() {
+                                            if let Some(t) = p.tasks.iter().find(|t| t.name == *n) {
+                                                for inp in t.inputs.iter() {
+                                                    let s = inp.trim();
+                                                    if !s.is_empty() {
+                                                        want_names.push(s.to_string());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        want_names.sort();
+                                        want_names.dedup();
+                                        batch_relations =
+                                            crate::data_engineer::facts::resolve_model_names_to_fqns(&actx, &want_names).await;
+                                    }
+                                }
+                                if let Some(obj) = p.project_snapshot.as_object() {
+                                    if let Some(arr) = obj.get("validate_fail_facts").and_then(|v| v.as_array()) {
+                                        if let Some(last) = arr.last() {
+                                            prior_validate_facts = Some(last.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if !batch_relations.is_empty() {
+                            let limits = crate::data_engineer::facts::FactsLimits::for_scope(
+                                crate::data_engineer::facts::FactsScope::AuthorBatch,
+                            );
+                            let bundle = crate::data_engineer::facts::build_facts_bundle_from_relations(
+                                &actx,
+                                crate::data_engineer::facts::FactsScope::AuthorBatch,
+                                dialect.clone(),
+                                crate::data_engineer::facts::TargetFacts::default(),
+                                &batch_relations,
+                                limits,
+                            )
+                            .await;
+                            q.push_str("\n\nIMMUTABLE FACTS (author_batch_schema):\n");
+                            q.push_str(&serde_json::to_string_pretty(&bundle).unwrap_or_else(|_| "{}".to_string()));
+                            q.push('\n');
+                            q.push_str("Rules:\n- You MUST NOT reference any column not present in facts.relations[].columns for that relation.\n- If required facts are missing, call sql_schema and then patch.\n");
+                        }
+                        if let Some(vf) = prior_validate_facts {
+                            q.push_str("\n\nIMMUTABLE FACTS (latest_validate_fail_facts):\n");
+                            q.push_str(&serde_json::to_string_pretty(&vf).unwrap_or_else(|_| "{}".to_string()));
+                            q.push('\n');
+                        }
+                    }
                     if let Some(b) = last_validate_brief.as_ref() {
                         q.push_str("\n\nLast dbt_validate summary (most recent):\n");
                         q.push_str(b);
@@ -2674,6 +2846,60 @@ impl DataEngineerSuite {
                         .map(|l| l.steps.len().saturating_sub(1))
                         .unwrap_or(0);
                     let to_phase = if phase == Phase::CleanseValidate { Phase::CleanseAuthor } else { Phase::ModelAuthor };
+                    // Attach authoritative schema facts for the next authoring turn. This ensures the LLM
+                    // never needs to guess relation columns after a deterministic validate failure.
+                    let dialect = obs
+                        .get("dialect")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown SQL dialect")
+                        .to_string();
+                    let facts_bundle = crate::data_engineer::facts::build_validate_fail_facts(
+                        &actx,
+                        dialect,
+                        &obs,
+                        crate::data_engineer::facts::FactsScope::ValidateFail,
+                        crate::data_engineer::facts::FactsLimits::for_scope(crate::data_engineer::facts::FactsScope::ValidateFail),
+                    )
+                    .await;
+                    // Best-effort persist into the active plan snapshot for reuse in subsequent authoring turns.
+                    // Keep bounded to avoid unbounded plan growth.
+                    if phase == Phase::CleanseValidate {
+                        if let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
+                            if p.project_snapshot.is_null() {
+                                p.project_snapshot = serde_json::json!({});
+                            }
+                            if let Some(obj) = p.project_snapshot.as_object_mut() {
+                                let arr = obj
+                                    .entry("validate_fail_facts")
+                                    .or_insert_with(|| serde_json::Value::Array(vec![]));
+                                if let Some(a) = arr.as_array_mut() {
+                                    a.push(serde_json::to_value(&facts_bundle).unwrap_or(serde_json::Value::Null));
+                                    while a.len() > 5 {
+                                        a.remove(0);
+                                    }
+                                }
+                            }
+                            let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
+                        }
+                    } else {
+                        if let Some(mut p) = crate::data_engineer::plan::load_model_plan(&actx).await {
+                            if p.project_snapshot.is_null() {
+                                p.project_snapshot = serde_json::json!({});
+                            }
+                            if let Some(obj) = p.project_snapshot.as_object_mut() {
+                                let arr = obj
+                                    .entry("validate_fail_facts")
+                                    .or_insert_with(|| serde_json::Value::Array(vec![]));
+                                if let Some(a) = arr.as_array_mut() {
+                                    a.push(serde_json::to_value(&facts_bundle).unwrap_or(serde_json::Value::Null));
+                                    while a.len() > 5 {
+                                        a.remove(0);
+                                    }
+                                }
+                            }
+                            let _ = crate::data_engineer::plan::save_model_plan(&actx, &p).await;
+                        }
+                    }
                     control_flow::append_phase_with_reason(
                         &thread_store,
                         thread_id,
@@ -2685,6 +2911,7 @@ impl DataEngineerSuite {
                             "dbt_validate_observation": obs,
                             "dbt_validate_step_idx": trigger_step_idx,
                             "errors": errs,
+                            "facts_bundle": facts_bundle,
                         })),
                     )
                     .await;

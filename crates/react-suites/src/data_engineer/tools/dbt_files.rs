@@ -39,6 +39,87 @@ fn parse_one_or_many<T: DeserializeOwned>(args: &Value, key: &str) -> Result<Vec
     }
 }
 
+fn patch_contract_error(msg: &str) -> String {
+    format!(
+        "dbt_files op=patch contract violation: {}\n\n\
+Allowed shape:\n\
+- args.op = \"patch\"\n\
+- preview_diff?: bool (TOP LEVEL ONLY)\n\
+- Provide EXACTLY ONE of:\n\
+  - replace_file: {{path,new_text,expected_sha256?}} or array\n\
+  - replace_range: {{path,start_line,end_line,new_text,expected_sha256?}} or array\n\
+  - replace_list: {{path,edits:[{{start_line,end_line,new_text}}],expected_sha256?}} or array\n\
+\n\
+Common errors:\n\
+- preview_diff must NOT be nested under replace_* objects\n\
+- replace_file must be an object/array (not a string)\n\
+- path and new_text are required\n",
+        msg
+    )
+}
+
+fn validate_patch_args_shape(args: &Value) -> Result<(), String> {
+    // Enforce top-level preview_diff only (never nested).
+    if let Some(v) = args.get("replace_file") {
+        if let Some(obj) = v.as_object() {
+            if obj.contains_key("preview_diff") {
+                return Err(patch_contract_error("replace_file.preview_diff is not allowed (preview_diff must be top-level args.preview_diff)"));
+            }
+        }
+        if let Some(arr) = v.as_array() {
+            for (i, it) in arr.iter().enumerate() {
+                if let Some(obj) = it.as_object() {
+                    if obj.contains_key("preview_diff") {
+                        return Err(patch_contract_error(&format!("replace_file[{}].preview_diff is not allowed (preview_diff must be top-level args.preview_diff)", i)));
+                    }
+                }
+            }
+        }
+        if v.is_string() {
+            return Err(patch_contract_error("replace_file must be an object or array (got string)"));
+        }
+    }
+    if let Some(v) = args.get("replace_range") {
+        if let Some(obj) = v.as_object() {
+            if obj.contains_key("preview_diff") {
+                return Err(patch_contract_error("replace_range.preview_diff is not allowed (preview_diff must be top-level args.preview_diff)"));
+            }
+        }
+        if let Some(arr) = v.as_array() {
+            for (i, it) in arr.iter().enumerate() {
+                if let Some(obj) = it.as_object() {
+                    if obj.contains_key("preview_diff") {
+                        return Err(patch_contract_error(&format!("replace_range[{}].preview_diff is not allowed (preview_diff must be top-level args.preview_diff)", i)));
+                    }
+                }
+            }
+        }
+        if v.is_string() {
+            return Err(patch_contract_error("replace_range must be an object or array (got string)"));
+        }
+    }
+    if let Some(v) = args.get("replace_list") {
+        if let Some(obj) = v.as_object() {
+            if obj.contains_key("preview_diff") {
+                return Err(patch_contract_error("replace_list.preview_diff is not allowed (preview_diff must be top-level args.preview_diff)"));
+            }
+        }
+        if let Some(arr) = v.as_array() {
+            for (i, it) in arr.iter().enumerate() {
+                if let Some(obj) = it.as_object() {
+                    if obj.contains_key("preview_diff") {
+                        return Err(patch_contract_error(&format!("replace_list[{}].preview_diff is not allowed (preview_diff must be top-level args.preview_diff)", i)));
+                    }
+                }
+            }
+        }
+        if v.is_string() {
+            return Err(patch_contract_error("replace_list must be an object or array (got string)"));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReplaceFileArgs {
@@ -107,6 +188,7 @@ impl Tool for DbtFilesTool {
             }
             "patch" => {
                 let preview = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+                validate_patch_args_shape(&args)?;
 
                 // Optional single-file guard: if provided, ensure the patch bundle targets exactly this rel path.
                 let want_rel_path = args
@@ -471,5 +553,50 @@ mod tests {
         assert!(content.contains("config(schema=\"warehouse\""));
         assert!(content.contains("alias=\"x\""));
         assert!(content.to_ascii_lowercase().contains("select 1"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_rejects_nested_preview_diff_under_replace_file() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "replace_file": {
+                        "path": "models/x.sql",
+                        "new_text": "select 1\n",
+                        "preview_diff": true
+                    }
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("contract violation"));
+        assert!(err.contains("replace_file.preview_diff"));
+        assert!(err.to_lowercase().contains("top-level"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_rejects_replace_file_as_string() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "replace_file": "models/x.sql"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("contract violation"));
+        assert!(err.to_lowercase().contains("replace_file"));
     }
 }
