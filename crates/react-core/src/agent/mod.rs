@@ -14,6 +14,15 @@ use crate::scope::RequestScope;
 use uuid::Uuid;
 use async_trait::async_trait;
 
+#[derive(serde::Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FinalEnvelope {
+    pub kind: String,
+    pub payload: Value,
+    #[serde(default)]
+    pub display: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct AgentCtx {
     pub top_k: usize,
@@ -97,7 +106,7 @@ pub trait AgentPolicy: Send + Sync {
         transcript: &mut Vec<String>,
         store: Option<&ThreadStore>,
         thread_id: &str,
-        final_obj: &Value,
+        final_env: &FinalEnvelope,
     ) -> Result<Option<RunOutcome>, String>;
 
     /// If we exhaust steps without reaching an accepted final, produce a fallback.
@@ -109,14 +118,14 @@ pub trait AgentPolicy: Send + Sync {
         _store: Option<&ThreadStore>,
         thread_id: &str,
     ) -> Result<RunOutcome, String> {
-        Ok(RunOutcome::Final {
+        Ok(RunOutcome::AwaitUser {
             thread_id: thread_id.to_string(),
-            result: ThreadResult { sql: None, answer: "No result".to_string() },
+            prompt: "Agent reached step limit without producing a valid final. Please retry.".to_string(),
         })
     }
 }
 
-/// Default policy: accept `final.answer` without any required validations.
+/// Default policy: accept any well-formed typed final envelope.
 pub struct DefaultPolicy;
 
 #[async_trait]
@@ -128,20 +137,13 @@ impl AgentPolicy for DefaultPolicy {
         _transcript: &mut Vec<String>,
         store: Option<&ThreadStore>,
         thread_id: &str,
-        final_obj: &Value,
+        final_env: &FinalEnvelope,
     ) -> Result<Option<RunOutcome>, String> {
-        let sql_opt = final_obj.get("sql").and_then(|x| x.as_str()).map(|s| s.to_string());
-        // Many suites expect `final.answer` to be machine-readable (e.g. plan JSON).
-        // Accept both:
-        // - string answers (typical conversational output)
-        // - JSON answers (object/array/number/bool/null), which we serialize to compact JSON text
-        //   so downstream code can parse it from `ThreadResult.answer: String`.
-        let answer = match final_obj.get("answer") {
-            Some(Value::String(s)) => s.to_string(),
-            Some(v) => serde_json::to_string(v).unwrap_or_default(),
-            None => String::new(),
+        let result = ThreadResult {
+            kind: final_env.kind.clone(),
+            payload: final_env.payload.clone(),
+            display: final_env.display.clone(),
         };
-        let result = ThreadResult { sql: sql_opt, answer };
         if let Some(store) = store {
             let agent = ctx
                 .agent_name
@@ -152,8 +154,9 @@ impl AgentPolicy for DefaultPolicy {
                 .append_step(
                     thread_id,
                     ThreadStep::Final {
-                        answer: result.answer.clone(),
-                        sql: result.sql.clone(),
+                        kind: result.kind.clone(),
+                        payload: result.payload.clone(),
+                        display: result.display.clone(),
                         observation: Observation::ok(),
                         ts,
                         agent,
@@ -545,7 +548,30 @@ impl Agent {
             let action = Self::coerce_args_only_action(Self::parse_action(&raw)?);
 
             if let Some(final_obj) = action.get("final") {
-                if let Some(outcome) = ctx.policy.handle_final(tools, ctx, &mut transcript, store, &tid, final_obj).await? {
+                let env = match serde_json::from_value::<FinalEnvelope>(final_obj.clone()) {
+                    Ok(env) => env,
+                    Err(e) => {
+                        warn!("model emitted invalid final envelope: {}", e);
+                        Self::transcript_add(
+                            &mut transcript,
+                            format!(
+                                "Observation: {}",
+                                serde_json::json!({
+                                    "ok": false,
+                                    "errors": [format!("invalid final envelope: {e}")]
+                                })
+                            ),
+                            &ctx.trace_tx,
+                        );
+                        continue;
+                    }
+                };
+
+                if let Some(outcome) = ctx
+                    .policy
+                    .handle_final(tools, ctx, &mut transcript, store, &tid, &env)
+                    .await?
+                {
                     return Ok(outcome);
                 }
                 // Policy rejected final; continue.
@@ -660,10 +686,10 @@ mod tests {
             transcript: &mut Vec<String>,
             store: Option<&crate::session::ThreadStore>,
             thread_id: &str,
-            final_obj: &serde_json::Value,
+            final_env: &FinalEnvelope,
         ) -> Result<Option<RunOutcome>, String> {
             self.inner
-                .handle_final(tools, ctx, transcript, store, thread_id, final_obj)
+                .handle_final(tools, ctx, transcript, store, thread_id, final_env)
                 .await
         }
     }
@@ -687,7 +713,7 @@ mod tests {
         let llm = Arc::new(ScriptedModel {
             replies: Arc::new(Mutex::new(vec![
                 "{\"action\":\"slow_tool\",\"args\":{}}".to_string(),
-                "{\"final\":{\"answer\":\"ok\",\"sql\":\"SELECT 1 AS ok\"}}".to_string(),
+                "{\"final\":{\"kind\":\"generic\",\"payload\":{\"text\":\"ok\"}}}".to_string(),
             ])),
         });
         let storage = Arc::new(InMemoryStorageAdapter::default());
@@ -722,16 +748,19 @@ mod tests {
             .await
             .expect("ok");
         match out {
-            RunOutcome::Final { result, .. } => assert_eq!(result.answer, "ok"),
+            RunOutcome::Final { result, .. } => {
+                assert_eq!(result.kind, "generic");
+                assert_eq!(result.payload.get("text").and_then(|x| x.as_str()), Some("ok"));
+            }
             _ => panic!("expected final outcome"),
         }
     }
 
     #[tokio::test]
-    async fn final_answer_accepts_json_values_by_serializing_to_string() {
+    async fn final_payload_round_trips_as_json_value() {
         let llm = Arc::new(ScriptedModel {
             replies: Arc::new(Mutex::new(vec![
-                "{\"final\":{\"answer\":{\"hello\":\"world\",\"n\":1},\"sql\":\"SELECT 1 AS ok\"}}".to_string(),
+                "{\"final\":{\"kind\":\"generic\",\"payload\":{\"obj\":{\"hello\":\"world\",\"n\":1}}}}".to_string(),
             ])),
         });
         let storage = Arc::new(InMemoryStorageAdapter::default());
@@ -765,9 +794,10 @@ mod tests {
             .expect("ok");
         match out {
             RunOutcome::Final { result, .. } => {
-                let v: Value = serde_json::from_str(&result.answer).expect("answer should be json text");
-                assert_eq!(v.get("hello").and_then(|x| x.as_str()), Some("world"));
-                assert_eq!(v.get("n").and_then(|x| x.as_i64()), Some(1));
+                assert_eq!(result.kind, "generic");
+                let obj = result.payload.get("obj").expect("obj");
+                assert_eq!(obj.get("hello").and_then(|x| x.as_str()), Some("world"));
+                assert_eq!(obj.get("n").and_then(|x| x.as_i64()), Some(1));
             }
             _ => panic!("expected final outcome"),
         }
@@ -776,16 +806,14 @@ mod tests {
     #[test]
     fn parse_action_repairs_raw_newlines_inside_json_strings() {
         // NOTE: This is intentionally invalid JSON: literal newline in the string value.
-        let raw = "{\"final\":{\"answer\":\"line1\nline2\",\"sql\":\"SELECT 1 AS ok\"}}";
+        let raw = "{\"final\":{\"kind\":\"generic\",\"payload\":{\"text\":\"line1\nline2\"}}}";
         let v = Agent::parse_action(raw).expect("should repair and parse");
         let final_obj = v.get("final").expect("final");
+        let env: FinalEnvelope = serde_json::from_value(final_obj.clone()).expect("env");
+        assert_eq!(env.kind, "generic");
         assert_eq!(
-            final_obj.get("answer").and_then(|x| x.as_str()).unwrap(),
+            env.payload.get("text").and_then(|x| x.as_str()).unwrap(),
             "line1\nline2"
-        );
-        assert_eq!(
-            final_obj.get("sql").and_then(|x| x.as_str()).unwrap(),
-            "SELECT 1 AS ok"
         );
     }
 }

@@ -11,47 +11,41 @@
 use crate::models;
 use serde::{Deserialize, Serialize};
 
+/// AskFinalPayloadChart : Optional chart suggestion derived from data shape
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FinalResponse {
-    #[serde(rename = "v")]
-    pub v: i32,
+pub struct AskFinalPayloadChart {
     #[serde(rename = "type")]
     pub r#type: Type,
-    #[serde(rename = "server_time")]
-    pub server_time: String,
-    #[serde(rename = "seq")]
-    pub seq: i32,
-    #[serde(rename = "thread_id")]
-    pub thread_id: String,
-    #[serde(rename = "thread_seq")]
-    pub thread_seq: i32,
-    #[serde(rename = "result")]
-    pub result: Box<models::FinalResult>,
+    #[serde(rename = "x")]
+    pub x: String,
+    #[serde(rename = "y")]
+    pub y: Vec<String>,
 }
 
-impl FinalResponse {
-    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, thread_id: String, thread_seq: i32, result: models::FinalResult) -> FinalResponse {
-        FinalResponse {
-            v,
+impl AskFinalPayloadChart {
+    /// Optional chart suggestion derived from data shape
+    pub fn new(r#type: Type, x: String, y: Vec<String>) -> AskFinalPayloadChart {
+        AskFinalPayloadChart {
             r#type,
-            server_time,
-            seq,
-            thread_id,
-            thread_seq,
-            result: Box::new(result),
+            x,
+            y,
         }
     }
 }
 /// 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum Type {
-    #[serde(rename = "final")]
-    Final,
+    #[serde(rename = "line")]
+    Line,
+    #[serde(rename = "bar")]
+    Bar,
+    #[serde(rename = "area")]
+    Area,
 }
 
 impl Default for Type {
     fn default() -> Type {
-        Self::Final
+        Self::Line
     }
 }
 

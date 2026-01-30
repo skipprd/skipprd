@@ -65,8 +65,9 @@ impl KbSuite {
 
         match Agent::run_until_block(&registry, &actx, sys, tools_card, question).await {
             Ok(RunOutcome::Final { thread_id: _tid, result }) => Ok(vec![FlowFrame::Final {
-                answer: result.answer,
-                sql: result.sql,
+                kind: result.kind,
+                payload: result.payload,
+                display: result.display,
             }]),
             Ok(RunOutcome::AwaitUser { thread_id: _tid, prompt }) => Ok(vec![FlowFrame::AwaitUser { prompt }]),
             Ok(RunOutcome::AwaitApproval { thread_id: _tid, prompt }) => Ok(vec![FlowFrame::AwaitApproval { prompt }]),

@@ -5,7 +5,7 @@ use tokio_tungstenite::tungstenite::Message;
 // Agent loop is invoked through suites; WS server doesn't call Agent directly.
 // Removed unused tool imports; flows handle registry/tool selection
 use uuid::Uuid;
-use crate::ws::api_gen as api;
+use crate::ws::api_gen::src::models as api;
 use std::collections::{HashMap, VecDeque};
 use chrono::Utc;
 use crate::models as m;
@@ -16,6 +16,76 @@ use react_suites::data_engineer::plan as de_plan;
 use std::sync::Arc;
 
 // Steering prompts removed for model agent; model runs eagerly without awaiting user choice.
+
+fn final_display_text_from_payload(payload: &Value) -> String {
+    if let Some(s) = payload.get("answer").and_then(|v| v.as_str()) {
+        return s.to_string();
+    }
+    if let Some(s) = payload.get("text").and_then(|v| v.as_str()) {
+        return s.to_string();
+    }
+    if let Ok(s) = serde_json::to_string(payload) {
+        return s;
+    }
+    String::new()
+}
+
+fn ws_final_result_from_typed_final(kind: &str, payload: &Value, display: &Option<String>) -> api::FinalResult {
+    match kind {
+        "ask" => {
+            let answer = payload
+                .get("answer")
+                .and_then(|x| x.as_str())
+                .or_else(|| display.as_deref())
+                .unwrap_or("")
+                .to_string();
+            let sql = payload.get("sql").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            if answer.trim().is_empty() || sql.trim().is_empty() {
+                // Ask payload must include answer+sql; degrade to generic.
+                return ws_final_result_from_typed_final("generic", payload, display);
+            }
+            let mut p = api::AskFinalPayload::new(answer, sql);
+            if let Some(v) = payload.get("data").cloned() {
+                if let Ok(d) = serde_json::from_value::<api::AskFinalPayloadData>(v) {
+                    p.data = Some(d);
+                }
+            }
+            if let Some(v) = payload.get("chart").cloned() {
+                if let Ok(c) = serde_json::from_value::<api::AskFinalPayloadChart>(v) {
+                    p.chart = Some(c);
+                }
+            }
+            api::FinalResult::Ask(api::AskFinalResult::new(api::ask_final_result::Kind::Ask, p))
+        }
+        "kb" => {
+            let answer = payload
+                .get("answer")
+                .and_then(|x| x.as_str())
+                .or_else(|| display.as_deref())
+                .unwrap_or("")
+                .to_string();
+            if answer.trim().is_empty() {
+                return ws_final_result_from_typed_final("generic", payload, display);
+            }
+            let p = api::KbFinalPayload::new(answer);
+            api::FinalResult::Kb(api::KbFinalResult::new(api::kb_final_result::Kind::Kb, p))
+        }
+        _ => {
+            // WS schema only knows ask/kb/generic for now; map all other kinds to generic.
+            let txt = payload
+                .get("text")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| display.clone())
+                .unwrap_or_else(|| final_display_text_from_payload(payload));
+            let p = api::GenericFinalPayload::new(txt);
+            api::FinalResult::Generic(api::GenericFinalResult::new(
+                api::generic_final_result::Kind::Generic,
+                p,
+            ))
+        }
+    }
+}
 
 fn env_bool(key: &str, default: bool) -> bool {
     let dv = if default { "1" } else { "0" };
@@ -217,8 +287,8 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 								preview = Some(text.to_string());
 								break;
 							}
-							ThreadStep::Final { answer, .. } => {
-								preview = Some(answer.to_string());
+							ThreadStep::Final { payload, display, .. } => {
+								preview = Some(display.clone().unwrap_or_else(|| final_display_text_from_payload(payload)));
 								break;
 							}
 							_ => {}
@@ -377,16 +447,16 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 								.await;
 						}
 					}
-					AgentFrame::Final { answer, sql } => {
-						let sql = if agent == "model" || agent == "cleanse" { None } else { sql };
+					AgentFrame::Final { kind, payload, display } => {
+						let display_text = display.clone().unwrap_or_else(|| final_display_text_from_payload(&payload));
 						// finalize title once using concise summary
 						{
 							let store = state.thread_store();
-							let title = synthesize_title(&state.suite_ctx.llm, &question, &answer).await;
+							let title = synthesize_title(&state.suite_ctx.llm, &question, &display_text).await;
 							let _ = store.finalize_title(&thread_id, &title).await;
 						}
 						// optional token streaming (simple chunking)
-						for t in chunk_text(&answer, 24) {
+						for t in chunk_text(&display_text, 24) {
 							let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.clone(), t);
 							tk.for_cid = Some(cid.clone());
 							let m = api::ServerMessage::Token(tk);
@@ -395,7 +465,16 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 							out.push(s);
 						}
 						let tseq = state.next_thread_seq(&thread_id);
-						let resp = api::ServerMessage::Final(api::FinalResponse::new(1, m::final_response::Type::Final, now_iso(), state.next_seq(), thread_id.clone(), tseq, api::FinalResponseResult { sql: sql.clone(), answer: answer.clone(), data: None, chart: None }));
+						let final_result = ws_final_result_from_typed_final(&kind, &payload, &display);
+						let resp = api::ServerMessage::Final(api::FinalResponse::new(
+							1,
+							m::final_response::Type::Final,
+							now_iso(),
+							state.next_seq(),
+							thread_id.clone(),
+							tseq,
+							final_result,
+						));
 						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
@@ -563,10 +642,10 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 								.await;
 						}
 					}
-					AgentFrame::Final { answer, sql } => {
-						let sql = if agent == "model" || agent == "cleanse" { None } else { sql };
+					AgentFrame::Final { kind, payload, display } => {
+						let display_text = display.clone().unwrap_or_else(|| final_display_text_from_payload(&payload));
 						// optional token streaming (simple chunking)
-						for t in chunk_text(&answer, 24) {
+						for t in chunk_text(&display_text, 24) {
 							let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.clone(), t);
 							tk.for_cid = Some(cid.clone());
 							let m = api::ServerMessage::Token(tk);
@@ -575,7 +654,16 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 							out.push(s);
 						}
 						let tseq = state.next_thread_seq(&thread_id);
-						let resp = api::ServerMessage::Final(api::FinalResponse::new(1, m::final_response::Type::Final, now_iso(), state.next_seq(), thread_id.clone(), tseq, api::FinalResponseResult { sql: sql.clone(), answer: answer.clone(), data: None, chart: None }));
+						let final_result = ws_final_result_from_typed_final(&kind, &payload, &display);
+						let resp = api::ServerMessage::Final(api::FinalResponse::new(
+							1,
+							m::final_response::Type::Final,
+							now_iso(),
+							state.next_seq(),
+							thread_id.clone(),
+							tseq,
+							final_result,
+						));
 						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
@@ -656,7 +744,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 						text: text.clone(),
 						observation: Observation::ok(),
 						ts: chrono::Utc::now().to_rfc3339(),
-						agent: agent_label,
+						agent: agent_label.clone(),
 					},
 				)
 				.await;
@@ -742,9 +830,10 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 								.await;
 						}
 					}
-					AgentFrame::Final { answer, sql } => {
+					AgentFrame::Final { kind, payload, display } => {
+						let display_text = display.clone().unwrap_or_else(|| final_display_text_from_payload(&payload));
 						// optional token streaming (simple chunking); no cid here in generic handler
-						for t in chunk_text(&answer, 24) {
+						for t in chunk_text(&display_text, 24) {
 							let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.clone(), t);
 							let m = api::ServerMessage::Token(tk);
 							let s = serde_json::to_string(&m).unwrap();
@@ -752,7 +841,16 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 							out.push(s);
 						}
 						let tseq = state.next_thread_seq(&thread_id);
-						let resp = api::ServerMessage::Final(api::FinalResponse::new(1, m::final_response::Type::Final, now_iso(), state.next_seq(), thread_id.clone(), tseq, api::FinalResponseResult { sql: sql.clone(), answer: answer.clone(), data: None, chart: None }));
+						let final_result = ws_final_result_from_typed_final(&kind, &payload, &display);
+						let resp = api::ServerMessage::Final(api::FinalResponse::new(
+							1,
+							m::final_response::Type::Final,
+							now_iso(),
+							state.next_seq(),
+							thread_id.clone(),
+							tseq,
+							final_result,
+						));
 						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
@@ -1957,7 +2055,7 @@ fn trace_line_to_text_and_status(line: &str) -> Option<(String, m::TraceStatus)>
 	None
 }
 enum AgentFrame {
-	Final { answer: String, sql: Option<String> },
+	Final { kind: String, payload: serde_json::Value, display: Option<String> },
 	Review { text: String, meta: Option<serde_json::Value> },
 	AwaitUser { prompt: String },
 	AwaitApproval { prompt: String },
@@ -2210,7 +2308,7 @@ async fn run_agent_with_processing_suite(
 				};
 				let convert = |ff: react_suites::FlowFrame| -> AgentFrame {
 					match ff {
-						react_suites::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
+						react_suites::FlowFrame::Final { kind, payload, display } => AgentFrame::Final { kind, payload, display },
 						react_suites::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
 						react_suites::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
 						react_suites::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
@@ -2269,9 +2367,9 @@ async fn run_agent_with_processing_suite(
 							// Review is non-terminal; continue emitting subsequent frames.
 							continue;
 						}
-						AgentFrame::Final { answer, sql } => {
-							let sql = if agent == "model" || agent == "cleanse" { None } else { sql };
-							for t in chunk_text(&answer, 24) {
+						AgentFrame::Final { kind, payload, display } => {
+							let display_text = display.clone().unwrap_or_else(|| final_display_text_from_payload(&payload));
+							for t in chunk_text(&display_text, 24) {
 								let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.to_string(), t);
 								tk.for_cid = Some(cid.to_string());
 								let s = serde_json::to_string(&tk).unwrap();
@@ -2280,6 +2378,7 @@ async fn run_agent_with_processing_suite(
 								let _ = write.send(Message::Text(s)).await;
 							}
 							let tseq = state.next_thread_seq(thread_id);
+							let final_result = ws_final_result_from_typed_final(&kind, &payload, &display);
 							let resp = api::FinalResponse::new(
 								1,
 								m::final_response::Type::Final,
@@ -2287,7 +2386,7 @@ async fn run_agent_with_processing_suite(
 								state.next_seq(),
 								thread_id.to_string(),
 								tseq,
-								api::FinalResponseResult { sql: sql.clone(), answer: answer.clone(), data: None, chart: None },
+								final_result,
 							);
 							let s = serde_json::to_string(&resp).unwrap();
 							state.buffer_last(&s);
@@ -2362,7 +2461,7 @@ async fn run_agent_and_frames(
 	// Delegate to suites
     let convert = |ff: react_suites::FlowFrame| -> AgentFrame {
 		match ff {
-			react_suites::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
+			react_suites::FlowFrame::Final { kind, payload, display } => AgentFrame::Final { kind, payload, display },
 			react_suites::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
 			react_suites::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
 			react_suites::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
@@ -2390,7 +2489,7 @@ async fn run_user_and_frames(
 ) -> Result<Vec<AgentFrame>, String> {
 	let convert = |ff: react_suites::FlowFrame| -> AgentFrame {
 		match ff {
-			react_suites::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
+			react_suites::FlowFrame::Final { kind, payload, display } => AgentFrame::Final { kind, payload, display },
 			react_suites::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
 			react_suites::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
 			react_suites::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
@@ -2476,12 +2575,17 @@ async fn build_history(
 					created_at: step.ts().to_string(),
 				});
 			}
-			ThreadStep::Final { answer, .. } => {
+			ThreadStep::Final { payload, display, .. } => {
 				tseq += 1;
+				let content = display
+					.clone()
+					.or_else(|| payload.get("text").and_then(|x| x.as_str()).map(|s| s.to_string()))
+					.or_else(|| payload.get("answer").and_then(|x| x.as_str()).map(|s| s.to_string()))
+					.unwrap_or_else(|| final_display_text_from_payload(payload));
 				all_msgs.push(api::HistoryResponseMessagesInner {
 					thread_seq: tseq,
 					role: m::history_response_messages_inner::Role::Assistant,
-					content: answer.to_string(),
+					content,
 					created_at: step.ts().to_string(),
 				});
 			}
@@ -2599,7 +2703,11 @@ mod tests {
 			_agent_type: &str,
 			_ctx: &SuiteCtx,
 		) -> Result<Vec<react_suites::FlowFrame>, String> {
-			Ok(vec![react_suites::FlowFrame::Final { answer: "ok".to_string(), sql: Some("SELECT 1".to_string()) }])
+			Ok(vec![react_suites::FlowFrame::Final {
+				kind: "ask".to_string(),
+				payload: serde_json::json!({"answer":"ok","sql":"SELECT 1"}),
+				display: Some("ok".to_string()),
+			}])
 		}
 
 		async fn handle_open(
@@ -2609,7 +2717,11 @@ mod tests {
 			_agent_type: &str,
 			_ctx: &SuiteCtx,
 		) -> Result<Vec<react_suites::FlowFrame>, String> {
-			Ok(vec![react_suites::FlowFrame::Final { answer: "ok".to_string(), sql: Some("SELECT 1".to_string()) }])
+			Ok(vec![react_suites::FlowFrame::Final {
+				kind: "ask".to_string(),
+				payload: serde_json::json!({"answer":"ok","sql":"SELECT 1"}),
+				display: Some("ok".to_string()),
+			}])
 		}
 
 		async fn handle_user(
@@ -2625,7 +2737,11 @@ mod tests {
 			}
 			// Sleep long enough for phase_tick (250ms) and plan_tick (400ms) to emit at least once.
 			tokio::time::sleep(Duration::from_millis(520)).await;
-			Ok(vec![react_suites::FlowFrame::Final { answer: "ok".to_string(), sql: Some("SELECT 1".to_string()) }])
+			Ok(vec![react_suites::FlowFrame::Final {
+				kind: "ask".to_string(),
+				payload: serde_json::json!({"answer":"ok","sql":"SELECT 1"}),
+				display: Some("ok".to_string()),
+			}])
 		}
 	}
 
@@ -2693,8 +2809,9 @@ mod tests {
 					agent: "agent".to_string(),
 				},
 				ThreadStep::Final {
-					answer: "done".to_string(),
-					sql: None,
+					kind: "generic".to_string(),
+					payload: serde_json::json!({ "text": "done" }),
+					display: Some("done".to_string()),
 					observation: Observation::ok(),
 					ts: "t".to_string(),
 					agent: "agent".to_string(),

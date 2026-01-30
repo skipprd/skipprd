@@ -128,10 +128,10 @@ impl AgentPolicy for InterruptOnlyPolicy {
         transcript: &mut Vec<String>,
         store: Option<&react_core::session::ThreadStore>,
         thread_id: &str,
-        final_obj: &serde_json::Value,
+        final_env: &react_core::agent::FinalEnvelope,
     ) -> Result<Option<RunOutcome>, String> {
         react_core::agent::DefaultPolicy
-            .handle_final(tools, ctx, transcript, store, thread_id, final_obj)
+            .handle_final(tools, ctx, transcript, store, thread_id, final_env)
             .await
     }
 }
@@ -1075,8 +1075,9 @@ impl DataEngineerSuite {
 
         match Agent::run_until_block(&registry, &actx, &sys, &tools_card, question).await {
             Ok(RunOutcome::Final { thread_id: _tid, result }) => Ok(vec![FlowFrame::Final {
-                answer: result.answer,
-                sql: result.sql,
+                kind: result.kind,
+                payload: result.payload,
+                display: result.display,
             }]),
             Ok(RunOutcome::AwaitUser { thread_id: _tid, prompt }) => Ok(vec![FlowFrame::AwaitUser { prompt }]),
             Ok(RunOutcome::AwaitApproval { thread_id: _tid, prompt }) => Ok(vec![FlowFrame::AwaitApproval { prompt }]),
@@ -1119,8 +1120,9 @@ impl DataEngineerSuite {
         let prompt = Self::inject_review_question(question);
         match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &prompt).await {
             Ok(RunOutcome::Final { thread_id: _tid, result }) => Ok(vec![FlowFrame::Final {
-                answer: result.answer,
-                sql: result.sql,
+                kind: result.kind,
+                payload: result.payload,
+                display: result.display,
             }]),
             Ok(RunOutcome::AwaitUser { thread_id: _tid, prompt }) => Ok(vec![FlowFrame::AwaitUser { prompt }]),
             Ok(RunOutcome::AwaitApproval { thread_id: _tid, prompt }) => Ok(vec![FlowFrame::AwaitApproval { prompt }]),
@@ -1159,11 +1161,11 @@ impl DataEngineerSuite {
         // Plan phases (cleanse_plan/model_plan) are tool-heavy: they must do discovery and evidence,
         // then emit a final plan object. The small 6-step budget used for some helper contexts can
         // cause a fallback Final ("No result") which then fails plan JSON parsing and shows up as a
-        // misleading "final.answer must be valid JSON" error.
+        // misleading "final.kind/payload must be valid for the plan" error.
         let thread_store = ThreadStore::new(sctx.storage.clone(), sctx.scope.clone(), sctx.keyspace.clone());
         AgentCtx {
             top_k: 30,
-            per_step_timeout_secs: 10,
+            per_step_timeout_secs: 20,
             max_steps: 40,
             thread_id: Some(thread_id.to_string()),
             progress_tx: None,
@@ -1727,13 +1729,16 @@ impl DataEngineerSuite {
                                 }
                             }
 
-                            let Some(v) = crate::data_engineer::plan::parse_plan_json(&result.answer) else {
-                                return Ok(vec![FlowFrame::AwaitUser {
-                                    prompt: "Plan phase failed: final.answer must be valid JSON for the plan. Please retry.".to_string(),
-                                }]);
-                            };
                             if is_cleanse {
-                                let mut plan: crate::data_engineer::plan::CleansePlan = serde_json::from_value(v)
+                                if result.kind != "cleanse_plan" {
+                                    return Ok(vec![FlowFrame::AwaitUser {
+                                        prompt: format!(
+                                            "Plan phase failed: final.kind must be 'cleanse_plan' (got '{}'). Please retry.",
+                                            result.kind
+                                        ),
+                                    }]);
+                                }
+                                let mut plan: crate::data_engineer::plan::CleansePlan = serde_json::from_value(result.payload.clone())
                                     .map_err(|e| format!("invalid cleanse plan JSON: {e}"))?;
                                 plan.status = crate::data_engineer::plan::PlanStatus::Draft;
                                 plan.plan_key = crate::data_engineer::plan::new_cleanse_plan_key(&actx);
@@ -1787,7 +1792,15 @@ impl DataEngineerSuite {
                                 );
                                 return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
                             } else {
-                                let mut plan: crate::data_engineer::plan::ModelPlan = serde_json::from_value(v)
+                                if result.kind != "model_plan" {
+                                    return Ok(vec![FlowFrame::AwaitUser {
+                                        prompt: format!(
+                                            "Plan phase failed: final.kind must be 'model_plan' (got '{}'). Please retry.",
+                                            result.kind
+                                        ),
+                                    }]);
+                                }
+                                let mut plan: crate::data_engineer::plan::ModelPlan = serde_json::from_value(result.payload.clone())
                                     .map_err(|e| format!("invalid model plan JSON: {e}"))?;
                                 plan.status = crate::data_engineer::plan::PlanStatus::Draft;
                                 plan.plan_key = crate::data_engineer::plan::new_model_plan_key(&actx);
@@ -2955,9 +2968,15 @@ impl DataEngineerSuite {
                 Phase::CleanseReview | Phase::ModelReview | Phase::PostPublishReview => {
                     let review_q = Self::build_review_question_with_context(question, phase, log.as_ref());
                     let frames = review_batched::run_batched_review(thread_id, &review_q, phase, sctx).await?;
-                    let first = frames.into_iter().next().unwrap_or(FlowFrame::Final { answer: "".to_string(), sql: None });
-                    let (answer, _sql) = match first {
-                        FlowFrame::Final { answer, sql } => (answer, sql),
+                    let first = frames.into_iter().next().unwrap_or(FlowFrame::Final {
+                        kind: "generic".to_string(),
+                        payload: serde_json::json!({ "text": "" }),
+                        display: None,
+                    });
+                    let answer = match first {
+                        FlowFrame::Final { payload, display, .. } => display
+                            .or_else(|| payload.get("text").and_then(|x| x.as_str()).map(|s| s.to_string()))
+                            .unwrap_or_default(),
                         other => return Ok(vec![other]),
                     };
 
@@ -3208,7 +3227,11 @@ impl DataEngineerSuite {
                         answer.push_str("\nLatest review summary:\n");
                         answer.push_str(&last);
                     }
-                    out_frames.push(FlowFrame::Final { answer, sql: None });
+                    out_frames.push(FlowFrame::Final {
+                        kind: "generic".to_string(),
+                        payload: serde_json::json!({ "text": answer.clone() }),
+                        display: Some(answer),
+                    });
                     return Ok(out_frames);
                 }
             }
@@ -3305,7 +3328,11 @@ impl DataEngineerSuite {
                     let compile_ok = obs.get("compile_ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     let run_ok = obs.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     if ok && compile_ok && run_ok {
-                        return Ok(vec![FlowFrame::Final { answer: result.answer, sql: result.sql }]);
+                        return Ok(vec![FlowFrame::Final {
+                            kind: result.kind,
+                            payload: result.payload,
+                            display: result.display,
+                        }]);
                     }
 
                     let runtime_failures: Vec<serde_json::Value> = obs
@@ -3392,7 +3419,11 @@ impl DataEngineerSuite {
         }
 
         if let Some(r) = last_final {
-            return Ok(vec![FlowFrame::Final { answer: r.answer, sql: r.sql }]);
+            return Ok(vec![FlowFrame::Final {
+                kind: r.kind,
+                payload: r.payload,
+                display: r.display,
+            }]);
         }
         Err(format!("{}: no outcome", agent_name))
     }

@@ -19,6 +19,33 @@ pub use final_response_result_chart::FinalResponseResultChart;
 pub mod final_response;
 pub use final_response::FinalResponse;
 
+pub mod final_result;
+pub use final_result::FinalResult;
+
+pub mod ask_final_payload_chart;
+pub use ask_final_payload_chart::AskFinalPayloadChart;
+
+pub mod ask_final_payload_data;
+pub use ask_final_payload_data::AskFinalPayloadData;
+
+pub mod ask_final_payload;
+pub use ask_final_payload::AskFinalPayload;
+
+pub mod ask_final_result;
+pub use ask_final_result::AskFinalResult;
+
+pub mod kb_final_payload;
+pub use kb_final_payload::KbFinalPayload;
+
+pub mod kb_final_result;
+pub use kb_final_result::KbFinalResult;
+
+pub mod generic_final_payload;
+pub use generic_final_payload::GenericFinalPayload;
+
+pub mod generic_final_result;
+pub use generic_final_result::GenericFinalResult;
+
 pub mod review_response;
 pub use review_response::ReviewResponse;
 

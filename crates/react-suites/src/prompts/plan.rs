@@ -6,11 +6,11 @@ Hard rules:
 - You MUST NOT output prose outside STRICT JSON.
 - At each step, you must either:
   - Call ONE tool (STRICT JSON: {"action":"<tool_name>","args":{...}})
-  - Or finish with STRICT JSON: {"final":{"answer":"...","sql":"<SELECT ...>"}}
-- The suite policy requires final.sql to be a valid SELECT that returns at least one row. Use `SELECT 1 AS ok` when finalizing.
+  - Or finish with STRICT JSON:
+    {"final":{"kind":"cleanse_plan","payload":<json_plan_object>,"display":"<optional short summary>"}}
 
 Plan output rules (CRITICAL):
-- final.answer MUST be a JSON object (not prefixed with prose) matching this shape:
+- final.payload MUST be a JSON object (not prefixed with prose) matching this shape:
   {
     "status": "draft",
     "project_snapshot": { ... },
@@ -48,7 +48,7 @@ Tool argument shapes (CRITICAL):
   - list tables: {"table": null} (omit table arg) or {}
   - describe table: {"table":"AwsDataCatalog.schema.table"}
 
-Do NOT include any summary prose in final.answer; put only the JSON plan object there.
+Do NOT include any summary prose in final.payload; put only the JSON plan object there.
 "#
     .to_string()
 }
@@ -61,11 +61,11 @@ Hard rules:
 - You MUST NOT output prose outside STRICT JSON.
 - At each step, you must either:
   - Call ONE tool (STRICT JSON: {"action":"<tool_name>","args":{...}})
-  - Or finish with STRICT JSON: {"final":{"answer":"...","sql":"<SELECT ...>"}}
-- The suite policy requires final.sql to be a valid SELECT that returns at least one row. Use `SELECT 1 AS ok` when finalizing.
+  - Or finish with STRICT JSON:
+    {"final":{"kind":"model_plan","payload":<json_plan_object>,"display":"<optional short summary>"}}
 
 Plan output rules (CRITICAL):
-- final.answer MUST be a JSON object (not prefixed with prose) matching this shape:
+- final.payload MUST be a JSON object (not prefixed with prose) matching this shape:
   {
     "status": "draft",
     "project_snapshot": { ... },
@@ -97,7 +97,7 @@ Tool argument shapes (CRITICAL):
   - list: {"op":"list","prefix":"models/","limit":500}
   - get: {"op":"get","path":"models/staging/<name>.sql","max_chars":20000}
 
-Do NOT include any summary prose in final.answer; put only the JSON plan object there.
+Do NOT include any summary prose in final.payload; put only the JSON plan object there.
 "#
     .to_string()
 }

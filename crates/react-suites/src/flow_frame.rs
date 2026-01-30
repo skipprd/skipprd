@@ -7,9 +7,10 @@ use serde_json::Value;
 pub enum FlowFrame {
     /// Terminal response for an agent run.
     Final {
-        answer: String,
+        kind: String,
+        payload: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
-        sql: Option<String>,
+        display: Option<String>,
     },
     /// Non-terminal reviewer output (read-only).
     Review {

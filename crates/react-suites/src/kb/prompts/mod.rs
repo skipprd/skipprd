@@ -11,7 +11,7 @@ Rules:
 
 Output MUST be strict JSON with either:
 - {"action":"<tool_name>","args":{...}}
-- {"final":{"answer":"..."}}
+- {"final":{"kind":"kb","payload":{"answer":"..."},"display":"..."}}
 "#
 }
 

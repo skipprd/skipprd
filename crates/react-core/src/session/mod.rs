@@ -10,7 +10,7 @@ use crate::storage::StorageAdapter;
 use crate::keyspace::Keyspace;
 use crate::scope::RequestScope;
 
-pub const THREAD_SCHEMA_VERSION: u32 = 2;
+pub const THREAD_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
@@ -223,9 +223,10 @@ pub enum ThreadStep {
         agent: String,
     },
     Final {
-        answer: String,
+        kind: String,
+        payload: Value,
         #[serde(default)]
-        sql: Option<String>,
+        display: Option<String>,
         observation: Observation,
         ts: String,
         agent: String,
@@ -277,8 +278,10 @@ impl Default for ThreadLog {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadResult {
-    pub sql: Option<String>,
-    pub answer: String,
+    pub kind: String,
+    pub payload: Value,
+    #[serde(default)]
+    pub display: Option<String>,
 }
 
 #[derive(Clone)]

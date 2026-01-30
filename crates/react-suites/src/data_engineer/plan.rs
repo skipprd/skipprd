@@ -878,20 +878,8 @@ pub fn summarize_model_plan(plan: &ModelPlan, max_lines: usize) -> String {
 }
 
 pub fn parse_plan_json(answer: &str) -> Option<Value> {
-    // Preferred: the entire answer is JSON.
-    if let Ok(v) = serde_json::from_str::<Value>(answer.trim()) {
-        return Some(v);
-    }
-    // Backstop: accept the historical first-line prefix format: PLAN:<json>
-    let first = answer.lines().next()?.trim();
-    let prefix = "PLAN:";
-    if first.starts_with(prefix) {
-        let json_text = first[prefix.len()..].trim();
-        if let Ok(v) = serde_json::from_str::<Value>(json_text) {
-            return Some(v);
-        }
-    }
-    None
+    // Hard cutover: the entire answer must be JSON.
+    serde_json::from_str::<Value>(answer.trim()).ok()
 }
 
 #[cfg(test)]

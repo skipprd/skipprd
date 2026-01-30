@@ -2,11 +2,11 @@ pub fn cleanse_system_prompt() -> String {
     r#"You are a data cleansing/staging agent focused on authoring artifacts, not answering queries.
 At each step, you must either:
 - Call ONE tool (STRICT JSON: {"action": "<tool_name>", "args": {...}})
-- Or finish with STRICT JSON: {"final": {"answer": "<concise summary>", "sql": "<SELECT ...>"}}
+- Or finish with STRICT JSON:
+  {"final":{"kind":"generic","payload":{"text":"<concise summary>"},"display":"<concise summary>"}}
 
 Hard rules:
 - You MUST NOT provide SQL results as an answer.
-- The suite policy requires final.sql to be a valid SELECT that returns at least one row. Use a non-answer validation query (e.g., `SELECT 1 AS ok`) when finalizing after artifact work.
 - Your job: author DBT artifacts for a curated silver/staging tier. Prefer BATCH scaffolding (many files at once) over slow, per-file iteration.
 - Follow phase-specific instructions in the question; they override any general defaults here.
 - Source discipline for silver/staging:
@@ -140,7 +140,8 @@ Usage guidance:
   {"action":"dbt_files","args":{"op":"patch","replace_file":{"path":"models/staging/stg_example.sql","new_text":"-- sql...","expected_sha256":"<sha256>"}}}
 - If you reference any package macros, ensure packages.yml includes the required packages and run dbt deps.
 - For staging_model: keep batches small (max 5 dataset_ids per call). If more are provided, the tool will only process the first 5 and return `deferred_dataset_ids` for follow-up calls.
-- After saving and validating, produce final with {"answer":"<concise>","sql":"SELECT 1 AS ok"} (or another safe validation SELECT).
+- After you have saved and validated, finalize with:
+  {"final":{"kind":"generic","payload":{"text":"<concise summary>"},"display":"<concise summary>"}}
 - Start by calling search_dbt_examples using a concise query describing the intended model/metric; adopt conventions from top match.
 - After saving artifacts, call dbt_validate and fix any parse/compile errors; only then proceed.
 - After a clean validate, publish with publish_dbt_to_provider (it may return await_approval; on approval re-run with confirm=true).

@@ -1,14 +1,14 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use react_core::agent::{AgentPolicy, Interrupt, RunOutcome};
+use react_core::agent::{AgentPolicy, FinalEnvelope, Interrupt, RunOutcome};
 use react_core::session::{Observation, ThreadCacheStore, ThreadResult, ThreadStep, ThreadStore, ToolObservation};
 use react_core::tools::ToolRegistry;
 
 use super::types::DatasetCandidate;
 
 /// Policy for analytics-style suites: accept a model-emitted `final` only after validating that
-/// `final.sql` runs successfully (via the `run_sql` tool) and returns at least one row.
+/// Ask-mode `final.payload.sql` runs successfully (via the `run_sql` tool) and returns at least one row.
 ///
 /// This policy also supports user/approval interrupts by configured tool names.
 pub struct SqlValidatedPolicy {
@@ -97,92 +97,102 @@ impl AgentPolicy for SqlValidatedPolicy {
         transcript: &mut Vec<String>,
         store: Option<&ThreadStore>,
         thread_id: &str,
-        final_obj: &Value,
+        final_env: &FinalEnvelope,
     ) -> Result<Option<RunOutcome>, String> {
+        let is_authoring = matches!(ctx.agent_name.as_deref(), Some("model") | Some("cleanse"));
+        let is_ask = matches!(ctx.agent_name.as_deref(), Some("ask"));
+
         // For DBT-authoring agents, require successful dbt_validate before allowing final.
         //
         // IMPORTANT:
         // - If artifacts were authored, a compile-only validate is not sufficient to finalize; we require
         //   a runtime validate (build/run) to pass (run_ok=true) unless explicitly overridden.
         // - This prevents "compiles cleanly" finals that still have runtime/test failures.
-        if matches!(ctx.agent_name.as_deref(), Some("model") | Some("cleanse")) {
+        if is_authoring {
             if let Some(store) = store {
-                if let Ok(log) = store.get(thread_id).await {
-                    let mut has_artifacts = false;
+                let log = match store.get(thread_id).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        transcript.push(format!(
+                            "Observation: dbt_validate_required; thread log unavailable so validation status is unknown ({e}). Call dbt_validate before finalizing."
+                        ));
+                        return Ok(None);
+                    }
+                };
+                let mut has_artifacts = false;
+                for step in log.steps.iter().rev() {
+                    match step {
+                        ThreadStep::ArtifactSaved { .. } => {
+                            has_artifacts = true;
+                            break;
+                        }
+                        ThreadStep::Tool { name, .. } if name == "approve_and_save_artifact_batch" => {
+                            has_artifacts = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                if has_artifacts {
+                    let mut last_validate: Option<&ThreadStep> = None;
                     for step in log.steps.iter().rev() {
-                        match step {
-                            ThreadStep::ArtifactSaved { .. } => {
-                                has_artifacts = true;
-                                break;
-                            }
-                            ThreadStep::Tool { name, .. } if name == "approve_and_save_artifact_batch" => {
-                                has_artifacts = true;
-                                break;
-                            }
-                            _ => {}
+                        if matches!(step, ThreadStep::Tool { name, .. } if name == "dbt_validate") {
+                            last_validate = Some(step);
+                            break;
                         }
                     }
-                    if has_artifacts {
-                        let mut last_validate: Option<&ThreadStep> = None;
-                        for step in log.steps.iter().rev() {
-                            if matches!(step, ThreadStep::Tool { name, .. } if name == "dbt_validate") {
-                                last_validate = Some(step);
-                                break;
-                            }
-                        }
-                        // If artifacts were written, we require an explicit dbt_validate step.
-                        // (Suite-level post-run validation is not sufficient for this policy gate.)
-                        let Some(v) = last_validate else {
-                            transcript.push(
-                                "Observation: dbt_validate_required; you must run dbt_validate after writing artifacts before finalizing.".to_string(),
-                            );
-                            return Ok(None);
-                        };
+                    // If artifacts were written, we require an explicit dbt_validate step.
+                    // (Suite-level post-run validation is not sufficient for this policy gate.)
+                    let Some(v) = last_validate else {
+                        transcript.push(
+                            "Observation: dbt_validate_required; you must run dbt_validate after writing artifacts before finalizing.".to_string(),
+                        );
+                        return Ok(None);
+                    };
 
-                        let (ok, compile_ok, run_ok, build, run) = match v {
-                            ThreadStep::Tool { args, observation, .. } => {
-                                let ok = observation.ok;
-                                let compile_ok = observation
-                                    .extra
-                                    .get("compile_ok")
-                                    .and_then(|x| x.as_bool())
-                                    .unwrap_or(false);
-                                let run_ok = observation.extra.get("run_ok").and_then(|x| x.as_bool());
-                                let build = args.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
-                                let run = args.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
-                                (ok, compile_ok, run_ok, build, run)
-                            }
-                            _ => (false, false, None, false, false),
-                        };
-                        let runtime_validate = build || run;
-                        let allow_compile_only = std::env::var("DBT_ALLOW_COMPILE_ONLY_FINAL")
-                            .ok()
-                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                            .unwrap_or(false);
-
-                        if !(ok && compile_ok) {
-                            transcript.push(
-                                "Observation: dbt_validate_failed; you must fix DBT artifacts and re-run dbt_validate until compile_ok=true before finalizing."
-                                    .to_string(),
-                            );
-                            return Ok(None);
+                    let (ok, compile_ok, run_ok, build, run) = match v {
+                        ThreadStep::Tool { args, observation, .. } => {
+                            let ok = observation.ok;
+                            let compile_ok = observation
+                                .extra
+                                .get("compile_ok")
+                                .and_then(|x| x.as_bool())
+                                .unwrap_or(false);
+                            let run_ok = observation.extra.get("run_ok").and_then(|x| x.as_bool());
+                            let build = args.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
+                            let run = args.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
+                            (ok, compile_ok, run_ok, build, run)
                         }
+                        _ => (false, false, None, false, false),
+                    };
+                    let runtime_validate = build || run;
+                    let allow_compile_only = std::env::var("DBT_ALLOW_COMPILE_ONLY_FINAL")
+                        .ok()
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
 
-                        if !runtime_validate && !allow_compile_only {
-                            transcript.push(
-                                "Observation: dbt_validate_incomplete; compile-only validation is not sufficient after authoring DBT artifacts. Re-run dbt_validate with build=true (or run=true) and fix any runtime/test failures before finalizing."
-                                    .to_string(),
-                            );
-                            return Ok(None);
-                        }
+                    if !(ok && compile_ok) {
+                        transcript.push(
+                            "Observation: dbt_validate_failed; you must fix DBT artifacts and re-run dbt_validate until compile_ok=true before finalizing."
+                                .to_string(),
+                        );
+                        return Ok(None);
+                    }
 
-                        if runtime_validate && run_ok != Some(true) {
-                            transcript.push(
-                                "Observation: dbt_validate_run_failed; you must fix runtime/test failures and re-run dbt_validate until run_ok=true before finalizing."
-                                    .to_string(),
-                            );
-                            return Ok(None);
-                        }
+                    if !runtime_validate && !allow_compile_only {
+                        transcript.push(
+                            "Observation: dbt_validate_incomplete; compile-only validation is not sufficient after authoring DBT artifacts. Re-run dbt_validate with build=true (or run=true) and fix any runtime/test failures before finalizing."
+                                .to_string(),
+                        );
+                        return Ok(None);
+                    }
+
+                    if runtime_validate && run_ok != Some(true) {
+                        transcript.push(
+                            "Observation: dbt_validate_run_failed; you must fix runtime/test failures and re-run dbt_validate until run_ok=true before finalizing."
+                                .to_string(),
+                        );
+                        return Ok(None);
                     }
                 }
             } else {
@@ -192,8 +202,53 @@ impl AgentPolicy for SqlValidatedPolicy {
                 );
                 return Ok(None);
             }
+
+            // Authoring agents finalize without SQL validation (Ask-only concern).
+            let result = ThreadResult {
+                kind: final_env.kind.clone(),
+                payload: final_env.payload.clone(),
+                display: final_env.display.clone(),
+            };
+            if let Some(store) = store {
+                let agent = ctx
+                    .agent_name
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let _ = store
+                    .append_step(
+                        thread_id,
+                        ThreadStep::Final {
+                            kind: result.kind.clone(),
+                            payload: result.payload.clone(),
+                            display: result.display.clone(),
+                            observation: Observation::ok(),
+                            ts: chrono::Utc::now().to_rfc3339(),
+                            agent,
+                        },
+                    )
+                    .await;
+            }
+            return Ok(Some(RunOutcome::Final { thread_id: thread_id.to_string(), result }));
         }
-        let sql_opt = final_obj.get("sql").and_then(|x| x.as_str()).map(|s| s.to_string());
+
+        // Ask mode: require and validate SQL+data before finalizing.
+        if !is_ask {
+            transcript.push("Observation: invalid_final_kind; only ask/model/cleanse agents may finalize in this suite.".to_string());
+            return Ok(None);
+        }
+        if final_env.kind != "ask" {
+            transcript.push(format!(
+                "Observation: invalid_final_kind; ask agent must finalize with final.kind='ask' (got '{}').",
+                final_env.kind
+            ));
+            return Ok(None);
+        }
+
+        let sql_opt = final_env
+            .payload
+            .get("sql")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
         if let Some(sql_str) = sql_opt.as_ref() {
             let sql_lower = sql_str.to_lowercase();
             if sql_lower.contains(" default.") {
@@ -249,12 +304,11 @@ impl AgentPolicy for SqlValidatedPolicy {
             ));
             return Ok(None);
         }
-        let answer = final_obj
-            .get("answer")
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        let result = ThreadResult { sql: sql_opt, answer };
+        let result = ThreadResult {
+            kind: final_env.kind.clone(),
+            payload: final_env.payload.clone(),
+            display: final_env.display.clone(),
+        };
         if let Some(store) = store {
             let agent = ctx
                 .agent_name
@@ -264,8 +318,9 @@ impl AgentPolicy for SqlValidatedPolicy {
                 .append_step(
                     thread_id,
                     ThreadStep::Final {
-                        answer: result.answer.clone(),
-                        sql: result.sql.clone(),
+                        kind: result.kind.clone(),
+                        payload: result.payload.clone(),
+                        display: result.display.clone(),
                         observation: Observation::ok(),
                         ts: chrono::Utc::now().to_rfc3339(),
                         agent,
@@ -319,7 +374,11 @@ impl AgentPolicy for SqlValidatedPolicy {
         }
         Ok(RunOutcome::Final {
             thread_id: thread_id.to_string(),
-            result: ThreadResult { sql: None, answer: summary },
+            result: ThreadResult {
+                kind: "generic".to_string(),
+                payload: serde_json::json!({ "text": summary.clone() }),
+                display: Some(summary),
+            },
         })
     }
 }
@@ -395,10 +454,14 @@ mod tests {
         let policy = SqlValidatedPolicy::default();
         let mut transcript: Vec<String> = Vec::new();
         let tools = ToolRegistry::new();
-        let final_obj = serde_json::json!({"answer":"x","sql":"SELECT 1 AS ok"});
+        let final_env = FinalEnvelope {
+            kind: "ask".to_string(),
+            payload: serde_json::json!({"answer":"x","sql":"SELECT 1 AS ok"}),
+            display: None,
+        };
 
         let out = policy
-            .handle_final(&tools, &ctx, &mut transcript, Some(&store), tid, &final_obj)
+            .handle_final(&tools, &ctx, &mut transcript, Some(&store), tid, &final_env)
             .await
             .unwrap();
         assert!(out.is_none());

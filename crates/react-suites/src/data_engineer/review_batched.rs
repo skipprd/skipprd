@@ -1112,8 +1112,9 @@ pub async fn run_batched_review(
     }
 
     Ok(vec![FlowFrame::Final {
-        answer: final_review_text,
-        sql: Some("SELECT 1 AS ok".to_string()),
+        kind: "generic".to_string(),
+        payload: serde_json::json!({ "text": final_review_text.clone() }),
+        display: Some(final_review_text),
     }])
 }
 

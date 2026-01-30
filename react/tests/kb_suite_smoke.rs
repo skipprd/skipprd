@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use react_core::agent::{Agent, AgentCtx, AgentPolicy, DefaultPolicy, Interrupt, RunOutcome};
+use react_core::agent::{Agent, AgentCtx, AgentPolicy, DefaultPolicy, FinalEnvelope, Interrupt, RunOutcome};
 use react_core::storage::InMemoryStorageAdapter;
 use react_core::llm::{ChatMessage, LargeLanguageModel};
 use react_core::session::ThreadStore;
@@ -55,16 +55,16 @@ impl AgentPolicy for InterruptOnAskUser {
         _transcript: &mut Vec<String>,
         _store: Option<&ThreadStore>,
         _thread_id: &str,
-        _final_obj: &Value,
+        _final_env: &FinalEnvelope,
     ) -> Result<Option<RunOutcome>, String> {
         Ok(None)
     }
 }
 
 #[tokio::test]
-async fn agent_default_policy_accepts_final_without_sql() {
+async fn agent_default_policy_accepts_typed_final() {
     let llm = Arc::new(FixedJsonModel {
-        out: r#"{"final":{"answer":"hello"}} "#.to_string(),
+        out: r#"{"final":{"kind":"kb","payload":{"answer":"hello"}}} "#.to_string(),
     });
     let ctx = AgentCtx {
         top_k: 1,
@@ -90,8 +90,8 @@ async fn agent_default_policy_accepts_final_without_sql() {
     let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q").await.expect("run");
     match out {
         RunOutcome::Final { result, .. } => {
-            assert_eq!(result.answer, "hello");
-            assert!(result.sql.is_none());
+            assert_eq!(result.kind, "kb");
+            assert_eq!(result.payload.get("answer").and_then(|x| x.as_str()), Some("hello"));
         }
         _ => panic!("expected final"),
     }
@@ -126,8 +126,9 @@ async fn agent_does_not_special_case_ask_user_tool_name() {
     reg.register(AskUserTool);
     let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q").await.expect("run");
     match out {
-        RunOutcome::Final { .. } => {} // OK: did not become AwaitUser automatically
-        other => panic!("expected Final (no interrupt policy), got {:?}", std::mem::discriminant(&other)),
+        // OK: did not become AwaitUser automatically from tool name; it simply hit fallback.
+        RunOutcome::AwaitUser { .. } => {}
+        other => panic!("expected AwaitUser fallback (no final produced), got {:?}", std::mem::discriminant(&other)),
     }
 }
 
