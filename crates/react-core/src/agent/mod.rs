@@ -601,6 +601,7 @@ impl Agent {
                 Err(_) => serde_json::json!({"ok": false, "errors": ["tool timeout"]}),
             };
             let obs_env = ToolObservation::normalize(raw_obs.clone());
+            let obs_env_for_transcript = obs_env.clone();
             let agent = ctx
                 .agent_name
                 .clone()
@@ -632,7 +633,23 @@ impl Agent {
 
             Self::transcript_add(&mut transcript, format!("Assistant: {}", raw), &ctx.trace_tx);
 
-            Self::transcript_add(&mut transcript, format!("Observation: {}", raw_obs), &ctx.trace_tx);
+            // Always preserve full tool output in the persisted thread log (ToolObservation).
+            // For the model-facing transcript, include the full error output when it fits the prompt budget;
+            // otherwise include a deterministic excerpt so we don't miss the critical lines while staying in-bounds.
+            if obs_env_for_transcript.ok {
+                Self::transcript_add(&mut transcript, format!("Observation: {}", raw_obs), &ctx.trace_tx);
+            } else {
+                let max_prompt_chars = crate::error_context::estimate_max_prompt_chars(ctx);
+                // Best-effort remaining budget: current transcript size + the new line overhead.
+                let used_chars: usize = transcript.iter().map(|l| l.chars().count() + 1).sum();
+                let remaining = max_prompt_chars.saturating_sub(used_chars).max(256);
+                let rendered = crate::error_context::render_failure_context(&obs_env_for_transcript, remaining);
+                Self::transcript_add(
+                    &mut transcript,
+                    format!("Observation: {}", serde_json::json!({ "ok": false, "error_context": rendered })),
+                    &ctx.trace_tx,
+                );
+            }
         }
 
         ctx.policy.fallback(tools, ctx, &mut transcript, store, &tid).await

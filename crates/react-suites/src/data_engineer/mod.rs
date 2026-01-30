@@ -1249,7 +1249,7 @@ impl DataEngineerSuite {
                 _ => Self::allow_ask_approval_in_phase(log.as_ref(), phase),
             };
 
-            // Helper: most recent dbt_validate error brief (for prompt grounding).
+            // Helper: most recent dbt_validate error context (for prompt grounding).
             let mut last_validate_brief: Option<String> = None;
             let mut last_validate_failed_models: Vec<serde_json::Value> = Vec::new();
             if let Some(ref l) = log {
@@ -1260,8 +1260,11 @@ impl DataEngineerSuite {
                     if name != "dbt_validate" {
                         continue;
                     }
-                    if !observation.errors.is_empty() {
-                        last_validate_brief = Some(dbt_error::compact_brief(&observation.errors, 6, 1200));
+                    // IMPORTANT: do not truncate dbt failures to a brief. Preserve full error output when it fits,
+                    // otherwise include a deterministic excerpt (keyword-window matches).
+                    if !observation.ok {
+                        let max_chars = react_core::error_context::estimate_max_prompt_chars(&Self::plan_agent_ctx(thread_id, sctx));
+                        last_validate_brief = Some(react_core::error_context::render_failure_context(observation, max_chars));
                     }
                     // Best-effort: extract failing model(s) from dbt stdout so the authoring LLM
                     // can target a specific file even when plan batches are already complete.

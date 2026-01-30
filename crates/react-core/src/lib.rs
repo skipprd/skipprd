@@ -17,4 +17,5 @@ pub mod helpers;
 pub mod session;
 pub mod agent;
 pub mod llm_observability;
+pub mod error_context;
 
