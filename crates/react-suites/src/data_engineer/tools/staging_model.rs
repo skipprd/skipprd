@@ -140,6 +140,8 @@ fn build_staging_sys_prompt(
          - Dialect/provider compatibility:\n\
            - If Provider is athena (Trino SQL), DO NOT use initcap() (it is not registered). Avoid title-casing strings.\n\
          - Use the provided schema_columns types to guide casting and cleansing. Do NOT guess types from names.\n\
+         - CRITICAL: Do NOT select or reference any column that is not present in schema_columns.\n\
+           If the desired field is missing, note it and proceed with the closest available alternative.\n\
          - Time-like fields MUST be detected from schema types when possible:\n\
            - timestamp/datetime types: timestamp, timestamptz, datetime\n\
            - date types: date\n\

@@ -102,7 +102,8 @@ fn build_gold_sys_prompt(provider: &str, dialect: &str, max_items: usize) -> Str
          - Gold models MUST ONLY read from silver/staging models using ref('stg_*').\n\
          - Gold models MUST NOT call source() anywhere.\n\
          - Prefer minimal, stable columns for business use; do not invent fields.\n\
-         - If you need a field that does not exist in silver, put it in notes and do NOT guess.\n\
+         - CRITICAL: Do NOT select or reference any column not present in inputs[].schema_columns for that input.\n\
+           If you need a field that does not exist in silver, put it in notes and do NOT guess.\n\
          - Use provided inputs[].schema_columns (from the warehouse/catalog) as ground truth for available columns + types.\n\
          - IMPORTANT time handling (consistency):\n\
            - If an input column is already typed as timestamp/date/timestamptz/datetime, use it directly; do NOT re-cast it to the same type.\n\

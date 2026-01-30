@@ -1155,6 +1155,39 @@ impl DataEngineerSuite {
         }
     }
 
+    fn plan_agent_ctx(thread_id: &str, sctx: &SuiteCtx) -> AgentCtx {
+        // Plan phases (cleanse_plan/model_plan) are tool-heavy: they must do discovery and evidence,
+        // then emit a final plan object. The small 6-step budget used for some helper contexts can
+        // cause a fallback Final ("No result") which then fails plan JSON parsing and shows up as a
+        // misleading "final.answer must be valid JSON" error.
+        let thread_store = ThreadStore::new(sctx.storage.clone(), sctx.scope.clone(), sctx.keyspace.clone());
+        AgentCtx {
+            top_k: 30,
+            per_step_timeout_secs: 10,
+            max_steps: 40,
+            thread_id: Some(thread_id.to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: sctx.trace_tx.clone(),
+            // Keep a single agent label for agent-mode runs; phase selection is handled by the outer loop.
+            agent_name: Some("agent".to_string()),
+            // Preserve strict interrupts (ask_user/ask_approval), but otherwise accept finals.
+            policy: std::sync::Arc::new(InterruptOnlyPolicy),
+            llm: sctx.llm.clone(),
+            storage: sctx.storage.clone(),
+            scope: sctx.scope.clone(),
+            keyspace: sctx.keyspace.clone(),
+            query: sctx.query.clone(),
+            dbt: sctx.dbt.clone(),
+            vector: sctx.vector.clone(),
+            thread_store: Some(thread_store),
+            runtime: sctx
+                .resolved_config
+                .clone()
+                .map(|c| c as Arc<dyn std::any::Any + Send + Sync>),
+        }
+    }
+
     async fn run_agent(thread_id: &str, question: &str, sctx: &SuiteCtx) -> Result<Vec<FlowFrame>, String> {
         use control_flow::{DerivedGuardState, Phase};
         Self::ensure_catalog_bootstrap(sctx).await;
@@ -1301,7 +1334,7 @@ impl DataEngineerSuite {
                     // Plan phases are read-only discovery + plan authoring. They persist an approved
                     // plan to storage and then drive the subsequent authoring phase deterministically.
                     let is_cleanse = phase == Phase::CleansePlan;
-                    let actx = Self::agent_tool_ctx(thread_id, sctx);
+                    let actx = Self::plan_agent_ctx(thread_id, sctx);
 
                     // If the user already approved an existing draft, mark it approved and proceed.
                     if let Some(ref l) = log {

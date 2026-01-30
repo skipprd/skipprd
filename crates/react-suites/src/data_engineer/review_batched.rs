@@ -13,6 +13,7 @@ use super::control_flow::Phase;
 use super::plan as de_plan;
 use super::tools::dbt_files::DbtFilesTool;
 use super::tools::sql_schema::SqlSchemaTool;
+use crate::data_engineer::{facts, naming};
 
 const REVIEW_SNAPSHOT_VERSION: i64 = 1;
 const DEFAULT_BATCH_SIZE: usize = 5;
@@ -596,6 +597,59 @@ fn cap_schema_columns(schema_obs: &Value) -> Value {
     v
 }
 
+async fn dependency_schemas_for_sql(sctx: &SuiteCtx, actx: &AgentCtx, sql: &str) -> Value {
+    // Derive authoritative schemas for dependencies referenced by the model SQL:
+    // - ref('...') -> relation FQN via manifest index
+    // - source('schema','table') -> relation FQN via manifest source index
+    //
+    // Keep bounded and deterministic.
+    let mut out: Vec<Value> = Vec::new();
+
+    let mut ref_names = naming::extract_ref_calls(sql);
+    ref_names.sort();
+    ref_names.dedup();
+    ref_names.truncate(20);
+
+    let source_calls = naming::extract_source_calls(sql);
+
+    // Resolve refs via manifest model index.
+    let ref_fqns = facts::resolve_model_names_to_fqns(actx, &ref_names).await;
+    for (i, fqn) in ref_fqns.iter().enumerate() {
+        // Pair with ref name best-effort (same order as ref_names after mapping isn't guaranteed).
+        let name = ref_names.get(i).cloned().unwrap_or_else(|| "".to_string());
+        let schema = cap_schema_columns(&schema_for_dataset_fqn(sctx, actx, fqn).await);
+        out.push(serde_json::json!({
+            "kind": "ref",
+            "ref_name": name,
+            "relation_fqn": fqn,
+            "schema": schema
+        }));
+        if out.len() >= 25 {
+            break;
+        }
+    }
+
+    // Resolve sources via manifest source index (more reliable than guessing catalog/schema).
+    let src_idx = facts::load_manifest_source_index(actx).await;
+    for (src_name, table_name) in source_calls.into_iter().take(25) {
+        if let Some(fqn) = src_idx.get(&(src_name.clone(), table_name.clone())) {
+            let schema = cap_schema_columns(&schema_for_dataset_fqn(sctx, actx, fqn).await);
+            out.push(serde_json::json!({
+                "kind": "source",
+                "source_name": src_name,
+                "table_name": table_name,
+                "relation_fqn": fqn,
+                "schema": schema
+            }));
+        }
+        if out.len() >= 50 {
+            break;
+        }
+    }
+
+    Value::Array(out)
+}
+
 fn render_path_list(label: &str, paths: &[String], max_items: usize) -> String {
     let mut p = paths.to_vec();
     p.sort();
@@ -969,12 +1023,21 @@ pub async fn run_batched_review(
             } else {
                 Value::Null
             };
+
+            // Also attach dependency schemas derived from the model file content (ref/source schemas),
+            // so review suggestions do not invent fields for upstream relations.
+            let deps = if let Some(f) = files.iter().find(|ff| ff.path.trim() == expected_path.trim()) {
+                dependency_schemas_for_sql(sctx, &actx, &f.content).await
+            } else {
+                Value::Array(vec![])
+            };
             batch_detail.push(serde_json::json!({
                 "item": item,
                 "expected_model_path": expected_path,
                 "invariants": invariants,
                 "task_notes": notes,
                 "authoritative_schema": schema_obs
+                ,"dependency_schemas": deps
             }));
         }
 
