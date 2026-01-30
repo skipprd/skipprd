@@ -26,6 +26,7 @@ pub mod patch_protocol;
 pub mod project_files;
 pub mod plan;
 pub mod facts;
+mod review_batched;
 
 fn lock_prompt_for_plan(
     kind: &str,
@@ -2920,7 +2921,7 @@ impl DataEngineerSuite {
 
                 Phase::CleanseReview | Phase::ModelReview | Phase::PostPublishReview => {
                     let review_q = Self::build_review_question_with_context(question, phase, log.as_ref());
-                    let frames = Self::run_review(thread_id, &review_q, sctx).await?;
+                    let frames = review_batched::run_batched_review(thread_id, &review_q, phase, sctx).await?;
                     let first = frames.into_iter().next().unwrap_or(FlowFrame::Final { answer: "".to_string(), sql: None });
                     let (answer, _sql) = match first {
                         FlowFrame::Final { answer, sql } => (answer, sql),

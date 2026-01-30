@@ -14,6 +14,8 @@ use super::types::{
     ChatRequest, ChatResponse, EmbedRequest, EmbedResponse, ProviderHttpResponse,
 };
 use crate::llm::LargeLanguageModel;
+use react_core::llm_observability::{self, PartInput};
+use react_core::llm::ChatMessage as CoreChatMessage;
 
 fn pretty_json(text: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(text) {
@@ -22,21 +24,17 @@ fn pretty_json(text: &str) -> String {
     }
 }
 
-fn truncate_for_log(s: &str, max_bytes: usize) -> String {
-    if max_bytes == 0 || s.len() <= max_bytes {
-        return s.to_string();
+fn router_parts_for_messages(req: &ChatRequest) -> (Vec<CoreChatMessage>, Vec<PartInput>) {
+    let mut core_msgs: Vec<CoreChatMessage> = Vec::new();
+    let mut parts: Vec<PartInput> = Vec::new();
+    for (i, m) in req.messages.iter().enumerate() {
+        core_msgs.push(CoreChatMessage { role: m.role.clone(), content: m.content.clone() });
+        parts.push(PartInput {
+            name: format!("msg.{:02}.{}", i, m.role.trim().to_lowercase()),
+            text: m.content.clone(),
+        });
     }
-    // Find a UTF-8 safe boundary <= max_bytes.
-    let mut end = 0usize;
-    for (i, _) in s.char_indices() {
-        if i > max_bytes {
-            break;
-        }
-        end = i;
-    }
-    let mut out = s[..end].to_string();
-    out.push_str("\n-- [truncated]\n");
-    out
+    (core_msgs, parts)
 }
 
 pub struct LlmRouter {
@@ -127,6 +125,37 @@ impl LlmRouter {
         let payload = serde_json::to_value(&http_req.body).map_err(|e| e.to_string())?;
         let max_retries: usize = Config::getenv("LLM_HTTP_MAX_RETRIES", "3").parse().unwrap_or(3).max(1).min(10);
 
+        // LLM observability (parts): best-effort, thread-scoped when req.thread_id is provided.
+        let obs_thread_id = req.thread_id.clone().filter(|s| !s.trim().is_empty());
+        let (call_id_opt, prompt_hash_opt, built_parts_opt) = if llm_observability::llm_calls_enabled() {
+            if let Some(tid) = obs_thread_id.as_deref() {
+                let call_id = llm_observability::next_call_id(tid);
+                let (core_msgs, parts) = router_parts_for_messages(req);
+                let prompt_hash = llm_observability::prompt_hash_for_messages(&core_msgs);
+                let built = llm_observability::build_parts_for_thread(tid, &parts);
+                debug!(
+                    "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_hash={} response_pending=1",
+                    tid,
+                    call_id,
+                    "router",
+                    "router",
+                    req.model,
+                    prompt_hash
+                );
+                for p in built.parts.iter() {
+                    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+                    let hash = p.get("hash").and_then(|v| v.as_str()).unwrap_or("-");
+                    let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    debug!("LLM_PART thread_id={} call_id={} name={} hash={} text={}", tid, call_id, name, hash, text);
+                }
+                (Some(call_id), Some(prompt_hash), Some(built))
+            } else {
+                (None, None, None)
+            }
+        } else {
+            (None, None, None)
+        };
+
         let mut attempt = 0usize;
         let (status, body_text) = loop {
             attempt += 1;
@@ -183,18 +212,37 @@ impl LlmRouter {
             return Err(format!("LLM request failed: {}: http {}: {}", full_url, ph.status, snippet));
         }
         let parsed = adapter.parse_chat_http(&ph)?;
-        // Always print a truncated parsed response at DEBUG so failures like invalid tool shapes
-        // are diagnosable without printing prompts. Full output remains opt-in.
-        let pretty_text = pretty_json(&parsed.text);
-        let max_bytes: usize = Config::getenv("LLM_LOG_PARSED_TEXT_MAX", "4000")
-            .parse()
-            .unwrap_or(4000)
-            .max(512)
-            .min(200_000);
-        if Config::getenv("LLM_LOG_PARSED_TEXT", "0") == "1" {
-            debug!("LLM(router) parsed text:\n{}", pretty_text);
+        // Observability response logging (no truncation). If not enabled, do not print parsed text at all by default.
+        if let (Some(tid), Some(call_id), Some(prompt_hash), Some(built)) =
+            (obs_thread_id.as_deref(), call_id_opt, prompt_hash_opt, built_parts_opt)
+        {
+            let response_hash = llm_observability::sha256_hex_str(&parsed.text);
+            let response_text = if llm_observability::llm_response_text_enabled() {
+                Some(llm_observability::redact_common_secrets(&parsed.text))
+            } else {
+                None
+            };
+            if let Some(rt) = response_text.as_deref() {
+                debug!(
+                    "LLM_RESPONSE thread_id={} call_id={} response_hash={} response_text={}",
+                    tid, call_id, response_hash, rt
+                );
+            } else {
+                debug!(
+                    "LLM_RESPONSE thread_id={} call_id={} response_hash={} response_text=disabled",
+                    tid, call_id, response_hash
+                );
+            }
+            // Keep variables used (to avoid accidental drop warnings if future edits extend this).
+            let _ = (prompt_hash, built);
+        } else if Config::getenv("LLM_LOG_PARSED_TEXT", "0") == "1" {
+            debug!("LLM(router) parsed text:\n{}", pretty_json(&parsed.text));
         } else {
-            debug!("LLM(router) parsed text (truncated):\n{}", truncate_for_log(&pretty_text, max_bytes));
+            debug!(
+                "LLM(router) parsed text omitted (set LLM_LOG_PARSED_TEXT=1 to print): chars={} sha256={}",
+                parsed.text.len(),
+                llm_observability::sha256_hex_str(&parsed.text)
+            );
         }
         // store in memo
         chat_memo().insert(key, MemoEntry { at: Instant::now(), resp: parsed.clone() });

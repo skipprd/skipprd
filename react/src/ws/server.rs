@@ -1177,6 +1177,15 @@ fn map_task_status(s: de_plan::TaskStatus) -> api::PlanTaskStatus {
 	}
 }
 
+fn map_project_snapshot(v: serde_json::Value) -> Option<HashMap<String, serde_json::Value>> {
+	let obj = v.as_object()?;
+	let mut out: HashMap<String, serde_json::Value> = HashMap::new();
+	for (k, vv) in obj.iter() {
+		out.insert(k.clone(), vv.clone());
+	}
+	Some(out)
+}
+
 async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<api::PlanSnapshot> {
 	// Plans are stored alongside other top-level resources (threads/, dbt/, etc),
 	// NOT under dbt/.
@@ -1200,6 +1209,9 @@ async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<ap
 					p.plan_key = k.to_string();
 				}
 				if !p.status.is_terminal() {
+					let project_snapshot = p.project_snapshot;
+					let plan_key = p.plan_key;
+					let status = p.status;
 					let tasks = p
 						.tasks
 						.into_iter()
@@ -1219,12 +1231,14 @@ async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<ap
 							api::PlanTask::Cleanse(snap)
 						})
 						.collect::<Vec<_>>();
-					return Some(api::PlanSnapshot::new(
+					let mut snap = api::PlanSnapshot::new(
 						api::plan_snapshot::PlanKind::Cleanse,
-						p.plan_key,
-						map_plan_status(p.status),
+						plan_key,
+						map_plan_status(status),
 						tasks,
-					));
+					);
+					snap.project_snapshot = map_project_snapshot(project_snapshot);
+					return Some(snap);
 				} else {
 					newest_terminal_cleanse = Some(p);
 				}
@@ -1240,6 +1254,9 @@ async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<ap
 					p.plan_key = k.to_string();
 				}
 				if !p.status.is_terminal() {
+					let project_snapshot = p.project_snapshot;
+					let plan_key = p.plan_key;
+					let status = p.status;
 					let tasks = p
 						.tasks
 						.into_iter()
@@ -1268,12 +1285,14 @@ async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<ap
 							api::PlanTask::Model(snap)
 						})
 						.collect::<Vec<_>>();
-					return Some(api::PlanSnapshot::new(
+					let mut snap = api::PlanSnapshot::new(
 						api::plan_snapshot::PlanKind::Model,
-						p.plan_key,
-						map_plan_status(p.status),
+						plan_key,
+						map_plan_status(status),
 						tasks,
-					));
+					);
+					snap.project_snapshot = map_project_snapshot(project_snapshot);
+					return Some(snap);
 				} else {
 					newest_terminal_model = Some(p);
 				}
@@ -1294,6 +1313,9 @@ async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<ap
 	match choose_terminal {
 		"cleanse" => {
 			let p = newest_terminal_cleanse?;
+			let project_snapshot = p.project_snapshot;
+			let plan_key = p.plan_key;
+			let status = p.status;
 			let tasks = p
 				.tasks
 				.into_iter()
@@ -1313,15 +1335,20 @@ async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<ap
 					api::PlanTask::Cleanse(snap)
 				})
 				.collect::<Vec<_>>();
-			Some(api::PlanSnapshot::new(
+			let mut snap = api::PlanSnapshot::new(
 				api::plan_snapshot::PlanKind::Cleanse,
-				p.plan_key,
-				map_plan_status(p.status),
+				plan_key,
+				map_plan_status(status),
 				tasks,
-			))
+			);
+			snap.project_snapshot = map_project_snapshot(project_snapshot);
+			Some(snap)
 		}
 		"model" => {
 			let p = newest_terminal_model?;
+			let project_snapshot = p.project_snapshot;
+			let plan_key = p.plan_key;
+			let status = p.status;
 			let tasks = p
 				.tasks
 				.into_iter()
@@ -1350,12 +1377,14 @@ async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<ap
 					api::PlanTask::Model(snap)
 				})
 				.collect::<Vec<_>>();
-			Some(api::PlanSnapshot::new(
+			let mut snap = api::PlanSnapshot::new(
 				api::plan_snapshot::PlanKind::Model,
-				p.plan_key,
-				map_plan_status(p.status),
+				plan_key,
+				map_plan_status(status),
 				tasks,
-			))
+			);
+			snap.project_snapshot = map_project_snapshot(project_snapshot);
+			Some(snap)
 		}
 		_ => None,
 	}
@@ -1970,11 +1999,15 @@ async fn run_agent_with_processing_suite(
 	let agent_s = agent.to_string();
 
 	let agent_task = tokio::spawn(async move {
-		match kind {
-			SuiteRunKind::New => suite.handle_new(&thread_id_s, &q_s, &agent_s, &sctx2).await,
-			SuiteRunKind::Open => suite.handle_open(&thread_id_s, &q_s, &agent_s, &sctx2).await,
-			SuiteRunKind::User => suite.handle_user(&thread_id_s, &q_s, &agent_s, &sctx2).await,
-		}
+		let tid_scope = thread_id_s.clone();
+		crate::llm::thread_ctx::scope_thread_id(&tid_scope, async move {
+			match kind {
+				SuiteRunKind::New => suite.handle_new(&thread_id_s, &q_s, &agent_s, &sctx2).await,
+				SuiteRunKind::Open => suite.handle_open(&thread_id_s, &q_s, &agent_s, &sctx2).await,
+				SuiteRunKind::User => suite.handle_user(&thread_id_s, &q_s, &agent_s, &sctx2).await,
+			}
+		})
+		.await
 	});
 	tokio::pin!(agent_task);
 
@@ -2876,7 +2909,7 @@ mod tests {
 		let plan = de_plan::CleansePlan {
 			plan_key: plan_key.clone(),
 			status: de_plan::PlanStatus::Approved,
-			project_snapshot: serde_json::json!({}),
+			project_snapshot: serde_json::json!({"review": {"review_version": 1, "project_notes": ["ok"]}}),
 			tasks: vec![de_plan::CleanseTask {
 				dataset_id: "a.b.c".to_string(),
 				expected_model_path: Some("models/staging/stg_a_b_c.sql".to_string()),
@@ -2910,7 +2943,19 @@ mod tests {
 			if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
 				match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
 					"suite_progress" => saw_suite_progress = true,
-					"plan_update" => saw_plan_update = true,
+					"plan_update" => {
+						saw_plan_update = true;
+						let ps = v
+							.get("plan")
+							.and_then(|p| p.get("projectSnapshot"))
+							.and_then(|x| x.as_object())
+							.cloned()
+							.unwrap_or_default();
+						assert!(
+							!ps.is_empty(),
+							"expected plan_update.plan.projectSnapshot to be present when plan has project_snapshot"
+						);
+					},
 					"trace" => {
 						saw_trace = true;
 						let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");

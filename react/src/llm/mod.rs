@@ -114,6 +114,7 @@ pub mod router;
 pub mod openai_chat_adapter;
 pub mod openai_responses_adapter;
 pub mod llama_cpp_adapter;
+pub mod thread_ctx;
 
 #[cfg(test)]
 mod tests {

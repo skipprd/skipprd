@@ -233,59 +233,6 @@ impl Agent {
         out
     }
 
-    fn minimal_base_for_chunking(transcript: &[String]) -> String {
-        // Keep only the last ~50 transcript lines to keep prompt size bounded.
-        let keep = 50usize.min(transcript.len());
-        let tail = &transcript[transcript.len().saturating_sub(keep)..];
-        let mut out = String::new();
-        for line in tail {
-            out.push_str(line);
-            out.push('\n');
-        }
-        out
-    }
-
-    fn chunk_text(s: &str, max_chars: usize) -> Vec<String> {
-        if s.is_empty() {
-            return vec![];
-        }
-        let max_chars = max_chars.max(256);
-        let mut out: Vec<String> = Vec::new();
-        let mut buf = String::new();
-        for line in s.lines() {
-            // Keep line breaks to preserve dbt line numbers and context.
-            let piece = if buf.is_empty() { line.to_string() } else { format!("\n{}", line) };
-            if buf.len() + piece.len() <= max_chars {
-                buf.push_str(&piece);
-            } else {
-                if !buf.is_empty() {
-                    out.push(buf);
-                    buf = String::new();
-                }
-                // If a single line is too large, hard-split it.
-                if line.len() > max_chars {
-                    let mut start = 0usize;
-                    let chars: Vec<char> = line.chars().collect();
-                    while start < chars.len() {
-                        let end = (start + max_chars).min(chars.len());
-                        out.push(chars[start..end].iter().collect::<String>());
-                        start = end;
-                    }
-                } else {
-                    buf.push_str(line);
-                }
-            }
-            if out.len() >= 40 {
-                // Safety cap; we don't want unbounded LLM calls.
-                break;
-            }
-        }
-        if !buf.is_empty() && out.len() < 40 {
-            out.push(buf);
-        }
-        out
-    }
-
     async fn llm_chat_once(ctx: &AgentCtx, prompt: String) -> Result<String, String> {
         let model = ctx.llm.clone();
 
@@ -413,63 +360,6 @@ impl Agent {
         }
 
         res
-    }
-
-    async fn llm_action_via_chunked_errors(
-        ctx: &AgentCtx,
-        transcript: &[String],
-        step_idx: usize,
-        error_blob: &str,
-    ) -> Result<String, String> {
-        // We split the error log into chunks and ask the model to build an incremental diagnosis state.
-        // Then we ask for the next action using only the compact transcript + the final state.
-        let base = Self::minimal_base_for_chunking(transcript);
-        let chunk_budget = 40_000usize;
-        let chunks = Self::chunk_text(error_blob, chunk_budget);
-        if chunks.is_empty() {
-            return Self::llm_chat_once(ctx, base + &format!("\n\nStep {}: Decide next action.", step_idx + 1)).await;
-        }
-
-        let mut state_json = "{\"summary\":\"\",\"failing_models\":[],\"key_errors\":[],\"next_fix_hint\":\"\"}".to_string();
-        for (i, ch) in chunks.iter().enumerate() {
-            let prompt = format!(
-                "{base}\n\n\
-                 You are being shown a LONG error log in chunks so you can see ALL details.\n\
-                 Update your internal diagnosis state ONLY.\n\
-                 Respond with STRICT JSON only.\n\n\
-                 Chunk {i1}/{n}:\n{chunk}\n\n\
-                 CurrentStateJSON:\n{state}\n\n\
-                 Output JSON schema:\n\
-                 {{\"summary\":string,\"failing_models\":[string],\"key_errors\":[string],\"next_fix_hint\":string}}\n",
-                base = base,
-                i1 = i + 1,
-                n = chunks.len(),
-                chunk = ch,
-                state = state_json
-            );
-            let raw = Self::llm_chat_once(ctx, prompt).await?;
-            // Best-effort parse; if invalid, keep previous state and continue.
-            if let Ok(v) = serde_json::from_str::<Value>(&raw) {
-                if v.is_object() {
-                    state_json = v.to_string();
-                }
-            }
-            // Cap iterations
-            if i + 1 >= 20 {
-                break;
-            }
-        }
-
-        let prompt = format!(
-            "{base}\n\n\
-             DiagnosisStateJSON:\n{state}\n\n\
-             Step {step}: Decide next action.\n\
-             Respond with STRICT JSON only.\n",
-            base = base,
-            state = state_json,
-            step = step_idx + 1
-        );
-        Self::llm_chat_once(ctx, prompt).await
     }
 
     fn parse_action(raw: &str) -> Result<Value, String> {
@@ -715,22 +605,6 @@ impl Agent {
             }
 
             Self::transcript_add(&mut transcript, format!("Assistant: {}", raw), &ctx.trace_tx);
-
-            // Special case: if tool produced a *very large* error blob, do a chunked follow-up action.
-            let err_opt: Option<String> = raw_obs
-                .get("errors")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.get(0))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| raw_obs.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()));
-            if let Some(err) = err_opt.as_deref() {
-                if err.len() >= 10_000 {
-                    if let Ok(raw2) = Self::llm_action_via_chunked_errors(ctx, &transcript, step_idx, err).await {
-                        Self::transcript_add(&mut transcript, format!("Assistant: {}", raw2), &ctx.trace_tx);
-                    }
-                }
-            }
 
             Self::transcript_add(&mut transcript, format!("Observation: {}", raw_obs), &ctx.trace_tx);
         }

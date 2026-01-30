@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::llm::{create_llm, ChatMessage, LlmConfig, LargeLanguageModel};
 use crate::llm::router::LlmRouter;
+use crate::llm::thread_ctx;
 
 /// Lightweight session wrapper around the configured LLM.
 /// For local llama.cpp this will reuse the shared model underneath; for HTTP it reuses the HTTP client.
@@ -64,7 +65,7 @@ impl LargeLanguageModel for RouterModel {
             temperature: crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2").parse().ok(),
             top_p: crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0").parse().ok(),
             response_format: if wants_json { Some(serde_json::json!({"type":"json_object"})) } else { None },
-            thread_id: None,
+            thread_id: thread_ctx::current_thread_id(),
         };
         let r = self.router.chat(&req)?;
         Ok(r.text)

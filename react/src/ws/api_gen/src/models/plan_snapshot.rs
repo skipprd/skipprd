@@ -21,6 +21,9 @@ pub struct PlanSnapshot {
     pub status: models::PlanStatus,
     #[serde(rename = "tasks")]
     pub tasks: Vec<models::PlanTask>,
+    /// Optional, suite-owned snapshot payload for UI/debugging (e.g. batched review notes). This is an opaque JSON object; clients must treat it as best-effort and forward-compatible. 
+    #[serde(rename = "projectSnapshot", skip_serializing_if = "Option::is_none")]
+    pub project_snapshot: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl PlanSnapshot {
@@ -30,6 +33,7 @@ impl PlanSnapshot {
             plan_key,
             status,
             tasks,
+            project_snapshot: None,
         }
     }
 }

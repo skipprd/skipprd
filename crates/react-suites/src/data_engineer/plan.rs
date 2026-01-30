@@ -292,6 +292,17 @@ async fn list_plan_keys(ctx: &AgentCtx, suffix: &str) -> Vec<String> {
     keys
 }
 
+/// Return the newest (lexicographically largest) plan key for this thread, regardless of terminal status.
+///
+/// Notes:
+/// - Plan keys are timestamp-prefixed, so lexicographic ordering matches recency.
+/// - This is intentionally different from `load_cleanse_plan`/`load_model_plan`, which prefer the
+///   oldest non-terminal plan to match the deterministic pipeline behavior.
+pub async fn newest_plan_key_any(ctx: &AgentCtx, suffix: &str) -> Option<String> {
+    let keys = list_plan_keys(ctx, suffix).await;
+    keys.last().cloned()
+}
+
 async fn oldest_active_cleanse_plan_key(ctx: &AgentCtx) -> Option<String> {
     let keys = list_plan_keys(ctx, "_cleanse.json").await;
     for k in keys {
