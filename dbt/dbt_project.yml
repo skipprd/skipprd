@@ -1,0 +1,16 @@
+name: example_project
+version: '1.0'
+profile: 'example'
+model-paths: ['models']
+seed-paths: ['seeds']
+macro-paths: ['macros']
+target-path: 'target'
+
+models:
+  example_project:
+    # Suffix strategy: dbt materializes schemas as <DBT_TARGET_SCHEMA>_<suffix>.
+    # Default all models into GOLD by setting their custom schema name to the gold suffix.
+    +schema: "{{ env_var('DBT_GOLD_SUFFIX', 'warehouse') }}"
+    # Force staging models under models/staging into SILVER.
+    staging:
+      +schema: "{{ env_var('DBT_SILVER_SUFFIX', 'silver') }}"

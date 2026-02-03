@@ -49,15 +49,6 @@ pub use generic_final_result::GenericFinalResult;
 pub mod review_response;
 pub use review_response::ReviewResponse;
 
-pub mod trace_response;
-pub use trace_response::TraceResponse;
-
-pub mod trace_status;
-pub use trace_status::TraceStatus;
-
-pub mod suite_progress_response;
-pub use suite_progress_response::SuiteProgressResponse;
-
 pub mod await_approval_response;
 pub use await_approval_response::AwaitApprovalResponse;
 
@@ -106,23 +97,29 @@ pub use approve_request::ApproveRequest;
 pub mod reject_request;
 pub use reject_request::RejectRequest;
 
-pub mod processing_response;
-pub use processing_response::ProcessingResponse;
-
-pub mod resume_request;
-pub use resume_request::ResumeRequest;
-
 pub mod seen_request;
 pub use seen_request::SeenRequest;
 
-pub mod plan_request;
-pub use plan_request::PlanRequest;
+pub mod plans_request;
+pub use plans_request::PlansRequest;
 
-pub mod plan_response;
-pub use plan_response::PlanResponse;
+pub mod plans_response;
+pub use plans_response::PlansResponse;
 
-pub mod plan_update_response;
-pub use plan_update_response::PlanUpdateResponse;
+pub mod plans_changed_response;
+pub use plans_changed_response::PlansChangedResponse;
+
+pub mod phase_response;
+pub use phase_response::PhaseResponse;
+
+pub mod phase_run;
+pub use phase_run::PhaseRun;
+
+pub mod llm_start_response;
+pub use llm_start_response::LlmStartResponse;
+
+pub mod llm_end_response;
+pub use llm_end_response::LlmEndResponse;
 
 pub mod plan_snapshot;
 pub use plan_snapshot::PlanSnapshot;
@@ -142,20 +139,8 @@ pub use cleanse_task_snapshot::CleanseTaskSnapshot;
 pub mod model_task_snapshot;
 pub use model_task_snapshot::ModelTaskSnapshot;
 
-pub mod plan_change;
-pub use plan_change::PlanChange;
-
-pub mod plan_status_changed_change;
-pub use plan_status_changed_change::PlanStatusChangedChange;
-
-pub mod task_status_changed_change;
-pub use task_status_changed_change::TaskStatusChangedChange;
-
-pub mod task_note_added_change;
-pub use task_note_added_change::TaskNoteAddedChange;
-
-pub mod task_error_change;
-pub use task_error_change::TaskErrorChange;
+pub mod thread_state_request;
+pub use thread_state_request::ThreadStateRequest;
 
 pub mod server_message;
 pub use server_message::ServerMessage;
@@ -163,8 +148,32 @@ pub use server_message::ServerMessage;
 pub mod thread_assigned_response;
 pub use thread_assigned_response::ThreadAssignedResponse;
 
-pub mod token_response;
-pub use token_response::TokenResponse;
+pub mod thread_event;
+pub use thread_event::ThreadEvent;
+
+pub mod thread_event_kind;
+pub use thread_event_kind::ThreadEventKind;
+
+pub mod tool_event_status;
+pub use tool_event_status::ToolEventStatus;
+
+pub mod tool_start_response;
+pub use tool_start_response::ToolStartResponse;
+
+pub mod tool_end_response;
+pub use tool_end_response::ToolEndResponse;
+
+pub mod thread_state_item_error;
+pub use thread_state_item_error::ThreadStateItemError;
+
+pub mod thread_state_item;
+pub use thread_state_item::ThreadStateItem;
+
+pub mod thread_state_snapshot;
+pub use thread_state_snapshot::ThreadStateSnapshot;
+
+pub mod thread_state_response;
+pub use thread_state_response::ThreadStateResponse;
 
 pub mod unread_response;
 pub use unread_response::UnreadResponse;

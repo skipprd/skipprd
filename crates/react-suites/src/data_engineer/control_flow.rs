@@ -157,7 +157,7 @@ pub struct DerivedGuardState {
  
 fn is_mutation_step(step: &ThreadStep) -> bool {
     match step {
-        ThreadStep::Tool { name, args, .. } => match name.as_str() {
+        ThreadStep::ToolEnd { name, args, .. } => match name.as_str() {
             "approve_and_save_artifact"
             | "approve_and_save_artifact_batch"
             | "staging_model"
@@ -185,8 +185,11 @@ fn is_effective_mutation_step(step: &ThreadStep) -> bool {
         return false;
     }
 
-    let ThreadStep::Tool { name, args, observation, .. } = step else { return false };
-    match name.as_str() {
+    let (name, args, observation) = match step {
+        ThreadStep::ToolEnd { name, args, observation, .. } => (name.as_str(), args, observation),
+        _ => return false,
+    };
+    match name {
         // These tools are inherently mutating if they succeed.
         "approve_and_save_artifact" | "approve_and_save_artifact_batch" => observation.ok,
         // staging_model is only a real mutation if it wrote at least one file.
@@ -276,7 +279,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
     // Find most recent dbt_validate.
     let mut last_validate_idx: Option<usize> = None;
     for (i, step) in log.steps.iter().enumerate().rev() {
-        if matches!(step, ThreadStep::Tool { name, .. } if name == "dbt_validate") {
+        if matches!(step, ThreadStep::ToolEnd { name, .. } if name == "dbt_validate") {
             last_validate_idx = Some(i);
             break;
         }
@@ -285,7 +288,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
     let vstep = &log.steps[vidx];
  
     let (vargs, vobs) = match vstep {
-        ThreadStep::Tool { args, observation, .. } => (args, observation),
+        ThreadStep::ToolEnd { args, observation, .. } => (args, observation),
         _ => return out,
     };
     let ok = vobs.ok;
@@ -340,12 +343,12 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
     for step in log.steps.iter().skip(vidx + 1) {
         if is_mutation_step(step) {
             let ok = match step {
-                ThreadStep::Tool { observation, .. } => observation.ok,
+                ThreadStep::ToolEnd { observation, .. } => observation.ok,
                 _ => false,
             };
             if ok {
                 // Successful dbt_files patch counts as "patch applied", even if no-op.
-                if let ThreadStep::Tool { name, args, observation, .. } = step {
+                if let ThreadStep::ToolEnd { name, args, observation, .. } = step {
                     if name == "dbt_files" && observation.ok {
                         let preview = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
                         let is_patch = args
@@ -369,7 +372,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
             }
         }
         if out.probe_required {
-            if let ThreadStep::Tool { name, args, observation, .. } = step {
+            if let ThreadStep::ToolEnd { name, args, observation, .. } = step {
                 if observation.ok && name == "run_sql" {
                     let sql = args.get("sql").and_then(|x| x.as_str()).unwrap_or("");
                     if looks_like_data_probe_sql(sql) {
@@ -399,7 +402,7 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
     // Find the most recent successful dbt_files patch (non-preview).
     let mut patched_paths: Vec<String> = Vec::new();
     for step in log.steps.iter().rev() {
-        let ThreadStep::Tool { name, args, observation, .. } = step else { continue };
+        let ThreadStep::ToolEnd { name, args, observation, .. } = step else { continue };
         if name != "dbt_files" || !observation.ok {
             continue;
         }
@@ -556,7 +559,7 @@ fn unresolved_mutation_failures_in_phase(log: &ThreadLog, phase: Phase) -> Vec<S
             continue;
         }
         let (name, obs) = match step {
-            ThreadStep::Tool { name, observation, .. } => (name.as_str(), observation),
+            ThreadStep::ToolEnd { name, observation, .. } => (name.as_str(), observation),
             _ => continue,
         };
         let ok = obs.ok;
@@ -749,6 +752,74 @@ pub async fn call_and_record_tool(
     ctx: &AgentCtx,
     timeout_secs: u64,
 ) -> Value {
+    fn clean_tool_name(name: &str, args: &Value) -> String {
+        match name {
+            "dbt_files" => {
+                let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                match op {
+                    "get" => {
+                        let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+                        if !p.is_empty() { return format!("Read {p}"); }
+                        "Read file".to_string()
+                    }
+                    "list" => {
+                        let p = args.get("prefix").and_then(|v| v.as_str()).unwrap_or("").trim();
+                        if !p.is_empty() { return format!("List {p}"); }
+                        "List files".to_string()
+                    }
+                    "get_json" => {
+                        let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+                        if !p.is_empty() { return format!("Read JSON {p}"); }
+                        "Read JSON".to_string()
+                    }
+                    "patch" => {
+                        let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+                        if !p.is_empty() { return format!("Patch {p}"); }
+                        "Patch file".to_string()
+                    }
+                    _ => {
+                        if !op.is_empty() { return format!("dbt_files {op}"); }
+                        "dbt_files".to_string()
+                    }
+                }
+            }
+            "sql_schema" => {
+                let t = args.get("table").and_then(|v| v.as_str()).unwrap_or("").trim();
+                if !t.is_empty() { format!("Describe {t}") } else { "List tables".to_string() }
+            }
+            "sql_stats" => {
+                let t = args.get("table").and_then(|v| v.as_str()).unwrap_or("").trim();
+                if !t.is_empty() { format!("Stats {t}") } else { "Stats".to_string() }
+            }
+            "sql_sample" => {
+                let t = args.get("table").and_then(|v| v.as_str()).unwrap_or("").trim();
+                if !t.is_empty() { format!("Sample {t}") } else { "Sample".to_string() }
+            }
+            "run_sql" => "Run SQL".to_string(),
+            other => other.replace('_', " "),
+        }
+    }
+
+    let agent = agent.unwrap_or_else(|| "unknown".to_string());
+    let clean_name = clean_tool_name(tool.name(), &args);
+    let tool_id = uuid::Uuid::new_v4().to_string();
+    let ts_start = chrono::Utc::now().to_rfc3339();
+    let _ = store
+        .append_step(
+            thread_id,
+            ThreadStep::ToolStart {
+                tool_id: tool_id.clone(),
+                name: tool.name().to_string(),
+                clean_name: clean_name.clone(),
+                args: args.clone(),
+                status: "running".to_string(),
+                payload: None,
+                ts: ts_start,
+                agent: agent.clone(),
+            },
+        )
+        .await;
+
     let raw = match timeout(
         Duration::from_secs(timeout_secs.max(1)),
         tool.call(args.clone(), ctx),
@@ -759,13 +830,22 @@ pub async fn call_and_record_tool(
         Err(_) => serde_json::json!({"ok": false, "errors": ["tool timeout"]}),
     };
     let obs = ToolObservation::normalize(raw.clone());
-    let agent = agent.unwrap_or_else(|| "unknown".to_string());
+    let status = if obs.ok { "ok".to_string() } else { "failed".to_string() };
+    let payload = obs
+        .extra
+        .get("payload")
+        .cloned()
+        .or_else(|| obs.extra.get("ui_payload").cloned());
     let _ = store
         .append_step(
             thread_id,
-            ThreadStep::Tool {
+            ThreadStep::ToolEnd {
+                tool_id,
                 name: tool.name().to_string(),
+                clean_name,
                 args,
+                status,
+                payload,
                 observation: obs,
                 ts: chrono::Utc::now().to_rfc3339(),
                 agent,
@@ -827,13 +907,20 @@ mod tests {
                 ts,
                 agent: "test".to_string(),
             },
-            _ => ThreadStep::Tool {
-                name: action.to_string(),
-                args,
-                observation: ToolObservation::normalize(observation),
-                ts,
-                agent: "test".to_string(),
-            },
+            _ => {
+                let obs = ToolObservation::normalize(observation);
+                ThreadStep::ToolEnd {
+                    tool_id: "t".to_string(),
+                    name: action.to_string(),
+                    clean_name: action.to_string(),
+                    args,
+                    status: if obs.ok { "ok".to_string() } else { "failed".to_string() },
+                    payload: None,
+                    observation: obs,
+                    ts,
+                    agent: "test".to_string(),
+                }
+            }
         }
     }
 

@@ -93,7 +93,12 @@ impl CatalogProvider for DefaultCatalogProvider {
         dataset_ids: &HashMap<String, crate::discover::Metadata>,
         progress: Option<&crate::helpers::progress::ProgressUi>,
     ) -> Result<(), String> {
-        let items = orchestrator::Orchestrator::build_all_with_progress(query, dataset_ids, progress).await?;
+        let thread = crate::llm::thread_ctx::current_thread_id().map(|tid| {
+            let store = react_core::session::ThreadStore::new(self.storage.clone(), scope.clone(), self.keyspace.clone());
+            (store, tid)
+        });
+        let items =
+            orchestrator::Orchestrator::build_all_with_progress(query, dataset_ids, progress, thread).await?;
         for (dataset_id, cat) in items {
             self.write_catalog(scope, &dataset_id, &cat).await?;
         }

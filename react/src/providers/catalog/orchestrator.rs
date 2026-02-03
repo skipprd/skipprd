@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use futures_util::stream::{self, StreamExt};
+use react_core::session::{ThreadStep, ThreadStore, ToolObservation};
+use serde_json::Value;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
+use std::time::Duration;
 
 pub struct Orchestrator;
 
@@ -10,7 +14,98 @@ impl Orchestrator {
         query: &dyn crate::providers::dataset_catalog_provider::DatasetCatalogProvider,
         dataset_ids: &HashMap<String, crate::discover::Metadata>,
         progress: Option<&crate::helpers::progress::ProgressUi>,
+        thread: Option<(ThreadStore, String)>,
     ) -> Result<Vec<(String, super::types::DataCatalog)>, String> {
+        fn dataset_label(ds_id: &str) -> String {
+            ds_id.rsplit('.').next().unwrap_or(ds_id).to_string()
+        }
+
+        async fn append_step_retry(store: &ThreadStore, thread_id: &str, step: ThreadStep, what: &str) {
+            // Best-effort durability: retries reduce orphaned start/end spans.
+            // This is still non-fatal by design (preflight observability should not block progress).
+            let max_attempts: usize = 3;
+            for attempt in 1..=max_attempts {
+                match store.append_step(thread_id, step.clone()).await {
+                    Ok(_) => return,
+                    Err(e) => {
+                        warn!(
+                            "ORCHESTRATOR: failed to persist preflight step what={} attempt={}/{} thread_id={} err={}",
+                            what,
+                            attempt,
+                            max_attempts,
+                            thread_id,
+                            e
+                        );
+                        if attempt < max_attempts {
+                            tokio::time::sleep(Duration::from_millis((attempt as u64) * 75)).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        async fn tool_start(
+            thread: &Option<(ThreadStore, String)>,
+            tool_id: &str,
+            name: &str,
+            clean_name: &str,
+            args: Value,
+            payload: Option<Value>,
+        ) {
+            let Some((store, thread_id)) = thread.as_ref() else { return };
+            append_step_retry(
+                store,
+                thread_id,
+                ThreadStep::ToolStart {
+                    tool_id: tool_id.to_string(),
+                    name: name.to_string(),
+                    clean_name: clean_name.to_string(),
+                    args,
+                    status: "running".to_string(),
+                    payload,
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    agent: "preflight".to_string(),
+                },
+                &format!("tool_start name={} tool_id={}", name, tool_id),
+            )
+            .await;
+        }
+
+        async fn tool_end(
+            thread: &Option<(ThreadStore, String)>,
+            tool_id: &str,
+            name: &str,
+            clean_name: &str,
+            args: Value,
+            ok: bool,
+            payload: Option<Value>,
+            error: Option<String>,
+        ) {
+            let Some((store, thread_id)) = thread.as_ref() else { return };
+            let status = if ok { "ok" } else { "failed" }.to_string();
+            let raw_obs = if ok {
+                serde_json::json!({"ok": true})
+            } else {
+                serde_json::json!({"ok": false, "errors": [error.clone().unwrap_or_else(|| "unknown error".to_string())]})
+            };
+            append_step_retry(
+                store,
+                thread_id,
+                ThreadStep::ToolEnd {
+                    tool_id: tool_id.to_string(),
+                    name: name.to_string(),
+                    clean_name: clean_name.to_string(),
+                    args,
+                    status,
+                    payload,
+                    observation: ToolObservation::normalize(raw_obs),
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    agent: "preflight".to_string(),
+                },
+                &format!("tool_end name={} tool_id={}", name, tool_id),
+            )
+            .await;
+        }
         let mut datasets = query.list_datasets().await?;
         if dataset_ids.is_empty() {
             info!("ORCHESTRATOR: building catalogs from provider dataset discovery (all datasets)");
@@ -46,6 +141,19 @@ impl Orchestrator {
         datasets.sort_by(|a, b| a.fqn().cmp(&b.fqn()));
         info!("ORCHESTRATOR: discovered {} dataset(s)", datasets.len());
 
+        // Optional WS-visible preflight activity (tool_start/tool_end events).
+        // Keep these coarse-grained to avoid flooding.
+        let overall_tool_id = Uuid::new_v4().to_string();
+        tool_start(
+            &thread,
+            &overall_tool_id,
+            "preflight_catalog_all",
+            "Build catalogs",
+            serde_json::json!({"op":"build_all"}),
+            Some(serde_json::json!({"datasets": datasets.len()})),
+        )
+        .await;
+
         // Canonical query concurrency is owned by the provider. Keep batching aligned so we don't
         // create unbounded in-flight work.
         let dataset_concurrency = query.max_concurrency().max(1);
@@ -65,18 +173,66 @@ impl Orchestrator {
             p.start("Building stats");
         }
         let mut st = stream::iter(datasets.into_iter())
-            .map(|ds| async move {
-                let ds_id = ds.fqn();
-                info!("ORCHESTRATOR: dataset='{}' start", ds_id);
+            .map(|ds| {
+                let thread = thread.clone();
+                async move {
+                    let ds_id = ds.fqn();
+                    let ds_label = dataset_label(&ds_id);
+
+                    let dataset_tool_id = Uuid::new_v4().to_string();
+                    tool_start(
+                        &thread,
+                        &dataset_tool_id,
+                        "preflight_catalog_dataset",
+                        &format!("Catalog {ds_label}"),
+                        serde_json::json!({"dataset_id": ds_id}),
+                        Some(serde_json::json!({"stage":"start"})),
+                    )
+                    .await;
+
+                    info!("ORCHESTRATOR: dataset='{}' start", ds_id);
 
                 // Fetch schema once so we can embed types into the catalog fields.
+                let schema_tool_id = Uuid::new_v4().to_string();
+                tool_start(
+                    &thread,
+                    &schema_tool_id,
+                    "preflight_catalog_schema",
+                    &format!("Schema {ds_label}"),
+                    serde_json::json!({"dataset_id": ds_id}),
+                    None,
+                )
+                .await;
+
                 let schema_cols = match query.get_dataset_schema(&ds).await {
                     Ok(cols) => {
                         info!("ORCHESTRATOR: dataset='{}' schema_ok columns={}", ds_id, cols.len());
+                        tool_end(
+                            &thread,
+                            &schema_tool_id,
+                            "preflight_catalog_schema",
+                            &format!("Schema {ds_label}"),
+                            serde_json::json!({"dataset_id": ds_id}),
+                            true,
+                            Some(serde_json::json!({"columns": cols.len()})),
+                            None,
+                        )
+                        .await;
                         cols
                     }
                     Err(e) => {
                         warn!("ORCHESTRATOR: dataset='{}' schema unavailable: {}", ds_id, e);
+                        tool_end(
+                            &thread,
+                            &schema_tool_id,
+                            "preflight_catalog_schema",
+                            &format!("Schema {ds_label}"),
+                            serde_json::json!({"dataset_id": ds_id}),
+                            false,
+                            None,
+                            Some(e),
+                        )
+                        .await;
                         Vec::new()
                     }
                 };
@@ -118,6 +274,16 @@ impl Orchestrator {
 
                 // Prefer provider stats. If unavailable, fall back to schema-only catalog.
                 info!("ORCHESTRATOR: dataset='{}' stats_start max_fields={}", ds_id, max_fields);
+                let stats_tool_id = Uuid::new_v4().to_string();
+                tool_start(
+                    &thread,
+                    &stats_tool_id,
+                    "preflight_catalog_stats",
+                    &format!("Stats {ds_label}"),
+                    serde_json::json!({"dataset_id": ds_id, "max_fields": max_fields}),
+                    None,
+                )
+                .await;
                 let (ns_stats_opt, ds_stats_opt) = match query.get_dataset_stats(&ds, max_fields).await {
                     Ok((ns_stats, ds_stats)) => {
                         info!(
@@ -126,13 +292,39 @@ impl Orchestrator {
                             ns_stats.fields.len(),
                             ds_stats.approx_total_rows
                         );
+                        tool_end(
+                            &thread,
+                            &stats_tool_id,
+                            "preflight_catalog_stats",
+                            &format!("Stats {ds_label}"),
+                            serde_json::json!({"dataset_id": ds_id, "max_fields": max_fields}),
+                            true,
+                            Some(serde_json::json!({
+                                "fields": ns_stats.fields.len(),
+                                "approx_total_rows": ds_stats.approx_total_rows
+                            })),
+                            None,
+                        )
+                        .await;
                         (Some(ns_stats), Some(ds_stats))
                     }
                     Err(e) => {
                         warn!("ORCHESTRATOR: dataset='{}' stats unavailable: {}", ds_id, e);
+                        tool_end(
+                            &thread,
+                            &stats_tool_id,
+                            "preflight_catalog_stats",
+                            &format!("Stats {ds_label}"),
+                            serde_json::json!({"dataset_id": ds_id, "max_fields": max_fields}),
+                            false,
+                            None,
+                            Some(e),
+                        )
+                        .await;
                         (None, None)
                     }
                 };
+                let has_stats = ns_stats_opt.is_some();
 
                 // Ensure we can still build a usable catalog even without stats: seed fields from schema.
                 let ns_stats_seeded: Option<crate::discover::stats::DatasetFieldStats> = if ns_stats_opt.is_some() {
@@ -180,7 +372,25 @@ impl Orchestrator {
                     }
                 }
                 info!("ORCHESTRATOR: dataset='{}' catalog_built", ds_id);
-                (ds_id, cat)
+                let dataset_ok = !schema_cols.is_empty() || has_stats;
+                tool_end(
+                    &thread,
+                    &dataset_tool_id,
+                    "preflight_catalog_dataset",
+                    &format!("Catalog {ds_label}"),
+                    serde_json::json!({"dataset_id": ds_id}),
+                    dataset_ok,
+                    Some(serde_json::json!({
+                        "schema_columns": schema_cols.len(),
+                        "catalog_fields": cat.fields.len(),
+                        "has_stats": has_stats
+                    })),
+                    if dataset_ok { None } else { Some("schema+stats unavailable".to_string()) },
+                )
+                .await;
+
+                    (ds_id, cat)
+                }
             })
             .buffer_unordered(dataset_concurrency);
 
@@ -214,6 +424,18 @@ impl Orchestrator {
             "ORCHESTRATOR: completed building catalogs for {} dataset(s)",
             to_write.len()
         );
+
+        tool_end(
+            &thread,
+            &overall_tool_id,
+            "preflight_catalog_all",
+            "Build catalogs",
+            serde_json::json!({"op":"build_all"}),
+            true,
+            Some(serde_json::json!({"datasets": to_write.len()})),
+            None,
+        )
+        .await;
         Ok(to_write)
     }
 

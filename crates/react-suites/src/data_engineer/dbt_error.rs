@@ -4,6 +4,11 @@ pub enum DbtErrorClass {
     ProfilesYaml,
     DbtProjectYaml,
     WarehouseConfig,
+    /// dbt dependency graph is missing a declared source (e.g. schema.yml doesn't define it).
+    ///
+    /// This is a *grounding/truth* failure, not a SQL dialect issue. Treat as non-remediable by
+    /// SQL patching; fix by reconciling `models/schema.yml` with actual dataset facts.
+    MissingSource,
     /// Generic SQL compilation/runtime error (dialect mismatch or invalid SQL).
     ///
     /// This is intentionally provider-agnostic; the same class can be used to trigger remediation.
@@ -286,6 +291,14 @@ pub fn classify(errors: &[String]) -> DbtErrorClass {
     {
         return DbtErrorClass::WarehouseConfig;
     }
+    // Missing dbt source definitions (grounding failure, not SQL).
+    // Typical dbt phrasing:
+    //   "depends on a source named 'test_raw.raw_products' which was not found"
+    if (s.contains("depends on a source named") && s.contains("which was not found"))
+        || (s.contains("source named") && s.contains("was not found"))
+    {
+        return DbtErrorClass::MissingSource;
+    }
     // Generic SQL failures (compilation/runtime/database execution)
     if s.contains("compilation error")
         || s.contains("runtime error")
@@ -338,6 +351,15 @@ mod tests {
     fn classify_workgroup_missing() {
         let errs = vec!["InvalidRequestException: WorkGroup is not found.".to_string()];
         assert_eq!(classify(&errs), DbtErrorClass::WarehouseConfig);
+    }
+
+    #[test]
+    fn classify_missing_source_is_grounding_error() {
+        let errs = vec![concat!(
+            "Compilation Error: Model 'model.x.y' depends on a source named 'test_raw.raw_products' which was not found"
+        )
+        .to_string()];
+        assert_eq!(classify(&errs), DbtErrorClass::MissingSource);
     }
 
     #[test]

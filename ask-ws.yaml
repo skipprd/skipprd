@@ -4,8 +4,8 @@ info:
   version: 0.3.0
   description: |
     WebSocket-based chat threads for the ReAct server. Clients send JSON frames and receive JSON frames.
-    Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, resume.
-    Server message types: list, suites, thread_assigned, processing, token, trace, final, review, await_user, await_approval, unread, ok, error, history.
+    Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, plans, thread_state.
+    Server message types: list, suites, thread_assigned, final, review, await_user, await_approval, unread, ok, error, history, plans, plans_changed, thread_state, phase, tool_start, tool_end, llm_start, llm_end.
 
 servers:
   - url: ws://{host}:{port}/
@@ -48,10 +48,10 @@ components:
         - $ref: '#/components/schemas/NewRequest'
         - $ref: '#/components/schemas/OpenRequest'
         - $ref: '#/components/schemas/UserRequest'
-        - $ref: '#/components/schemas/ResumeRequest'
+        - $ref: '#/components/schemas/ThreadStateRequest'
         - $ref: '#/components/schemas/HistoryRequest'
         - $ref: '#/components/schemas/SeenRequest'
-        - $ref: '#/components/schemas/PlanRequest'
+        - $ref: '#/components/schemas/PlansRequest'
         - $ref: '#/components/schemas/DeleteRequest'
         - $ref: '#/components/schemas/ApproveRequest'
         - $ref: '#/components/schemas/RejectRequest'
@@ -63,10 +63,10 @@ components:
           new: '#/components/schemas/NewRequest'
           open: '#/components/schemas/OpenRequest'
           user: '#/components/schemas/UserRequest'
-          resume: '#/components/schemas/ResumeRequest'
+          thread_state: '#/components/schemas/ThreadStateRequest'
           history: '#/components/schemas/HistoryRequest'
           seen: '#/components/schemas/SeenRequest'
-          plan: '#/components/schemas/PlanRequest'
+          plans: '#/components/schemas/PlansRequest'
           delete: '#/components/schemas/DeleteRequest'
           approve: '#/components/schemas/ApproveRequest'
           reject: '#/components/schemas/RejectRequest'
@@ -77,19 +77,21 @@ components:
         - $ref: '#/components/schemas/SuitesResponse'
         - $ref: '#/components/schemas/FinalResponse'
         - $ref: '#/components/schemas/ReviewResponse'
-        - $ref: '#/components/schemas/TraceResponse'
-        - $ref: '#/components/schemas/SuiteProgressResponse'
-        - $ref: '#/components/schemas/PlanResponse'
-        - $ref: '#/components/schemas/PlanUpdateResponse'
+        - $ref: '#/components/schemas/PlansResponse'
+        - $ref: '#/components/schemas/PlansChangedResponse'
+        - $ref: '#/components/schemas/ThreadStateResponse'
+        - $ref: '#/components/schemas/PhaseResponse'
         - $ref: '#/components/schemas/AwaitUserResponse'
         - $ref: '#/components/schemas/AwaitApprovalResponse'
         - $ref: '#/components/schemas/OkResponse'
         - $ref: '#/components/schemas/ErrorResponse'
         - $ref: '#/components/schemas/ThreadAssignedResponse'
-        - $ref: '#/components/schemas/ProcessingResponse'
-        - $ref: '#/components/schemas/TokenResponse'
         - $ref: '#/components/schemas/HistoryResponse'
         - $ref: '#/components/schemas/UnreadResponse'
+        - $ref: '#/components/schemas/ToolStartResponse'
+        - $ref: '#/components/schemas/ToolEndResponse'
+        - $ref: '#/components/schemas/LlmStartResponse'
+        - $ref: '#/components/schemas/LlmEndResponse'
       discriminator:
         propertyName: type
         mapping:
@@ -97,19 +99,21 @@ components:
           suites: '#/components/schemas/SuitesResponse'
           final: '#/components/schemas/FinalResponse'
           review: '#/components/schemas/ReviewResponse'
-          trace: '#/components/schemas/TraceResponse'
-          suite_progress: '#/components/schemas/SuiteProgressResponse'
-          plan: '#/components/schemas/PlanResponse'
-          plan_update: '#/components/schemas/PlanUpdateResponse'
+          plans: '#/components/schemas/PlansResponse'
+          plans_changed: '#/components/schemas/PlansChangedResponse'
+          thread_state: '#/components/schemas/ThreadStateResponse'
+          phase: '#/components/schemas/PhaseResponse'
           await_user: '#/components/schemas/AwaitUserResponse'
           await_approval: '#/components/schemas/AwaitApprovalResponse'
           ok: '#/components/schemas/OkResponse'
           error: '#/components/schemas/ErrorResponse'
           thread_assigned: '#/components/schemas/ThreadAssignedResponse'
-          processing: '#/components/schemas/ProcessingResponse'
-          token: '#/components/schemas/TokenResponse'
           history: '#/components/schemas/HistoryResponse'
           unread: '#/components/schemas/UnreadResponse'
+          tool_start: '#/components/schemas/ToolStartResponse'
+          tool_end: '#/components/schemas/ToolEndResponse'
+          llm_start: '#/components/schemas/LlmStartResponse'
+          llm_end: '#/components/schemas/LlmEndResponse'
 
     # Client -> Server
     ListRequest:
@@ -140,7 +144,7 @@ components:
     NewRequest:
       type: object
       additionalProperties: false
-      required: [v, type, cid, question, suiteId, agentType]
+      required: [v, type, cid, suiteId, agentType]
       properties:
         v:
           type: integer
@@ -151,7 +155,8 @@ components:
           enum: [new]
         question:
           type: string
-          description: User's question to start a new thread
+          nullable: true
+          description: Optional initial message. If absent, creates an empty thread.
         suiteId:
           type: string
           description: Suite id to use (e.g. data_engineer | kb)
@@ -159,10 +164,6 @@ components:
           type: string
           description: Agent/mode to use (ask | cleanse | model | kb | agent | review). Required.
           enum: [ask, cleanse, model, kb, agent, review]
-        trace:
-          type: boolean
-          nullable: true
-          description: If true, stream `TraceResponse` frames while the agent runs. Each trace frame includes `text` plus a coarse `status` (pending|running|ok|failed). If omitted, the server inherits the last-known trace setting for the thread/connection.
 
     OpenRequest:
       type: object
@@ -189,10 +190,6 @@ components:
           type: string
           description: Agent to use for this message; if differs from current, a switch_agent step is recorded.
           enum: [ask, cleanse, model, kb, agent, review]
-        trace:
-          type: boolean
-          nullable: true
-          description: If true, stream `TraceResponse` frames while the agent runs. Each trace frame includes `text` plus a coarse `status` (pending|running|ok|failed). If omitted, the server inherits the last-known trace setting for the thread/connection.
 
     UserRequest:
       type: object
@@ -211,20 +208,16 @@ components:
         text:
           type: string
           description: User-provided content in response to an `await_user` prompt
-        trace:
-          type: boolean
-          nullable: true
-          description: If true, stream `TraceResponse` frames while the agent runs. Each trace frame includes `text` plus a coarse `status` (pending|running|ok|failed). If omitted, the server inherits the last-known trace setting for the thread/connection.
 
-    ResumeRequest:
+    ThreadStateRequest:
       type: object
       additionalProperties: false
-      required: [v, type, cid, after_seq]
+      required: [v, type, cid, thread_id]
       properties:
         v: { type: integer }
         cid: { type: string }
-        type: { type: string, enum: [resume] }
-        after_seq: { type: integer }
+        type: { type: string, enum: [thread_state] }
+        thread_id: { type: string }
 
     HistoryRequest:
       type: object
@@ -249,14 +242,14 @@ components:
         thread_id: { type: string }
         up_to_thread_seq: { type: integer }
 
-    PlanRequest:
+    PlansRequest:
       type: object
       additionalProperties: false
       required: [v, type, cid, thread_id]
       properties:
         v: { type: integer }
         cid: { type: string }
-        type: { type: string, enum: [plan] }
+        type: { type: string, enum: [plans] }
         thread_id: { type: string }
 
     DeleteRequest:
@@ -497,108 +490,273 @@ components:
           nullable: true
           additionalProperties: true
 
-    TraceResponse:
+    PlansResponse:
       type: object
       additionalProperties: false
-      required: [v, type, server_time, seq, thread_id, status, text]
+      required: [v, type, server_time, seq, thread_id]
       properties:
         v: { type: integer }
-        type:
-          type: string
-          enum: [trace]
+        type: { type: string, enum: [plans] }
         server_time: { type: string }
         seq: { type: integer }
         thread_id: { type: string }
         thread_seq: { type: integer, nullable: true }
         for_cid: { type: string, nullable: true }
-        status:
-          $ref: '#/components/schemas/TraceStatus'
-        text:
-          type: string
-          description: Lightweight trace line (tool call / observation), suitable for UI streaming. No prompts or hidden reasoning.
-
-    TraceStatus:
-      type: string
-      enum: [pending, running, ok, failed]
-
-    SuiteProgressResponse:
-      type: object
-      additionalProperties: false
-      required: [v, type, server_time, seq, thread_id, suiteId, phases, completed, current]
-      properties:
-        v: { type: integer }
-        type:
-          type: string
-          enum: [suite_progress]
-        server_time: { type: string }
-        seq: { type: integer }
-        thread_id: { type: string }
-        thread_seq: { type: integer, nullable: true }
-        for_cid: { type: string, nullable: true }
-        suiteId:
-          type: string
-          description: Suite id currently running (e.g. data_engineer)
-        phases:
-          type: array
-          items: { type: string }
-          description: |
-            Ordered list of phases for the current suite (best-effort).
-
-            For `data_engineer`, phases include plan phases:
-            - preflight
-            - cleanse_plan
-            - cleanse_author
-            - cleanse_validate
-            - cleanse_review
-            - model_plan
-            - model_author
-            - model_validate
-            - model_review
-            - publish_await_approval
-            - publish
-            - post_publish_review
-            - done
-        completed:
-          type: array
-          items: { type: string }
-          description: Phases considered complete (best-effort)
-        current:
-          type: string
-          description: Current phase name (for `data_engineer`, see `phases` list for known values including plan phases)
-
-    PlanResponse:
-      type: object
-      additionalProperties: false
-      required: [v, type, server_time, seq, thread_id, plan]
-      properties:
-        v: { type: integer }
-        type: { type: string, enum: [plan] }
-        server_time: { type: string }
-        seq: { type: integer }
-        thread_id: { type: string }
-        thread_seq: { type: integer, nullable: true }
-        for_cid: { type: string, nullable: true }
-        plan:
+        cleanse:
           $ref: '#/components/schemas/PlanSnapshot'
+          nullable: true
+        model:
+          $ref: '#/components/schemas/PlanSnapshot'
+          nullable: true
 
-    PlanUpdateResponse:
+    PlansChangedResponse:
       type: object
       additionalProperties: false
-      required: [v, type, server_time, seq, thread_id, plan, changes]
+      required: [v, type, server_time, seq, thread_id, changed]
       properties:
         v: { type: integer }
-        type: { type: string, enum: [plan_update] }
+        type: { type: string, enum: [plans_changed] }
         server_time: { type: string }
         seq: { type: integer }
         thread_id: { type: string }
         thread_seq: { type: integer, nullable: true }
         for_cid: { type: string, nullable: true }
-        plan:
-          $ref: '#/components/schemas/PlanSnapshot'
-        changes:
+        changed:
           type: array
           items:
-            $ref: '#/components/schemas/PlanChange'
+            type: string
+            enum: [cleanse, model]
+          description: Which plan kinds changed. UI should fetch `plans` to get latest snapshots.
+        cleanse_plan_key: { type: string, nullable: true }
+        model_plan_key: { type: string, nullable: true }
+
+    ThreadStateResponse:
+      type: object
+      additionalProperties: false
+      required: [v, type, server_time, seq, thread_id, state]
+      properties:
+        v: { type: integer }
+        type: { type: string, enum: [thread_state] }
+        server_time: { type: string }
+        seq: { type: integer }
+        thread_id: { type: string }
+        thread_seq: { type: integer, nullable: true }
+        for_cid: { type: string, nullable: true }
+        state:
+          $ref: '#/components/schemas/ThreadStateSnapshot'
+
+    PhaseResponse:
+      type: object
+      additionalProperties: false
+      required: [v, type, server_time, seq, thread_id, step_idx, phase, ts, runs, total_runtime_ms]
+      properties:
+        v: { type: integer }
+        type: { type: string, enum: [phase] }
+        server_time: { type: string }
+        seq: { type: integer }
+        thread_id: { type: string }
+        thread_seq: { type: integer, nullable: true }
+        for_cid: { type: string, nullable: true }
+        step_idx:
+          type: integer
+          description: Index of the backing ThreadStep::Phase in the thread log.
+        phase: { type: string }
+        from_phase: { type: string, nullable: true }
+        reason_code: { type: string, nullable: true }
+        reason_detail:
+          type: object
+          nullable: true
+          additionalProperties: true
+        ts:
+          type: string
+          description: RFC3339 timestamp stored in the thread log for this phase transition.
+        runs:
+          type: array
+          description: |
+            List of start/end windows for this phase across the thread lifetime.
+            Each re-entry into the phase appends a new run.
+          items:
+            $ref: '#/components/schemas/PhaseRun'
+        total_runtime_ms:
+          type: integer
+          format: int64
+          description: Sum of all completed run durations for this phase (ms).
+        from_phase_runs:
+          type: array
+          nullable: true
+          description: |
+            If `from_phase` is present, this is the updated run list for the phase being exited.
+          items:
+            $ref: '#/components/schemas/PhaseRun'
+        from_phase_total_runtime_ms:
+          type: integer
+          format: int64
+          nullable: true
+          description: If `from_phase` is present, sum of all completed run durations for it (ms).
+
+    PhaseRun:
+      type: object
+      additionalProperties: false
+      required: [started_at]
+      properties:
+        started_at:
+          type: string
+          description: RFC3339 start timestamp for this run.
+        ended_at:
+          type: string
+          nullable: true
+          description: RFC3339 end timestamp for this run (null if in progress).
+        runtime_ms:
+          type: integer
+          format: int64
+          nullable: true
+          description: Duration for this run (ms), present when ended_at is present.
+ 
+    ToolEventStatus:
+      type: string
+      enum: [running, ok, failed]
+
+    ThreadEventKind:
+      type: string
+      enum: [tool_start, tool_end, llm_start, llm_end]
+
+    ThreadEvent:
+      type: object
+      additionalProperties: false
+      required: [step_idx, event_kind, ts]
+      properties:
+        step_idx:
+          type: integer
+          description: Index of the backing ThreadStep in the thread log.
+        event_kind:
+          $ref: '#/components/schemas/ThreadEventKind'
+        ts:
+          type: string
+          description: RFC3339 timestamp of the event.
+        tool_id:
+          type: string
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        clean_name:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/ToolEventStatus'
+        runtime_ms:
+          type: integer
+          format: int64
+          nullable: true
+        payload:
+          type: object
+          nullable: true
+          additionalProperties: true
+        error:
+          type: string
+          nullable: true
+        call_id:
+          type: integer
+          nullable: true
+        model:
+          type: string
+          nullable: true
+        phase:
+          type: string
+          nullable: true
+
+    ToolStartResponse:
+      type: object
+      additionalProperties: false
+      required: [v, type, server_time, seq, thread_id, tool_id, name, status]
+      properties:
+        v: { type: integer }
+        type: { type: string, enum: [tool_start] }
+        server_time: { type: string }
+        seq: { type: integer }
+        thread_id: { type: string }
+        thread_seq: { type: integer, nullable: true }
+        for_cid: { type: string, nullable: true }
+        tool_id: { type: string }
+        name: { type: string }
+        clean_name:
+          type: string
+          description: Human-readable, short, self-documenting label for UI (e.g. "Read dbt_project.yml").
+        phase:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/ToolEventStatus'
+        payload:
+          type: object
+          nullable: true
+          additionalProperties: true
+
+    ToolEndResponse:
+      type: object
+      additionalProperties: false
+      required: [v, type, server_time, seq, thread_id, tool_id, name, status]
+      properties:
+        v: { type: integer }
+        type: { type: string, enum: [tool_end] }
+        server_time: { type: string }
+        seq: { type: integer }
+        thread_id: { type: string }
+        thread_seq: { type: integer, nullable: true }
+        for_cid: { type: string, nullable: true }
+        tool_id: { type: string }
+        name: { type: string }
+        clean_name:
+          type: string
+          description: Human-readable, short, self-documenting label for UI (e.g. "Read dbt_project.yml").
+        phase:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/ToolEventStatus'
+        payload:
+          type: object
+          nullable: true
+          additionalProperties: true
+        error:
+          type: string
+          nullable: true
+
+    LlmStartResponse:
+      type: object
+      additionalProperties: false
+      required: [v, type, server_time, seq, thread_id, call_id, phase]
+      properties:
+        v: { type: integer }
+        type: { type: string, enum: [llm_start] }
+        server_time: { type: string }
+        seq: { type: integer }
+        thread_id: { type: string }
+        thread_seq: { type: integer, nullable: true }
+        for_cid: { type: string, nullable: true }
+        call_id: { type: integer }
+        phase: { type: string }
+        model: { type: string, nullable: true }
+
+    LlmEndResponse:
+      type: object
+      additionalProperties: false
+      required: [v, type, server_time, seq, thread_id, call_id, phase, status]
+      properties:
+        v: { type: integer }
+        type: { type: string, enum: [llm_end] }
+        server_time: { type: string }
+        seq: { type: integer }
+        thread_id: { type: string }
+        thread_seq: { type: integer, nullable: true }
+        for_cid: { type: string, nullable: true }
+        call_id: { type: integer }
+        phase: { type: string }
+        model: { type: string, nullable: true }
+        status:
+          type: string
+          enum: [ok, failed]
+        error: { type: string, nullable: true }
 
     PlanSnapshot:
       type: object
@@ -622,6 +780,74 @@ components:
           description: |
             Optional, suite-owned snapshot payload for UI/debugging (e.g. batched review notes).
             This is an opaque JSON object; clients must treat it as best-effort and forward-compatible.
+
+    ThreadStateSnapshot:
+      type: object
+      additionalProperties: false
+      required: [thread_state_schema_version, thread_id, last_materialized_step_count, total_runtime_ms, phases, completedPhases, events, items]
+      properties:
+        thread_state_schema_version: { type: integer }
+        thread_id: { type: string }
+        suiteId: { type: string, nullable: true }
+        agentType: { type: string, nullable: true }
+        currentPhase: { type: string, nullable: true }
+        last_materialized_step_count: { type: integer }
+        total_runtime_ms: { type: integer, format: int64 }
+        phases:
+          type: array
+          items: { type: string }
+          description: |
+            Ordered suite phases for the current suite+agent_type (suite-owned ordering).
+            Clients should treat this as the authoritative phase order for rendering progress.
+        completedPhases:
+          type: array
+          items: { type: string }
+          description: |
+            Subset of `phases` that are considered completed, derived from `currentPhase` and
+            the suite's phase order. (Does not include the current in-flight phase.)
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/ThreadEvent'
+          description: |
+            Recent, durable timeline events for UI. This is a bounded, best-effort list intended
+            for "post reconnect" tool timelines. (Not a complete event log.)
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ThreadStateItem'
+        planSummaries:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Summary-only plan refs (opaque JSON by kind).
+
+    ThreadStateItem:
+      type: object
+      additionalProperties: false
+      required: [item_id, kind, status]
+      properties:
+        item_id: { type: string }
+        kind: { type: string }
+        status: { type: string }
+        started_at: { type: string, nullable: true }
+        finished_at: { type: string, nullable: true }
+        runtime_ms: { type: integer, format: int64, nullable: true }
+        last_error:
+          $ref: '#/components/schemas/ThreadStateItemError'
+        outputs:
+          type: object
+          additionalProperties: true
+          description: Opaque outputs object (suite/tool specific). Keep small.
+
+    ThreadStateItemError:
+      type: object
+      additionalProperties: false
+      required: [summary]
+      properties:
+        summary: { type: string }
+        tool_step_idx: { type: integer, nullable: true }
+        step_ts: { type: string, nullable: true }
 
     PlanStatus:
       type: string
@@ -680,52 +906,7 @@ components:
           type: array
           items: { type: string }
 
-    PlanChange:
-      oneOf:
-        - $ref: '#/components/schemas/PlanStatusChangedChange'
-        - $ref: '#/components/schemas/TaskStatusChangedChange'
-        - $ref: '#/components/schemas/TaskNoteAddedChange'
-        - $ref: '#/components/schemas/TaskErrorChange'
-      discriminator:
-        propertyName: kind
-        mapping:
-          plan_status_changed: '#/components/schemas/PlanStatusChangedChange'
-          task_status_changed: '#/components/schemas/TaskStatusChangedChange'
-          task_note_added: '#/components/schemas/TaskNoteAddedChange'
-          task_error: '#/components/schemas/TaskErrorChange'
-
-    PlanStatusChangedChange:
-      type: object
-      additionalProperties: false
-      required: [from, to]
-      properties:
-        from: { $ref: '#/components/schemas/PlanStatus' }
-        to: { $ref: '#/components/schemas/PlanStatus' }
-
-    TaskStatusChangedChange:
-      type: object
-      additionalProperties: false
-      required: [taskId, from, to]
-      properties:
-        taskId: { type: string }
-        from: { $ref: '#/components/schemas/PlanTaskStatus' }
-        to: { $ref: '#/components/schemas/PlanTaskStatus' }
-
-    TaskNoteAddedChange:
-      type: object
-      additionalProperties: false
-      required: [taskId, note]
-      properties:
-        taskId: { type: string }
-        note: { type: string }
-
-    TaskErrorChange:
-      type: object
-      additionalProperties: false
-      required: [taskId, error]
-      properties:
-        taskId: { type: string }
-        error: { type: string }
+    # Legacy plan diff/change schemas removed (hard cutover to thread_state + plans).
 
     AwaitUserResponse:
       type: object
@@ -801,40 +982,6 @@ components:
         seq: { type: integer }
         cid: { type: string }
         thread_id: { type: string }
-
-    ProcessingResponse:
-      type: object
-      additionalProperties: false
-      required: [v, type, server_time, seq, thread_id]
-      properties:
-        v: { type: integer }
-        type: { type: string, enum: [processing] }
-        server_time: { type: string }
-        seq: { type: integer }
-        thread_id: { type: string }
-        thread_seq: { type: integer, nullable: true }
-        for_cid: { type: string, nullable: true }
-        stage: { type: string, enum: [queued, processing, complete, error], nullable: true }
-        progress: { type: number, minimum: 0, maximum: 1, nullable: true }
-        step:
-          type: string
-          enum: [run_sql, sql_schema, sql_stats, sql_sample, vect_query]
-          nullable: true
-
-    TokenResponse:
-      type: object
-      additionalProperties: false
-      required: [v, type, server_time, seq, thread_id, delta]
-      properties:
-        v: { type: integer }
-        type: { type: string, enum: [token] }
-        server_time: { type: string }
-        seq: { type: integer }
-        thread_id: { type: string }
-        thread_seq: { type: integer, nullable: true }
-        for_cid: { type: string, nullable: true }
-        delta: { type: string }
-        finish_reason: { type: string, enum: [stop, length, error], nullable: true }
 
     HistoryResponse:
       type: object

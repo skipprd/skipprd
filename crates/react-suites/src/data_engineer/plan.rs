@@ -249,6 +249,102 @@ fn ensure_expected_model_paths_model(plan: &mut ModelPlan) {
     }
 }
 
+pub fn prune_cleanse_plan_to_grounded_raw_datasets(plan: &mut CleansePlan, allowed_raw: &std::collections::BTreeSet<String>) {
+    // Drop tasks that reference unproven datasets.
+    let mut removed: Vec<String> = Vec::new();
+    plan.tasks.retain(|t| {
+        let keep = allowed_raw.contains(t.dataset_id.trim());
+        if !keep {
+            removed.push(t.dataset_id.clone());
+        }
+        keep
+    });
+
+    // Drop pruned dataset_ids from batches.
+    for b in plan.batches.iter_mut() {
+        b.retain(|ds| allowed_raw.contains(ds.trim()));
+    }
+    plan.batches.retain(|b| !b.is_empty());
+
+    if !removed.is_empty() {
+        removed.sort();
+        removed.dedup();
+        // Record provenance in project_snapshot (best-effort) without growing unbounded.
+        if plan.project_snapshot.is_null() {
+            plan.project_snapshot = serde_json::json!({});
+        }
+        if let Some(obj) = plan.project_snapshot.as_object_mut() {
+            obj.insert(
+                "pruned_dataset_ids".to_string(),
+                serde_json::json!({
+                    "count": removed.len(),
+                    "items": removed.into_iter().take(50).collect::<Vec<_>>()
+                }),
+            );
+        }
+    }
+}
+
+pub fn prune_model_plan_to_grounded_staging_models(
+    plan: &mut ModelPlan,
+    allowed_stg_models: &std::collections::BTreeSet<String>,
+) {
+    // Drop tasks that are not grounded in existing staging models and/or violate inputs constraints.
+    let mut removed: Vec<String> = Vec::new();
+    plan.tasks.retain(|t| {
+        let name = t.name.trim();
+        if name.is_empty() {
+            removed.push(t.name.clone());
+            return false;
+        }
+        // Require that the task itself is a valid model name. (We don't require stg_ prefix for gold outputs.)
+        // But we do require its inputs to be staging models only.
+        let mut ok_inputs = true;
+        for inp in t.inputs.iter() {
+            let it = inp.trim();
+            if it.is_empty() {
+                continue;
+            }
+            if !it.to_ascii_lowercase().starts_with("stg_") {
+                ok_inputs = false;
+                break;
+            }
+            if !allowed_stg_models.contains(it) {
+                ok_inputs = false;
+                break;
+            }
+        }
+        if !ok_inputs {
+            removed.push(t.name.clone());
+            return false;
+        }
+        true
+    });
+
+    for b in plan.batches.iter_mut() {
+        b.retain(|name| !name.trim().is_empty());
+        b.retain(|name| plan.tasks.iter().any(|t| t.name == *name));
+    }
+    plan.batches.retain(|b| !b.is_empty());
+
+    if !removed.is_empty() {
+        removed.sort();
+        removed.dedup();
+        if plan.project_snapshot.is_null() {
+            plan.project_snapshot = serde_json::json!({});
+        }
+        if let Some(obj) = plan.project_snapshot.as_object_mut() {
+            obj.insert(
+                "pruned_model_tasks".to_string(),
+                serde_json::json!({
+                    "count": removed.len(),
+                    "items": removed.into_iter().take(50).collect::<Vec<_>>()
+                }),
+            );
+        }
+    }
+}
+
 fn thread_dir(ctx: &AgentCtx) -> String {
     ctx.thread_id
         .as_deref()
@@ -452,7 +548,7 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
     let start = plan.progress.last_applied_step_idx.min(log.steps.len());
     for (idx, step) in log.steps.iter().enumerate().skip(start) {
         // Deterministic batch executor (preferred): derive progress from its structured output.
-        if let ThreadStep::Tool { name, args: _args, observation, .. } = step {
+        if let ThreadStep::ToolEnd { name, observation, .. } = step {
             if name == "apply_next_cleanse_batch" {
                 let ok = observation.ok;
                 let attempted: Vec<String> = observation
@@ -504,7 +600,7 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
         // Track BOTH success and failure so plans remain truthful and can drive remediation.
         // IMPORTANT: do NOT `continue` for non-staging tools here; later handlers (dbt_validate, dbt_files)
         // need to observe those tool steps too.
-        if let ThreadStep::Tool { name, args, observation, .. } = step {
+        if let ThreadStep::ToolEnd { name, args, observation, .. } = step {
             if name != "staging_model" {
                 // not handled here
             } else {
@@ -562,7 +658,7 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
         }
 
         // dbt_validate failures: mark affected staging tasks as needs_update.
-        if let ThreadStep::Tool { name, args: _args, observation, .. } = step {
+        if let ThreadStep::ToolEnd { name, observation, .. } = step {
             if name == "dbt_validate" {
                 let ok = observation.ok;
                 if !ok {
@@ -612,7 +708,7 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
         }
 
         // Also capture dbt_files patch failures (repair steps) and attach them to the best matching task.
-        if let ThreadStep::Tool { name, args, observation, .. } = step {
+        if let ThreadStep::ToolEnd { name, args, observation, .. } = step {
             if name == "dbt_files" {
                 let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
                 if op == "patch" {
@@ -664,7 +760,7 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
     let start = plan.progress.last_applied_step_idx.min(log.steps.len());
     for (idx, step) in log.steps.iter().enumerate().skip(start) {
         // Deterministic batch executor (preferred): derive progress from its structured output.
-        if let ThreadStep::Tool { name, args: _args, observation, .. } = step {
+        if let ThreadStep::ToolEnd { name, observation, .. } = step {
             if name == "apply_next_model_batch" {
                 let ok = observation.ok;
                 let attempted: Vec<String> = observation
@@ -713,7 +809,7 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
             }
         }
 
-        if let ThreadStep::Tool { name, args, observation, .. } = step {
+        if let ThreadStep::ToolEnd { name, args, observation, .. } = step {
             if name != "gold_model" {
                 // fall through
             } else {
@@ -763,7 +859,7 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
         }
 
         // dbt_validate failures: mark affected gold tasks as needs_update (best-effort).
-        if let ThreadStep::Tool { name, args: _args, observation, .. } = step {
+        if let ThreadStep::ToolEnd { name, observation, .. } = step {
             if name == "dbt_validate" {
                 let ok = observation.ok;
                 if !ok {
@@ -809,7 +905,7 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
         }
 
         // Capture dbt_files patch failures during gold repairs too.
-        if let ThreadStep::Tool { name, args, observation, .. } = step {
+        if let ThreadStep::ToolEnd { name, args, observation, .. } = step {
             if name == "dbt_files" {
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
             if op == "patch" {
@@ -888,10 +984,15 @@ mod tests {
     use react_core::session::{ThreadLog, ThreadStep, ToolObservation};
 
     fn step(action: &str, args: Value, observation: Value) -> ThreadStep {
-        ThreadStep::Tool {
+        let obs = ToolObservation::normalize(observation);
+        ThreadStep::ToolEnd {
+            tool_id: "t".to_string(),
             name: action.to_string(),
+            clean_name: action.to_string(),
             args,
-            observation: ToolObservation::normalize(observation),
+            status: if obs.ok { "ok".to_string() } else { "failed".to_string() },
+            payload: None,
+            observation: obs,
             ts: "t".to_string(),
             agent: "test".to_string(),
         }
@@ -991,6 +1092,125 @@ mod tests {
         assert!(model_all_done(&plan));
         // Note: PlanStatus::Completed is set only after dbt_validate passes.
         assert_eq!(plan.status, PlanStatus::Approved);
+    }
+
+    #[test]
+    fn prune_cleanse_plan_to_grounded_raw_datasets_prunes_tasks_and_batches() {
+        let mut plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![
+                CleanseTask {
+                    dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
+                    expected_model_path: None,
+                    invariants: vec![],
+                    status: TaskStatus::Pending,
+                    notes: vec![],
+                },
+                CleanseTask {
+                    dataset_id: "AwsDataCatalog.test_raw.raw_products".to_string(),
+                    expected_model_path: None,
+                    invariants: vec![],
+                    status: TaskStatus::Pending,
+                    notes: vec![],
+                },
+            ],
+            batches: vec![vec![
+                "AwsDataCatalog.test_raw.raw_customers".to_string(),
+                "AwsDataCatalog.test_raw.raw_products".to_string(),
+            ]],
+            progress: PlanProgress::default(),
+        };
+        let mut allowed = std::collections::BTreeSet::new();
+        allowed.insert("AwsDataCatalog.test_raw.raw_customers".to_string());
+
+        prune_cleanse_plan_to_grounded_raw_datasets(&mut plan, &allowed);
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].dataset_id, "AwsDataCatalog.test_raw.raw_customers");
+        assert_eq!(plan.batches.len(), 1);
+        assert_eq!(plan.batches[0], vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]);
+    }
+
+    #[test]
+    fn prune_model_plan_to_grounded_staging_models_prunes_tasks_with_unproven_inputs() {
+        let mut plan = ModelPlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![
+                ModelTask {
+                    name: "fct_ok".to_string(),
+                    folder: "marts".to_string(),
+                    goal: "ok".to_string(),
+                    inputs: vec!["stg_customers".to_string()],
+                    expected_model_path: None,
+                    invariants: vec![],
+                    status: TaskStatus::Pending,
+                    notes: vec![],
+                },
+                ModelTask {
+                    name: "fct_bad".to_string(),
+                    folder: "marts".to_string(),
+                    goal: "bad".to_string(),
+                    inputs: vec!["raw_orders".to_string()],
+                    expected_model_path: None,
+                    invariants: vec![],
+                    status: TaskStatus::Pending,
+                    notes: vec![],
+                },
+            ],
+            batches: vec![vec!["fct_ok".to_string(), "fct_bad".to_string()]],
+            progress: PlanProgress::default(),
+        };
+        let mut allowed = std::collections::BTreeSet::new();
+        allowed.insert("stg_customers".to_string());
+
+        prune_model_plan_to_grounded_staging_models(&mut plan, &allowed);
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].name, "fct_ok");
+        assert_eq!(plan.batches.len(), 1);
+        assert_eq!(plan.batches[0], vec!["fct_ok".to_string()]);
+    }
+
+    #[test]
+    fn model_progress_scoping_prevents_replaying_old_tool_steps() {
+        // Prior-cycle authoring produced a success for dim_customers.
+        let log = ThreadLog {
+            steps: vec![step(
+                "gold_model",
+                serde_json::json!({"items":[{"name":"dim_customers"}]}),
+                serde_json::json!({"ok": true, "succeeded_item_names":["dim_customers"]}),
+            )],
+            ..Default::default()
+        };
+
+        // New plan instance reuses the same task name, but MUST NOT be auto-completed by old log history.
+        let mut plan = ModelPlan {
+            plan_key: "k2".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![ModelTask {
+                name: "dim_customers".to_string(),
+                folder: "marts".to_string(),
+                goal: "x".to_string(),
+                inputs: vec![],
+                expected_model_path: None,
+                invariants: vec![],
+                status: TaskStatus::Pending,
+                notes: vec![],
+            }],
+            batches: vec![vec!["dim_customers".to_string()]],
+            progress: PlanProgress {
+                // Critical: scope progress cursor beyond the historical log we already have.
+                last_applied_step_idx: log.steps.len(),
+                ..Default::default()
+            },
+        };
+
+        update_model_progress_from_log(&mut plan, &log);
+        assert_eq!(plan.tasks[0].status, TaskStatus::Pending);
+        assert_eq!(model_next_batch(&plan), vec!["dim_customers".to_string()]);
     }
 
     #[test]

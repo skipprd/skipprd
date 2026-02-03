@@ -249,6 +249,27 @@ pub async fn run_repair_loop(
             return Ok((res, report));
         }
 
+        // Missing sources are grounding failures; do NOT attempt SQL remediation.
+        if matches!(class, crate::data_engineer::dbt_error::DbtErrorClass::MissingSource) {
+            report.iterations.push(RepairIteration {
+                iteration: i + 1,
+                scanned_models: 0,
+                rewritten_models: 0,
+                catalog_refreshed,
+                llm_changed_files: 0,
+                changed_keys: vec![],
+                change_diffs: vec![],
+                notes: vec!["missing dbt source definition; treat as dataset grounding failure (schema.yml vs actual datasets)".to_string()],
+                dbt_ok: res.ok,
+                compile_ok: res.compile_ok,
+                run_ok: res.run_ok,
+                unresolved_columns,
+                errors: res.errors.clone(),
+            });
+            report.stopped_reason = Some("missing_source".to_string());
+            return Ok((res, report));
+        }
+
         let allow_llm_repair = matches!(
             class,
             crate::data_engineer::dbt_error::DbtErrorClass::SqlFailure

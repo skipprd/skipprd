@@ -127,7 +127,7 @@ impl Tool for PublishDbtToProviderTool {
             if let Some(store) = ctx.thread_store.as_ref() {
                 if let Ok(log) = store.get(&tid).await {
                     for step in log.steps.iter().rev() {
-                        let react_core::session::ThreadStep::Tool { name, observation, .. } = step else {
+                        let react_core::session::ThreadStep::ToolEnd { name, observation, .. } = step else {
                             continue;
                         };
                         if name != "publish_dbt_to_provider" {

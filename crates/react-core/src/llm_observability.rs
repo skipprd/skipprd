@@ -3,7 +3,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use once_cell::sync::OnceCell;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 
 fn env_truthy(key: &str) -> bool {
     std::env::var(key)
@@ -134,14 +134,16 @@ pub struct PartInput {
 
 #[derive(Clone, Debug)]
 pub struct BuiltParts {
-    /// Parts in order. Each element is `{name, hash, text}` where text is either full content or `"unchanged"`.
+    /// Parts in order. Each element is `{name, hash, text}`.
+    ///
+    /// `text` is a multi-line string where repeated *chunks* are replaced with `unchanged: <hash>`.
     pub parts: Vec<Value>,
     pub part_hashes: BTreeMap<String, String>,
 }
 
-static PART_HASH_CACHE: OnceCell<DashMap<String, String>> = OnceCell::new();
-fn part_cache() -> &'static DashMap<String, String> {
-    PART_HASH_CACHE.get_or_init(|| DashMap::new())
+static PART_SEEN_CACHE: OnceCell<DashSet<String>> = OnceCell::new();
+fn part_seen_cache() -> &'static DashSet<String> {
+    PART_SEEN_CACHE.get_or_init(|| DashSet::new())
 }
 
 static CALL_ID_CACHE: OnceCell<DashMap<String, u64>> = OnceCell::new();
@@ -159,7 +161,8 @@ pub fn next_call_id(thread_id: &str) -> u64 {
     entry
 }
 
-/// Build deduped parts for a thread. If a part's hash matches the last-seen hash, it is replaced with `"unchanged"`.
+/// Build deduped parts for a thread. If a part's hash was ever seen before (for the same `thread_id` + part name),
+/// it is replaced with `"unchanged: <hash>"`.
 ///
 /// Hashing is performed on the *raw* part text; printed/persisted text is redacted.
 pub fn build_parts_for_thread(thread_id: &str, parts: &[PartInput]) -> BuiltParts {
@@ -173,24 +176,34 @@ pub fn build_parts_for_thread(thread_id: &str, parts: &[PartInput]) -> BuiltPart
 
         out_hashes.insert(name.clone(), hash.clone());
 
-        let cache_key = format!("{}::{}", thread_id, name);
-        let prev = part_cache().get(&cache_key).map(|v| v.value().clone());
-        let is_same = prev.as_deref() == Some(hash.as_str());
-        part_cache().insert(cache_key, hash.clone());
-
-        if is_same {
-            out_parts.push(serde_json::json!({
-                "name": name,
-                "hash": hash,
-                "text": "unchanged"
-            }));
-        } else {
-            out_parts.push(serde_json::json!({
-                "name": name,
-                "hash": hash,
-                "text": redact_common_secrets(&raw)
-            }));
+        // Chunk-level dedupe inside each part:
+        // Many prompts follow a stable “header + prior context + new context” pattern.
+        // We want to print the new tail while replacing repeated earlier chunks with `unchanged: <hash>`.
+        let chunks: Vec<&str> = raw.split("\n\n").collect();
+        let mut rendered_chunks: Vec<String> = Vec::with_capacity(chunks.len());
+        for ch in chunks.into_iter() {
+            let chunk_raw = ch.to_string();
+            let chunk_hash = sha256_hex_str(&chunk_raw);
+            let chunk_seen_key = format!("{}::{}::{}", thread_id, name, chunk_hash);
+            let is_seen = !part_seen_cache().insert(chunk_seen_key);
+            if is_seen {
+                rendered_chunks.push(format!("unchanged: {}", chunk_hash));
+            } else {
+                // Include hash on first emission so later `unchanged: <hash>` lines can be traced back.
+                rendered_chunks.push(format!(
+                    "hash: {}\n{}",
+                    chunk_hash,
+                    redact_common_secrets(&chunk_raw)
+                ));
+            }
         }
+        let rendered = rendered_chunks.join("\n\n");
+
+        out_parts.push(serde_json::json!({
+            "name": name,
+            "hash": hash,
+            "text": rendered
+        }));
     }
 
     BuiltParts { parts: out_parts, part_hashes: out_hashes }
@@ -222,12 +235,68 @@ mod tests {
         let first = build_parts_for_thread(tid, &parts);
         assert_eq!(first.parts.len(), 2);
         // First call should include full text.
-        assert_eq!(first.parts[0].get("text").and_then(|v| v.as_str()).unwrap(), "hello");
+        let t0 = first.parts[0].get("text").and_then(|v| v.as_str()).unwrap();
+        assert!(t0.starts_with("hash: "));
+        assert!(t0.contains("hello"));
 
         let second = build_parts_for_thread(tid, &parts);
         assert_eq!(second.parts.len(), 2);
-        assert_eq!(second.parts[0].get("text").and_then(|v| v.as_str()).unwrap(), "unchanged");
-        assert_eq!(second.parts[1].get("text").and_then(|v| v.as_str()).unwrap(), "unchanged");
+        assert!(second.parts[0].get("text").and_then(|v| v.as_str()).unwrap().starts_with("unchanged: "));
+        assert!(second.parts[1].get("text").and_then(|v| v.as_str()).unwrap().starts_with("unchanged: "));
+    }
+
+    #[test]
+    fn parts_dedup_marks_unchanged_if_seen_before_not_just_last() {
+        let tid = "t_seen";
+        let hello = PartInput { name: "a".to_string(), text: "hello".to_string() };
+        let world = PartInput { name: "a".to_string(), text: "world".to_string() };
+
+        let first = build_parts_for_thread(tid, &[hello.clone()]);
+        let t1 = first.parts[0].get("text").and_then(|v| v.as_str()).unwrap();
+        assert!(t1.contains("hello"));
+        assert!(t1.contains(&sha256_hex_str("hello")));
+
+        let second = build_parts_for_thread(tid, &[world.clone()]);
+        let t2 = second.parts[0].get("text").and_then(|v| v.as_str()).unwrap();
+        assert!(t2.contains("world"));
+        assert!(t2.contains(&sha256_hex_str("world")));
+
+        // "hello" reappears after a different value; should still be considered seen and be shortened.
+        let third = build_parts_for_thread(tid, &[hello.clone()]);
+        let t = third.parts[0].get("text").and_then(|v| v.as_str()).unwrap();
+        assert!(t.starts_with("unchanged: "));
+        assert!(t.contains(&sha256_hex_str("hello")));
+    }
+
+    #[test]
+    fn parts_dedup_can_emit_unchanged_chunks_within_a_single_part() {
+        let tid = "t_chunked";
+        let p1 = PartInput {
+            name: "user".to_string(),
+            text: "some system prompt\n\nsome previous user prompt\n\nsome new context".to_string(),
+        };
+        let first = build_parts_for_thread(tid, &[p1.clone()]);
+        let first_text = first.parts[0].get("text").and_then(|v| v.as_str()).unwrap();
+        assert!(first_text.contains(&sha256_hex_str("some system prompt")));
+        assert!(first_text.contains(&sha256_hex_str("some previous user prompt")));
+        assert!(first_text.contains(&sha256_hex_str("some new context")));
+        assert!(first_text.contains("some system prompt"));
+        assert!(first_text.contains("some previous user prompt"));
+        assert!(first_text.contains("some new context"));
+
+        let p2 = PartInput {
+            name: "user".to_string(),
+            text: "some system prompt\n\nsome previous user prompt\n\nbrand new tail".to_string(),
+        };
+        let second = build_parts_for_thread(tid, &[p2]);
+        let t = second.parts[0].get("text").and_then(|v| v.as_str()).unwrap();
+        assert!(t.contains(&format!("unchanged: {}", sha256_hex_str("some system prompt"))));
+        assert!(t.contains(&format!(
+            "unchanged: {}",
+            sha256_hex_str("some previous user prompt")
+        )));
+        assert!(t.contains(&sha256_hex_str("brand new tail")));
+        assert!(t.contains("brand new tail"));
     }
 
     #[test]

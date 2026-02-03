@@ -1,7 +1,7 @@
 /*
  * ReAct WebSocket API
  *
- * WebSocket-based chat threads for the ReAct server. Clients send JSON frames and receive JSON frames. Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, resume. Server message types: list, suites, thread_assigned, processing, token, trace, final, review, await_user, await_approval, unread, ok, error, history. 
+ * WebSocket-based chat threads for the ReAct server. Clients send JSON frames and receive JSON frames. Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, plans, thread_state. Server message types: list, suites, thread_assigned, final, review, await_user, await_approval, unread, ok, error, history, plans, plans_changed, thread_state, phase, tool_start, tool_end, llm_start, llm_end. 
  *
  * The version of the OpenAPI document: 0.3.0
  * 
@@ -31,9 +31,6 @@ pub struct OpenRequest {
     /// Agent to use for this message; if differs from current, a switch_agent step is recorded.
     #[serde(rename = "agentType")]
     pub agent_type: AgentType,
-    /// If true, stream `TraceResponse` frames while the agent runs. Each trace frame includes `text` plus a coarse `status` (pending|running|ok|failed). If omitted, the server inherits the last-known trace setting for the thread/connection.
-    #[serde(rename = "trace", skip_serializing_if = "Option::is_none")]
-    pub trace: Option<bool>,
 }
 
 impl OpenRequest {
@@ -46,7 +43,6 @@ impl OpenRequest {
             question: None,
             suite_id,
             agent_type,
-            trace: None,
         }
     }
 }

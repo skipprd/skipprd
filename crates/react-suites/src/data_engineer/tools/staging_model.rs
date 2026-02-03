@@ -217,6 +217,60 @@ impl Tool for StagingModelTool {
             }));
         }
 
+        // Grounded gating (fail-fast, no side effects):
+        // - Cleanse/silver must only operate on raw datasets (configured source_schema).
+        // - The only fact we trust for dataset existence is query.schema(<fqn>) success.
+        let cfg = crate::config::resolved_config_from_ctx(ctx)
+            .ok_or_else(|| "resolved_config missing (cannot enforce raw dataset constraints)".to_string())?;
+        let want_catalog = cfg.providers.athena.target_catalog.clone();
+        let want_schema = cfg.providers.athena.source_schema.clone();
+        let mut schema_cols_by_ds: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
+        let mut gating_errors: Vec<String> = Vec::new();
+        for ds in dataset_ids.iter() {
+            let Some((cat, db, _tbl)) = parse_dataset_id(ds) else {
+                gating_errors.push(format!(
+                    "{}: invalid dataset_id (expected <catalog>.<schema>.<table>)",
+                    ds
+                ));
+                continue;
+            };
+            if cat != want_catalog {
+                gating_errors.push(format!(
+                    "{}: dataset is not in configured target catalog (expected {})",
+                    ds, want_catalog
+                ));
+                continue;
+            }
+            if db != want_schema {
+                gating_errors.push(format!(
+                    "{}: cleanse/silver can only target raw datasets in schema '{}' (got '{}')",
+                    ds, want_schema, db
+                ));
+                continue;
+            }
+            match query.schema(ds).await {
+                Ok(cols) => {
+                    schema_cols_by_ds.insert(ds.clone(), cols);
+                }
+                Err(e) => {
+                    gating_errors.push(format!("{}: schema lookup failed (treating as fact): {}", ds, e));
+                }
+            }
+        }
+        if !gating_errors.is_empty() {
+            // IMPORTANT: do not write schema.yml or any models if the dataset facts are not proven.
+            return Ok(serde_json::json!({
+                "ok": false,
+                "datasets": dataset_ids.len(),
+                "written_keys": [],
+                "schema_key": Value::Null,
+                "notes": [],
+                "errors": gating_errors,
+                "deferred_dataset_ids": deferred_dataset_ids,
+                "succeeded_dataset_ids": [],
+            }));
+        }
+
         // Ensure models/schema.yml exists. We only "seed" it when missing.
         // For existing schema.yml, avoid applying no-op patches (diff parsers may reject header-only diffs).
         let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
@@ -505,7 +559,8 @@ impl Tool for StagingModelTool {
                 .unwrap_or_else(|| staging_model_rel_path_for_name(&canonical_name));
             let key = format!("{}/{}", base, rel_path);
 
-            let cols = query.schema(ds).await.unwrap_or_default();
+            // Use the pre-validated schema facts (guaranteed present by gating above).
+            let cols = schema_cols_by_ds.get(ds).cloned().unwrap_or_default();
             let cols_json: Vec<Value> = cols
                 .iter()
                 .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
@@ -610,6 +665,12 @@ impl Tool for StagingModelTool {
 mod tests {
     use super::*;
     use crate::data_engineer::naming::extract_source_calls;
+    use async_trait::async_trait;
+    use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::providers::{DbtProvider, QueryProvider, QueryResult};
+    use react_core::scope::RequestScope;
+    use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
+    use std::sync::Arc;
 
     #[test]
     fn resolve_dataset_ids_accepts_dataset_ids_array() {
@@ -700,5 +761,136 @@ mod tests {
         ];
         let got = matching_staging_rel_paths_by_source(&files, "test_raw", "raw_orders");
         assert_eq!(got.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn staging_model_fails_fast_when_schema_facts_do_not_prove_dataset() {
+        #[derive(Clone)]
+        struct MockDbt;
+        #[async_trait]
+        impl DbtProvider for MockDbt {
+            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
+                Ok(())
+            }
+            async fn write_model_sql(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _sql: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn write_metricflow_yaml(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _yaml_text: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn validate_project(
+                &self,
+                _scope: &RequestScope,
+                _args: &react_core::providers::DbtValidateArgs,
+            ) -> Result<react_core::providers::DbtValidateResult, String> {
+                Err("not used".to_string())
+            }
+        }
+
+        #[derive(Clone)]
+        struct MockQuery;
+        #[async_trait]
+        impl QueryProvider for MockQuery {
+            async fn query(&self, _sql: &str) -> Result<QueryResult, String> {
+                Err("not used".to_string())
+            }
+            async fn schema(&self, dataset_fqn: &str) -> Result<Vec<(String, String)>, String> {
+                Err(format!("not found: {}", dataset_fqn))
+            }
+            async fn sample(&self, _dataset_fqn: &str, _limit: usize) -> Result<Vec<Vec<String>>, String> {
+                Err("not used".to_string())
+            }
+        }
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let cfg = Arc::new(crate::config::ReactResolvedConfig {
+            server: crate::config::ServerResolved { port: 1 },
+            storage: crate::config::StorageResolved { bucket: "b".to_string() },
+            scope: scope.clone(),
+            llm: crate::config::LlmResolved::default(),
+            providers: crate::config::ProvidersResolved {
+                athena: crate::config::AthenaResolved {
+                    enabled: true,
+                    workgroup: "wg".to_string(),
+                    region: "eu-west-1".to_string(),
+                    result_s3: "s3://x/".to_string(),
+                    target_catalog: "AwsDataCatalog".to_string(),
+                    source_schema: "test_raw".to_string(),
+                    discovery_cache_ttl_secs: 120,
+                },
+                catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
+                dbt: crate::config::DbtResolved {
+                    enabled: true,
+                    profiles_dir: None,
+                    target: "athena".to_string(),
+                    naming: crate::config::DbtNamingResolved {
+                        target_schema: "test".to_string(),
+                        silver_suffix: "silver".to_string(),
+                        gold_suffix: "warehouse".to_string(),
+                    },
+                    runner: "host".to_string(),
+                    docker_image: None,
+                    docker_platform: None,
+                    docker_network: None,
+                    docker_mount_aws_dir: false,
+                },
+                vector: crate::config::VectorResolved { enabled: false },
+            },
+        });
+
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 1,
+            thread_id: Some("t1".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(react_core::agent::DefaultPolicy),
+            llm: Arc::new(react_core::llm::NullModel::new()),
+            storage: storage.clone(),
+            scope,
+            keyspace,
+            query: Some(Arc::new(MockQuery)),
+            dbt: Some(Arc::new(MockDbt)),
+            vector: None,
+            thread_store: None,
+            runtime: Some(cfg as Arc<dyn std::any::Any + Send + Sync>),
+        };
+
+        let tool = StagingModelTool { datasets: None };
+        let obs = tool
+            .call(
+                serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_customers"]}),
+                &ctx,
+            )
+            .await
+            .expect("call ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(obs.get("written_keys").and_then(|v| v.as_array()).map(|a| a.len()), Some(0));
+
+        // Ensure we didn't write schema.yml as a side effect.
+        let schema_key = format!(
+            "{}{}",
+            ctx.keyspace.dbt_prefix(&ctx.scope),
+            crate::data_engineer::project_files::MODELS_SCHEMA_YML
+        );
+        assert!(storage.get_bytes(&schema_key).await.is_err());
     }
 }

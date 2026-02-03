@@ -126,7 +126,7 @@ impl AgentPolicy for SqlValidatedPolicy {
                             has_artifacts = true;
                             break;
                         }
-                        ThreadStep::Tool { name, .. } if name == "approve_and_save_artifact_batch" => {
+                        ThreadStep::ToolEnd { name, .. } if name == "approve_and_save_artifact_batch" => {
                             has_artifacts = true;
                             break;
                         }
@@ -136,9 +136,12 @@ impl AgentPolicy for SqlValidatedPolicy {
                 if has_artifacts {
                     let mut last_validate: Option<&ThreadStep> = None;
                     for step in log.steps.iter().rev() {
-                        if matches!(step, ThreadStep::Tool { name, .. } if name == "dbt_validate") {
-                            last_validate = Some(step);
-                            break;
+                        match step {
+                            ThreadStep::ToolEnd { name, .. } if name == "dbt_validate" => {
+                                last_validate = Some(step);
+                                break;
+                            }
+                            _ => {}
                         }
                     }
                     // If artifacts were written, we require an explicit dbt_validate step.
@@ -151,7 +154,7 @@ impl AgentPolicy for SqlValidatedPolicy {
                     };
 
                     let (ok, compile_ok, run_ok, build, run) = match v {
-                        ThreadStep::Tool { args, observation, .. } => {
+                        ThreadStep::ToolEnd { args, observation, .. } => {
                             let ok = observation.ok;
                             let compile_ok = observation
                                 .extra
@@ -165,7 +168,7 @@ impl AgentPolicy for SqlValidatedPolicy {
                         }
                         _ => (false, false, None, false, false),
                     };
-                    let runtime_validate = build || run;
+                    let runtime_validate = build || run || run_ok.is_some();
                     let allow_compile_only = std::env::var("DBT_ALLOW_COMPILE_ONLY_FINAL")
                         .ok()
                         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -281,13 +284,17 @@ impl AgentPolicy for SqlValidatedPolicy {
             let _ = store
                 .append_step(
                     thread_id,
-                    ThreadStep::Tool {
+                    ThreadStep::ToolEnd {
+                        tool_id: uuid::Uuid::new_v4().to_string(),
                         name: "run_sql".to_string(),
+                        clean_name: "Run SQL".to_string(),
                         args: serde_json::json!({"sql": sql_for_run}),
+                        status: if ok { "ok".to_string() } else { "failed".to_string() },
+                        payload: None,
                         observation: ToolObservation::normalize(obs.clone()),
                         ts: chrono::Utc::now().to_rfc3339(),
                         agent,
-                    }
+                    },
                 )
                 .await;
         }
@@ -346,7 +353,7 @@ impl AgentPolicy for SqlValidatedPolicy {
                 let mut keys: Vec<String> = Vec::new();
                 for step in log.steps.iter().rev() {
                     match step {
-                        ThreadStep::Tool { name, observation, .. } if name == "approve_and_save_artifact_batch" => {
+                        ThreadStep::ToolEnd { name, observation, .. } if name == "approve_and_save_artifact_batch" => {
                             if let Some(arr) = observation.extra.get("keys").and_then(|x| x.as_array()) {
                                 for v in arr {
                                     if let Some(s) = v.as_str() {
@@ -397,12 +404,19 @@ mod tests {
         let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
         let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
         let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
-        let tid = "tid";
+        // Use a unique thread id to avoid cross-test cache collisions.
+        let tid = format!(
+            "tid-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
 
         // Simulate an artifact save, then a failed dbt_validate.
         let _ = store
             .append_step(
-                tid,
+                &tid,
                 ThreadStep::ArtifactSaved {
                     kind: "model".to_string(),
                     name: "m".to_string(),
@@ -419,10 +433,30 @@ mod tests {
             .await;
         let _ = store
             .append_step(
-                tid,
-                ThreadStep::Tool {
-                    name: "dbt_validate".to_string(),
+                &tid,
+                ThreadStep::ToolEnd {
+                    tool_id: "t-save".to_string(),
+                    name: "approve_and_save_artifact_batch".to_string(),
+                    clean_name: "Save artifacts".to_string(),
                     args: serde_json::json!({}),
+                    status: "ok".to_string(),
+                    payload: None,
+                    observation: ToolObservation::normalize(serde_json::json!({"ok": true})),
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    agent: "model".to_string(),
+                },
+            )
+            .await;
+        let _ = store
+            .append_step(
+                &tid,
+                ThreadStep::ToolEnd {
+                    tool_id: "t1".to_string(),
+                    name: "dbt_validate".to_string(),
+                    clean_name: "Validate DBT".to_string(),
+                    args: serde_json::json!({"build": true}),
+                    status: "failed".to_string(),
+                    payload: None,
                     observation: ToolObservation::normalize(serde_json::json!({"ok": false, "compile_ok": false, "errors": ["fail"]})),
                     ts: chrono::Utc::now().to_rfc3339(),
                     agent: "model".to_string(),
@@ -434,7 +468,7 @@ mod tests {
             top_k: 1,
             per_step_timeout_secs: 1,
             max_steps: 1,
-            thread_id: Some(tid.to_string()),
+            thread_id: Some(tid.clone()),
             progress_tx: None,
             pre_step_tx: None,
             trace_tx: None,
@@ -461,11 +495,14 @@ mod tests {
         };
 
         let out = policy
-            .handle_final(&tools, &ctx, &mut transcript, Some(&store), tid, &final_env)
+            .handle_final(&tools, &ctx, &mut transcript, Some(&store), tid.as_str(), &final_env)
             .await
             .unwrap();
         assert!(out.is_none());
-        assert!(transcript.iter().any(|l| l.contains("dbt_validate_failed")));
+        assert!(
+            transcript.iter().any(|l| l.contains("dbt_validate_failed")),
+            "expected dbt_validate_failed in transcript; got: {transcript:?}"
+        );
     }
 }
 

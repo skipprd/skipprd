@@ -1,0 +1,9 @@
+version: 2
+sources:
+- name: test_raw
+  database: AwsDataCatalog
+  schema: test_raw
+  tables:
+  - name: raw_customers
+  - name: raw_order_items
+  - name: raw_orders

@@ -370,33 +370,45 @@ impl Tool for ApproveAndSaveArtifactTool {
             match validate_tool.call(args, ctx).await {
                 Ok(obs) => {
                     info!("approve_and_save_artifact: dbt_validate observation: {:?}", obs);
+                    let obs_norm = react_core::session::ToolObservation::normalize(obs);
+                    let tool_id = uuid::Uuid::new_v4().to_string();
                     let _ = store
                         .append_step(
                             tid,
-                            react_core::session::ThreadStep::Tool {
+                            react_core::session::ThreadStep::ToolEnd {
+                                tool_id,
                                 name: "dbt_validate".to_string(),
+                                clean_name: "Validate DBT".to_string(),
                                 args: serde_json::json!({"s3_prefix": s3_prefix, "build": true}),
-                                observation: react_core::session::ToolObservation::normalize(obs),
+                                status: if obs_norm.ok { "ok".to_string() } else { "failed".to_string() },
+                                payload: None,
+                                observation: obs_norm,
                                 ts: chrono::Utc::now().to_rfc3339(),
                                 agent: agent.clone(),
-                            }
+                            },
                         )
                         .await;
                 }
                 Err(e) => {
                     info!("approve_and_save_artifact: dbt_validate failed: {}", e);
+                    let obs_norm = react_core::session::ToolObservation::normalize(
+                        serde_json::json!({"ok": false, "errors": [e]}),
+                    );
+                    let tool_id = uuid::Uuid::new_v4().to_string();
                     let _ = store
                         .append_step(
                             tid,
-                            react_core::session::ThreadStep::Tool {
+                            react_core::session::ThreadStep::ToolEnd {
+                                tool_id,
                                 name: "dbt_validate".to_string(),
+                                clean_name: "Validate DBT".to_string(),
                                 args: serde_json::json!({"s3_prefix": s3_prefix, "build": true}),
-                                observation: react_core::session::ToolObservation::normalize(
-                                    serde_json::json!({"ok": false, "errors": [e]}),
-                                ),
+                                status: "failed".to_string(),
+                                payload: None,
+                                observation: obs_norm,
                                 ts: chrono::Utc::now().to_rfc3339(),
                                 agent: agent.clone(),
-                            }
+                            },
                         )
                         .await;
                 }

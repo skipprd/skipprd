@@ -1,7 +1,7 @@
 /*
  * ReAct WebSocket API
  *
- * WebSocket-based chat threads for the ReAct server. Clients send JSON frames and receive JSON frames. Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, resume. Server message types: list, suites, thread_assigned, processing, token, trace, final, review, await_user, await_approval, unread, ok, error, history. 
+ * WebSocket-based chat threads for the ReAct server. Clients send JSON frames and receive JSON frames. Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, plans, thread_state. Server message types: list, suites, thread_assigned, final, review, await_user, await_approval, unread, ok, error, history, plans, plans_changed, thread_state, phase, tool_start, tool_end, llm_start, llm_end. 
  *
  * The version of the OpenAPI document: 0.3.0
  * 
@@ -24,14 +24,14 @@ pub enum ClientMessage {
     Open(models::OpenRequest),
     #[serde(rename="user")]
     User(models::UserRequest),
-    #[serde(rename="resume")]
-    Resume(models::ResumeRequest),
+    #[serde(rename="thread_state")]
+    ThreadState(models::ThreadStateRequest),
     #[serde(rename="history")]
     History(models::HistoryRequest),
     #[serde(rename="seen")]
     Seen(models::SeenRequest),
-    #[serde(rename="plan")]
-    Plan(models::PlanRequest),
+    #[serde(rename="plans")]
+    Plans(models::PlansRequest),
     #[serde(rename="delete")]
     Delete(models::DeleteRequest),
     #[serde(rename="approve")]

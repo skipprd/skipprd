@@ -1,7 +1,7 @@
 /*
  * ReAct WebSocket API
  *
- * WebSocket-based chat threads for the ReAct server. Clients send JSON frames and receive JSON frames. Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, resume. Server message types: list, suites, thread_assigned, processing, token, trace, final, review, await_user, await_approval, unread, ok, error, history. 
+ * WebSocket-based chat threads for the ReAct server. Clients send JSON frames and receive JSON frames. Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, plans, thread_state. Server message types: list, suites, thread_assigned, final, review, await_user, await_approval, unread, ok, error, history, plans, plans_changed, thread_state, phase, tool_start, tool_end, llm_start, llm_end. 
  *
  * The version of the OpenAPI document: 0.3.0
  * 
@@ -22,14 +22,14 @@ pub enum ServerMessage {
     Final(models::FinalResponse),
     #[serde(rename="review")]
     Review(models::ReviewResponse),
-    #[serde(rename="trace")]
-    Trace(models::TraceResponse),
-    #[serde(rename="suite_progress")]
-    SuiteProgress(models::SuiteProgressResponse),
-    #[serde(rename="plan")]
-    Plan(models::PlanResponse),
-    #[serde(rename="plan_update")]
-    PlanUpdate(models::PlanUpdateResponse),
+    #[serde(rename="plans")]
+    Plans(models::PlansResponse),
+    #[serde(rename="plans_changed")]
+    PlansChanged(models::PlansChangedResponse),
+    #[serde(rename="thread_state")]
+    ThreadState(models::ThreadStateResponse),
+    #[serde(rename="phase")]
+    Phase(models::PhaseResponse),
     #[serde(rename="await_user")]
     AwaitUser(models::AwaitUserResponse),
     #[serde(rename="await_approval")]
@@ -40,14 +40,18 @@ pub enum ServerMessage {
     Error(models::ErrorResponse),
     #[serde(rename="thread_assigned")]
     ThreadAssigned(models::ThreadAssignedResponse),
-    #[serde(rename="processing")]
-    Processing(models::ProcessingResponse),
-    #[serde(rename="token")]
-    Token(models::TokenResponse),
     #[serde(rename="history")]
     History(models::HistoryResponse),
     #[serde(rename="unread")]
     Unread(models::UnreadResponse),
+    #[serde(rename="tool_start")]
+    ToolStart(models::ToolStartResponse),
+    #[serde(rename="tool_end")]
+    ToolEnd(models::ToolEndResponse),
+    #[serde(rename="llm_start")]
+    LlmStart(models::LlmStartResponse),
+    #[serde(rename="llm_end")]
+    LlmEnd(models::LlmEndResponse),
 }
 
 impl Default for ServerMessage {
@@ -56,58 +60,32 @@ impl Default for ServerMessage {
     }
 }
 
-/// 
+/// Which plan kinds changed. UI should fetch `plans` to get latest snapshots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-pub enum Stage {
-    #[serde(rename = "queued")]
-    Queued,
-    #[serde(rename = "processing")]
-    Processing,
-    #[serde(rename = "complete")]
-    Complete,
-    #[serde(rename = "error")]
-    Error,
+pub enum Changed {
+    #[serde(rename = "cleanse")]
+    Cleanse,
+    #[serde(rename = "model")]
+    Model,
 }
 
-impl Default for Stage {
-    fn default() -> Stage {
-        Self::Queued
+impl Default for Changed {
+    fn default() -> Changed {
+        Self::Cleanse
     }
 }
 /// 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-pub enum Step {
-    #[serde(rename = "run_sql")]
-    RunSql,
-    #[serde(rename = "sql_schema")]
-    SqlSchema,
-    #[serde(rename = "sql_stats")]
-    SqlStats,
-    #[serde(rename = "sql_sample")]
-    SqlSample,
-    #[serde(rename = "vect_query")]
-    VectQuery,
+pub enum Status {
+    #[serde(rename = "ok")]
+    Ok,
+    #[serde(rename = "failed")]
+    Failed,
 }
 
-impl Default for Step {
-    fn default() -> Step {
-        Self::RunSql
-    }
-}
-/// 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-pub enum FinishReason {
-    #[serde(rename = "stop")]
-    Stop,
-    #[serde(rename = "length")]
-    Length,
-    #[serde(rename = "error")]
-    Error,
-}
-
-impl Default for FinishReason {
-    fn default() -> FinishReason {
-        Self::Stop
+impl Default for Status {
+    fn default() -> Status {
+        Self::Ok
     }
 }
 

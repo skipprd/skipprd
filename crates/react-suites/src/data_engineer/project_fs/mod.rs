@@ -846,17 +846,79 @@ async fn postprocess_schema_yml(
     datasets: Option<&std::sync::Arc<dyn DatasetCatalogProvider>>,
     content: &str,
 ) -> Result<String, String> {
-    let Some(datasets) = datasets else {
-        return Err("dataset provider missing for schema.yml postprocess".to_string());
-    };
+    // Dynamic, grounded sources:
+    // - list_datasets is advisory only (can be incomplete due to permissions/caching).
+    // - The only fact we trust is that QueryProvider.schema(<fqn>) succeeds.
+    let q = ctx
+        .query
+        .as_ref()
+        .ok_or_else(|| "query provider missing for schema.yml postprocess".to_string())?;
     let cfg = crate::config::resolved_config_from_ctx(ctx)
         .ok_or_else(|| "resolved_config missing for schema.yml postprocess".to_string())?;
     let want_catalog = cfg.providers.athena.target_catalog.clone();
     let want_schema = cfg.providers.athena.source_schema.clone();
-    let mut dss = datasets.list_datasets().await.map_err(|e| format!("list_datasets: {}", e))?;
-    dss.retain(|ds| ds.catalog == want_catalog && ds.database == want_schema);
-    dss.sort_by(|a, b| a.table.cmp(&b.table));
-    let sources_val = sources_value_from_dataset_ids(&dss);
+    const MAX_PROVED_SOURCES: usize = 200;
+
+    fn parse_sources_from_schema_yml(root: &YamlMapping) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        let Some(YamlValue::Sequence(srcs)) = root.get(&YamlValue::String("sources".to_string())) else {
+            return out;
+        };
+        for src in srcs.iter() {
+            let Some(m) = src.as_mapping() else { continue };
+            let name = m
+                .get(&YamlValue::String("name".to_string()))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let tables = m
+                .get(&YamlValue::String("tables".to_string()))
+                .and_then(|v| v.as_sequence())
+                .cloned()
+                .unwrap_or_default();
+            for t in tables.into_iter() {
+                let Some(tm) = t.as_mapping() else { continue };
+                let tn = tm
+                    .get(&YamlValue::String("name".to_string()))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if !name.is_empty() && !tn.is_empty() {
+                    out.push((name.clone(), tn));
+                }
+            }
+        }
+        out
+    }
+
+    fn sources_value_from_fqns(fqns: &std::collections::BTreeSet<String>) -> YamlValue {
+        // Convert to the dbt schema.yml `sources:` structure:
+        // - name: <schema>
+        //   database: <catalog>
+        //   schema: <schema>
+        //   tables: [{ name: <table> }, ...]
+        let grouped = crate::data_engineer::dataset_truth::group_by_catalog_schema(fqns);
+        let mut sources_seq: Vec<YamlValue> = Vec::new();
+        for ((cat, db), mut tables) in grouped.into_iter() {
+            tables.sort();
+            tables.dedup();
+            let mut src = YamlMapping::new();
+            src.insert(YamlValue::String("name".to_string()), YamlValue::String(db.clone()));
+            src.insert(YamlValue::String("database".to_string()), YamlValue::String(cat));
+            src.insert(YamlValue::String("schema".to_string()), YamlValue::String(db));
+            let mut tables_seq: Vec<YamlValue> = Vec::new();
+            for t in tables.into_iter() {
+                let mut tm = YamlMapping::new();
+                tm.insert(YamlValue::String("name".to_string()), YamlValue::String(t));
+                tables_seq.push(YamlValue::Mapping(tm));
+            }
+            src.insert(YamlValue::String("tables".to_string()), YamlValue::Sequence(tables_seq));
+            sources_seq.push(YamlValue::Mapping(src));
+        }
+        YamlValue::Sequence(sources_seq)
+    }
 
     let mut root = if content.trim().is_empty() {
         YamlMapping::new()
@@ -871,6 +933,66 @@ async fn postprocess_schema_yml(
     if !root.contains_key(&YamlValue::String("version".to_string())) {
         root.insert(YamlValue::String("version".to_string()), YamlValue::Number(2.into()));
     }
+
+    // Candidate sources:
+    // - current schema.yml sources
+    // - any source() calls found in staging SQL
+    // - optional advisory: datasets.list_datasets() (bounded), but always re-checked via schema()
+    let mut candidates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    // (A) Existing schema.yml sources
+    for (schema, table) in parse_sources_from_schema_yml(&root).into_iter() {
+        let s = schema.trim().to_string();
+        let t = table.trim().to_string();
+        if s == want_schema && !t.is_empty() {
+            candidates.insert(format!("{}.{}.{}", want_catalog, s, t));
+        }
+    }
+
+    // (B) Staging model SQL source() calls
+    {
+        let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/";
+        let staging_prefix = format!("{}models/staging/", base);
+        if let Ok(keys) = ctx.storage.list_prefix(&staging_prefix).await {
+            for k in keys {
+                if !k.ends_with(".sql") || k.contains("/_versions/") {
+                    continue;
+                }
+                if let Ok(bytes) = ctx.storage.get_bytes(&k).await {
+                    let sql = String::from_utf8_lossy(&bytes).to_string();
+                    for (schema, table) in crate::data_engineer::naming::extract_source_calls(&sql).into_iter() {
+                        if schema == want_schema && !table.trim().is_empty() {
+                            candidates.insert(format!("{}.{}.{}", want_catalog, schema, table));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // (C) Advisory discovery (optional, bounded)
+    if let Some(ds) = datasets {
+        if let Ok(listed) = ds.list_datasets().await {
+            for d in listed.into_iter().take(MAX_PROVED_SOURCES) {
+                if d.catalog == want_catalog && d.database == want_schema {
+                    candidates.insert(d.fqn());
+                }
+            }
+        }
+    }
+
+    // Prove candidates by schema() and only emit proven sources.
+    let mut proven: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for fqn in candidates.into_iter() {
+        if proven.len() >= MAX_PROVED_SOURCES {
+            break;
+        }
+        if let Ok(_cols) = q.schema(&fqn).await {
+            proven.insert(fqn);
+        }
+    }
+
+    let sources_val = sources_value_from_fqns(&proven);
     root.insert(YamlValue::String("sources".to_string()), sources_val);
     serde_yaml::to_string(&YamlValue::Mapping(root)).map_err(|e| e.to_string())
 }
@@ -1090,8 +1212,10 @@ mod tests {
     use async_trait::async_trait;
     use react_core::keyspace::{DefaultKeyspace, Keyspace};
     use react_core::llm::{ChatMessage, LargeLanguageModel};
+    use react_core::providers::{QueryProvider, QueryResult};
     use react_core::scope::RequestScope;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[derive(Default)]
@@ -1165,7 +1289,28 @@ mod tests {
         })
     }
 
-    fn make_ctx(storage: Arc<dyn StorageAdapter>) -> AgentCtx {
+    #[derive(Clone, Default)]
+    struct MockQuery {
+        schemas: Arc<std::sync::Mutex<HashMap<String, Vec<(String, String)>>>>,
+    }
+
+    #[async_trait]
+    impl QueryProvider for MockQuery {
+        async fn query(&self, _sql: &str) -> Result<QueryResult, String> {
+            Err("not implemented".to_string())
+        }
+        async fn schema(&self, dataset_fqn: &str) -> Result<Vec<(String, String)>, String> {
+            let m = self.schemas.lock().unwrap();
+            m.get(dataset_fqn)
+                .cloned()
+                .ok_or_else(|| format!("not found: {}", dataset_fqn))
+        }
+        async fn sample(&self, _dataset_fqn: &str, _limit: usize) -> Result<Vec<Vec<String>>, String> {
+            Err("not implemented".to_string())
+        }
+    }
+
+    fn make_ctx(storage: Arc<dyn StorageAdapter>, query: Option<Arc<dyn QueryProvider>>) -> AgentCtx {
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
         let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
         AgentCtx {
@@ -1182,7 +1327,7 @@ mod tests {
             storage,
             scope: scope.clone(),
             keyspace,
-            query: None,
+            query,
             dbt: None,
             vector: None,
             thread_store: None,
@@ -1193,7 +1338,7 @@ mod tests {
     #[tokio::test]
     async fn apply_patch_creates_file_and_injects_config() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
-        let ctx = make_ctx(storage);
+        let ctx = make_ctx(storage, None);
         let sql = "select * from {{ source('test_raw','raw_orders') }}";
         let patch_text = create_git_patch_text("", sql, "models/staging/stg_test_raw_raw_orders.sql", false).expect("patch");
         let outcome = apply_patch(
@@ -1214,7 +1359,7 @@ mod tests {
     #[tokio::test]
     async fn apply_patch_rejects_misnamed_staging_model_path() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
-        let ctx = make_ctx(storage);
+        let ctx = make_ctx(storage, None);
         let sql = "select * from {{ source('test_raw','raw_orders') }}";
         let patch_text = create_git_patch_text("", sql, "models/staging/stg_wrong.sql", false).expect("patch");
         let err = apply_patch(&ctx, None, "models/staging/stg_wrong.sql", &patch_text, None, PatchApplyKind::UnifiedDiff)
@@ -1227,7 +1372,7 @@ mod tests {
     #[tokio::test]
     async fn apply_patch_rejects_staging_with_multiple_sources() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
-        let ctx = make_ctx(storage);
+        let ctx = make_ctx(storage, None);
         let sql = r#"
 select * from {{ source('test_raw','raw_orders') }}
 union all
@@ -1250,7 +1395,7 @@ select * from {{ source('test_raw','raw_customers') }}
     #[tokio::test]
     async fn apply_patch_rejects_gold_model_using_source() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
-        let ctx = make_ctx(storage);
+        let ctx = make_ctx(storage, None);
         let sql = "select * from {{ source('test_raw','raw_orders') }}";
         let patch_text = create_git_patch_text("", sql, "models/marts/fct_orders.sql", false).expect("patch");
         let err = apply_patch(&ctx, None, "models/marts/fct_orders.sql", &patch_text, None, PatchApplyKind::UnifiedDiff)
@@ -1262,7 +1407,12 @@ select * from {{ source('test_raw','raw_customers') }}
     #[tokio::test]
     async fn apply_patch_schema_yml_rebuilds_sources_and_preserves_models() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
-        let ctx = make_ctx(storage);
+        let q = MockQuery::default();
+        *q.schemas.lock().unwrap() = HashMap::from([
+            ("AwsDataCatalog.test_raw.raw_customers".to_string(), vec![("id".to_string(), "varchar".to_string())]),
+            ("AwsDataCatalog.test_raw.raw_orders".to_string(), vec![("id".to_string(), "varchar".to_string())]),
+        ]);
+        let ctx = make_ctx(storage, Some(Arc::new(q)));
         let datasets: Arc<dyn DatasetCatalogProvider> = Arc::new(MockDatasets {
             items: vec![
                 DatasetId { catalog: "AwsDataCatalog".to_string(), database: "test_raw".to_string(), table: "raw_customers".to_string() },
@@ -1278,6 +1428,32 @@ select * from {{ source('test_raw','raw_customers') }}
         let map = v.as_mapping().expect("mapping root");
         assert!(map.contains_key(&YamlValue::String("models".to_string())));
         assert!(map.contains_key(&YamlValue::String("sources".to_string())));
+    }
+
+    #[tokio::test]
+    async fn schema_yml_filters_unproven_sources_via_schema_facts() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let q = MockQuery::default();
+        *q.schemas.lock().unwrap() = HashMap::from([(
+            "AwsDataCatalog.test_raw.raw_customers".to_string(),
+            vec![("id".to_string(), "varchar".to_string())],
+        )]);
+        let ctx = make_ctx(storage, Some(Arc::new(q)));
+        let datasets: Arc<dyn DatasetCatalogProvider> = Arc::new(MockDatasets { items: vec![] });
+
+        let existing = r#"
+version: 2
+sources:
+  - name: test_raw
+    database: AwsDataCatalog
+    schema: test_raw
+    tables:
+      - name: raw_customers
+      - name: raw_products
+"#;
+        let out = canonicalize_schema_yml(&ctx, Some(&datasets), existing).await.expect("ok");
+        assert!(out.contains("raw_customers"));
+        assert!(!out.contains("raw_products"));
     }
 
     #[test]
@@ -1325,7 +1501,7 @@ select * from {{ source('test_raw','raw_customers') }}
     #[tokio::test]
     async fn apply_patch_repairs_hunk_counts_for_new_file() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
-        let ctx = make_ctx(storage);
+        let ctx = make_ctx(storage, None);
 
         // Note: the hunk header intentionally lies about how many lines are added.
         // `apply_patch` should repair the header counts and apply successfully.
@@ -1348,7 +1524,7 @@ select * from {{ source('test_raw','raw_customers') }}
     #[tokio::test]
     async fn apply_patch_packages_yml_normalizes_entries() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
-        let ctx = make_ctx(storage);
+        let ctx = make_ctx(storage, None);
         let raw = r#"
 packages:
   - package: calogica/dbt_expectations
@@ -1380,7 +1556,7 @@ packages:
     #[tokio::test]
     async fn apply_patch_rejects_base_sha_mismatch() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
-        let ctx = make_ctx(storage);
+        let ctx = make_ctx(storage, None);
         let patch_text = create_git_patch_text("", "select 1", "models/staging/stg_orders.sql", false).expect("patch");
         let err = apply_patch(&ctx, None, "models/staging/stg_orders.sql", &patch_text, Some("bad"), PatchApplyKind::UnifiedDiff)
             .await

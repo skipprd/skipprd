@@ -63,6 +63,73 @@ pub struct AgentCtx {
 
 pub struct Agent;
 
+fn title_case_words(s: &str) -> String {
+    let mut out = String::new();
+    for (i, w) in s.split_whitespace().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let mut chars = w.chars();
+        match chars.next() {
+            Some(c) => {
+                out.extend(c.to_uppercase());
+                out.push_str(chars.as_str());
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+fn clean_tool_name(name: &str, args: &Value) -> String {
+    match name {
+        "dbt_files" => {
+            let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            match op {
+                "get" => {
+                    let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+                    if !p.is_empty() { return format!("Read {p}"); }
+                    "Read file".to_string()
+                }
+                "list" => {
+                    let p = args.get("prefix").and_then(|v| v.as_str()).unwrap_or("").trim();
+                    if !p.is_empty() { return format!("List {p}"); }
+                    "List files".to_string()
+                }
+                "get_json" => {
+                    let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+                    if !p.is_empty() { return format!("Read JSON {p}"); }
+                    "Read JSON".to_string()
+                }
+                "patch" => {
+                    let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+                    if !p.is_empty() { return format!("Patch {p}"); }
+                    "Patch file".to_string()
+                }
+                _ => {
+                    if !op.is_empty() { return format!("dbt_files {op}"); }
+                    "dbt_files".to_string()
+                }
+            }
+        }
+        "run_sql" => "Run SQL".to_string(),
+        "sql_schema" => {
+            let t = args.get("table").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if !t.is_empty() { format!("Describe {t}") } else { "List tables".to_string() }
+        }
+        "sql_stats" => {
+            let t = args.get("table").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if !t.is_empty() { format!("Stats {t}") } else { "Stats".to_string() }
+        }
+        "sql_sample" => {
+            let t = args.get("table").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if !t.is_empty() { format!("Sample {t}") } else { "Sample".to_string() }
+        }
+        "vect_query" => "Vector search".to_string(),
+        other => title_case_words(&other.replace('_', " ")),
+    }
+}
+
 pub enum RunOutcome {
     Final { thread_id: String, result: ThreadResult },
     AwaitUser { thread_id: String, prompt: String },
@@ -305,6 +372,24 @@ impl Agent {
             (None, "react_loop".to_string(), String::new(), None)
         };
 
+        // Emit llm_start as soon as we have a call id.
+        if let (Some(call_id), Some(thread_id), Some(store)) =
+            (call_id_opt, thread_id_opt.as_ref().cloned(), store_opt.as_ref().cloned())
+        {
+            let _ = store
+                .append_step(
+                    &thread_id,
+                    ThreadStep::LlmStart {
+                        call_id,
+                        model: Some("unknown".to_string()),
+                        phase: phase.clone(),
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        agent: agent.clone(),
+                    },
+                )
+                .await;
+        }
+
         let res = tokio::task::spawn_blocking(move || model.chat(&messages))
             .await
             .map_err(|e| format!("LLM execution failed: {}", e))?
@@ -318,6 +403,23 @@ impl Agent {
                 Ok(txt) => (true, txt.as_str()),
                 Err(e) => (false, e.as_str()),
             };
+
+            // Emit llm_end before the full llm_call record.
+            let _ = store
+                .append_step(
+                    &thread_id,
+                    ThreadStep::LlmEnd {
+                        call_id,
+                        model: Some("unknown".to_string()),
+                        phase: phase.clone(),
+                        status: if ok { "ok".to_string() } else { "failed".to_string() },
+                        error: if ok { None } else { Some(response_raw.to_string()) },
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        agent: agent.clone(),
+                    },
+                )
+                .await;
+
             let response_hash = crate::llm_observability::sha256_hex_str(response_raw);
             let response_text = if crate::llm_observability::llm_response_text_enabled() {
                 Some(crate::llm_observability::redact_common_secrets(response_raw))
@@ -591,6 +693,32 @@ impl Agent {
                 .timeout_for_tool(action_name)
                 .unwrap_or(ctx.per_step_timeout_secs)
                 .max(1);
+
+            // Persist tool_start immediately so UIs can show in-flight tool runtime.
+            let tool_id = uuid::Uuid::new_v4().to_string();
+            let agent = ctx
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let clean_name = clean_tool_name(action_name, &args);
+            if let Some(store) = store {
+                let _ = store
+                    .append_step(
+                        &tid,
+                        ThreadStep::ToolStart {
+                            tool_id: tool_id.clone(),
+                            name: action_name.to_string(),
+                            clean_name: clean_name.clone(),
+                            args: args.clone(),
+                            status: "running".to_string(),
+                            payload: None,
+                            ts: chrono::Utc::now().to_rfc3339(),
+                            agent: agent.clone(),
+                        },
+                    )
+                    .await;
+            }
+
             let raw_obs = match tokio::time::timeout(
                 std::time::Duration::from_secs(timeout_secs),
                 tools.call(action_name, args.clone(), ctx),
@@ -602,19 +730,25 @@ impl Agent {
             };
             let obs_env = ToolObservation::normalize(raw_obs.clone());
             let obs_env_for_transcript = obs_env.clone();
-            let agent = ctx
-                .agent_name
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string());
 
-            // Persist step if store exists.
+            // Persist tool_end if store exists.
             if let Some(store) = store {
+                let status = if obs_env.ok { "ok".to_string() } else { "failed".to_string() };
+                let payload = obs_env
+                    .extra
+                    .get("payload")
+                    .cloned()
+                    .or_else(|| obs_env.extra.get("ui_payload").cloned());
                 let _ = store
                     .append_step(
                         &tid,
-                        ThreadStep::Tool {
+                        ThreadStep::ToolEnd {
+                            tool_id: tool_id.clone(),
                             name: action_name.to_string(),
+                            clean_name: clean_name.clone(),
                             args: args.clone(),
+                            status,
+                            payload,
                             observation: obs_env,
                             ts: chrono::Utc::now().to_rfc3339(),
                             agent: agent.clone(),

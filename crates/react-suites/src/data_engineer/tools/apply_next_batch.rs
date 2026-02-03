@@ -10,6 +10,7 @@ use react_core::tools::Tool;
 use crate::data_engineer::plan;
 use crate::data_engineer::plan::{CleansePlan, ModelPlan, TaskStatus};
 use crate::data_engineer::tools;
+use crate::data_engineer::dataset_truth;
 
 pub(crate) const MAX_CONSECUTIVE_BATCH_FAILURES: usize = 3;
 
@@ -106,6 +107,28 @@ impl Tool for ApplyNextCleanseBatchTool {
                 "succeeded_dataset_ids": [],
                 "failed_dataset_ids": [],
             }));
+        }
+
+        // Truth gating (fail-fast): only proceed if schema() proves each dataset exists.
+        if let Some(q) = ctx.query.as_ref() {
+            let mut gating_errors: Vec<String> = Vec::new();
+            for ds in batch.iter() {
+                if let Err(e) = q.schema(ds).await {
+                    gating_errors.push(format!("{}: schema lookup failed (treating as fact): {}", ds, e));
+                }
+            }
+            if !gating_errors.is_empty() {
+                mark_needs_update_cleanse(&mut plan, &batch, "dataset schema lookup failed; dataset not usable");
+                update_failure_counters(&mut plan.progress, false);
+                let _ = plan::save_cleanse_plan(ctx, &plan).await;
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "attempted_dataset_ids": batch.clone(),
+                    "succeeded_dataset_ids": [],
+                    "failed_dataset_ids": batch.clone(),
+                    "errors": gating_errors,
+                }));
+            }
         }
 
         // Optional user instruction passthrough to inner tool.
@@ -232,6 +255,39 @@ impl Tool for ApplyNextModelBatchTool {
                 "attempted_item_names": [],
                 "succeeded_item_names": [],
                 "failed_item_names": [],
+            }));
+        }
+
+        // Truth gating: gold/model must only rely on existing staging models (silver).
+        let stg = dataset_truth::discover_staging_models_from_storage(ctx).await;
+        let mut gating_errors: Vec<String> = Vec::new();
+        for n in batch_names.iter() {
+            if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
+                for inp in t.inputs.iter() {
+                    let it = inp.trim();
+                    if it.is_empty() {
+                        continue;
+                    }
+                    if !dataset_truth::is_ref_only_gold_input(it) {
+                        gating_errors.push(format!("{n}: invalid gold input '{it}' (gold must read from stg_* only)"));
+                        continue;
+                    }
+                    if !stg.allowed_models.contains(it) {
+                        gating_errors.push(format!("{n}: missing staging model input '{it}' (not present under models/staging/)"));
+                    }
+                }
+            }
+        }
+        if !gating_errors.is_empty() {
+            mark_needs_update_model(&mut plan, &batch_names, "gold inputs are not grounded in existing staging models");
+            update_failure_counters(&mut plan.progress, false);
+            let _ = plan::save_model_plan(ctx, &plan).await;
+            return Ok(serde_json::json!({
+                "ok": false,
+                "attempted_item_names": batch_names,
+                "succeeded_item_names": [],
+                "failed_item_names": batch_names,
+                "errors": gating_errors,
             }));
         }
 

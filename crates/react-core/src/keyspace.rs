@@ -3,6 +3,7 @@ use crate::scope::RequestScope;
 pub trait Keyspace: Send + Sync {
     fn threads_prefix(&self, scope: &RequestScope) -> String;
     fn thread_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String>;
+    fn thread_state_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String>;
 
     fn catalog_key(&self, scope: &RequestScope, dataset_id: &str) -> String;
     fn semantic_key(&self, scope: &RequestScope, dataset_id: &str) -> String;
@@ -70,6 +71,17 @@ impl Keyspace for DefaultKeyspace {
         Self::ensure_safe_segment(&scope.project_id)?;
         Self::ensure_safe_segment(thread_id)?;
         Ok(format!("{}/{}/{}/threads/{}.json", scope.tenant, scope.workspace, scope.project_id, thread_id))
+    }
+
+    fn thread_state_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String> {
+        Self::ensure_safe_segment(&scope.tenant)?;
+        Self::ensure_safe_segment(&scope.workspace)?;
+        Self::ensure_safe_segment(&scope.project_id)?;
+        Self::ensure_safe_segment(thread_id)?;
+        Ok(format!(
+            "{}/{}/{}/threads/{}.state.json",
+            scope.tenant, scope.workspace, scope.project_id, thread_id
+        ))
     }
 
     fn catalog_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
@@ -140,6 +152,14 @@ mod tests {
         let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
         let k = ks.thread_key(&scope, "123").unwrap();
         assert_eq!(k, "t/w/p/threads/123.json");
+    }
+
+    #[test]
+    fn keyspace_builds_thread_state_key() {
+        let ks = DefaultKeyspace::new("b".to_string());
+        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let k = ks.thread_state_key(&scope, "123").unwrap();
+        assert_eq!(k, "t/w/p/threads/123.state.json");
     }
 }
 

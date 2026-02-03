@@ -3,7 +3,7 @@ use serde_json::Value;
 use once_cell::sync::OnceCell;
 use dashmap::DashMap;
 use std::time::Instant;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::storage::StorageAdapter;
@@ -11,6 +11,92 @@ use crate::keyspace::Keyspace;
 use crate::scope::RequestScope;
 
 pub const THREAD_SCHEMA_VERSION: u32 = 3;
+pub const THREAD_STATE_SCHEMA_VERSION: u32 = 1;
+
+/// Materialized, reloadable thread state (stable summary, not raw streaming events).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadState {
+    pub thread_state_schema_version: u32,
+    pub thread_id: String,
+    #[serde(default)]
+    pub suite_id: Option<String>,
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    #[serde(default)]
+    pub current_phase: Option<String>,
+    /// Number of thread steps that have been materialized into this state snapshot.
+    #[serde(default)]
+    pub last_materialized_step_count: usize,
+    /// Sum of completed phase runtimes in milliseconds.
+    #[serde(default)]
+    pub total_runtime_ms: u64,
+    /// Per-item semaphore/state keyed by stable item ids.
+    #[serde(default)]
+    pub items: BTreeMap<String, ThreadItemState>,
+    /// Recent, bounded timeline events (tool_start/tool_end) for "post reconnect" UIs.
+    #[serde(default)]
+    pub events: Vec<ThreadEvent>,
+    /// Suite-specific plan summaries (summary only). Keys like \"cleanse\" / \"model\".
+    #[serde(default)]
+    pub plan_summaries: BTreeMap<String, Value>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadEvent {
+    pub step_idx: usize,
+    pub event_kind: String, // tool_start|tool_end|llm_start|llm_end
+    pub ts: String,
+    #[serde(default)]
+    pub tool_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub clean_name: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>, // running|ok|failed
+    #[serde(default)]
+    pub runtime_ms: Option<u64>,
+    #[serde(default)]
+    pub payload: Option<Value>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub call_id: Option<u64>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub phase: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadItemState {
+    pub kind: String,   // phase|tool|task
+    pub status: String, // queued|running|ok|failed|blocked
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+    /// Runtime/duration in milliseconds (best-effort).
+    #[serde(default)]
+    pub runtime_ms: Option<u64>,
+    #[serde(default)]
+    pub last_error: Option<ThreadItemError>,
+    #[serde(default)]
+    pub outputs: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadItemError {
+    pub summary: String,
+    #[serde(default)]
+    pub tool_step_idx: Option<usize>,
+    #[serde(default)]
+    pub step_ts: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
@@ -129,10 +215,52 @@ pub enum ThreadStep {
         ts: String,
         agent: String,
     },
-    Tool {
+    ToolStart {
+        tool_id: String,
         name: String,
+        /// Human-readable, short label for UI (e.g. "Read dbt_project.yml").
+        #[serde(default)]
+        clean_name: String,
         args: Value,
+        /// running|ok|failed (tool_start should be running)
+        status: String,
+        #[serde(default)]
+        payload: Option<Value>,
+        ts: String,
+        agent: String,
+    },
+    ToolEnd {
+        tool_id: String,
+        name: String,
+        /// Human-readable, short label for UI (e.g. "Read dbt_project.yml").
+        #[serde(default)]
+        clean_name: String,
+        #[serde(default)]
+        args: Value,
+        /// running|ok|failed (tool_end should be ok|failed)
+        status: String,
+        #[serde(default)]
+        payload: Option<Value>,
         observation: ToolObservation,
+        ts: String,
+        agent: String,
+    },
+    LlmStart {
+        call_id: u64,
+        #[serde(default)]
+        model: Option<String>,
+        phase: String,
+        ts: String,
+        agent: String,
+    },
+    LlmEnd {
+        call_id: u64,
+        #[serde(default)]
+        model: Option<String>,
+        phase: String,
+        status: String, // ok|failed
+        #[serde(default)]
+        error: Option<String>,
         ts: String,
         agent: String,
     },
@@ -239,7 +367,10 @@ impl ThreadStep {
             ThreadStep::SwitchSuite { ts, .. } => ts,
             ThreadStep::SwitchAgent { ts, .. } => ts,
             ThreadStep::User { ts, .. } => ts,
-            ThreadStep::Tool { ts, .. } => ts,
+            ThreadStep::ToolStart { ts, .. } => ts,
+            ThreadStep::ToolEnd { ts, .. } => ts,
+            ThreadStep::LlmStart { ts, .. } => ts,
+            ThreadStep::LlmEnd { ts, .. } => ts,
             ThreadStep::LlmCall { ts, .. } => ts,
             ThreadStep::Phase { ts, .. } => ts,
             ThreadStep::GuardBlock { ts, .. } => ts,
@@ -369,6 +500,12 @@ impl ThreadStore {
             .unwrap_or_else(|_| format!("invalid/thread/{}.json", thread_id))
     }
 
+    fn state_key(&self, thread_id: &str) -> String {
+        self.keyspace
+            .thread_state_key(&self.scope, thread_id)
+            .unwrap_or_else(|_| format!("invalid/thread/{}.state.json", thread_id))
+    }
+
     fn list_prefix(&self) -> String {
         format!("{}/", self.keyspace.threads_prefix(&self.scope).trim_end_matches('/'))
     }
@@ -391,10 +528,49 @@ impl ThreadStore {
             ));
         }
         log.steps.push(step);
+        let step_count = log.steps.len();
         let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
         self.storage.put_json(&key, &val).await?;
         // Update cache
         cache().insert(thread_id.to_string(), CacheEntry { log, ts: Instant::now() });
+
+        // Best-effort: keep thread_state strongly consistent with the persisted step sequence.
+        // This is a separate object today (S3 best-effort); later a transactional store can make this atomic.
+        let _ = self.materialize_thread_state(thread_id, step_count).await;
+        Ok(())
+    }
+
+    pub async fn get_thread_state(&self, thread_id: &str) -> Result<ThreadState, String> {
+        let key = self.state_key(thread_id);
+        if let Ok(v) = self.storage.get_json(&key).await {
+            if let Ok(s) = serde_json::from_value::<ThreadState>(v) {
+                if s.thread_state_schema_version == THREAD_STATE_SCHEMA_VERSION {
+                    return Ok(s);
+                }
+            }
+        }
+        // Fallback: build from thread log.
+        let log = self.get(thread_id).await?;
+        Ok(build_thread_state_from_log(thread_id, &log))
+    }
+
+    pub async fn put_thread_state(&self, thread_id: &str, state: &ThreadState) -> Result<(), String> {
+        let key = self.state_key(thread_id);
+        let v = serde_json::to_value(state).map_err(|e| e.to_string())?;
+        self.storage.put_json(&key, &v).await
+    }
+
+    async fn materialize_thread_state(&self, thread_id: &str, want_step_count: usize) -> Result<(), String> {
+        let log = self.get(thread_id).await?;
+        let mut state = self
+            .get_thread_state(thread_id)
+            .await
+            .unwrap_or_else(|_| build_thread_state_from_log(thread_id, &log));
+
+        if state.last_materialized_step_count != want_step_count {
+            state = build_thread_state_from_log(thread_id, &log);
+        }
+        self.put_thread_state(thread_id, &state).await?;
         Ok(())
     }
 
@@ -423,6 +599,11 @@ impl ThreadStore {
         let mut out: Vec<String> = Vec::new();
         if let Ok(keys) = self.storage.list_prefix(&prefix).await {
             for k in keys {
+                // Thread state snapshots live alongside logs under the same prefix.
+                // The list endpoint must return ONLY thread logs.
+                if k.ends_with(".state.json") {
+                    continue;
+                }
                 if let Some(name) = k.strip_prefix(&prefix).and_then(|s| s.strip_suffix(".json")) {
                     out.push(name.to_string());
                 }
@@ -488,9 +669,332 @@ impl ThreadStore {
     }
 }
 
+fn build_thread_state_from_log(thread_id: &str, log: &ThreadLog) -> ThreadState {
+    // For UI timelines, only emit tool events that have both a start+end in the persisted log.
+    // This prevents orphan spans when the store drops one side of the pair.
+    let paired_tool_ids: HashSet<String> = {
+        let mut starts: HashSet<String> = HashSet::new();
+        let mut ends: HashSet<String> = HashSet::new();
+        for s in log.steps.iter() {
+            match s {
+                ThreadStep::ToolStart { tool_id, .. } => {
+                    starts.insert(tool_id.clone());
+                }
+                ThreadStep::ToolEnd { tool_id, .. } => {
+                    ends.insert(tool_id.clone());
+                }
+                _ => {}
+            }
+        }
+        starts.intersection(&ends).cloned().collect()
+    };
+
+    let mut st = ThreadState {
+        thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
+        thread_id: thread_id.to_string(),
+        suite_id: None,
+        agent_type: None,
+        current_phase: None,
+        last_materialized_step_count: 0,
+        total_runtime_ms: 0,
+        items: BTreeMap::new(),
+        events: Vec::new(),
+        plan_summaries: BTreeMap::new(),
+    };
+
+    for (idx, step) in log.steps.iter().enumerate() {
+        apply_step_to_state(&mut st, idx, step, &paired_tool_ids);
+        st.last_materialized_step_count = idx + 1;
+    }
+
+    // Total runtime = sum of completed phase runtimes.
+    st.total_runtime_ms = st
+        .items
+        .values()
+        .filter(|it| it.kind == "phase")
+        .filter_map(|it| it.runtime_ms)
+        .sum();
+    st
+}
+
+fn duration_ms(start_ts: &str, end_ts: &str) -> Option<u64> {
+    let start = chrono::DateTime::parse_from_rfc3339(start_ts).ok()?;
+    let end = chrono::DateTime::parse_from_rfc3339(end_ts).ok()?;
+    let delta = end.signed_duration_since(start);
+    let ms = delta.num_milliseconds();
+    if ms <= 0 { return Some(0); }
+    Some(ms as u64)
+}
+
+fn apply_step_to_state(st: &mut ThreadState, step_idx: usize, step: &ThreadStep, paired_tool_ids: &HashSet<String>) {
+    fn push_event(st: &mut ThreadState, ev: ThreadEvent) {
+        const MAX_EVENTS: usize = 200;
+        st.events.push(ev);
+        if st.events.len() > MAX_EVENTS {
+            let drop_n = st.events.len() - MAX_EVENTS;
+            st.events.drain(0..drop_n);
+        }
+    }
+
+    match step {
+        ThreadStep::SwitchSuite { to, .. } => {
+            if !to.trim().is_empty() {
+                st.suite_id = Some(to.to_string());
+            }
+        }
+        ThreadStep::SwitchAgent { to, .. } => {
+            if !to.trim().is_empty() {
+                st.agent_type = Some(to.to_string());
+            }
+        }
+        ThreadStep::Phase {
+            phase,
+            from_phase,
+            ts,
+            ..
+        } => {
+            let ph = phase.trim().to_string();
+            if ph.is_empty() {
+                return;
+            }
+
+            if let Some(prev) = from_phase.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let key = format!("phase:{}", prev);
+                let ent = st.items.entry(key).or_insert_with(|| ThreadItemState {
+                    kind: "phase".to_string(),
+                    status: "ok".to_string(),
+                    started_at: None,
+                    finished_at: Some(ts.clone()),
+                    runtime_ms: None,
+                    last_error: None,
+                    outputs: None,
+                });
+                ent.kind = "phase".to_string();
+                ent.status = "ok".to_string();
+                ent.finished_at.get_or_insert_with(|| ts.clone());
+                if ent.runtime_ms.is_none() {
+                    if let (Some(ref started), Some(ref finished)) = (&ent.started_at, &ent.finished_at) {
+                        ent.runtime_ms = duration_ms(started, finished);
+                    }
+                }
+            }
+
+            let key = format!("phase:{}", ph);
+            let ent = st.items.entry(key).or_insert_with(|| ThreadItemState {
+                kind: "phase".to_string(),
+                status: "running".to_string(),
+                started_at: Some(ts.clone()),
+                finished_at: None,
+                runtime_ms: None,
+                last_error: None,
+                outputs: None,
+            });
+            ent.kind = "phase".to_string();
+            ent.status = "running".to_string();
+            ent.started_at.get_or_insert_with(|| ts.clone());
+            st.current_phase = Some(ph);
+        }
+        ThreadStep::ToolStart { tool_id, name, clean_name, args: _, status, payload, ts, .. } => {
+            let key = format!("tool:{}", tool_id);
+            let ent = st.items.entry(key).or_insert_with(|| ThreadItemState {
+                kind: "tool".to_string(),
+                status: status.clone(),
+                started_at: Some(ts.clone()),
+                finished_at: None,
+                runtime_ms: None,
+                last_error: None,
+                outputs: None,
+            });
+            ent.kind = "tool".to_string();
+            ent.status = status.clone();
+            ent.started_at.get_or_insert_with(|| ts.clone());
+            if let Some(p) = payload.clone() {
+                ent.outputs = Some(p);
+            }
+
+            // Only emit timeline events when we have a complete span in the log.
+            if paired_tool_ids.contains(tool_id) {
+                push_event(
+                    st,
+                    ThreadEvent {
+                        step_idx,
+                        event_kind: "tool_start".to_string(),
+                        ts: ts.clone(),
+                        tool_id: Some(tool_id.clone()),
+                        name: Some(name.clone()),
+                        clean_name: Some(clean_name.clone()),
+                        status: Some(status.clone()),
+                        runtime_ms: None,
+                        payload: payload.clone(),
+                        error: None,
+                        call_id: None,
+                        model: None,
+                        phase: st
+                            .current_phase
+                            .clone()
+                            .or_else(|| Some("preflight".to_string())),
+                    },
+                );
+            }
+        }
+        ThreadStep::ToolEnd { tool_id, name, clean_name, args: _, status, payload, observation, ts, .. } => {
+            let key = format!("tool:{}", tool_id);
+            let (runtime_ms, payload_out, err_out) = {
+                let ent = st.items.entry(key).or_insert_with(|| ThreadItemState {
+                    kind: "tool".to_string(),
+                    status: status.clone(),
+                    started_at: Some(ts.clone()),
+                    finished_at: None,
+                    runtime_ms: None,
+                    last_error: None,
+                    outputs: None,
+                });
+                ent.kind = "tool".to_string();
+                ent.status = status.clone();
+                ent.started_at.get_or_insert_with(|| ts.clone());
+                ent.finished_at = Some(ts.clone());
+                if ent.runtime_ms.is_none() {
+                    if let (Some(ref started), Some(ref finished)) = (&ent.started_at, &ent.finished_at) {
+                        ent.runtime_ms = duration_ms(started, finished);
+                    }
+                }
+
+                // Prefer explicit payload (tool-owned) for outputs; otherwise keep a small generic subset.
+                if let Some(p) = payload.clone() {
+                    ent.outputs = Some(p);
+                } else {
+                    let mut outputs = serde_json::Map::new();
+                    for k in ["written_keys", "key", "uploaded_target_files", "runtime_failures"] {
+                        if let Some(v) = observation.extra.get(k) {
+                            outputs.insert(k.to_string(), v.clone());
+                        }
+                    }
+                    if !outputs.is_empty() {
+                        ent.outputs = Some(Value::Object(outputs));
+                    }
+                }
+
+                if status == "failed" || !observation.ok {
+                    let summary = observation
+                        .errors
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "unknown error".to_string());
+                    ent.last_error = Some(ThreadItemError {
+                        summary,
+                        tool_step_idx: None,
+                        step_ts: Some(ts.clone()),
+                    });
+                }
+
+                let err_out = if observation.ok { None } else { observation.errors.first().cloned() };
+                (ent.runtime_ms, ent.outputs.clone(), err_out)
+            };
+
+            // Only emit timeline events when we have a complete span in the log.
+            if paired_tool_ids.contains(tool_id) {
+                push_event(
+                    st,
+                    ThreadEvent {
+                        step_idx,
+                        event_kind: "tool_end".to_string(),
+                        ts: ts.clone(),
+                        tool_id: Some(tool_id.clone()),
+                        name: Some(name.clone()),
+                        clean_name: Some(clean_name.clone()),
+                        status: Some(status.clone()),
+                        runtime_ms,
+                        payload: payload_out,
+                        error: err_out,
+                        call_id: None,
+                        model: None,
+                        phase: st
+                            .current_phase
+                            .clone()
+                            .or_else(|| Some("preflight".to_string())),
+                    },
+                );
+            }
+        }
+        ThreadStep::LlmStart { call_id, model, phase, ts, .. } => {
+            push_event(
+                st,
+                ThreadEvent {
+                    step_idx,
+                    event_kind: "llm_start".to_string(),
+                    ts: ts.clone(),
+                    tool_id: None,
+                    name: None,
+                    clean_name: None,
+                    status: Some("running".to_string()),
+                    runtime_ms: None,
+                    payload: None,
+                    error: None,
+                    call_id: Some(*call_id),
+                    model: model.clone(),
+                    phase: Some(phase.clone()),
+                },
+            );
+        }
+        ThreadStep::LlmEnd { call_id, model, phase, status, error, ts, .. } => {
+            push_event(
+                st,
+                ThreadEvent {
+                    step_idx,
+                    event_kind: "llm_end".to_string(),
+                    ts: ts.clone(),
+                    tool_id: None,
+                    name: None,
+                    clean_name: None,
+                    status: Some(status.clone()),
+                    runtime_ms: None,
+                    payload: None,
+                    error: error.clone(),
+                    call_id: Some(*call_id),
+                    model: model.clone(),
+                    phase: Some(phase.clone()),
+                },
+            );
+        }
+        ThreadStep::AskUser { prompt, ts, .. } => {
+            block_current_phase(st, prompt, ts);
+        }
+        ThreadStep::AskApproval { prompt, ts, .. } => {
+            block_current_phase(st, prompt, ts);
+        }
+        ThreadStep::GuardBlock { reason, ts, .. } => {
+            block_current_phase(st, reason, ts);
+        }
+        _ => {}
+    }
+}
+
+fn block_current_phase(st: &mut ThreadState, msg: &str, ts: &str) {
+    let Some(ph) = st.current_phase.clone() else { return };
+    let key = format!("phase:{}", ph);
+    let ent = st.items.entry(key).or_insert_with(|| ThreadItemState {
+        kind: "phase".to_string(),
+        status: "blocked".to_string(),
+        started_at: Some(ts.to_string()),
+        finished_at: None,
+        runtime_ms: None,
+        last_error: None,
+        outputs: None,
+    });
+    ent.kind = "phase".to_string();
+    ent.status = "blocked".to_string();
+    ent.last_error = Some(ThreadItemError {
+        summary: msg.to_string(),
+        tool_step_idx: None,
+        step_ts: Some(ts.to_string()),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyspace::DefaultKeyspace;
+    use crate::storage::InMemoryStorageAdapter;
 
     #[test]
     fn tool_observation_normalizes_legacy_error_field_into_errors_array() {
@@ -533,6 +1037,51 @@ mod tests {
             "title_finalized": false
         });
         assert!(serde_json::from_value::<ThreadLog>(bad).is_err());
+    }
+
+    #[test]
+    fn orphan_tool_end_does_not_emit_timeline_event() {
+        let log = ThreadLog {
+            schema_version: THREAD_SCHEMA_VERSION,
+            steps: vec![ThreadStep::ToolEnd {
+                tool_id: "orphan".to_string(),
+                name: "run_sql".to_string(),
+                clean_name: "Run SQL".to_string(),
+                args: serde_json::json!({}),
+                status: "ok".to_string(),
+                payload: None,
+                observation: ToolObservation::normalize(serde_json::json!({"ok": true})),
+                ts: "t".to_string(),
+                agent: "ask".to_string(),
+            }],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        let st = build_thread_state_from_log("tid", &log);
+        assert!(st.events.is_empty(), "orphan tool_end should not appear in timeline events");
+    }
+
+    #[test]
+    fn orphan_tool_start_does_not_emit_timeline_event() {
+        let log = ThreadLog {
+            schema_version: THREAD_SCHEMA_VERSION,
+            steps: vec![ThreadStep::ToolStart {
+                tool_id: "orphan".to_string(),
+                name: "run_sql".to_string(),
+                clean_name: "Run SQL".to_string(),
+                args: serde_json::json!({}),
+                status: "running".to_string(),
+                payload: None,
+                ts: "t".to_string(),
+                agent: "ask".to_string(),
+            }],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        let st = build_thread_state_from_log("tid", &log);
+        assert!(st.events.is_empty(), "orphan tool_start should not appear in timeline events");
     }
 
     #[test]
@@ -604,5 +1153,131 @@ mod tests {
             }
             _ => panic!("expected llm_call"),
         }
+    }
+
+    #[tokio::test]
+    async fn thread_state_is_materialized_from_appended_steps() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let store = ThreadStore::new(storage, scope, keyspace);
+
+        let tid = "tid";
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-01-26T00:00:00Z").unwrap().to_rfc3339();
+        let t1 = chrono::DateTime::parse_from_rfc3339("2026-01-26T00:00:05Z").unwrap().to_rfc3339();
+        let t2 = chrono::DateTime::parse_from_rfc3339("2026-01-26T00:00:06Z").unwrap().to_rfc3339();
+
+        store
+            .append_step(
+                tid,
+                ThreadStep::Phase {
+                    phase: "model_plan".to_string(),
+                    from_phase: None,
+                    reason_code: None,
+                    reason_detail: None,
+                    observation: Observation::ok(),
+                    ts: t0.clone(),
+                    agent: "agent".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .append_step(
+                tid,
+                ThreadStep::Phase {
+                    phase: "model_author".to_string(),
+                    from_phase: Some("model_plan".to_string()),
+                    reason_code: None,
+                    reason_detail: None,
+                    observation: Observation::ok(),
+                    ts: t1.clone(),
+                    agent: "agent".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .append_step(
+                tid,
+                ThreadStep::ToolStart {
+                    tool_id: "t1".to_string(),
+                    name: "dbt_validate".to_string(),
+                    clean_name: "Validate DBT".to_string(),
+                    args: serde_json::json!({"build": true}),
+                    status: "running".to_string(),
+                    payload: None,
+                    ts: t2.clone(),
+                    agent: "agent".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .append_step(
+                tid,
+                ThreadStep::ToolEnd {
+                    tool_id: "t1".to_string(),
+                    name: "dbt_validate".to_string(),
+                    clean_name: "Validate DBT".to_string(),
+                    args: serde_json::json!({"build": true}),
+                    status: "failed".to_string(),
+                    payload: None,
+                    observation: ToolObservation::normalize(serde_json::json!({"ok": false, "errors": ["boom"], "logs": {"run_or_build": {"stdout": "line 1:1 error"}}})),
+                    ts: t2.clone(),
+                    agent: "agent".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let st = store.get_thread_state(tid).await.unwrap();
+        assert_eq!(st.thread_state_schema_version, THREAD_STATE_SCHEMA_VERSION);
+        assert_eq!(st.thread_id, tid);
+        assert_eq!(st.current_phase.as_deref(), Some("model_author"));
+        let ph = st.items.get("phase:model_plan").expect("phase:model_plan present");
+        assert_eq!(ph.runtime_ms, Some(5_000));
+        assert!(st.total_runtime_ms >= 5_000);
+        // tool step should be materialized as failed
+        let tool_item = st.items.get("tool:t1").expect("tool:t1 present");
+        assert_eq!(tool_item.status, "failed");
+        assert!(tool_item.last_error.as_ref().map(|e| e.summary.as_str()) == Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn list_returns_only_thread_logs_not_thread_state_snapshots() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
+
+        // Write a real thread log.
+        let tid = "123";
+        store
+            .append_step(
+                tid,
+                ThreadStep::User {
+                    text: "hi".to_string(),
+                    observation: Observation::ok(),
+                    ts: "t".to_string(),
+                    agent: "ask".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Also write a thread_state snapshot object under the same prefix.
+        let state_key = keyspace.thread_state_key(&scope, tid).unwrap();
+        let st = ThreadState {
+            thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
+            thread_id: tid.to_string(),
+            ..Default::default()
+        };
+        storage.put_json(&state_key, &serde_json::to_value(&st).unwrap()).await.unwrap();
+
+        let ids = store.list().await;
+        assert_eq!(ids, vec![tid.to_string()]);
     }
 }

@@ -25,6 +25,7 @@ pub mod naming;
 pub mod patch_protocol;
 pub mod project_files;
 pub mod plan;
+pub mod dataset_truth;
 pub mod facts;
 mod review_batched;
 
@@ -169,7 +170,136 @@ enum AllowedBatch {
     ModelItemNames(Vec<String>),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserDecision {
+    Approve,
+    Reject,
+}
+
 impl DataEngineerSuite {
+    fn plan_json_repair_system_prompt(kind: &str) -> String {
+        match kind {
+            "cleanse_plan" => crate::prompts::plan::cleanse_plan_system_prompt()
+                + "\n\nSTRICT REPAIR MODE:\n\
+- Tools are NOT available.\n\
+- You MUST output ONLY a single final JSON envelope.\n\
+- Do not output any prose.\n\
+- Return: {\"final\":{\"kind\":\"cleanse_plan\",\"payload\":<json_plan_object>,\"display\":\"<optional short summary>\"}}\n",
+            "model_plan" => crate::prompts::plan::model_plan_system_prompt()
+                + "\n\nSTRICT REPAIR MODE:\n\
+- Tools are NOT available.\n\
+- You MUST output ONLY a single final JSON envelope.\n\
+- Do not output any prose.\n\
+- Return: {\"final\":{\"kind\":\"model_plan\",\"payload\":<json_plan_object>,\"display\":\"<optional short summary>\"}}\n",
+            _ => {
+                "You are repairing a JSON plan.\n\
+Hard rules:\n\
+- Tools are NOT available.\n\
+- Output STRICT JSON only.\n"
+                    .to_string()
+            }
+        }
+    }
+
+    /// Parse a user approval/rejection decision from free-form text.
+    ///
+    /// In agent-mode we accept a small set of loose synonyms so chat replies like
+    /// "Approved", "ok", or "continue" don't trap the loop in repeated approval prompts.
+    fn parse_user_decision(text: &str) -> Option<UserDecision> {
+        let raw = text.trim();
+        if raw.is_empty() {
+            return None;
+        }
+
+        fn normalize_token(s: &str) -> Option<String> {
+            let t = s
+                .trim()
+                // Strip surrounding punctuation (approve!, reject., etc).
+                .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+                .to_lowercase();
+            if t.is_empty() { None } else { Some(t) }
+        }
+
+        // Prefer first token so "yes please" still counts.
+        let first = raw.split_whitespace().next().unwrap_or("");
+        let tok = normalize_token(first).or_else(|| normalize_token(raw))?;
+
+        match tok.as_str() {
+            // Approve
+            "approve" | "approved" | "yes" | "y" | "ok" | "okay" | "continue" => Some(UserDecision::Approve),
+            // Reject
+            "reject" | "rejected" | "no" | "n" => Some(UserDecision::Reject),
+            _ => None,
+        }
+    }
+
+    async fn repair_plan_json_payload_via_llm(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+        actx: &AgentCtx,
+        phase: control_flow::Phase,
+        expected_kind: &str,
+        bad_payload: &serde_json::Value,
+        err: &str,
+        attempt: usize,
+    ) -> Result<react_core::session::ThreadResult, String> {
+        // Record an explicit guard step so the UI can surface "plan was invalid and is being repaired".
+        let ts = chrono::Utc::now().to_rfc3339();
+        let reason = format!(
+            "Plan JSON failed validation (attempt {attempt}). expected_kind={expected_kind}. error={err}"
+        );
+        let step = react_core::session::ThreadStep::GuardBlock {
+            phase: phase.as_str().to_string(),
+            kind: "plan_json_invalid".to_string(),
+            reason: reason.clone(),
+            observation: react_core::session::Observation::fail(vec![reason.clone()]),
+            ts: ts.clone(),
+            agent: "agent".to_string(),
+        };
+        let _ = thread_store.append_step(thread_id, step.clone()).await;
+        control_flow::append_phase_with_reason(
+            thread_store,
+            thread_id,
+            Some("agent".to_string()),
+            Some(phase),
+            phase,
+            Some("phase_blocked"),
+            Some(serde_json::json!({
+                "kind": "plan_json_invalid",
+                "attempt": attempt,
+                "expected_kind": expected_kind,
+                "error": err,
+            })),
+        )
+        .await?;
+
+        // Build a repair-only prompt: include the FULL invalid payload and the parse error.
+        let payload_str = serde_json::to_string_pretty(bad_payload).unwrap_or_else(|_| bad_payload.to_string());
+        let q = format!(
+            "Your previous plan JSON payload was invalid and could not be parsed by the server.\n\
+You MUST fix it and re-emit the plan.\n\n\
+Validation error:\n{err}\n\n\
+Invalid payload JSON (FULL, do not omit content):\n{payload_str}\n\n\
+Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
+        );
+
+        let sys = crate::util::time_context::with_time_context(Self::plan_json_repair_system_prompt(expected_kind));
+
+        // No tools for repair: any tool call should fail and force a retry.
+        let registry = ToolRegistry::new();
+        let tools_card = "";
+        match Agent::run_until_block(&registry, actx, &sys, tools_card, &q).await {
+            Ok(RunOutcome::Final { thread_id: _tid, result }) => Ok(result),
+            Ok(RunOutcome::AwaitUser { thread_id: _tid, prompt }) => Err(format!(
+                "plan json repair failed: model requested user input (not allowed). prompt={prompt}"
+            )),
+            Ok(RunOutcome::AwaitApproval { thread_id: _tid, prompt }) => Err(format!(
+                "plan json repair failed: model requested approval (not allowed). prompt={prompt}"
+            )),
+            Err(e) => Err(format!("plan json repair failed: {e}")),
+        }
+    }
+
     async fn authoring_complete_reason_detail(
         thread_store: &ThreadStore,
         thread_id: &str,
@@ -217,8 +347,7 @@ impl DataEngineerSuite {
             let react_core::session::ThreadStep::User { text, .. } = step else {
                 continue;
             };
-            let t = text.trim().to_lowercase();
-            if t == "approve" || t == "reject" {
+            if Self::parse_user_decision(text).is_some() {
                 return false;
             }
         }
@@ -270,7 +399,7 @@ impl DataEngineerSuite {
     fn is_mutation_step_for_review(step: &react_core::session::ThreadStep) -> bool {
         match step {
             react_core::session::ThreadStep::ArtifactSaved { .. } => true,
-            react_core::session::ThreadStep::Tool { name, args, .. } => match name.as_str() {
+            react_core::session::ThreadStep::ToolEnd { name, args, .. } => match name.as_str() {
                 "approve_and_save_artifact" | "approve_and_save_artifact_batch" | "staging_model" => true,
                 "dbt_files" => args
                     .get("op")
@@ -308,7 +437,7 @@ impl DataEngineerSuite {
                     "lines_removed": lines_removed,
                 }),
             ),
-            react_core::session::ThreadStep::Tool { name, args, observation, .. } => {
+            react_core::session::ThreadStep::ToolEnd { name, args, observation, .. } => {
                 let args_v = match name.as_str() {
                     "dbt_files" => serde_json::json!({
                         "op": args.get("op"),
@@ -1254,7 +1383,7 @@ impl DataEngineerSuite {
             let mut last_validate_failed_models: Vec<serde_json::Value> = Vec::new();
             if let Some(ref l) = log {
                 for step in l.steps.iter().rev() {
-                    let react_core::session::ThreadStep::Tool { name, observation, .. } = step else {
+                    let react_core::session::ThreadStep::ToolEnd { name, observation, .. } = step else {
                         continue;
                     };
                     if name != "dbt_validate" {
@@ -1351,22 +1480,83 @@ impl DataEngineerSuite {
                                 .rev()
                                 .find(|s| matches!(s, react_core::session::ThreadStep::User { .. }))
                             {
-                                let t = match last_user {
-                                    react_core::session::ThreadStep::User { text, .. } => text.trim().to_lowercase(),
-                                    _ => String::new(),
+                                let decision = match last_user {
+                                    react_core::session::ThreadStep::User { text, .. } => Self::parse_user_decision(text),
+                                    _ => None,
                                 };
-                                if t == "approve" {
+                                if decision == Some(UserDecision::Approve) {
                                     if is_cleanse {
                                         if let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
                                             if p.status == crate::data_engineer::plan::PlanStatus::Draft {
+                                                // Defensive grounding at approval time (facts can change; never assume).
+                                                if let Some(q) = actx.query.as_ref() {
+                                                    let mut candidates: Vec<String> = Vec::new();
+                                                    for t in p.tasks.iter() {
+                                                        if !t.dataset_id.trim().is_empty() {
+                                                            candidates.push(t.dataset_id.trim().to_string());
+                                                        }
+                                                    }
+                                                    for b in p.batches.iter() {
+                                                        for ds in b.iter() {
+                                                            if !ds.trim().is_empty() {
+                                                                candidates.push(ds.trim().to_string());
+                                                            }
+                                                        }
+                                                    }
+                                                    candidates.sort();
+                                                    candidates.dedup();
+                                                    let grounded =
+                                                        crate::data_engineer::dataset_truth::build_grounded_raw_dataset_set(&actx, q, &candidates).await;
+                                                    crate::data_engineer::plan::prune_cleanse_plan_to_grounded_raw_datasets(&mut p, &grounded.allowed);
+                                                }
+                                                if p.tasks.is_empty() || p.batches.is_empty() {
+                                                    p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+                                                    let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
+                                                    // Stay in plan phase; the next iteration will generate a new plan.
+                                                    control_flow::append_phase_with_reason(
+                                                        &thread_store,
+                                                        thread_id,
+                                                        Some("agent".to_string()),
+                                                        Some(phase),
+                                                        phase,
+                                                        Some("plan_pruned_empty"),
+                                                        Some(serde_json::json!({ "plan_key": p.plan_key })),
+                                                    )
+                                                    .await?;
+                                                    continue;
+                                                }
                                                 p.status = crate::data_engineer::plan::PlanStatus::Approved;
+                                                // Scope progress to *this* plan instance so old tool calls
+                                                // can't auto-complete a newly approved plan.
+                                                p.progress.last_applied_step_idx = l.steps.len();
                                                 let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
                                             }
                                         }
                                     } else {
                                         if let Some(mut p) = crate::data_engineer::plan::load_model_plan(&actx).await {
                                             if p.status == crate::data_engineer::plan::PlanStatus::Draft {
+                                                // Defensive grounding at approval time: gold must rely only on existing staging models.
+                                                let stg = crate::data_engineer::dataset_truth::discover_staging_models_from_storage(&actx).await;
+                                                crate::data_engineer::plan::prune_model_plan_to_grounded_staging_models(&mut p, &stg.allowed_models);
+                                                if p.tasks.is_empty() || p.batches.is_empty() {
+                                                    p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+                                                    let _ = crate::data_engineer::plan::save_model_plan(&actx, &p).await;
+                                                    control_flow::append_phase_with_reason(
+                                                        &thread_store,
+                                                        thread_id,
+                                                        Some("agent".to_string()),
+                                                        Some(phase),
+                                                        phase,
+                                                        Some("plan_pruned_empty"),
+                                                        Some(serde_json::json!({ "plan_key": p.plan_key })),
+                                                    )
+                                                    .await?;
+                                                    continue;
+                                                }
                                                 p.status = crate::data_engineer::plan::PlanStatus::Approved;
+                                                // Scope progress to *this* plan instance so old tool calls
+                                                // can't auto-complete a newly approved plan.
+                                                p.progress.last_applied_step_idx = l.steps.len();
                                                 let _ = crate::data_engineer::plan::save_model_plan(&actx, &p).await;
                                             }
                                         }
@@ -1385,7 +1575,7 @@ impl DataEngineerSuite {
                                     .await?;
                                     continue;
                                 }
-                                if t == "reject" {
+                                if decision == Some(UserDecision::Reject) {
                                     if is_cleanse {
                                         if let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
                                             p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
@@ -1404,8 +1594,30 @@ impl DataEngineerSuite {
 
                     // If an approved plan already exists (oldest active plan for this thread), move forward (idempotent).
                     if is_cleanse {
-                        if let Some(p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
+                        if let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
                             if matches!(p.status, crate::data_engineer::plan::PlanStatus::Approved | crate::data_engineer::plan::PlanStatus::Completed) {
+                                // Safety: an empty/invalid approved plan would cause authoring to fast-forward.
+                                if p.tasks.is_empty() || p.batches.is_empty() {
+                                    let plan_key = p.plan_key.clone();
+                                    p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+                                    let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
+                                    control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        phase,
+                                        Some("plan_invalid_empty"),
+                                        Some(serde_json::json!({
+                                            "plan_key": plan_key,
+                                            "status": format!("{:?}", p.status),
+                                            "tasks_len": p.tasks.len(),
+                                            "batches_len": p.batches.len(),
+                                        })),
+                                    )
+                                    .await;
+                                    continue;
+                                }
                                 control_flow::append_phase_with_reason(
                                     &thread_store,
                                     thread_id,
@@ -1420,8 +1632,30 @@ impl DataEngineerSuite {
                             }
                         }
                     } else {
-                        if let Some(p) = crate::data_engineer::plan::load_model_plan(&actx).await {
+                        if let Some(mut p) = crate::data_engineer::plan::load_model_plan(&actx).await {
                             if matches!(p.status, crate::data_engineer::plan::PlanStatus::Approved | crate::data_engineer::plan::PlanStatus::Completed) {
+                                // Safety: an empty/invalid approved plan would cause authoring to fast-forward.
+                                if p.tasks.is_empty() || p.batches.is_empty() {
+                                    let plan_key = p.plan_key.clone();
+                                    p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+                                    let _ = crate::data_engineer::plan::save_model_plan(&actx, &p).await;
+                                    control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        phase,
+                                        Some("plan_invalid_empty"),
+                                        Some(serde_json::json!({
+                                            "plan_key": plan_key,
+                                            "status": format!("{:?}", p.status),
+                                            "tasks_len": p.tasks.len(),
+                                            "batches_len": p.batches.len(),
+                                        })),
+                                    )
+                                    .await;
+                                    continue;
+                                }
                                 control_flow::append_phase_with_reason(
                                     &thread_store,
                                     thread_id,
@@ -1477,14 +1711,19 @@ impl DataEngineerSuite {
                         let mut saw_sql_schema = false;
                         let mut saw_evidence = false;
                         for s in l.steps.iter().skip(start + 1) {
-                            if let react_core::session::ThreadStep::Tool { name, .. } = s {
-                                match name.as_str() {
-                                    "dbt_files" => saw_dbt_files = true,
-                                    "sql_schema" => saw_sql_schema = true,
-                                    "sql_stats" | "sql_sample" | "run_sql" => saw_evidence = true,
-                                    _ => {}
-                                }
+                        let name_opt: Option<&str> = match s {
+                            react_core::session::ThreadStep::ToolStart { name, .. } => Some(name.as_str()),
+                            react_core::session::ThreadStep::ToolEnd { name, .. } => Some(name.as_str()),
+                            _ => None,
+                        };
+                        if let Some(name) = name_opt {
+                            match name {
+                                "dbt_files" => saw_dbt_files = true,
+                                "sql_schema" => saw_sql_schema = true,
+                                "sql_stats" | "sql_sample" | "run_sql" => saw_evidence = true,
+                                _ => {}
                             }
+                        }
                         }
                         if !(saw_dbt_files && saw_sql_schema && saw_evidence) {
                             // Bootstrap calls are intentionally conservative: list models (may be empty),
@@ -1684,14 +1923,19 @@ impl DataEngineerSuite {
                                 let mut saw_sql_schema = false;
                                 let mut saw_evidence = false;
                                 for s in l.steps.iter().skip(start + 1) {
-                                    if let react_core::session::ThreadStep::Tool { name, .. } = s {
-                                        match name.as_str() {
-                                            "dbt_files" => saw_dbt_files = true,
-                                            "sql_schema" => saw_sql_schema = true,
-                                            "sql_stats" | "sql_sample" | "run_sql" => saw_evidence = true,
-                                            _ => {}
-                                        }
+                                let name_opt: Option<&str> = match s {
+                                    react_core::session::ThreadStep::ToolStart { name, .. } => Some(name.as_str()),
+                                    react_core::session::ThreadStep::ToolEnd { name, .. } => Some(name.as_str()),
+                                    _ => None,
+                                };
+                                if let Some(name) = name_opt {
+                                    match name {
+                                        "dbt_files" => saw_dbt_files = true,
+                                        "sql_schema" => saw_sql_schema = true,
+                                        "sql_stats" | "sql_sample" | "run_sql" => saw_evidence = true,
+                                        _ => {}
                                     }
+                                }
                                 }
                                 if !(saw_dbt_files && saw_sql_schema && saw_evidence) {
                                     // Stay in plan phase and re-run with a hard reminder.
@@ -1741,10 +1985,49 @@ impl DataEngineerSuite {
                                         ),
                                     }]);
                                 }
-                                let mut plan: crate::data_engineer::plan::CleansePlan = serde_json::from_value(result.payload.clone())
-                                    .map_err(|e| format!("invalid cleanse plan JSON: {e}"))?;
+                                let mut payload = result.payload.clone();
+                                let mut plan_opt: Option<crate::data_engineer::plan::CleansePlan> = None;
+                                let mut last_err: Option<String> = None;
+                                for attempt in 1..=3 {
+                                    match serde_json::from_value::<crate::data_engineer::plan::CleansePlan>(payload.clone()) {
+                                        Ok(p) => {
+                                            plan_opt = Some(p);
+                                            last_err = None;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            let err = format!("invalid cleanse plan JSON: {e}");
+                                            last_err = Some(err.clone());
+                                            // Ask the LLM to repair the plan JSON and re-emit it.
+                                            let repaired = Self::repair_plan_json_payload_via_llm(
+                                                &thread_store,
+                                                thread_id,
+                                                &actx,
+                                                phase,
+                                                "cleanse_plan",
+                                                &payload,
+                                                &err,
+                                                attempt,
+                                            )
+                                            .await?;
+                                            payload = repaired.payload;
+                                            // Loop again: we will re-try serde parsing on the repaired payload.
+                                        }
+                                    }
+                                }
+                                if let Some(e) = last_err {
+                                    return Ok(vec![FlowFrame::AwaitUser {
+                                        prompt: format!(
+                                            "Plan JSON is invalid and could not be repaired automatically.\n\nError:\n{e}\n\nPlease reply with a corrected STRICT JSON final envelope for kind='cleanse_plan'."
+                                        ),
+                                    }]);
+                                }
+                                let mut plan = plan_opt.ok_or_else(|| "plan json repair: no plan produced".to_string())?;
                                 plan.status = crate::data_engineer::plan::PlanStatus::Draft;
                                 plan.plan_key = crate::data_engineer::plan::new_cleanse_plan_key(&actx);
+                                // Scope progress to the current plan instance so we don't replay the full
+                                // historical log and accidentally mark tasks done from prior cycles.
+                                plan.progress.last_applied_step_idx = log.as_ref().map(|l| l.steps.len()).unwrap_or(0);
                                 // Capture a cheap snapshot for “current project as-is” provenance.
                                 plan.project_snapshot = serde_json::json!({
                                     "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
@@ -1755,7 +2038,7 @@ impl DataEngineerSuite {
                                     let start = Self::phase_start_idx(l, phase).unwrap_or(0);
                                     let mut calls: Vec<serde_json::Value> = Vec::new();
                                     for s in l.steps.iter().skip(start + 1) {
-                                        let react_core::session::ThreadStep::Tool { name, args, observation, .. } = s else {
+                                        let react_core::session::ThreadStep::ToolEnd { name, args, observation, .. } = s else {
                                             continue;
                                         };
                                         if name != "sql_schema" || !observation.ok {
@@ -1787,6 +2070,39 @@ impl DataEngineerSuite {
                                         }
                                     }
                                 }
+                                // Ground the plan against reality: only keep datasets we can prove exist via schema().
+                                let query = actx
+                                    .query
+                                    .as_ref()
+                                    .ok_or_else(|| "query provider missing (cannot ground cleanse plan)".to_string())?
+                                    .clone();
+                                let mut candidates: Vec<String> = Vec::new();
+                                for t in plan.tasks.iter() {
+                                    if !t.dataset_id.trim().is_empty() {
+                                        candidates.push(t.dataset_id.trim().to_string());
+                                    }
+                                }
+                                for b in plan.batches.iter() {
+                                    for ds in b.iter() {
+                                        if !ds.trim().is_empty() {
+                                            candidates.push(ds.trim().to_string());
+                                        }
+                                    }
+                                }
+                                candidates.sort();
+                                candidates.dedup();
+                                let grounded =
+                                    crate::data_engineer::dataset_truth::build_grounded_raw_dataset_set(&actx, &query, &candidates).await;
+                                crate::data_engineer::plan::prune_cleanse_plan_to_grounded_raw_datasets(
+                                    &mut plan,
+                                    &grounded.allowed,
+                                );
+                                if plan.tasks.is_empty() || plan.batches.is_empty() {
+                                    return Ok(vec![FlowFrame::AwaitUser {
+                                        prompt: "Cleanse plan contained no grounded raw datasets after applying schema() facts. This indicates the raw datasets are not queryable via the current warehouse connection (or the plan referenced non-raw tables). Fix the underlying data/catalog visibility and retry plan generation."
+                                            .to_string(),
+                                    }]);
+                                }
                                 crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await?;
                                 let prompt = format!(
                                     "{}\n\nApprove this cleanse plan? Reply \"approve\" or \"reject\".\n\n(Plan saved to: {})",
@@ -1803,10 +2119,49 @@ impl DataEngineerSuite {
                                         ),
                                     }]);
                                 }
-                                let mut plan: crate::data_engineer::plan::ModelPlan = serde_json::from_value(result.payload.clone())
-                                    .map_err(|e| format!("invalid model plan JSON: {e}"))?;
+                                let mut payload = result.payload.clone();
+                                let mut plan_opt: Option<crate::data_engineer::plan::ModelPlan> = None;
+                                let mut last_err: Option<String> = None;
+                                for attempt in 1..=3 {
+                                    match serde_json::from_value::<crate::data_engineer::plan::ModelPlan>(payload.clone()) {
+                                        Ok(p) => {
+                                            plan_opt = Some(p);
+                                            last_err = None;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            let err = format!("invalid model plan JSON: {e}");
+                                            last_err = Some(err.clone());
+                                            // Ask the LLM to repair the plan JSON and re-emit it.
+                                            let repaired = Self::repair_plan_json_payload_via_llm(
+                                                &thread_store,
+                                                thread_id,
+                                                &actx,
+                                                phase,
+                                                "model_plan",
+                                                &payload,
+                                                &err,
+                                                attempt,
+                                            )
+                                            .await?;
+                                            payload = repaired.payload;
+                                            // Loop again: we will re-try serde parsing on the repaired payload.
+                                        }
+                                    }
+                                }
+                                if let Some(e) = last_err {
+                                    return Ok(vec![FlowFrame::AwaitUser {
+                                        prompt: format!(
+                                            "Plan JSON is invalid and could not be repaired automatically.\n\nError:\n{e}\n\nPlease reply with a corrected STRICT JSON final envelope for kind='model_plan'."
+                                        ),
+                                    }]);
+                                }
+                                let mut plan = plan_opt.ok_or_else(|| "plan json repair: no plan produced".to_string())?;
                                 plan.status = crate::data_engineer::plan::PlanStatus::Draft;
                                 plan.plan_key = crate::data_engineer::plan::new_model_plan_key(&actx);
+                                // Scope progress to the current plan instance so we don't replay the full
+                                // historical log and accidentally mark tasks done from prior cycles.
+                                plan.progress.last_applied_step_idx = log.as_ref().map(|l| l.steps.len()).unwrap_or(0);
                                 plan.project_snapshot = serde_json::json!({
                                     "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
                                     "dbt_project_yml_etag": actx.storage.head_etag(&actx.keyspace.dbt_project_key(&actx.scope)).await.ok().flatten(),
@@ -1816,7 +2171,7 @@ impl DataEngineerSuite {
                                     let start = Self::phase_start_idx(l, phase).unwrap_or(0);
                                     let mut calls: Vec<serde_json::Value> = Vec::new();
                                     for s in l.steps.iter().skip(start + 1) {
-                                        let react_core::session::ThreadStep::Tool { name, args, observation, .. } = s else {
+                                        let react_core::session::ThreadStep::ToolEnd { name, args, observation, .. } = s else {
                                             continue;
                                         };
                                         if name != "sql_schema" || !observation.ok {
@@ -1846,6 +2201,18 @@ impl DataEngineerSuite {
                                             obj.insert("plan_schema_facts".to_string(), serde_json::json!({ "sql_schema_calls": calls }));
                                         }
                                     }
+                                }
+                                // Ground gold planning: gold must be based ONLY on existing staging (silver) models.
+                                let stg = crate::data_engineer::dataset_truth::discover_staging_models_from_storage(&actx).await;
+                                crate::data_engineer::plan::prune_model_plan_to_grounded_staging_models(
+                                    &mut plan,
+                                    &stg.allowed_models,
+                                );
+                                if plan.tasks.is_empty() || plan.batches.is_empty() {
+                                    return Ok(vec![FlowFrame::AwaitUser {
+                                        prompt: "Model plan contained no grounded tasks after enforcing gold-tier constraints (must reference existing staging/silver models only). Ensure staging models exist under models/staging/ and retry."
+                                            .to_string(),
+                                    }]);
                                 }
                                 crate::data_engineer::plan::save_model_plan(&actx, &plan).await?;
                                 let prompt = format!(
@@ -1918,6 +2285,28 @@ impl DataEngineerSuite {
                                 return Err("missing active cleanse plan in authoring phase (expected plan to exist)".to_string());
                             }
                         };
+                        // Safety: do not allow authoring to proceed with an empty/invalid approved plan,
+                        // otherwise the phase will fast-forward (plan_tasks_done) without doing work.
+                        if plan.tasks.is_empty() || plan.batches.is_empty() {
+                            let plan_key = plan.plan_key.clone();
+                            plan.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+                            let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
+                            control_flow::append_phase_with_reason(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                Some(phase),
+                                Phase::CleansePlan,
+                                Some("plan_invalid_empty"),
+                                Some(serde_json::json!({
+                                    "plan_key": plan_key,
+                                    "tasks_len": plan.tasks.len(),
+                                    "batches_len": plan.batches.len(),
+                                })),
+                            )
+                            .await;
+                            continue;
+                        }
                         if let Some(ref l) = log {
                             crate::data_engineer::plan::update_cleanse_progress_from_log(&mut plan, l);
                             let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
@@ -2058,6 +2447,28 @@ impl DataEngineerSuite {
                                 return Err("missing active model plan in authoring phase (expected plan to exist)".to_string());
                             }
                         };
+                        // Safety: do not allow authoring to proceed with an empty/invalid approved plan,
+                        // otherwise the phase will fast-forward (plan_tasks_done) without doing work.
+                        if plan.tasks.is_empty() || plan.batches.is_empty() {
+                            let plan_key = plan.plan_key.clone();
+                            plan.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+                            let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
+                            control_flow::append_phase_with_reason(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                Some(phase),
+                                Phase::ModelPlan,
+                                Some("plan_invalid_empty"),
+                                Some(serde_json::json!({
+                                    "plan_key": plan_key,
+                                    "tasks_len": plan.tasks.len(),
+                                    "batches_len": plan.batches.len(),
+                                })),
+                            )
+                            .await;
+                            continue;
+                        }
                         if let Some(ref l) = log {
                             crate::data_engineer::plan::update_model_progress_from_log(&mut plan, l);
                             let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
@@ -2603,6 +3014,24 @@ impl DataEngineerSuite {
                     };
                     if !select_terms.is_empty() {
                         emit_trace(&actx, "targeted compile started");
+                        let args_compile =
+                            serde_json::json!({"build": false, "run": false, "select": select_terms.clone(), "targeted": true, "targeted_step": "compile"});
+                        let tool_id_compile = uuid::Uuid::new_v4().to_string();
+                        let _ = thread_store
+                            .append_step(
+                                thread_id,
+                                react_core::session::ThreadStep::ToolStart {
+                                    tool_id: tool_id_compile.clone(),
+                                    name: "dbt_validate".to_string(),
+                                    clean_name: "Validate DBT (compile)".to_string(),
+                                    args: args_compile.clone(),
+                                    status: "running".to_string(),
+                                    payload: None,
+                                    ts: chrono::Utc::now().to_rfc3339(),
+                                    agent: "agent".to_string(),
+                                },
+                            )
+                            .await;
                         let obs_compile = control_flow::DeterministicDbtValidateTargetedOnce::run(
                             &actx,
                             &select_terms,
@@ -2610,13 +3039,18 @@ impl DataEngineerSuite {
                             false,
                         )
                         .await?;
+                        let obs_compile_norm = react_core::session::ToolObservation::normalize(obs_compile.clone());
                         let _ = thread_store
                             .append_step(
                                 thread_id,
-                                react_core::session::ThreadStep::Tool {
+                                react_core::session::ThreadStep::ToolEnd {
+                                    tool_id: tool_id_compile,
                                     name: "dbt_validate".to_string(),
-                                    args: serde_json::json!({"build": false, "run": false, "select": select_terms.clone(), "targeted": true, "targeted_step": "compile"}),
-                                    observation: react_core::session::ToolObservation::normalize(obs_compile.clone()),
+                                    clean_name: "Validate DBT (compile)".to_string(),
+                                    args: args_compile,
+                                    status: if obs_compile_norm.ok { "ok".to_string() } else { "failed".to_string() },
+                                    payload: None,
+                                    observation: obs_compile_norm,
                                     ts: chrono::Utc::now().to_rfc3339(),
                                     agent: "agent".to_string(),
                                 },
@@ -2633,6 +3067,24 @@ impl DataEngineerSuite {
                         } else {
                             emit_trace(&actx, "targeted compile ok");
                             emit_trace(&actx, "targeted build started");
+                            let args_build =
+                                serde_json::json!({"build": true, "run": false, "select": select_terms.clone(), "targeted": true, "targeted_step": "build"});
+                            let tool_id_build = uuid::Uuid::new_v4().to_string();
+                            let _ = thread_store
+                                .append_step(
+                                    thread_id,
+                                    react_core::session::ThreadStep::ToolStart {
+                                        tool_id: tool_id_build.clone(),
+                                        name: "dbt_validate".to_string(),
+                                        clean_name: "Validate DBT (build)".to_string(),
+                                        args: args_build.clone(),
+                                        status: "running".to_string(),
+                                        payload: None,
+                                        ts: chrono::Utc::now().to_rfc3339(),
+                                        agent: "agent".to_string(),
+                                    },
+                                )
+                                .await;
                             let obs_build = control_flow::DeterministicDbtValidateTargetedOnce::run(
                                 &actx,
                                 &select_terms,
@@ -2640,13 +3092,18 @@ impl DataEngineerSuite {
                                 false,
                             )
                             .await?;
+                            let obs_build_norm = react_core::session::ToolObservation::normalize(obs_build.clone());
                             let _ = thread_store
                                 .append_step(
                                     thread_id,
-                                    react_core::session::ThreadStep::Tool {
+                                    react_core::session::ThreadStep::ToolEnd {
+                                        tool_id: tool_id_build,
                                         name: "dbt_validate".to_string(),
-                                        args: serde_json::json!({"build": true, "run": false, "select": select_terms.clone(), "targeted": true, "targeted_step": "build"}),
-                                        observation: react_core::session::ToolObservation::normalize(obs_build.clone()),
+                                        clean_name: "Validate DBT (build)".to_string(),
+                                        args: args_build,
+                                        status: if obs_build_norm.ok { "ok".to_string() } else { "failed".to_string() },
+                                        payload: None,
+                                        observation: obs_build_norm,
                                         ts: chrono::Utc::now().to_rfc3339(),
                                         agent: "agent".to_string(),
                                     },
@@ -2664,14 +3121,36 @@ impl DataEngineerSuite {
                             } else {
                                 emit_trace(&actx, "targeted build ok");
                                 // Deterministic full validate (NO repair loop / no mutation).
-                                obs = control_flow::DeterministicDbtValidateOnce::run(&actx, true, false, None).await?;
+                                let args_full = serde_json::json!({"build": true});
+                                let tool_id_full = uuid::Uuid::new_v4().to_string();
                                 let _ = thread_store
                                     .append_step(
                                         thread_id,
-                                        react_core::session::ThreadStep::Tool {
+                                        react_core::session::ThreadStep::ToolStart {
+                                            tool_id: tool_id_full.clone(),
                                             name: "dbt_validate".to_string(),
-                                            args: serde_json::json!({"build": true}),
-                                            observation: react_core::session::ToolObservation::normalize(obs.clone()),
+                                            clean_name: "Validate DBT".to_string(),
+                                            args: args_full.clone(),
+                                            status: "running".to_string(),
+                                            payload: None,
+                                            ts: chrono::Utc::now().to_rfc3339(),
+                                            agent: "agent".to_string(),
+                                        },
+                                    )
+                                    .await;
+                                obs = control_flow::DeterministicDbtValidateOnce::run(&actx, true, false, None).await?;
+                                let obs_norm = react_core::session::ToolObservation::normalize(obs.clone());
+                                let _ = thread_store
+                                    .append_step(
+                                        thread_id,
+                                        react_core::session::ThreadStep::ToolEnd {
+                                            tool_id: tool_id_full,
+                                            name: "dbt_validate".to_string(),
+                                            clean_name: "Validate DBT".to_string(),
+                                            args: args_full,
+                                            status: if obs_norm.ok { "ok".to_string() } else { "failed".to_string() },
+                                            payload: None,
+                                            observation: obs_norm,
                                             ts: chrono::Utc::now().to_rfc3339(),
                                             agent: "agent".to_string(),
                                         },
@@ -2681,14 +3160,36 @@ impl DataEngineerSuite {
                         }
                     } else {
                         // Deterministic full validate (NO repair loop / no mutation).
-                        obs = control_flow::DeterministicDbtValidateOnce::run(&actx, true, false, None).await?;
+                        let args_full = serde_json::json!({"build": true});
+                        let tool_id_full = uuid::Uuid::new_v4().to_string();
                         let _ = thread_store
                             .append_step(
                                 thread_id,
-                                react_core::session::ThreadStep::Tool {
+                                react_core::session::ThreadStep::ToolStart {
+                                    tool_id: tool_id_full.clone(),
                                     name: "dbt_validate".to_string(),
-                                    args: serde_json::json!({"build": true}),
-                                    observation: react_core::session::ToolObservation::normalize(obs.clone()),
+                                    clean_name: "Validate DBT".to_string(),
+                                    args: args_full.clone(),
+                                    status: "running".to_string(),
+                                    payload: None,
+                                    ts: chrono::Utc::now().to_rfc3339(),
+                                    agent: "agent".to_string(),
+                                },
+                            )
+                            .await;
+                        obs = control_flow::DeterministicDbtValidateOnce::run(&actx, true, false, None).await?;
+                        let obs_norm = react_core::session::ToolObservation::normalize(obs.clone());
+                        let _ = thread_store
+                            .append_step(
+                                thread_id,
+                                react_core::session::ThreadStep::ToolEnd {
+                                    tool_id: tool_id_full,
+                                    name: "dbt_validate".to_string(),
+                                    clean_name: "Validate DBT".to_string(),
+                                    args: args_full,
+                                    status: if obs_norm.ok { "ok".to_string() } else { "failed".to_string() },
+                                    payload: None,
+                                    observation: obs_norm,
                                     ts: chrono::Utc::now().to_rfc3339(),
                                     agent: "agent".to_string(),
                                 },
@@ -3085,16 +3586,16 @@ impl DataEngineerSuite {
                     // If the most recent persisted user action is "reject", stop and ask for guidance.
                     if let Some(ref l) = log {
                         if let Some(last_user) = l.steps.iter().rev().find(|s| matches!(s, react_core::session::ThreadStep::User { .. })) {
-                            let t = match last_user {
-                                react_core::session::ThreadStep::User { text, .. } => text.trim().to_lowercase(),
-                                _ => String::new(),
+                            let decision = match last_user {
+                                react_core::session::ThreadStep::User { text, .. } => Self::parse_user_decision(text),
+                                _ => None,
                             };
-                            if t == "reject" {
+                            if decision == Some(UserDecision::Reject) {
                                 return Ok(vec![FlowFrame::AwaitUser {
                                     prompt: "Publish was rejected. Provide guidance (e.g. restrict dataset_ids, change materializations, or adjust models) and then re-run agent.".to_string(),
                                 }]);
                             }
-                            if t == "approve" {
+                            if decision == Some(UserDecision::Approve) {
                                 control_flow::append_phase_with_reason(
                                     &thread_store,
                                     thread_id,
@@ -3165,11 +3666,11 @@ impl DataEngineerSuite {
                     // Only proceed if the last user action is "approve".
                     if let Some(ref l) = log {
                         if let Some(last_user) = l.steps.iter().rev().find(|s| matches!(s, react_core::session::ThreadStep::User { .. })) {
-                            let t = match last_user {
-                                react_core::session::ThreadStep::User { text, .. } => text.trim().to_lowercase(),
-                                _ => String::new(),
+                            let decision = match last_user {
+                                react_core::session::ThreadStep::User { text, .. } => Self::parse_user_decision(text),
+                                _ => None,
                             };
-                            if t != "approve" {
+                            if decision != Some(UserDecision::Approve) {
                                 return Ok(vec![FlowFrame::AwaitApproval {
                                     prompt: "Publish requires explicit approval. Click Approve to continue.".to_string(),
                                 }]);
@@ -3759,6 +4260,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_user_decision_accepts_loose_synonyms() {
+        use super::DataEngineerSuite;
+        use super::UserDecision;
+
+        for s in ["approve", "Approved", "approve!", "yes", "Y", "ok", "OK", "okay", "continue"] {
+            assert_eq!(
+                DataEngineerSuite::parse_user_decision(s),
+                Some(UserDecision::Approve),
+                "expected approve for input={}",
+                s
+            );
+        }
+        for s in ["reject", "Rejected", "reject.", "no", "N"] {
+            assert_eq!(
+                DataEngineerSuite::parse_user_decision(s),
+                Some(UserDecision::Reject),
+                "expected reject for input={}",
+                s
+            );
+        }
+        for s in ["", "   ", "maybe", "later", "continue?maybe"] {
+            assert_eq!(
+                DataEngineerSuite::parse_user_decision(s),
+                None,
+                "expected none for input={}",
+                s
+            );
+        }
+    }
+
+    #[test]
     fn review_question_includes_prior_review_and_mutation_diff_when_available() {
         use crate::data_engineer::control_flow::Phase;
         use react_core::session::{ThreadLog, ThreadStep};
@@ -3781,9 +4313,13 @@ mod tests {
         let log = ThreadLog {
             steps: vec![
                 prior_review_transition,
-                ThreadStep::Tool {
+                ThreadStep::ToolEnd {
+                    tool_id: "t1".to_string(),
                     name: "staging_model".to_string(),
+                    clean_name: "Staging model".to_string(),
                     args: serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
+                    status: "ok".to_string(),
+                    payload: None,
                     observation: react_core::session::ToolObservation::normalize(serde_json::json!({"ok": true, "written_keys":["k1"]})),
                     ts: "t".to_string(),
                     agent: "agent".to_string(),
@@ -3822,9 +4358,13 @@ mod tests {
         let _ = store
             .append_step(
                 tid,
-                ThreadStep::Tool {
+                ThreadStep::ToolEnd {
+                    tool_id: "t2".to_string(),
                     name: "dbt_validate".to_string(),
+                    clean_name: "Validate DBT".to_string(),
                     args: serde_json::json!({"build": true}),
+                    status: "failed".to_string(),
+                    payload: None,
                     observation: react_core::session::ToolObservation::normalize(serde_json::json!({
                         "ok": false,
                         "compile_ok": true,
@@ -3850,9 +4390,13 @@ mod tests {
         let _ = store
             .append_step(
                 tid,
-                ThreadStep::Tool {
+                ThreadStep::ToolEnd {
+                    tool_id: "t3".to_string(),
                     name: "dbt_files".to_string(),
+                    clean_name: "Patch files".to_string(),
                     args: serde_json::json!({"op": "patch"}),
+                    status: "ok".to_string(),
+                    payload: None,
                     observation: react_core::session::ToolObservation::normalize(serde_json::json!({
                         "ok": true,
                         "mutated": false,

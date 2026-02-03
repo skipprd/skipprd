@@ -9,7 +9,16 @@ use crate::ws::api_gen::src::models as api;
 use std::collections::{HashMap, VecDeque};
 use chrono::Utc;
 use crate::models as m;
-use react_core::session::{Observation, ThreadStore, ThreadLog, ThreadStep, ToolObservation};
+use react_core::session::{
+	Observation,
+	ThreadStore,
+	ThreadLog,
+	ThreadStep,
+	ToolObservation,
+	ThreadState as CoreThreadState,
+	ThreadItemState as CoreThreadItemState,
+	ThreadItemError as CoreThreadItemError,
+};
 use react_suites::registry::SuiteRegistry;
 use react_suites::SuiteCtx;
 use react_suites::data_engineer::plan as de_plan;
@@ -87,6 +96,232 @@ fn ws_final_result_from_typed_final(kind: &str, payload: &Value, display: &Optio
     }
 }
 
+fn ws_thread_state_snapshot_from_core(st: &CoreThreadState, reg: &SuiteRegistry) -> api::ThreadStateSnapshot {
+	fn elapsed_ms_since(start_ts: &str) -> Option<i64> {
+		let start = chrono::DateTime::parse_from_rfc3339(start_ts).ok()?;
+		let now = chrono::Utc::now();
+		let delta = now.signed_duration_since(start.with_timezone(&chrono::Utc));
+		let ms = delta.num_milliseconds();
+		Some(ms.max(0))
+	}
+
+    let mut items: Vec<api::ThreadStateItem> = Vec::new();
+    for (item_id, it) in st.items.iter() {
+        let mut wi = api::ThreadStateItem::new(item_id.clone(), it.kind.clone(), it.status.clone());
+        wi.started_at = it.started_at.clone();
+        wi.finished_at = it.finished_at.clone();
+        wi.runtime_ms = it.runtime_ms.map(|n| n as i64);
+		// Render-time runtime for in-flight items: now - started_at.
+		if wi.runtime_ms.is_none() {
+			if let (Some(ref started), None) = (&wi.started_at, &wi.finished_at) {
+				wi.runtime_ms = elapsed_ms_since(started);
+			}
+		}
+		wi.outputs = it.outputs.as_ref().and_then(|v| v.as_object()).map(|obj| {
+			let mut out: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+			for (k, vv) in obj.iter() {
+				out.insert(k.clone(), vv.clone());
+			}
+			out
+		});
+        if let Some(ref e) = it.last_error {
+            let mut we = api::ThreadStateItemError::new(e.summary.clone());
+            we.tool_step_idx = e.tool_step_idx.map(|n| n as i32);
+            we.step_ts = e.step_ts.clone();
+            wi.last_error = Some(we);
+        }
+        items.push(wi);
+    }
+    items.sort_by(|a, b| a.item_id.cmp(&b.item_id));
+
+	// Render-time total runtime: persisted completed-phase total + current phase elapsed (if any).
+	let mut total_runtime_ms: i64 = st.total_runtime_ms as i64;
+	if let Some(ref cur) = st.current_phase {
+		let cur_id = format!("phase:{}", cur);
+		if let Some(cur_item) = st.items.get(&cur_id) {
+			if cur_item.finished_at.is_none() {
+				if let Some(ref started) = cur_item.started_at {
+					total_runtime_ms += elapsed_ms_since(started).unwrap_or(0);
+				}
+			}
+		}
+	}
+
+	// Suite-owned phase ordering + completed phases derived from current phase.
+	let suite_id = st.suite_id.as_deref().unwrap_or("");
+	let agent_type = st.agent_type.as_deref().unwrap_or("ask");
+	let phases: Vec<String> = reg
+		.get(suite_id)
+		.map(|s| s.phase_order(agent_type))
+		.unwrap_or_default();
+	let current_phase = st.current_phase.clone().unwrap_or_else(|| "preflight".to_string());
+	let completed_phases = derive_completed_phases(&phases, &current_phase);
+
+	// Durable, bounded timeline events (post reconnect tool timeline).
+	let events: Vec<api::ThreadEvent> = st
+		.events
+		.iter()
+		.map(|ev| {
+			let kind = match ev.event_kind.as_str() {
+				"tool_start" => api::ThreadEventKind::ToolStart,
+				"tool_end" => api::ThreadEventKind::ToolEnd,
+				"llm_start" => api::ThreadEventKind::LlmStart,
+				"llm_end" => api::ThreadEventKind::LlmEnd,
+				_ => api::ThreadEventKind::ToolEnd,
+			};
+			let mut out = api::ThreadEvent::new(ev.step_idx as i32, kind, ev.ts.clone());
+			out.tool_id = ev.tool_id.clone();
+			out.name = ev.name.clone();
+			out.clean_name = ev.clean_name.clone();
+			out.runtime_ms = ev.runtime_ms.map(|n| n as i64);
+			out.error = ev.error.clone();
+			out.call_id = ev.call_id.map(|n| n as i32);
+			out.model = ev.model.clone();
+			out.phase = ev.phase.clone();
+			out.status = ev.status.as_deref().map(|s| match s {
+				"running" => api::ToolEventStatus::Running,
+				"ok" => api::ToolEventStatus::Ok,
+				"failed" => api::ToolEventStatus::Failed,
+				_ => api::ToolEventStatus::Running,
+			});
+			out.payload = ev.payload.as_ref().and_then(|v| v.as_object()).map(|obj| {
+				let mut hm: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+				for (k, vv) in obj.iter() {
+					hm.insert(k.clone(), vv.clone());
+				}
+				hm
+			});
+			out
+		})
+		.collect();
+
+    let mut snap = api::ThreadStateSnapshot::new(
+        st.thread_state_schema_version as i32,
+        st.thread_id.clone(),
+        st.last_materialized_step_count as i32,
+		total_runtime_ms.max(0),
+		phases,
+		completed_phases,
+		events,
+        items,
+    );
+    snap.suite_id = st.suite_id.clone();
+    snap.agent_type = st.agent_type.clone();
+    snap.current_phase = st.current_phase.clone();
+    if !st.plan_summaries.is_empty() {
+        let mut hm: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+        for (k, v) in st.plan_summaries.iter() {
+            hm.insert(k.clone(), v.clone());
+        }
+        snap.plan_summaries = Some(hm);
+    }
+    snap
+}
+
+async fn upsert_thread_state_from_plans(
+	store: &ThreadStore,
+	thread_id: &str,
+	cleanse: &Option<api::PlanSnapshot>,
+	model: &Option<api::PlanSnapshot>,
+) {
+	let mut st = match store.get_thread_state(thread_id).await {
+		Ok(s) => s,
+		Err(_) => return,
+	};
+
+	fn summarize_plan(p: &api::PlanSnapshot) -> serde_json::Value {
+		let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+		for t in p.tasks.iter() {
+			let st = match t {
+				api::PlanTask::Cleanse(c) => c.status,
+				api::PlanTask::Model(m) => m.status,
+			};
+			let k = format!("{:?}", st).to_lowercase();
+			*counts.entry(k).or_insert(0) += 1;
+		}
+		serde_json::json!({
+			"planKey": p.plan_key,
+			"status": format!("{:?}", p.status).to_lowercase(),
+			"taskCounts": counts,
+		})
+	}
+
+	fn map_task_status_to_item_status(s: api::PlanTaskStatus) -> String {
+		match s {
+			api::PlanTaskStatus::Pending => "queued",
+			api::PlanTaskStatus::InProgress => "running",
+			api::PlanTaskStatus::Done => "ok",
+			api::PlanTaskStatus::Blocked => "blocked",
+			api::PlanTaskStatus::NeedsUpdate => "blocked",
+		}
+		.to_string()
+	}
+
+	fn task_notes_and_error(notes: &[String]) -> Option<String> {
+		// Prefer most recent note that looks like an error.
+		for n in notes.iter().rev() {
+			let l = n.to_lowercase();
+			if l.contains("failed") || l.contains("error") || l.contains("exception") {
+				if !n.trim().is_empty() {
+					return Some(n.clone());
+				}
+			}
+		}
+		None
+	}
+
+	for (kind, plan_opt) in [("cleanse", cleanse), ("model", model)] {
+		if let Some(p) = plan_opt {
+			st.plan_summaries.insert(kind.to_string(), summarize_plan(p));
+
+			for t in p.tasks.iter() {
+				let (task_id, status, notes, outputs) = match t {
+					api::PlanTask::Cleanse(c) => (
+						c.task_id.clone(),
+						c.status,
+						c.notes.clone().unwrap_or_default(),
+						serde_json::json!({
+							"expected_model_path": c.expected_model_path,
+						}),
+					),
+					api::PlanTask::Model(mo) => (
+						mo.task_id.clone(),
+						mo.status,
+						mo.notes.clone().unwrap_or_default(),
+						serde_json::json!({
+							"expected_model_path": mo.expected_model_path,
+							"folder": mo.folder,
+							"inputs": mo.inputs,
+						}),
+					),
+				};
+				let item_id = format!("task:data_engineer:{}:{}", p.plan_key, task_id);
+				let ent = st.items.entry(item_id).or_insert_with(|| CoreThreadItemState {
+					kind: "task".to_string(),
+					status: "queued".to_string(),
+					started_at: None,
+					finished_at: None,
+					runtime_ms: None,
+					last_error: None,
+					outputs: None,
+				});
+				ent.kind = "task".to_string();
+				ent.status = map_task_status_to_item_status(status);
+				ent.outputs = Some(outputs);
+				if let Some(err) = task_notes_and_error(&notes) {
+					ent.last_error = Some(CoreThreadItemError {
+						summary: err,
+						tool_step_idx: None,
+						step_ts: None,
+					});
+				}
+			}
+		}
+	}
+
+	let _ = store.put_thread_state(thread_id, &st).await;
+}
+
 fn env_bool(key: &str, default: bool) -> bool {
     let dv = if default { "1" } else { "0" };
     match std::env::var(key).unwrap_or_else(|_| dv.to_string()).trim() {
@@ -118,18 +353,13 @@ fn ws_log_in(txt: &str) {
 }
 
 fn ws_log_out(txt: &str) {
-    // Full WS payloads can be enormous (plan_update, trace, etc). Default to compact logs.
+    // Full WS payloads can be enormous (thread_state, plans). Default to compact logs.
     if env_bool("WS_LOG_BODIES", false) {
         tracing::info!("WS -> {}", txt);
         return;
     }
     if let Ok(v) = serde_json::from_str::<Value>(txt) {
         let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("unknown");
-        // Suppress plan_update at INFO by default (it can be huge and frequent).
-        // Trace is intentionally allowed (compact) unless WS_LOG_BODIES is enabled.
-        if typ == "plan_update" && !env_bool("WS_LOG_PLAN_UPDATES", false) {
-            return;
-        }
         let seq = v.get("seq").and_then(|x| x.as_i64());
         let cid = v.get("cid").and_then(|x| x.as_str());
         let for_cid = v.get("for_cid").and_then(|x| x.as_str());
@@ -328,8 +558,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 		"new" => {
 			let req: api::NewRequest = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
 			let cid = req.cid.clone();
-			let question = req.question.clone();
-			if question.trim().is_empty() { return Err("question required".into()); }
+			let question = req.question.clone().unwrap_or_default();
 			let thread_id = Uuid::new_v4().to_string();
 			let suite_id = req.suite_id.clone();
 			let agent = normalize_agent_new(req.agent_type)?;
@@ -363,6 +592,32 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 					)
 					.await;
 			}
+			// Emit a real preflight phase step so UIs get an event during "preflight" (not just a default label).
+			{
+				let store = state.thread_store();
+				if let Ok(Some((step_idx, ts))) =
+					ensure_preflight_phase_step(&store, &thread_id, &agent, Some(&suite_id)).await
+				{
+					let runs = vec![api::PhaseRun::new(ts.clone())];
+					let mut ev = api::PhaseResponse::new(
+						1,
+						api::phase_response::Type::Phase,
+						now_iso(),
+						state.next_seq(),
+						thread_id.clone(),
+						step_idx as i32,
+						"preflight".to_string(),
+						ts,
+						runs,
+						0,
+					);
+					ev.for_cid = Some(cid.clone());
+					ev.reason_code = Some("preflight_start".to_string());
+					let s = serde_json::to_string(&api::ServerMessage::Phase(ev)).unwrap();
+					state.buffer_last(&s);
+					out.push(s);
+				}
+			}
 			// ok
 			let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 			ok.cid = Some(cid.clone());
@@ -372,35 +627,27 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let ta_s = serde_json::to_string(&ta).unwrap();
 			state.buffer_last(&ta_s);
 			out.push(ta_s);
-			// processing (reasoning)
-			let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
-			pr.for_cid = Some(cid.clone());
-			pr.stage = Some(m::processing_response::Stage::Queued);
-			pr.progress = Some(0.0);
-			let prm = api::ServerMessage::Processing(pr);
-			let pr_s = serde_json::to_string(&prm).unwrap();
-			state.buffer_last(&pr_s);
-			out.push(pr_s);
-			// record initial user question in thread history
-			{
-				let store = state.thread_store();
-				let _ = store
-					.append_step(
-						&thread_id,
-						ThreadStep::User {
-							text: question.clone(),
-							observation: Observation::ok(),
-							ts: chrono::Utc::now().to_rfc3339(),
-							agent: agent.clone(),
-						},
-					)
-					.await;
-				let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
-			}
-			// run agent
-			let frames = run_agent_and_frames(&thread_id, &question, &suite_id, &agent, &state.reg, &state.suite_ctx).await?;
-			for f in frames {
-				match f {
+			// If a question was provided, record it and run the suite. Otherwise, this is "create thread".
+			if !question.trim().is_empty() {
+				{
+					let store = state.thread_store();
+					let _ = store
+						.append_step(
+							&thread_id,
+							ThreadStep::User {
+								text: question.clone(),
+								observation: Observation::ok(),
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: agent.clone(),
+							},
+						)
+						.await;
+					let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
+				}
+				// run agent
+				let frames = run_agent_and_frames(&thread_id, &question, &suite_id, &agent, &state.reg, &state.suite_ctx).await?;
+				for f in frames {
+					match f {
 					AgentFrame::Review { text, meta } => {
 						let tseq = state.next_thread_seq(&thread_id);
 						let mut rr = api::ReviewResponse::new(
@@ -455,14 +702,22 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 							let title = synthesize_title(&state.suite_ctx.llm, &question, &display_text).await;
 							let _ = store.finalize_title(&thread_id, &title).await;
 						}
-						// optional token streaming (simple chunking)
-						for t in chunk_text(&display_text, 24) {
-							let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.clone(), t);
-							tk.for_cid = Some(cid.clone());
-							let m = api::ServerMessage::Token(tk);
-							let s = serde_json::to_string(&m).unwrap();
-							state.buffer_last(&s);
-							out.push(s);
+						// Persist final so reconnect/history can observe completion.
+						{
+							let store = state.thread_store();
+							append_step_if_new(
+								&store,
+								&thread_id,
+								ThreadStep::Final {
+									kind: kind.clone(),
+									payload: payload.clone(),
+									display: display.clone(),
+									observation: Observation::ok(),
+									ts: chrono::Utc::now().to_rfc3339(),
+									agent: agent.clone(),
+								},
+							)
+							.await;
 						}
 						let tseq = state.next_thread_seq(&thread_id);
 						let final_result = ws_final_result_from_typed_final(&kind, &payload, &display);
@@ -497,17 +752,17 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 						// persist gate in thread
 						{
 							let store = state.thread_store();
-							let _ = store
-								.append_step(
-									&thread_id,
-									ThreadStep::AskUser {
-										prompt,
-										observation: Observation::ok(),
-										ts: chrono::Utc::now().to_rfc3339(),
-										agent: agent.clone(),
-									},
-								)
-								.await;
+							append_step_if_new(
+								&store,
+								&thread_id,
+								ThreadStep::AskUser {
+									prompt,
+									observation: Observation::ok(),
+									ts: chrono::Utc::now().to_rfc3339(),
+									agent: agent.clone(),
+								},
+							)
+							.await;
 						}
 					}
 					AgentFrame::AwaitApproval { prompt } => {
@@ -519,13 +774,29 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 							state.next_seq(),
 							thread_id.clone(),
 							tseq,
-							prompt,
+							prompt.clone(),
 						));
 						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
+						// Persist gate so reconnect/history does not stall.
+						{
+							let store = state.thread_store();
+							append_step_if_new(
+								&store,
+								&thread_id,
+								ThreadStep::AskApproval {
+									prompt,
+									observation: Observation::ok(),
+									ts: chrono::Utc::now().to_rfc3339(),
+									agent: agent.clone(),
+								},
+							)
+							.await;
+						}
 					}
 				}
+			}
 			}
 		}
 		"open" => {
@@ -581,18 +852,35 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 			ok.cid = Some(cid.clone());
 			out.push(serde_json::to_string(&api::ServerMessage::Ok(ok)).unwrap());
-			// processing (retrieving)
-			let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
-			pr.for_cid = Some(cid.clone());
-			pr.stage = Some(m::processing_response::Stage::Queued);
-			pr.progress = Some(0.0);
-			let prm = api::ServerMessage::Processing(pr);
-			let pr_s = serde_json::to_string(&prm).unwrap();
-			state.buffer_last(&pr_s);
-			out.push(pr_s);
-			// run agent
+			// Ensure preflight is visible as a first-class phase event before we do any work.
 			let suite_id = state.current_suite.get(&thread_id).cloned().unwrap_or_else(|| requested_suite.clone());
 			let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| requested_agent.clone());
+			{
+				let store = state.thread_store();
+				if let Ok(Some((step_idx, ts))) =
+					ensure_preflight_phase_step(&store, &thread_id, &agent, Some(&suite_id)).await
+				{
+					let runs = vec![api::PhaseRun::new(ts.clone())];
+					let mut ev = api::PhaseResponse::new(
+						1,
+						api::phase_response::Type::Phase,
+						now_iso(),
+						state.next_seq(),
+						thread_id.clone(),
+						step_idx as i32,
+						"preflight".to_string(),
+						ts,
+						runs,
+						0,
+					);
+					ev.for_cid = Some(cid.clone());
+					ev.reason_code = Some("preflight_start".to_string());
+					let s = serde_json::to_string(&api::ServerMessage::Phase(ev)).unwrap();
+					state.buffer_last(&s);
+					out.push(s);
+				}
+			}
+			// run agent
 			let frames = run_agent_and_frames(&thread_id, &question, &suite_id, &agent, &state.reg, &state.suite_ctx).await?;
 			for f in frames {
 				match f {
@@ -644,15 +932,6 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 					}
 					AgentFrame::Final { kind, payload, display } => {
 						let display_text = display.clone().unwrap_or_else(|| final_display_text_from_payload(&payload));
-						// optional token streaming (simple chunking)
-						for t in chunk_text(&display_text, 24) {
-							let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.clone(), t);
-							tk.for_cid = Some(cid.clone());
-							let m = api::ServerMessage::Token(tk);
-							let s = serde_json::to_string(&m).unwrap();
-							state.buffer_last(&s);
-							out.push(s);
-						}
 						let tseq = state.next_thread_seq(&thread_id);
 						let final_result = ws_final_result_from_typed_final(&kind, &payload, &display);
 						let resp = api::ServerMessage::Final(api::FinalResponse::new(
@@ -766,14 +1045,6 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 				.get(&thread_id)
 				.cloned()
 				.ok_or_else(|| "agent_type missing for thread".to_string())?;
-			// processing
-			let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
-			pr.stage = Some(m::processing_response::Stage::Queued);
-			pr.progress = Some(0.0);
-			let prm = api::ServerMessage::Processing(pr);
-			let pr_s = serde_json::to_string(&prm).unwrap();
-			state.buffer_last(&pr_s);
-			out.push(pr_s);
 			// run agent for this thread using the user text
 			tracing::info!("user auto-resume (non-streaming fallback): thread_id={} agent={}", thread_id, agent);
 			let frames = run_user_and_frames(&thread_id, &text, &suite_id, &agent, &state.reg, &state.suite_ctx).await?;
@@ -832,14 +1103,6 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 					}
 					AgentFrame::Final { kind, payload, display } => {
 						let display_text = display.clone().unwrap_or_else(|| final_display_text_from_payload(&payload));
-						// optional token streaming (simple chunking); no cid here in generic handler
-						for t in chunk_text(&display_text, 24) {
-							let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.clone(), t);
-							let m = api::ServerMessage::Token(tk);
-							let s = serde_json::to_string(&m).unwrap();
-							state.buffer_last(&s);
-							out.push(s);
-						}
 						let tseq = state.next_thread_seq(&thread_id);
 						let final_result = ws_final_result_from_typed_final(&kind, &payload, &display);
 						let resp = api::ServerMessage::Final(api::FinalResponse::new(
@@ -886,16 +1149,6 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 				}
 			}
 		}
-		"resume" => {
-			let req: api::ResumeRequest = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
-			let after = req.after_seq;
-			// Replay frames with seq > after
-			for (seq, s) in state.sent.iter() {
-				if *seq > after {
-					out.push(s.clone());
-				}
-			}
-		}
 		"history" => {
 			let req: api::HistoryRequest = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
 			let thread_id = req.thread_id.clone();
@@ -930,42 +1183,48 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			state.buffer_last(&s);
 			out.push(s);
 		}
-		"plan" => {
-			let req: api::PlanRequest = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+		"plans" => {
+			let req: api::PlansRequest = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
 			let thread_id = req.thread_id.clone();
 			if thread_id.is_empty() { return Err("thread_id required".into()); }
 			if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
 
-			let snap = load_active_plan_snapshot(&state.suite_ctx, &thread_id).await;
-			match snap {
-				Some(plan) => {
-					let mut resp = api::PlanResponse::new(
-						1,
-						m::plan_response::Type::Plan,
-						now_iso(),
-						state.next_seq(),
-						thread_id.clone(),
-						plan,
-					);
-					resp.for_cid = Some(req.cid.clone());
-					let s = serde_json::to_string(&resp).unwrap();
-					state.buffer_last(&s);
-					out.push(s);
-				}
-				None => {
-					let mut err = api::ErrorResponse::new(
-						1,
-						m::error_response::Type::Error,
-						now_iso(),
-						"no active data_engineer plan for thread".to_string(),
-					);
-					err.code = Some("not_found".to_string());
-					err.cid = Some(req.cid.clone());
-					// Hint for clients: this is not transient; avoid tight retry loops.
-					err.retry_after_ms = Some(60_000);
-					out.push(serde_json::to_string(&err).unwrap());
-				}
-			}
+			let (cleanse, model) = load_latest_plans(&state.suite_ctx, &thread_id).await;
+			let mut resp = api::PlansResponse::new(
+				1,
+				m::plans_response::Type::Plans,
+				now_iso(),
+				state.next_seq(),
+				thread_id.clone(),
+			);
+			resp.for_cid = Some(req.cid.clone());
+			resp.cleanse = cleanse;
+			resp.model = model;
+			let s = serde_json::to_string(&resp).unwrap();
+			state.buffer_last(&s);
+			out.push(s);
+		}
+		"thread_state" => {
+			let req: api::ThreadStateRequest = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+			let thread_id = req.thread_id.clone();
+			if thread_id.is_empty() { return Err("thread_id required".into()); }
+			if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
+
+			let store = state.thread_store();
+			let st = store.get_thread_state(&thread_id).await?;
+			let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+			let mut resp = api::ThreadStateResponse::new(
+				1,
+				m::thread_state_response::Type::ThreadState,
+				now_iso(),
+				state.next_seq(),
+				thread_id.clone(),
+				snap,
+			);
+			resp.for_cid = Some(req.cid.clone());
+			let s = serde_json::to_string(&resp).unwrap();
+			state.buffer_last(&s);
+			out.push(s);
 		}
 		"delete" => {
 			let req: api::DeleteRequest = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
@@ -998,6 +1257,28 @@ fn now_iso() -> String {
 	Utc::now().to_rfc3339()
 }
 
+async fn append_step_if_new(store: &ThreadStore, thread_id: &str, step: ThreadStep) {
+	// Best-effort idempotency: if the last persisted step is equivalent, skip.
+	let is_dup = match store.get(thread_id).await.ok().and_then(|l| l.steps.last().cloned()) {
+		Some(ThreadStep::AskUser { prompt: p1, .. }) => {
+			matches!(&step, ThreadStep::AskUser { prompt: p2, .. } if p1 == *p2)
+		}
+		Some(ThreadStep::AskApproval { prompt: p1, .. }) => {
+			matches!(&step, ThreadStep::AskApproval { prompt: p2, .. } if p1 == *p2)
+		}
+		Some(ThreadStep::Final { kind: k1, payload: pl1, display: d1, .. }) => matches!(
+			&step,
+			ThreadStep::Final { kind: k2, payload: pl2, display: d2, .. }
+				if k1 == *k2 && pl1 == *pl2 && d1 == *d2
+		),
+		_ => false,
+	};
+	if is_dup {
+		return;
+	}
+	let _ = store.append_step(thread_id, step).await;
+}
+
 fn env_truthy(key: &str) -> bool {
 	std::env::var(key)
 		.ok()
@@ -1021,7 +1302,10 @@ fn summarize_step(step: &ThreadStep) -> String {
 		ThreadStep::SwitchSuite { agent, .. }
 		| ThreadStep::SwitchAgent { agent, .. }
 		| ThreadStep::User { agent, .. }
-		| ThreadStep::Tool { agent, .. }
+		| ThreadStep::ToolStart { agent, .. }
+		| ThreadStep::ToolEnd { agent, .. }
+		| ThreadStep::LlmStart { agent, .. }
+		| ThreadStep::LlmEnd { agent, .. }
 		| ThreadStep::LlmCall { agent, .. }
 		| ThreadStep::Phase { agent, .. }
 		| ThreadStep::GuardBlock { agent, .. }
@@ -1037,6 +1321,92 @@ fn summarize_step(step: &ThreadStep) -> String {
 	format!("ts={} agent={} step={}", step.ts(), agent, raw)
 }
 
+async fn ensure_preflight_phase_step(
+	store: &ThreadStore,
+	thread_id: &str,
+	agent: &str,
+	suite_id: Option<&str>,
+) -> Result<Option<(usize, String)>, String> {
+	let log = store.get(thread_id).await?;
+	let already_has_phase = log.steps.iter().any(|s| matches!(s, ThreadStep::Phase { .. }));
+	if already_has_phase {
+		return Ok(None);
+	}
+	let step_idx = log.steps.len();
+	let ts = chrono::Utc::now().to_rfc3339();
+	let mut detail = serde_json::Map::new();
+	detail.insert("phase".to_string(), serde_json::json!("preflight"));
+	if let Some(s) = suite_id {
+		if !s.trim().is_empty() {
+			detail.insert("suite_id".to_string(), serde_json::json!(s));
+		}
+	}
+	if !agent.trim().is_empty() {
+		detail.insert("agent".to_string(), serde_json::json!(agent));
+	}
+	let _ = store
+		.append_step(
+			thread_id,
+			ThreadStep::Phase {
+				phase: "preflight".to_string(),
+				from_phase: None,
+				reason_code: Some("preflight_start".to_string()),
+				reason_detail: Some(serde_json::Value::Object(detail)),
+				observation: Observation::ok(),
+				ts: ts.clone(),
+				agent: agent.to_string(),
+			},
+		)
+		.await;
+	Ok(Some((step_idx, ts)))
+}
+
+fn duration_ms(start_ts: &str, end_ts: &str) -> Option<i64> {
+	let start = chrono::DateTime::parse_from_rfc3339(start_ts).ok()?;
+	let end = chrono::DateTime::parse_from_rfc3339(end_ts).ok()?;
+	let delta = end.signed_duration_since(start);
+	Some(delta.num_milliseconds().max(0))
+}
+
+fn phase_runs_from_steps(steps: &[ThreadStep]) -> std::collections::HashMap<String, Vec<api::PhaseRun>> {
+	let mut runs: std::collections::HashMap<String, Vec<api::PhaseRun>> = std::collections::HashMap::new();
+	for step in steps.iter() {
+		let ThreadStep::Phase { phase, from_phase, ts, .. } = step else { continue };
+		let ts = ts.clone();
+
+		// Close the phase we are leaving (if we have an open run recorded).
+		if let Some(prev) = from_phase.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+			if let Some(v) = runs.get_mut(prev) {
+				if let Some(last) = v.last_mut() {
+					if last.ended_at.is_none() {
+						last.ended_at = Some(ts.clone());
+						last.runtime_ms = duration_ms(&last.started_at, &ts);
+					}
+				}
+			}
+		}
+
+		let ph = phase.trim();
+		if ph.is_empty() {
+			continue;
+		}
+		let v = runs.entry(ph.to_string()).or_default();
+		// Ensure at most one in-flight run per phase even if logs are imperfect.
+		if let Some(last) = v.last_mut() {
+			if last.ended_at.is_none() {
+				last.ended_at = Some(ts.clone());
+				last.runtime_ms = duration_ms(&last.started_at, &ts);
+			}
+		}
+		v.push(api::PhaseRun::new(ts));
+	}
+	runs
+}
+
+fn total_completed_runtime_ms(runs: &[api::PhaseRun]) -> i64 {
+	runs.iter().filter_map(|r| r.runtime_ms).sum()
+}
+
 fn derive_current_phase_from_steps(steps: &[ThreadStep]) -> String {
 	for step in steps.iter().rev() {
 		if let ThreadStep::Phase { phase, .. } = step {
@@ -1047,6 +1417,14 @@ fn derive_current_phase_from_steps(steps: &[ThreadStep]) -> String {
 		}
 	}
 	"preflight".to_string()
+}
+
+fn phase_at_step_idx(steps: &[ThreadStep], idx: usize) -> Option<String> {
+	if steps.is_empty() {
+		return None;
+	}
+	let end = idx.min(steps.len().saturating_sub(1));
+	Some(derive_current_phase_from_steps(&steps[..=end]))
 }
 
 fn derive_completed_phases(order: &[String], current: &str) -> Vec<String> {
@@ -1136,7 +1514,6 @@ struct ConnState {
 	seen: HashMap<String, i32>,
 	current_suite: HashMap<String, String>,
 	current_agent: HashMap<String, String>,
-	trace_pref: HashMap<String, bool>,
 	reg: Arc<SuiteRegistry>,
 	suite_ctx: SuiteCtx,
 }
@@ -1163,7 +1540,6 @@ impl ConnState {
 			seen: HashMap::new(),
 			current_suite: HashMap::new(),
 			current_agent: HashMap::new(),
-			trace_pref: HashMap::new(),
 			reg,
 			suite_ctx,
 		}
@@ -1195,14 +1571,6 @@ impl ConnState {
 			}
 		}
 	}
-}
-
-fn trace_enabled_for_thread(state: &mut ConnState, thread_id: &str, explicit: Option<bool>) -> bool {
-	if let Some(v) = explicit {
-		state.trace_pref.insert(thread_id.to_string(), v);
-		return v;
-	}
-	state.trace_pref.get(thread_id).copied().unwrap_or(false)
 }
 
 fn derive_thread_context(log: &ThreadLog) -> (String, String) {
@@ -1284,7 +1652,9 @@ fn map_project_snapshot(v: serde_json::Value) -> Option<HashMap<String, serde_js
 	Some(out)
 }
 
-async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<api::PlanSnapshot> {
+// load_active_plan_snapshot removed (hard cutover to `plans` + `thread_state`).
+
+async fn load_latest_plans(ctx: &SuiteCtx, thread_id: &str) -> (Option<api::PlanSnapshot>, Option<api::PlanSnapshot>) {
 	// Plans are stored alongside other top-level resources (threads/, dbt/, etc),
 	// NOT under dbt/.
 	let base = ctx
@@ -1297,8 +1667,7 @@ async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<ap
 	let mut keys = ctx.storage.list_prefix(&pref).await.unwrap_or_default();
 	keys.sort();
 
-	// Prefer the oldest non-terminal plan (matches suite behavior). If none exist, fall back to the
-	// newest terminal plan so UIs can still render the last known plan state (completed/cancelled).
+	let mut cleanse_active: Option<api::PlanSnapshot> = None;
 	let mut newest_terminal_cleanse: Option<de_plan::CleansePlan> = None;
 	for k in keys.iter().filter(|k| k.ends_with("_cleanse.json")) {
 		if let Ok(bytes) = ctx.storage.get_bytes(k).await {
@@ -1336,7 +1705,8 @@ async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<ap
 						tasks,
 					);
 					snap.project_snapshot = map_project_snapshot(project_snapshot);
-					return Some(snap);
+					cleanse_active = Some(snap);
+					break;
 				} else {
 					newest_terminal_cleanse = Some(p);
 				}
@@ -1344,6 +1714,44 @@ async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<ap
 		}
 	}
 
+	let cleanse = if let Some(s) = cleanse_active {
+		Some(s)
+	} else if let Some(p) = newest_terminal_cleanse {
+		let project_snapshot = p.project_snapshot;
+		let plan_key = p.plan_key;
+		let status = p.status;
+		let tasks = p
+			.tasks
+			.into_iter()
+			.map(|t| {
+				let mut snap = api::CleanseTaskSnapshot::new(
+					t.dataset_id.clone(),
+					t.dataset_id.clone(),
+					map_task_status(t.status),
+				);
+				snap.expected_model_path = t.expected_model_path;
+				if !t.invariants.is_empty() {
+					snap.invariants = Some(t.invariants);
+				}
+				if !t.notes.is_empty() {
+					snap.notes = Some(t.notes);
+				}
+				api::PlanTask::Cleanse(snap)
+			})
+			.collect::<Vec<_>>();
+		let mut snap = api::PlanSnapshot::new(
+			api::plan_snapshot::PlanKind::Cleanse,
+			plan_key,
+			map_plan_status(status),
+			tasks,
+		);
+		snap.project_snapshot = map_project_snapshot(project_snapshot);
+		Some(snap)
+	} else {
+		None
+	};
+
+	let mut model_active: Option<api::PlanSnapshot> = None;
 	let mut newest_terminal_model: Option<de_plan::ModelPlan> = None;
 	for k in keys.iter().filter(|k| k.ends_with("_model.json")) {
 		if let Ok(bytes) = ctx.storage.get_bytes(k).await {
@@ -1390,7 +1798,8 @@ async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<ap
 						tasks,
 					);
 					snap.project_snapshot = map_project_snapshot(project_snapshot);
-					return Some(snap);
+					model_active = Some(snap);
+					break;
 				} else {
 					newest_terminal_model = Some(p);
 				}
@@ -1398,157 +1807,64 @@ async fn load_active_plan_snapshot(ctx: &SuiteCtx, thread_id: &str) -> Option<ap
 		}
 	}
 
-	// No active plan. Fall back to the newest terminal plan (if any).
-	let choose_terminal = match (&newest_terminal_cleanse, &newest_terminal_model) {
-		(Some(c), Some(m)) => {
-			// Pick whichever has the lexicographically larger key (timestamped keys sort naturally).
-			if c.plan_key >= m.plan_key { "cleanse" } else { "model" }
-		}
-		(Some(_), None) => "cleanse",
-		(None, Some(_)) => "model",
-		(None, None) => return None,
-	};
-	match choose_terminal {
-		"cleanse" => {
-			let p = newest_terminal_cleanse?;
-			let project_snapshot = p.project_snapshot;
-			let plan_key = p.plan_key;
-			let status = p.status;
-			let tasks = p
-				.tasks
-				.into_iter()
-				.map(|t| {
-					let mut snap = api::CleanseTaskSnapshot::new(
-						t.dataset_id.clone(),
-						t.dataset_id.clone(),
-						map_task_status(t.status),
-					);
-					snap.expected_model_path = t.expected_model_path;
-					if !t.invariants.is_empty() {
-						snap.invariants = Some(t.invariants);
-					}
-					if !t.notes.is_empty() {
-						snap.notes = Some(t.notes);
-					}
-					api::PlanTask::Cleanse(snap)
-				})
-				.collect::<Vec<_>>();
-			let mut snap = api::PlanSnapshot::new(
-				api::plan_snapshot::PlanKind::Cleanse,
-				plan_key,
-				map_plan_status(status),
-				tasks,
-			);
-			snap.project_snapshot = map_project_snapshot(project_snapshot);
-			Some(snap)
-		}
-		"model" => {
-			let p = newest_terminal_model?;
-			let project_snapshot = p.project_snapshot;
-			let plan_key = p.plan_key;
-			let status = p.status;
-			let tasks = p
-				.tasks
-				.into_iter()
-				.map(|t| {
-					let mut snap = api::ModelTaskSnapshot::new(
-						t.name.clone(),
-						t.name.clone(),
-						map_task_status(t.status),
-					);
-					if !t.folder.trim().is_empty() {
-						snap.folder = Some(t.folder);
-					}
-					if !t.goal.trim().is_empty() {
-						snap.goal = Some(t.goal);
-					}
-					if !t.inputs.is_empty() {
-						snap.inputs = Some(t.inputs);
-					}
-					snap.expected_model_path = t.expected_model_path;
-					if !t.invariants.is_empty() {
-						snap.invariants = Some(t.invariants);
-					}
-					if !t.notes.is_empty() {
-						snap.notes = Some(t.notes);
-					}
-					api::PlanTask::Model(snap)
-				})
-				.collect::<Vec<_>>();
-			let mut snap = api::PlanSnapshot::new(
-				api::plan_snapshot::PlanKind::Model,
-				plan_key,
-				map_plan_status(status),
-				tasks,
-			);
-			snap.project_snapshot = map_project_snapshot(project_snapshot);
-			Some(snap)
-		}
-		_ => None,
-	}
-}
-
-fn task_id_status_notes(t: &api::PlanTask) -> (String, api::PlanTaskStatus, Vec<String>) {
-	match t {
-		api::PlanTask::Cleanse(c) => (c.task_id.clone(), c.status, c.notes.clone().unwrap_or_default()),
-		api::PlanTask::Model(mo) => (mo.task_id.clone(), mo.status, mo.notes.clone().unwrap_or_default()),
-	}
-}
-
-fn diff_plan_snapshots(prev: &api::PlanSnapshot, next: &api::PlanSnapshot) -> Vec<api::PlanChange> {
-	let mut out: Vec<api::PlanChange> = Vec::new();
-
-	if prev.status != next.status {
-		let ch = api::PlanStatusChangedChange::new(prev.status, next.status);
-		out.push(api::PlanChange::PlanStatusChanged(ch));
-	}
-
-	let mut prev_map: std::collections::HashMap<String, (api::PlanTaskStatus, Vec<String>)> =
-		std::collections::HashMap::new();
-	for t in prev.tasks.iter() {
-		let (id, st, notes) = task_id_status_notes(t);
-		prev_map.insert(id, (st, notes));
-	}
-
-	for t in next.tasks.iter() {
-		let (id, st, notes) = task_id_status_notes(t);
-		if let Some((prev_st, prev_notes)) = prev_map.get(&id) {
-			if *prev_st != st {
-				let ch = api::TaskStatusChangedChange::new(id.clone(), *prev_st, st);
-				out.push(api::PlanChange::TaskStatusChanged(ch));
-			}
-			for n in notes.iter() {
-				if !prev_notes.iter().any(|p| p.trim() == n.trim()) {
-					let ch = api::TaskNoteAddedChange::new(id.clone(), n.clone());
-					out.push(api::PlanChange::TaskNoteAdded(ch));
-
-					let lower = n.to_lowercase();
-					let looks_like_error =
-						lower.contains("failed") || lower.contains("error") || lower.contains("exception");
-					if looks_like_error {
-						let err = api::TaskErrorChange::new(id.clone(), n.clone());
-						out.push(api::PlanChange::TaskError(err));
-					}
+	let model = if let Some(s) = model_active {
+		Some(s)
+	} else if let Some(p) = newest_terminal_model {
+		let project_snapshot = p.project_snapshot;
+		let plan_key = p.plan_key;
+		let status = p.status;
+		let tasks = p
+			.tasks
+			.into_iter()
+			.map(|t| {
+				let mut snap = api::ModelTaskSnapshot::new(
+					t.name.clone(),
+					t.name.clone(),
+					map_task_status(t.status),
+				);
+				if !t.folder.trim().is_empty() {
+					snap.folder = Some(t.folder);
 				}
-			}
-		} else {
-			let ch = api::TaskStatusChangedChange::new(id.clone(), api::PlanTaskStatus::Pending, st);
-			out.push(api::PlanChange::TaskStatusChanged(ch));
-		}
-	}
+				if !t.goal.trim().is_empty() {
+					snap.goal = Some(t.goal);
+				}
+				if !t.inputs.is_empty() {
+					snap.inputs = Some(t.inputs);
+				}
+				snap.expected_model_path = t.expected_model_path;
+				if !t.invariants.is_empty() {
+					snap.invariants = Some(t.invariants);
+				}
+				if !t.notes.is_empty() {
+					snap.notes = Some(t.notes);
+				}
+				api::PlanTask::Model(snap)
+			})
+			.collect::<Vec<_>>();
+		let mut snap = api::PlanSnapshot::new(
+			api::plan_snapshot::PlanKind::Model,
+			plan_key,
+			map_plan_status(status),
+			tasks,
+		);
+		snap.project_snapshot = map_project_snapshot(project_snapshot);
+		Some(snap)
+	} else {
+		None
+	};
 
-	out
+	(cleanse, model)
 }
+
+// Plan diff/change frames removed (hard cutover to thread_state + plans).
 
 async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
 	let req: api::NewRequest = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
 	let cid = req.cid.clone();
-	let question = req.question.clone();
-	if question.trim().is_empty() { return Err("question required".into()); }
+	let question = req.question.clone().unwrap_or_default();
 	let thread_id = Uuid::new_v4().to_string();
 	let suite_id = req.suite_id.clone();
 	let agent = normalize_agent_new(req.agent_type)?;
-	let trace_enabled = req.trace.unwrap_or(false);
 	state.current_suite.insert(thread_id.clone(), suite_id.clone());
 	state.current_agent.insert(thread_id.clone(), agent.clone());
 	// Persist initial suite/agent selection so it survives reconnects
@@ -1595,35 +1911,27 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
-	// processing
-	let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
-	pr.for_cid = Some(cid.clone());
-	pr.stage = Some(m::processing_response::Stage::Queued);
-	pr.progress = Some(0.0);
-	{
-		let s = serde_json::to_string(&pr).unwrap();
-		state.buffer_last(&s);
-		ws_log_out(&s);
-		let _ = write.send(Message::Text(s)).await;
-	}
 	// agent with periodic updates
-	// record initial user question in thread history
-	{
-		let store = state.thread_store();
-		let _ = store
-			.append_step(
-				&thread_id,
-				ThreadStep::User {
-					text: question.clone(),
-					observation: Observation::ok(),
-					ts: chrono::Utc::now().to_rfc3339(),
-					agent: agent.clone(),
-				},
-			)
-			.await;
-		let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
+	// If a question was provided, record it and run the suite. Otherwise, this is "create thread".
+	if !question.trim().is_empty() {
+		{
+			let store = state.thread_store();
+			let _ = store
+				.append_step(
+					&thread_id,
+					ThreadStep::User {
+						text: question.clone(),
+						observation: Observation::ok(),
+						ts: chrono::Utc::now().to_rfc3339(),
+						agent: agent.clone(),
+					},
+				)
+				.await;
+			let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
+		}
+		run_suite_and_stream(&thread_id, &question, &suite_id, &agent, &cid, SuiteRunKind::New, state, write).await?;
 	}
-	run_agent_with_processing(&thread_id, &question, &suite_id, &agent, &cid, trace_enabled, true, state, write, m::processing_response::Stage::Queued).await
+	Ok(())
 }
 
 async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -1635,7 +1943,6 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	let question = req.question.clone().unwrap_or_else(|| "Continue.".to_string());
 	let requested_suite = req.suite_id.clone();
 	let requested_agent = normalize_agent_open(req.agent_type)?;
-	let trace_enabled = trace_enabled_for_thread(state, &thread_id, req.trace);
 
 	// Derive current suite/agent from persisted thread log (durable across reconnects)
 	let store = state.thread_store();
@@ -1682,16 +1989,28 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
-	// processing
-	let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
-	pr.for_cid = Some(cid.clone());
-	pr.stage = Some(m::processing_response::Stage::Queued);
-	pr.progress = Some(0.0);
+
+	// Strongly-consistent materialized state snapshot (durable across reloads).
 	{
-		let s = serde_json::to_string(&pr).unwrap();
-		state.buffer_last(&s);
-		ws_log_out(&s);
-		let _ = write.send(Message::Text(s)).await;
+		let store = state.thread_store();
+		let (cleanse, model) = load_latest_plans(&state.suite_ctx, &thread_id).await;
+		upsert_thread_state_from_plans(&store, &thread_id, &cleanse, &model).await;
+		if let Ok(st) = store.get_thread_state(&thread_id).await {
+			let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+			let mut resp = api::ThreadStateResponse::new(
+				1,
+				m::thread_state_response::Type::ThreadState,
+				now_iso(),
+				state.next_seq(),
+				thread_id.clone(),
+				snap,
+			);
+			resp.for_cid = Some(cid.clone());
+			let s = serde_json::to_string(&resp).unwrap();
+			state.buffer_last(&s);
+			ws_log_out(&s);
+			let _ = write.send(Message::Text(s)).await;
+		}
 	}
 	// agent with periodic updates
 	let suite_id = state.current_suite.get(&thread_id).cloned().unwrap_or_else(|| requested_suite.clone());
@@ -1712,7 +2031,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 			.await;
 		let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
 	}
-	run_agent_with_processing(&thread_id, &question, &suite_id, &agent, &cid, trace_enabled, false, state, write, m::processing_response::Stage::Queued).await
+	run_suite_and_stream(&thread_id, &question, &suite_id, &agent, &cid, SuiteRunKind::Open, state, write).await
 }
 
 async fn process_user(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -1741,24 +2060,12 @@ async fn process_user(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 		.get(&thread_id)
 		.cloned()
 		.ok_or_else(|| "agent_type missing for thread".to_string())?;
-	let trace_enabled = trace_enabled_for_thread(state, &thread_id, req.trace);
 
 	// ack
 	let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 	ok.cid = Some(cid.clone());
 	{
 		let s = serde_json::to_string(&ok).unwrap();
-		ws_log_out(&s);
-		let _ = write.send(Message::Text(s)).await;
-	}
-	// processing
-	let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
-	pr.for_cid = Some(cid.clone());
-	pr.stage = Some(m::processing_response::Stage::Queued);
-	pr.progress = Some(0.0);
-	{
-		let s = serde_json::to_string(&pr).unwrap();
-		state.buffer_last(&s);
 		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
@@ -1778,19 +2085,7 @@ async fn process_user(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 			)
 			.await;
 	}
-	run_agent_with_processing_suite(
-		&thread_id,
-		&text,
-		&suite_id,
-		&agent,
-		&cid,
-		trace_enabled,
-		SuiteRunKind::User,
-		state,
-		write,
-		m::processing_response::Stage::Queued,
-	)
-	.await
+	run_suite_and_stream(&thread_id, &text, &suite_id, &agent, &cid, SuiteRunKind::User, state, write).await
 }
 
 async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -1824,17 +2119,6 @@ async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl Sin
 		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
-	// processing
-	let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
-	pr.for_cid = Some(cid.clone());
-	pr.stage = Some(m::processing_response::Stage::Queued);
-	pr.progress = Some(0.0);
-	{
-		let s = serde_json::to_string(&pr).unwrap();
-		state.buffer_last(&s);
-		ws_log_out(&s);
-		let _ = write.send(Message::Text(s)).await;
-	}
 	// append user=approve step
 	{
 		let store = state.thread_store();
@@ -1851,7 +2135,7 @@ async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl Sin
 			.await;
 	}
 	tracing::info!("approve: thread_id={} agent={}", thread_id, agent);
-	run_agent_with_processing(&thread_id, "Continue.", &suite_id, &agent, &cid, false, false, state, write, m::processing_response::Stage::Queued).await
+	run_suite_and_stream(&thread_id, "Continue.", &suite_id, &agent, &cid, SuiteRunKind::User, state, write).await
 }
 
 async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -1885,17 +2169,6 @@ async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl Sink
 		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
-	// processing
-	let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
-	pr.for_cid = Some(cid.clone());
-	pr.stage = Some(m::processing_response::Stage::Queued);
-	pr.progress = Some(0.0);
-	{
-		let s = serde_json::to_string(&pr).unwrap();
-		state.buffer_last(&s);
-		ws_log_out(&s);
-		let _ = write.send(Message::Text(s)).await;
-	}
 	// append user=reject step
 	{
 		let store = state.thread_store();
@@ -1912,7 +2185,7 @@ async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl Sink
 			.await;
 	}
 	tracing::info!("reject: thread_id={} agent={}", thread_id, agent);
-	run_agent_with_processing(&thread_id, "Continue.", &suite_id, &agent, &cid, false, false, state, write, m::processing_response::Stage::Queued).await
+	run_suite_and_stream(&thread_id, "Continue.", &suite_id, &agent, &cid, SuiteRunKind::User, state, write).await
 }
 // normalize_agent removed (unused)
 
@@ -1942,24 +2215,18 @@ fn normalize_agent_open(a: api::open_request::AgentType) -> Result<String, Strin
 		),
 	}
 }
-async fn run_agent_with_processing(
+async fn run_suite_and_stream(
 	thread_id: &str,
 	question: &str,
 	suite_id: &str,
 	agent: &str,
 	cid: &str,
-	trace_enabled: bool,
-	is_new: bool,
+	kind: SuiteRunKind,
 	state: &mut ConnState,
 	write: &mut (impl SinkExt<Message> + Unpin),
-	initial_stage: m::processing_response::Stage,
 ) -> Result<(), String> {
-	// Suite-based runner. We intentionally keep this simple: the suite owns prompts/tools and the core
-	// WS server only handles message I/O. Step-level progress streaming can be reintroduced later by
-	// threading progress channels through the suite runner.
-	let kind = if is_new { SuiteRunKind::New } else { SuiteRunKind::Open };
-	return run_agent_with_processing_suite(thread_id, question, suite_id, agent, cid, trace_enabled, kind, state, write, initial_stage).await;
-	}
+	run_agent_with_processing_suite(thread_id, question, suite_id, agent, cid, kind, state, write).await
+}
 fn compact_schema_columns(fields: &[arrow::datatypes::FieldRef]) -> Vec<(String, String)> {
 	use arrow::datatypes::{Field, DataType};
 	fn walk(prefix: &str, f: &Field, depth: usize, out: &mut Vec<(String,String)>) {
@@ -1982,78 +2249,7 @@ fn compact_schema_columns(fields: &[arrow::datatypes::FieldRef]) -> Vec<(String,
 	out
 }
 
-fn trace_line_to_text_and_status(line: &str) -> Option<(String, m::TraceStatus)> {
-	fn truncate_one_line(s: &str, max: usize) -> String {
-		let first = s.lines().next().unwrap_or("").trim();
-		// Collapse internal whitespace a bit (avoid huge multi-line dumps).
-		let collapsed = first
-			.split_whitespace()
-			.collect::<Vec<_>>()
-			.join(" ");
-		if collapsed.len() <= max {
-			return collapsed;
-		}
-		format!("{}…", &collapsed[..max])
-	}
-
-	// Avoid leaking prompts/tool-cards/system text; only stream toolcall/observation summaries.
-	let s = line.trim();
-	if s.starts_with("System:") || s.starts_with("Tools:") || s.starts_with("User:") {
-		return None;
-	}
-	// Suite/tool milestone lines (plain text).
-	// Keep this intentionally small and generic: allow only a few safe prefixes.
-	if s.starts_with("saved ") {
-		return Some((s.to_string(), m::TraceStatus::Ok));
-	}
-	if s.starts_with("failed ") || s.starts_with("failed to ") {
-		return Some((s.to_string(), m::TraceStatus::Failed));
-	}
-	if s.starts_with("publish awaiting approval") {
-		return Some((s.to_string(), m::TraceStatus::Pending));
-	}
-	if s.starts_with("publish finished") || s.starts_with("publish no change") {
-		return Some((s.to_string(), m::TraceStatus::Ok));
-	}
-	if s.starts_with("publish failed") {
-		return Some((s.to_string(), m::TraceStatus::Failed));
-	}
-	if s.starts_with("publish started") || s.starts_with("saving ") {
-		return Some((s.to_string(), m::TraceStatus::Running));
-	}
-	if let Some(rest) = s.strip_prefix("Assistant:") {
-		// Try to parse the action JSON and emit a compact tool call line.
-		if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest.trim()) {
-			if let Some(action) = v.get("action").and_then(|x| x.as_str()) {
-				return Some((format!("tool_call {action}"), m::TraceStatus::Running));
-			}
-			if v.get("final").is_some() {
-				return None;
-			}
-		}
-		return None;
-	}
-	if let Some(rest) = s.strip_prefix("Observation:") {
-		if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest.trim()) {
-			let ok = v.get("ok").and_then(|x| x.as_bool());
-			let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
-			return Some(match ok {
-				Some(true) => ("tool_ok".to_string(), m::TraceStatus::Ok),
-				Some(false) => {
-					let txt = if err.is_empty() {
-						"tool_error".to_string()
-					} else {
-						format!("tool_error: {}", truncate_one_line(err, 180))
-					};
-					(txt, m::TraceStatus::Failed)
-				}
-				None => ("tool_observation".to_string(), m::TraceStatus::Running),
-			});
-		}
-		return Some(("tool_observation".to_string(), m::TraceStatus::Running));
-	}
-	None
-}
+// Trace streaming removed (hard cutover).
 enum AgentFrame {
 	Final { kind: String, payload: serde_json::Value, display: Option<String> },
 	Review { text: String, meta: Option<serde_json::Value> },
@@ -2074,16 +2270,36 @@ async fn run_agent_with_processing_suite(
 	suite_id: &str,
 	agent: &str,
 	cid: &str,
-	trace_enabled: bool,
 	kind: SuiteRunKind,
 	state: &mut ConnState,
 	write: &mut (impl SinkExt<Message> + Unpin),
-	_initial_stage: m::processing_response::Stage,
 ) -> Result<(), String> {
-	let (trace_tx, mut trace_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 	let mut sctx2 = state.suite_ctx.clone();
-	if trace_enabled {
-		sctx2.trace_tx = Some(trace_tx);
+
+	// Preflight is often the implicit "no phase yet" state; emit it explicitly so the UI sees activity.
+	{
+		let store = state.thread_store();
+		if let Ok(Some((step_idx, ts))) = ensure_preflight_phase_step(&store, thread_id, agent, Some(suite_id)).await {
+			let runs = vec![api::PhaseRun::new(ts.clone())];
+			let mut ev = api::PhaseResponse::new(
+				1,
+				api::phase_response::Type::Phase,
+				now_iso(),
+				state.next_seq(),
+				thread_id.to_string(),
+				step_idx as i32,
+				"preflight".to_string(),
+				ts,
+				runs,
+				0,
+			);
+			ev.for_cid = Some(cid.to_string());
+			ev.reason_code = Some("preflight_start".to_string());
+			let s = serde_json::to_string(&api::ServerMessage::Phase(ev)).unwrap();
+			state.buffer_last(&s);
+			ws_log_out(&s);
+			let _ = write.send(Message::Text(s)).await;
+		}
 	}
 
 	let suite = state
@@ -2091,7 +2307,6 @@ async fn run_agent_with_processing_suite(
 		.get(suite_id)
 		.ok_or_else(|| format!("invalid suite_id '{}'", suite_id))?
 		.clone();
-	let suite_for_progress = suite.clone();
 	let thread_id_s = thread_id.to_string();
 	let q_s = question.to_string();
 	let agent_s = agent.to_string();
@@ -2109,193 +2324,250 @@ async fn run_agent_with_processing_suite(
 	});
 	tokio::pin!(agent_task);
 
-	// Emit suite phase/progress frames while the suite is running (best-effort polling).
-	// This is intentionally cheap and decoupled: the suite already records `phase` steps in the thread log.
-	let phases_order = suite_for_progress.phase_order(agent);
-	let mut last_phase_sent: Option<String> = None;
-	let mut phase_tick = tokio::time::interval(std::time::Duration::from_millis(250));
-	phase_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-	// Emit plan_update frames for data_engineer while the suite is running.
-	let plan_updates_enabled = suite_id == "data_engineer";
-	let mut last_plan_sent: Option<api::PlanSnapshot> = None;
-	let mut plan_tick = tokio::time::interval(std::time::Duration::from_millis(400));
+	// Periodically refresh plan summaries/tasks into thread_state.
+	let mut plan_tick = tokio::time::interval(std::time::Duration::from_millis(800));
 	plan_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+	let mut last_cleanse_plan_fp: Option<String> = None;
+	let mut last_model_plan_fp: Option<String> = None;
 
-	// Emit trace frames for tool activity by polling new ThreadStep::Tool entries.
-	// This complements ctx.trace_tx, which only captures the core agent transcript.
-	let mut last_tool_step_idx: usize = match state.thread_store().get(thread_id).await {
+	// Emit tool_start/tool_end events from persisted thread log steps.
+	let mut last_emitted_step_idx: usize = match state.thread_store().get(thread_id).await {
 		Ok(log) => log.steps.len(),
 		Err(_) => 0,
 	};
 	let mut tool_tick = tokio::time::interval(std::time::Duration::from_millis(200));
 	tool_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-	// While the suite/agent is running, forward trace lines (if enabled).
+	// Emit strongly-consistent materialized thread_state while running.
+	let mut last_state_sent: Option<api::ThreadStateSnapshot> = None;
+	let mut state_tick = tokio::time::interval(std::time::Duration::from_millis(250));
+	state_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 	loop {
 		tokio::select! {
-			_ = phase_tick.tick() => {
-				if phases_order.is_empty() {
-					continue;
-				}
-				let store = state.thread_store();
-				let phase = match store.get(thread_id).await {
-					Ok(log) => derive_current_phase_from_steps(&log.steps),
-					Err(_) => "preflight".to_string(),
-				};
-				if last_phase_sent.as_deref() == Some(phase.as_str()) {
-					continue;
-				}
-				last_phase_sent = Some(phase.clone());
-				let completed = derive_completed_phases(&phases_order, &phase);
-				let mut sp = api::SuiteProgressResponse::new(
-					1,
-					m::suite_progress_response::Type::SuiteProgress,
-					now_iso(),
-					state.next_seq(),
-					thread_id.to_string(),
-					suite_id.to_string(),
-					phases_order.clone(),
-					completed,
-					phase,
-				);
-				sp.for_cid = Some(cid.to_string());
-				let s = serde_json::to_string(&sp).unwrap();
-				state.buffer_last(&s);
-				ws_log_out(&s);
-				let _ = write.send(Message::Text(s)).await;
-			}
 			_ = plan_tick.tick() => {
-				if !plan_updates_enabled {
-					continue;
+				let store = state.thread_store();
+				let (cleanse, model) = load_latest_plans(&state.suite_ctx, thread_id).await;
+				// Emit a lightweight "plans changed" notification so UIs can fetch `plans`.
+				{
+					let fp = |p: &Option<api::PlanSnapshot>| -> Option<String> {
+						p.as_ref().and_then(|pp| serde_json::to_string(pp).ok())
+					};
+					let new_cleanse_fp = fp(&cleanse);
+					let new_model_fp = fp(&model);
+					let mut changed: Vec<api::plans_changed_response::Changed> = Vec::new();
+					if new_cleanse_fp != last_cleanse_plan_fp {
+						changed.push(api::plans_changed_response::Changed::Cleanse);
+						last_cleanse_plan_fp = new_cleanse_fp;
+					}
+					if new_model_fp != last_model_plan_fp {
+						changed.push(api::plans_changed_response::Changed::Model);
+						last_model_plan_fp = new_model_fp;
+					}
+					if !changed.is_empty() {
+						let mut ev = api::PlansChangedResponse::new(
+							1,
+							api::plans_changed_response::Type::PlansChanged,
+							now_iso(),
+							state.next_seq(),
+							thread_id.to_string(),
+							changed,
+						);
+						ev.for_cid = Some(cid.to_string());
+						ev.cleanse_plan_key = cleanse.as_ref().map(|p| p.plan_key.clone());
+						ev.model_plan_key = model.as_ref().map(|p| p.plan_key.clone());
+						let s = serde_json::to_string(&api::ServerMessage::PlansChanged(ev)).unwrap();
+						state.buffer_last(&s);
+						ws_log_out(&s);
+						let _ = write.send(Message::Text(s)).await;
+					}
 				}
-				let next = load_active_plan_snapshot(&state.suite_ctx, thread_id).await;
-				let should_emit = match (&last_plan_sent, &next) {
-					(None, Some(_)) => true,
-					(Some(_), None) => true,
-					(Some(a), Some(b)) => a != b,
-					(None, None) => false,
-				};
-				if !should_emit {
-					continue;
-				}
-				let changes = match (&last_plan_sent, &next) {
-					(Some(prev), Some(cur)) => diff_plan_snapshots(prev, cur),
-					_ => Vec::new(),
-				};
-				last_plan_sent = next.clone();
-				if let Some(plan) = next {
-					let mut pu = api::PlanUpdateResponse::new(
-						1,
-						m::plan_update_response::Type::PlanUpdate,
-						now_iso(),
-						state.next_seq(),
-						thread_id.to_string(),
-						plan,
-						changes,
-					);
-					pu.for_cid = Some(cid.to_string());
-					let s = serde_json::to_string(&pu).unwrap();
-					state.buffer_last(&s);
-					ws_log_out(&s);
-					let _ = write.send(Message::Text(s)).await;
-				}
+				upsert_thread_state_from_plans(&store, thread_id, &cleanse, &model).await;
 			}
 			_ = tool_tick.tick() => {
-				if !trace_enabled {
-					continue;
-				}
-				fn truncate_one_line(s: &str, max: usize) -> String {
-					let first = s.lines().next().unwrap_or("").trim();
-					let collapsed = first
-						.split_whitespace()
-						.collect::<Vec<_>>()
-						.join(" ");
-					if collapsed.len() <= max {
-						return collapsed;
-					}
-					format!("{}…", &collapsed[..max])
-				}
 				let store = state.thread_store();
 				let log = match store.get(thread_id).await {
 					Ok(l) => l,
 					Err(_) => continue,
 				};
-				if last_tool_step_idx >= log.steps.len() {
+				if last_emitted_step_idx >= log.steps.len() {
 					continue;
 				}
-				for step in log.steps.iter().skip(last_tool_step_idx) {
-					let ThreadStep::Tool { name, observation, .. } = step else { continue };
-					// Emit "tool_call <name>" and then an observation summary.
-					{
-						let mut tr = api::TraceResponse::new(
-							1,
-							m::trace_response::Type::Trace,
-							now_iso(),
-							state.next_seq(),
-							thread_id.to_string(),
-							m::TraceStatus::Running,
-							format!("tool_call {}", name),
-						);
-						tr.for_cid = Some(cid.to_string());
-						let s = serde_json::to_string(&tr).unwrap();
-						state.buffer_last(&s);
-						ws_log_out(&s);
-						let _ = write.send(Message::Text(s)).await;
+
+				fn payload_map(v: &Option<serde_json::Value>) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+					let obj = v.as_ref()?.as_object()?;
+					let mut out: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+					for (k, vv) in obj.iter() {
+						out.insert(k.clone(), vv.clone());
 					}
-					{
-						let ok = observation.ok;
-						let err = observation
-							.errors
-							.first()
-							.map(|s| s.as_str())
-							.unwrap_or("");
-						let text = match ok {
-							true => "tool_ok".to_string(),
-							false => {
-								if err.is_empty() {
-									"tool_error".to_string()
-								} else {
-									format!("tool_error: {}", truncate_one_line(err, 180))
+					Some(out)
+				}
+
+				for i in last_emitted_step_idx..log.steps.len() {
+					match &log.steps[i] {
+						ThreadStep::Phase { phase, from_phase, reason_code, reason_detail, ts, .. } => {
+							let runs_map = phase_runs_from_steps(&log.steps[..=i]);
+							let runs = runs_map.get(phase).cloned().unwrap_or_default();
+							let total_runtime_ms = total_completed_runtime_ms(&runs);
+							let (from_runs, from_total) =
+								match from_phase.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+									Some(fp) => {
+										let rr = runs_map.get(fp).cloned().unwrap_or_default();
+										let tt = total_completed_runtime_ms(&rr);
+										(Some(rr), Some(tt))
+									}
+									None => (None, None),
+								};
+
+							let mut ev = api::PhaseResponse::new(
+								1,
+								api::phase_response::Type::Phase,
+								now_iso(),
+								state.next_seq(),
+								thread_id.to_string(),
+								i as i32,
+								phase.clone(),
+								ts.clone(),
+								runs,
+								total_runtime_ms,
+							);
+							ev.for_cid = Some(cid.to_string());
+							ev.from_phase = from_phase.clone();
+							ev.reason_code = reason_code.clone();
+							ev.from_phase_runs = from_runs;
+							ev.from_phase_total_runtime_ms = from_total;
+							ev.reason_detail = reason_detail.as_ref().and_then(|v| v.as_object()).map(|obj| {
+								let mut hm: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+								for (k, vv) in obj.iter() {
+									hm.insert(k.clone(), vv.clone());
 								}
+								hm
+							});
+							let s = serde_json::to_string(&api::ServerMessage::Phase(ev)).unwrap();
+							state.buffer_last(&s);
+							ws_log_out(&s);
+							let _ = write.send(Message::Text(s)).await;
+						}
+						ThreadStep::ToolStart { tool_id, name, clean_name, status, payload, .. } => {
+							let st = match status.as_str() {
+								"running" => api::ToolEventStatus::Running,
+								"ok" => api::ToolEventStatus::Ok,
+								"failed" => api::ToolEventStatus::Failed,
+								_ => api::ToolEventStatus::Running,
+							};
+							let mut ev = api::ToolStartResponse::new(
+								1,
+								api::tool_start_response::Type::ToolStart,
+								now_iso(),
+								state.next_seq(),
+								thread_id.to_string(),
+								tool_id.clone(),
+								name.clone(),
+								st,
+							);
+							ev.for_cid = Some(cid.to_string());
+							if !clean_name.trim().is_empty() {
+								ev.clean_name = Some(clean_name.clone());
 							}
-						};
-						let mut tr = api::TraceResponse::new(
-							1,
-							m::trace_response::Type::Trace,
-							now_iso(),
-							state.next_seq(),
-							thread_id.to_string(),
-							if ok { m::TraceStatus::Ok } else { m::TraceStatus::Failed },
-							text,
-						);
-						tr.for_cid = Some(cid.to_string());
-						let s = serde_json::to_string(&tr).unwrap();
-						state.buffer_last(&s);
-						ws_log_out(&s);
-						let _ = write.send(Message::Text(s)).await;
+							ev.phase = phase_at_step_idx(&log.steps, i);
+							ev.payload = payload_map(payload);
+							let s = serde_json::to_string(&api::ServerMessage::ToolStart(ev)).unwrap();
+							state.buffer_last(&s);
+							ws_log_out(&s);
+							let _ = write.send(Message::Text(s)).await;
+						}
+						ThreadStep::ToolEnd { tool_id, name, clean_name, status, payload, observation, .. } => {
+							let st = match status.as_str() {
+								"running" => api::ToolEventStatus::Running,
+								"ok" => api::ToolEventStatus::Ok,
+								"failed" => api::ToolEventStatus::Failed,
+								_ => if observation.ok { api::ToolEventStatus::Ok } else { api::ToolEventStatus::Failed },
+							};
+							let mut ev = api::ToolEndResponse::new(
+								1,
+								api::tool_end_response::Type::ToolEnd,
+								now_iso(),
+								state.next_seq(),
+								thread_id.to_string(),
+								tool_id.clone(),
+								name.clone(),
+								st,
+							);
+							ev.for_cid = Some(cid.to_string());
+							if !clean_name.trim().is_empty() {
+								ev.clean_name = Some(clean_name.clone());
+							}
+							ev.phase = phase_at_step_idx(&log.steps, i);
+							ev.payload = payload_map(payload);
+							if !observation.ok {
+								ev.error = observation.errors.first().cloned();
+							}
+							let s = serde_json::to_string(&api::ServerMessage::ToolEnd(ev)).unwrap();
+							state.buffer_last(&s);
+							ws_log_out(&s);
+							let _ = write.send(Message::Text(s)).await;
+						}
+						ThreadStep::LlmStart { call_id, phase, model, .. } => {
+							let mut ev = api::LlmStartResponse::new(
+								1,
+								api::llm_start_response::Type::LlmStart,
+								now_iso(),
+								state.next_seq(),
+								thread_id.to_string(),
+								*call_id as i32,
+								phase.clone(),
+							);
+							ev.for_cid = Some(cid.to_string());
+							ev.model = model.clone();
+							let s = serde_json::to_string(&api::ServerMessage::LlmStart(ev)).unwrap();
+							state.buffer_last(&s);
+							ws_log_out(&s);
+							let _ = write.send(Message::Text(s)).await;
+						}
+						ThreadStep::LlmEnd { call_id, phase, model, status, error, .. } => {
+							let mut ev = api::LlmEndResponse::new(
+								1,
+								api::llm_end_response::Type::LlmEnd,
+								now_iso(),
+								state.next_seq(),
+								thread_id.to_string(),
+								*call_id as i32,
+								phase.clone(),
+								if status == "failed" { api::llm_end_response::Status::Failed } else { api::llm_end_response::Status::Ok },
+							);
+							ev.for_cid = Some(cid.to_string());
+							ev.model = model.clone();
+							ev.error = error.clone();
+							let s = serde_json::to_string(&api::ServerMessage::LlmEnd(ev)).unwrap();
+							state.buffer_last(&s);
+							ws_log_out(&s);
+							let _ = write.send(Message::Text(s)).await;
+						}
+						_ => {}
 					}
 				}
-				last_tool_step_idx = log.steps.len();
+				last_emitted_step_idx = log.steps.len();
 			}
-			Some(line) = trace_rx.recv() => {
-				if !trace_enabled { continue; }
-				let Some((mut text, status)) = trace_line_to_text_and_status(&line) else { continue };
-				// Keep trace frames lightweight; do not stream giant tool outputs (e.g. dbt stderr).
-				if text.len() > 220 {
-					text = format!("{}…", &text[..220]);
+			_ = state_tick.tick() => {
+				let store = state.thread_store();
+				let st = match store.get_thread_state(thread_id).await {
+					Ok(s) => s,
+					Err(_) => continue,
+				};
+				let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+				if last_state_sent.as_ref() == Some(&snap) {
+					continue;
 				}
-				let mut tr = api::TraceResponse::new(
+				last_state_sent = Some(snap.clone());
+				let mut resp = api::ThreadStateResponse::new(
 					1,
-					m::trace_response::Type::Trace,
+					m::thread_state_response::Type::ThreadState,
 					now_iso(),
 					state.next_seq(),
 					thread_id.to_string(),
-					status,
-					text,
+					snap,
 				);
-				tr.for_cid = Some(cid.to_string());
-				let s = serde_json::to_string(&tr).unwrap();
+				resp.for_cid = Some(cid.to_string());
+				let s = serde_json::to_string(&resp).unwrap();
 				state.buffer_last(&s);
 				ws_log_out(&s);
 				let _ = write.send(Message::Text(s)).await;
@@ -2368,14 +2640,22 @@ async fn run_agent_with_processing_suite(
 							continue;
 						}
 						AgentFrame::Final { kind, payload, display } => {
-							let display_text = display.clone().unwrap_or_else(|| final_display_text_from_payload(&payload));
-							for t in chunk_text(&display_text, 24) {
-								let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.to_string(), t);
-								tk.for_cid = Some(cid.to_string());
-								let s = serde_json::to_string(&tk).unwrap();
-								state.buffer_last(&s);
-								ws_log_out(&s);
-								let _ = write.send(Message::Text(s)).await;
+							// Persist final so it’s durable across reconnects.
+							{
+								let store = state.thread_store();
+								append_step_if_new(
+									&store,
+									thread_id,
+									ThreadStep::Final {
+										kind: kind.clone(),
+										payload: payload.clone(),
+										display: display.clone(),
+										observation: Observation::ok(),
+										ts: chrono::Utc::now().to_rfc3339(),
+										agent: agent.to_string(),
+									},
+								)
+								.await;
 							}
 							let tseq = state.next_thread_seq(thread_id);
 							let final_result = ws_final_result_from_typed_final(&kind, &payload, &display);
@@ -2401,6 +2681,21 @@ async fn run_agent_with_processing_suite(
 							return Ok(());
 						}
 						AgentFrame::AwaitUser { prompt } => {
+							// Persist gate so the thread doesn't look like it's still running.
+							{
+								let store = state.thread_store();
+								append_step_if_new(
+									&store,
+									thread_id,
+									ThreadStep::AskUser {
+										prompt: prompt.clone(),
+										observation: Observation::ok(),
+										ts: chrono::Utc::now().to_rfc3339(),
+										agent: agent.to_string(),
+									},
+								)
+								.await;
+							}
 							let tseq = state.next_thread_seq(thread_id);
 							let resp = api::AwaitUserResponse::new(
 								1,
@@ -2422,6 +2717,21 @@ async fn run_agent_with_processing_suite(
 							return Ok(());
 						}
 						AgentFrame::AwaitApproval { prompt } => {
+							// Persist gate so the thread doesn't look like it's still running.
+							{
+								let store = state.thread_store();
+								append_step_if_new(
+									&store,
+									thread_id,
+									ThreadStep::AskApproval {
+										prompt: prompt.clone(),
+										observation: Observation::ok(),
+										ts: chrono::Utc::now().to_rfc3339(),
+										agent: agent.to_string(),
+									},
+								)
+								.await;
+							}
 							let tseq = state.next_thread_seq(thread_id);
 							let resp = api::AwaitApprovalResponse::new(
 								1,
@@ -2726,21 +3036,101 @@ mod tests {
 
 		async fn handle_user(
 			&self,
-			_thread_id: &str,
+			thread_id: &str,
 			_text: &str,
 			_agent_type: &str,
 			ctx: &SuiteCtx,
 		) -> Result<Vec<react_suites::FlowFrame>, String> {
-			if let Some(tx) = ctx.trace_tx.as_ref() {
-				let _ = tx.send("Assistant: {\"action\":\"dbt_files\",\"args\":{}}".to_string());
-				let _ = tx.send("Observation: {\"ok\":true}".to_string());
-			}
-			// Sleep long enough for phase_tick (250ms) and plan_tick (400ms) to emit at least once.
-			tokio::time::sleep(Duration::from_millis(520)).await;
+			// Emit a tool_start/tool_end pair into the durable thread log so WS can stream tool events.
+			let store = ThreadStore::new(ctx.storage.clone(), ctx.scope.clone(), ctx.keyspace.clone());
+			let tool_id = "t1".to_string();
+			let _ = store
+				.append_step(
+					thread_id,
+					ThreadStep::ToolStart {
+						tool_id: tool_id.clone(),
+						name: "dbt_files".to_string(),
+						clean_name: "dbt_files patch".to_string(),
+						args: serde_json::json!({"op":"patch"}),
+						status: "running".to_string(),
+						payload: Some(serde_json::json!({"hint":"starting"})),
+						ts: chrono::Utc::now().to_rfc3339(),
+						agent: "agent".to_string(),
+					},
+				)
+				.await;
+			let _ = store
+				.append_step(
+					thread_id,
+					ThreadStep::ToolEnd {
+						tool_id: tool_id.clone(),
+						name: "dbt_files".to_string(),
+						clean_name: "dbt_files patch".to_string(),
+						args: serde_json::json!({"op":"patch"}),
+						status: "ok".to_string(),
+						payload: Some(serde_json::json!({"written_keys": []})),
+						observation: ToolObservation::normalize(serde_json::json!({"ok": true})),
+						ts: chrono::Utc::now().to_rfc3339(),
+						agent: "agent".to_string(),
+					},
+				)
+				.await;
+
+			// Sleep long enough for WS ticks (tool/state) to emit at least once.
+			tokio::time::sleep(Duration::from_millis(650)).await;
 			Ok(vec![react_suites::FlowFrame::Final {
 				kind: "ask".to_string(),
 				payload: serde_json::json!({"answer":"ok","sql":"SELECT 1"}),
 				display: Some("ok".to_string()),
+			}])
+		}
+	}
+
+	struct StubAwaitApprovalSuite;
+
+	#[async_trait]
+	impl react_suites::suite::Suite for StubAwaitApprovalSuite {
+		fn id(&self) -> &'static str {
+			"data_engineer"
+		}
+
+		fn phase_order(&self, _agent_type: &str) -> Vec<String> {
+			vec!["preflight".to_string(), "done".to_string()]
+		}
+
+		async fn handle_new(
+			&self,
+			_thread_id: &str,
+			_question: &str,
+			_agent_type: &str,
+			_ctx: &SuiteCtx,
+		) -> Result<Vec<react_suites::FlowFrame>, String> {
+			Ok(vec![react_suites::FlowFrame::AwaitApproval {
+				prompt: "approve?".to_string(),
+			}])
+		}
+
+		async fn handle_open(
+			&self,
+			_thread_id: &str,
+			_question: &str,
+			_agent_type: &str,
+			_ctx: &SuiteCtx,
+		) -> Result<Vec<react_suites::FlowFrame>, String> {
+			Ok(vec![react_suites::FlowFrame::AwaitApproval {
+				prompt: "approve?".to_string(),
+			}])
+		}
+
+		async fn handle_user(
+			&self,
+			_thread_id: &str,
+			_text: &str,
+			_agent_type: &str,
+			_ctx: &SuiteCtx,
+		) -> Result<Vec<react_suites::FlowFrame>, String> {
+			Ok(vec![react_suites::FlowFrame::AwaitApproval {
+				prompt: "approve?".to_string(),
 			}])
 		}
 	}
@@ -2777,9 +3167,13 @@ mod tests {
 				},
 				// Inner phase/tool steps may record agent labels like "cleanse" — these must NOT
 				// override the user-selected agent_type derived from switch_agent.
-				ThreadStep::Tool {
+				ThreadStep::ToolEnd {
+					tool_id: "t".to_string(),
 					name: "sql_schema".to_string(),
+					clean_name: "List tables".to_string(),
 					args: json!({}),
+					status: "ok".to_string(),
+					payload: None,
 					observation: ToolObservation::normalize(json!({"ok": true})),
 					ts: "t".to_string(),
 					agent: "cleanse".to_string(),
@@ -2822,32 +3216,6 @@ mod tests {
 		// No seen messages yet -> both assistant messages should count as unread.
 		let (_max_seq, unread) = compute_unread_for_log(&log, 0);
 		assert_eq!(unread, 2);
-	}
-
-	#[test]
-	fn trace_line_filter_does_not_leak_prompts() {
-		assert_eq!(trace_line_to_text_and_status("System: secret prompt"), None);
-		assert_eq!(trace_line_to_text_and_status("Tools: huge tool card"), None);
-		assert_eq!(trace_line_to_text_and_status("User: hello"), None);
-
-		assert_eq!(
-			trace_line_to_text_and_status("Assistant: {\"action\":\"run_sql\",\"args\":{\"sql\":\"select 1\"}}").map(|(t, _)| t).as_deref(),
-			Some("tool_call run_sql")
-		);
-
-		assert_eq!(
-			trace_line_to_text_and_status("Observation: {\"ok\":true}").map(|(t, _)| t).as_deref(),
-			Some("tool_ok")
-		);
-
-		assert_eq!(
-			trace_line_to_text_and_status("saved models/staging/stg_x.sql"),
-			Some(("saved models/staging/stg_x.sql".to_string(), m::TraceStatus::Ok))
-		);
-		assert_eq!(
-			trace_line_to_text_and_status("failed to save models/staging/stg_x.sql: boom"),
-			Some(("failed to save models/staging/stg_x.sql: boom".to_string(), m::TraceStatus::Failed))
-		);
 	}
 
 	#[tokio::test]
@@ -2927,7 +3295,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn plan_request_returns_snapshot_when_plan_exists() {
+	async fn plans_request_returns_latest_cleanse_and_model_when_present() {
 		let storage = Arc::new(InMemoryStorageAdapter::default());
 		let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
 		let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
@@ -2947,36 +3315,175 @@ mod tests {
 			.trim_end_matches("/threads")
 			.trim_end_matches('/')
 			.to_string();
-		let plan_key = format!("{}/plans/{}/20260126T000000Z_cleanse.json", base, thread_id);
 
-		let plan = de_plan::CleansePlan {
-			plan_key: plan_key.clone(),
+		let cleanse_key = format!("{}/plans/{}/20260126T000000Z_cleanse.json", base, thread_id);
+		let cleanse = de_plan::CleansePlan {
+			plan_key: cleanse_key.clone(),
 			status: de_plan::PlanStatus::Approved,
 			project_snapshot: serde_json::json!({}),
-			tasks: vec![de_plan::CleanseTask {
-				dataset_id: "a.b.c".to_string(),
-				expected_model_path: Some("models/staging/stg_a_b_c.sql".to_string()),
-				invariants: vec!["pk: id".to_string()],
-				status: de_plan::TaskStatus::Pending,
-				notes: vec!["initial plan".to_string()],
-			}],
-			batches: vec![vec!["a.b.c".to_string()]],
+			tasks: vec![],
+			batches: vec![],
 			progress: de_plan::PlanProgress::default(),
 		};
-		let bytes = serde_json::to_vec_pretty(&plan).unwrap();
-		suite_ctx.storage.put_bytes(&plan_key, &bytes, "application/json").await.unwrap();
+		suite_ctx
+			.storage
+			.put_bytes(&cleanse_key, &serde_json::to_vec_pretty(&cleanse).unwrap(), "application/json")
+			.await
+			.unwrap();
 
-		let msg = json!({"v":1,"type":"plan","cid":"c1","thread_id":thread_id}).to_string();
+		let model_key = format!("{}/plans/{}/20260126T000000Z_model.json", base, thread_id);
+		let model = de_plan::ModelPlan {
+			plan_key: model_key.clone(),
+			status: de_plan::PlanStatus::Approved,
+			project_snapshot: serde_json::json!({}),
+			tasks: vec![],
+			batches: vec![],
+			progress: de_plan::PlanProgress::default(),
+		};
+		suite_ctx
+			.storage
+			.put_bytes(&model_key, &serde_json::to_vec_pretty(&model).unwrap(), "application/json")
+			.await
+			.unwrap();
+
+		let msg = json!({"v":1,"type":"plans","cid":"c1","thread_id":thread_id}).to_string();
 		let frames = handle_message(&msg, &mut state).await.unwrap();
 		assert_eq!(frames.len(), 1);
-		let resp: api::PlanResponse = serde_json::from_str(&frames[0]).unwrap();
+		let resp: api::PlansResponse = serde_json::from_str(&frames[0]).unwrap();
 		assert_eq!(resp.for_cid.as_deref(), Some("c1"));
-		assert_eq!(resp.plan.plan_kind, api::plan_snapshot::PlanKind::Cleanse);
-		assert_eq!(resp.plan.status, api::PlanStatus::Approved);
+		assert!(resp.cleanse.is_some());
+		assert!(resp.model.is_some());
 	}
 
 	#[tokio::test]
-	async fn user_request_streams_suite_progress_plan_update_and_trace() {
+	async fn open_emits_thread_state_frame() {
+		let storage = Arc::new(InMemoryStorageAdapter::default());
+		let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+		let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+		let suite_ctx = SuiteCtx::new(
+			storage.clone(),
+			Arc::new(NullSecretsProvider::default()),
+			Arc::new(NullModel::new()),
+			scope.clone(),
+			keyspace.clone(),
+		);
+		let mut reg = react_suites::registry::SuiteRegistry::new();
+		reg.register(StubDataEngineerSuite);
+		let reg = Arc::new(reg);
+		let mut state = ConnState::new(reg, suite_ctx.clone());
+
+		// Seed empty thread log so process_open can load it.
+		let thread_id = uuid::Uuid::new_v4().to_string();
+		let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
+		// minimal steps so derive_thread_context has something (optional)
+		let _ = store
+			.append_step(
+				&thread_id,
+				ThreadStep::SwitchSuite {
+					from: None,
+					to: "data_engineer".to_string(),
+					observation: Observation::ok(),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: "agent".to_string(),
+				},
+			)
+			.await;
+
+		let msg = json!({"v":1,"type":"open","cid":"c1","thread_id":thread_id,"suiteId":"data_engineer","agentType":"agent","question":"Continue."});
+		let mut sink = CollectSink::default();
+		process_open(&msg, &mut state, &mut sink).await.unwrap();
+
+		let frames = sink.out.lock().unwrap().clone();
+		assert!(frames.iter().any(|s| {
+			serde_json::from_str::<serde_json::Value>(s)
+				.ok()
+				.and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|t| t == "thread_state"))
+				.unwrap_or(false)
+		}));
+	}
+
+	#[tokio::test]
+	async fn open_persists_final_step_in_thread_log() {
+		let storage = Arc::new(InMemoryStorageAdapter::default());
+		let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+		let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+		let suite_ctx = SuiteCtx::new(
+			storage.clone(),
+			Arc::new(NullSecretsProvider::default()),
+			Arc::new(NullModel::new()),
+			scope.clone(),
+			keyspace.clone(),
+		);
+		let mut reg = react_suites::registry::SuiteRegistry::new();
+		reg.register(StubDataEngineerSuite);
+		let reg = Arc::new(reg);
+		let mut state = ConnState::new(reg, suite_ctx.clone());
+
+		let thread_id = uuid::Uuid::new_v4().to_string();
+		let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
+		let _ = store
+			.append_step(
+				&thread_id,
+				ThreadStep::SwitchSuite {
+					from: None,
+					to: "data_engineer".to_string(),
+					observation: Observation::ok(),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: "agent".to_string(),
+				},
+			)
+			.await;
+
+		let msg = json!({"v":1,"type":"open","cid":"c1","thread_id":thread_id,"suiteId":"data_engineer","agentType":"agent","question":"Continue."});
+		let mut sink = CollectSink::default();
+		process_open(&msg, &mut state, &mut sink).await.unwrap();
+
+		let log = store.get(&thread_id).await.unwrap();
+		assert!(matches!(log.steps.last(), Some(ThreadStep::Final { .. })));
+	}
+
+	#[tokio::test]
+	async fn open_persists_await_approval_step_in_thread_log() {
+		let storage = Arc::new(InMemoryStorageAdapter::default());
+		let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+		let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+		let suite_ctx = SuiteCtx::new(
+			storage.clone(),
+			Arc::new(NullSecretsProvider::default()),
+			Arc::new(NullModel::new()),
+			scope.clone(),
+			keyspace.clone(),
+		);
+		let mut reg = react_suites::registry::SuiteRegistry::new();
+		reg.register(StubAwaitApprovalSuite);
+		let reg = Arc::new(reg);
+		let mut state = ConnState::new(reg, suite_ctx.clone());
+
+		let thread_id = uuid::Uuid::new_v4().to_string();
+		let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
+		let _ = store
+			.append_step(
+				&thread_id,
+				ThreadStep::SwitchSuite {
+					from: None,
+					to: "data_engineer".to_string(),
+					observation: Observation::ok(),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: "agent".to_string(),
+				},
+			)
+			.await;
+
+		let msg = json!({"v":1,"type":"open","cid":"c1","thread_id":thread_id,"suiteId":"data_engineer","agentType":"agent","question":"Continue."});
+		let mut sink = CollectSink::default();
+		process_open(&msg, &mut state, &mut sink).await.unwrap();
+
+		let log = store.get(&thread_id).await.unwrap();
+		assert!(matches!(log.steps.last(), Some(ThreadStep::AskApproval { .. })));
+	}
+
+	#[tokio::test]
+	async fn user_request_streams_thread_state_and_tool_events() {
 		let storage = Arc::new(InMemoryStorageAdapter::default());
 		let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
 		let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
@@ -3016,110 +3523,39 @@ mod tests {
 			)
 			.await;
 
-		// Seed an approved plan so plan_update can be emitted during the run.
-		let base = keyspace
-			.threads_prefix(&scope)
-			.trim_end_matches("/threads")
-			.trim_end_matches('/')
-			.to_string();
-		let plan_key = format!("{}/plans/{}/20260126T000000Z_cleanse.json", base, thread_id);
-		let plan = de_plan::CleansePlan {
-			plan_key: plan_key.clone(),
-			status: de_plan::PlanStatus::Approved,
-			project_snapshot: serde_json::json!({"review": {"review_version": 1, "project_notes": ["ok"]}}),
-			tasks: vec![de_plan::CleanseTask {
-				dataset_id: "a.b.c".to_string(),
-				expected_model_path: Some("models/staging/stg_a_b_c.sql".to_string()),
-				invariants: vec![],
-				status: de_plan::TaskStatus::Pending,
-				notes: vec![],
-			}],
-			batches: vec![vec!["a.b.c".to_string()]],
-			progress: de_plan::PlanProgress::default(),
-		};
-		let bytes = serde_json::to_vec_pretty(&plan).unwrap();
-		suite_ctx.storage.put_bytes(&plan_key, &bytes, "application/json").await.unwrap();
-
 		let mut reg = react_suites::registry::SuiteRegistry::new();
 		reg.register(StubDataEngineerSuite);
 		let reg = Arc::new(reg);
 		let mut state = ConnState::new(reg, suite_ctx);
-		// Inherit trace setting when UserRequest.trace is omitted.
-		state.trace_pref.insert(thread_id.clone(), true);
 
-		let msg = json!({"v":1,"type":"user","cid":"c1","thread_id":thread_id,"text":"continue"}); // trace omitted
+		let msg = json!({"v":1,"type":"user","cid":"c1","thread_id":thread_id,"text":"continue"});
 		let mut sink = CollectSink::default();
 		process_user(&msg, &mut state, &mut sink).await.unwrap();
 
 		let frames = sink.out.lock().unwrap().clone();
 		assert!(!frames.is_empty());
-		let mut saw_suite_progress = false;
-		let mut saw_plan_update = false;
-		let mut saw_trace = false;
+		let mut saw_thread_state = false;
+		let mut saw_tool_start = false;
+		let mut saw_tool_end = false;
+		let mut saw_tool_phase = false;
 		for s in frames {
 			if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
 				match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-					"suite_progress" => saw_suite_progress = true,
-					"plan_update" => {
-						saw_plan_update = true;
-						let ps = v
-							.get("plan")
-							.and_then(|p| p.get("projectSnapshot"))
-							.and_then(|x| x.as_object())
-							.cloned()
-							.unwrap_or_default();
-						assert!(
-							!ps.is_empty(),
-							"expected plan_update.plan.projectSnapshot to be present when plan has project_snapshot"
-						);
-					},
-					"trace" => {
-						saw_trace = true;
-						let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
-						assert!(
-							matches!(status, "pending" | "running" | "ok" | "failed"),
-							"expected trace.status to be one of pending|running|ok|failed (got {status:?})"
-						);
-					},
+					"thread_state" => saw_thread_state = true,
+					"tool_start" => saw_tool_start = true,
+					"tool_end" => saw_tool_end = true,
 					_ => {}
+				}
+				if matches!(v.get("type").and_then(|t| t.as_str()), Some("tool_start" | "tool_end")) {
+					if v.get("phase").and_then(|p| p.as_str()).unwrap_or("").trim().is_empty() == false {
+						saw_tool_phase = true;
+					}
 				}
 			}
 		}
-		assert!(saw_suite_progress, "expected suite_progress frame during user-triggered run");
-		assert!(saw_plan_update, "expected plan_update frame during user-triggered run");
-		assert!(saw_trace, "expected trace frame during user-triggered run");
-	}
-
-	#[test]
-	fn diff_plan_snapshots_emits_status_and_note_changes() {
-		let prev_task = api::CleanseTaskSnapshot::new(
-			"a.b.c".to_string(),
-			"a.b.c".to_string(),
-			api::PlanTaskStatus::Pending,
-		);
-		let prev = api::PlanSnapshot::new(
-			api::plan_snapshot::PlanKind::Cleanse,
-			"k".to_string(),
-			api::PlanStatus::Approved,
-			vec![api::PlanTask::Cleanse(prev_task)],
-		);
-
-		let mut next_task = api::CleanseTaskSnapshot::new(
-			"a.b.c".to_string(),
-			"a.b.c".to_string(),
-			api::PlanTaskStatus::Blocked,
-		);
-		next_task.notes = Some(vec!["staging_model failed: boom".to_string()]);
-		let next = api::PlanSnapshot::new(
-			api::plan_snapshot::PlanKind::Cleanse,
-			"k".to_string(),
-			api::PlanStatus::Approved,
-			vec![api::PlanTask::Cleanse(next_task)],
-		);
-
-		let changes = diff_plan_snapshots(&prev, &next);
-		assert!(changes.iter().any(|c| matches!(c, api::PlanChange::TaskStatusChanged(_))));
-		assert!(changes.iter().any(|c| matches!(c, api::PlanChange::TaskNoteAdded(_))));
-		assert!(changes.iter().any(|c| matches!(c, api::PlanChange::TaskError(_))));
+		assert!(saw_thread_state);
+		assert!(saw_tool_start);
+		assert!(saw_tool_end);
+		assert!(saw_tool_phase);
 	}
 }

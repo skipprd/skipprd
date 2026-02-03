@@ -1,7 +1,7 @@
 /*
  * ReAct WebSocket API
  *
- * WebSocket-based chat threads for the ReAct server. Clients send JSON frames and receive JSON frames. Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, resume. Server message types: list, suites, thread_assigned, processing, token, trace, final, review, await_user, await_approval, unread, ok, error, history. 
+ * WebSocket-based chat threads for the ReAct server. Clients send JSON frames and receive JSON frames. Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, plans, thread_state. Server message types: list, suites, thread_assigned, final, review, await_user, await_approval, unread, ok, error, history, plans, plans_changed, thread_state, phase, tool_start, tool_end, llm_start, llm_end. 
  *
  * The version of the OpenAPI document: 0.3.0
  * 
@@ -19,30 +19,26 @@ pub struct NewRequest {
     pub cid: String,
     #[serde(rename = "type")]
     pub r#type: Type,
-    /// User's question to start a new thread
-    #[serde(rename = "question")]
-    pub question: String,
+    /// Optional initial message. If absent, creates an empty thread.
+    #[serde(rename = "question", skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
     /// Suite id to use (e.g. data_engineer | kb)
     #[serde(rename = "suiteId")]
     pub suite_id: String,
     /// Agent/mode to use (ask | cleanse | model | kb | agent | review). Required.
     #[serde(rename = "agentType")]
     pub agent_type: AgentType,
-    /// If true, stream `TraceResponse` frames while the agent runs. Each trace frame includes `text` plus a coarse `status` (pending|running|ok|failed). If omitted, the server inherits the last-known trace setting for the thread/connection.
-    #[serde(rename = "trace", skip_serializing_if = "Option::is_none")]
-    pub trace: Option<bool>,
 }
 
 impl NewRequest {
-    pub fn new(v: i32, cid: String, r#type: Type, question: String, suite_id: String, agent_type: AgentType) -> NewRequest {
+    pub fn new(v: i32, cid: String, r#type: Type, suite_id: String, agent_type: AgentType) -> NewRequest {
         NewRequest {
             v,
             cid,
             r#type,
-            question,
+            question: None,
             suite_id,
             agent_type,
-            trace: None,
         }
     }
 }
