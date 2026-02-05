@@ -53,16 +53,6 @@ fn mark_task_needs_update(status: &mut TaskStatus) {
     *status = TaskStatus::NeedsUpdate;
 }
 
-fn push_note_unique(notes: &mut Vec<String>, note: String) {
-    let nt = note.trim();
-    if nt.is_empty() {
-        return;
-    }
-    if !notes.iter().any(|n| n.trim() == nt) {
-        notes.push(note);
-    }
-}
-
 fn file_stem(s: &str) -> Option<String> {
     std::path::Path::new(s)
         .file_stem()
@@ -135,6 +125,80 @@ impl Default for PlanProgress {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChecklistOrigin {
+    Initial,
+    ReviewActionable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChecklistItemStatus {
+    Pending,
+    InProgress,
+    Done,
+    Blocked,
+    NeedsUpdate,
+}
+
+impl Default for ChecklistItemStatus {
+    fn default() -> Self {
+        ChecklistItemStatus::Pending
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChecklistEvidence {
+    pub kind: String,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub tool_id: Option<String>,
+    pub step_idx: usize,
+    #[serde(default)]
+    pub ts: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlanChecklistItem {
+    pub checklist_item_id: String,
+    pub label: String,
+    #[serde(default)]
+    pub details: Option<String>,
+    #[serde(default)]
+    pub status: ChecklistItemStatus,
+    pub origin: ChecklistOrigin,
+    #[serde(default)]
+    pub origin_step_idx: Option<usize>,
+    #[serde(default)]
+    pub evidence: Vec<ChecklistEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkGroupKind {
+    AuthorSql,
+    AuthorSchema,
+    Validate,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkGroupItemRef {
+    pub task_id: String,
+    pub checklist_item_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlanWorkGroup {
+    pub group_id: String,
+    pub label: String,
+    pub kind: WorkGroupKind,
+    pub items: Vec<WorkGroupItemRef>,
+    #[serde(default)]
+    pub depends_on_group_ids: Option<Vec<String>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CleanseTask {
     pub dataset_id: String,
@@ -149,7 +213,7 @@ pub struct CleanseTask {
     #[serde(default)]
     pub status: TaskStatus,
     #[serde(default)]
-    pub notes: Vec<String>,
+    pub checklist: Vec<PlanChecklistItem>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,6 +228,9 @@ pub struct CleansePlan {
     pub tasks: Vec<CleanseTask>,
     /// Ordered batches of dataset_ids; each batch MUST have at most 5 items.
     pub batches: Vec<Vec<String>>,
+    /// Ordered work groups (checklist-driven). This is the canonical execution plan for the UI.
+    #[serde(default)]
+    pub work_groups: Vec<PlanWorkGroup>,
     #[serde(default)]
     pub progress: PlanProgress,
 }
@@ -186,7 +253,7 @@ pub struct ModelTask {
     #[serde(default)]
     pub status: TaskStatus,
     #[serde(default)]
-    pub notes: Vec<String>,
+    pub checklist: Vec<PlanChecklistItem>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -201,6 +268,9 @@ pub struct ModelPlan {
     pub tasks: Vec<ModelTask>,
     /// Ordered batches of model names; each batch MUST have at most 5 items.
     pub batches: Vec<Vec<String>>,
+    /// Ordered work groups (checklist-driven). This is the canonical execution plan for the UI.
+    #[serde(default)]
+    pub work_groups: Vec<PlanWorkGroup>,
     #[serde(default)]
     pub progress: PlanProgress,
 }
@@ -488,12 +558,24 @@ pub async fn save_model_plan(ctx: &AgentCtx, plan: &ModelPlan) -> Result<(), Str
         .map_err(|e| e.to_string())
 }
 
+fn checklist_status(items: &[PlanChecklistItem], id: &str) -> ChecklistItemStatus {
+    items
+        .iter()
+        .find(|it| it.checklist_item_id == id)
+        .map(|it| it.status)
+        .unwrap_or(ChecklistItemStatus::Pending)
+}
+
 pub fn cleanse_next_batch(plan: &CleansePlan) -> Vec<String> {
     for batch in plan.batches.iter() {
         let mut out: Vec<String> = Vec::new();
         for ds in batch.iter() {
             if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
-                if t.status != TaskStatus::Done {
+                // "Next batch" is defined as "next SQL authoring work", not "overall task not done".
+                // This avoids repeatedly scheduling a dataset when only schema/validate checklist
+                // items remain.
+                if checklist_status(&t.checklist, CHECKLIST_SQL_MODEL) != ChecklistItemStatus::Done
+                {
                     out.push(ds.clone());
                 }
             } else {
@@ -516,7 +598,8 @@ pub fn model_next_batch(plan: &ModelPlan) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for name in batch.iter() {
             if let Some(t) = plan.tasks.iter().find(|t| t.name == *name) {
-                if t.status != TaskStatus::Done {
+                if checklist_status(&t.checklist, CHECKLIST_SQL_MODEL) != ChecklistItemStatus::Done
+                {
                     out.push(name.clone());
                 }
             } else {
@@ -533,15 +616,345 @@ pub fn model_next_batch(plan: &ModelPlan) -> Vec<String> {
     vec![]
 }
 
+const CHECKLIST_SQL_MODEL: &str = "sql_model";
+const CHECKLIST_SCHEMA_CONTRACT: &str = "schema_contract";
+const CHECKLIST_VALIDATE: &str = "validate";
+
+fn group_is_complete_cleanse(plan: &CleansePlan, g: &PlanWorkGroup) -> bool {
+    if g.items.is_empty() {
+        return true;
+    }
+    for it in g.items.iter() {
+        let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == it.task_id) else {
+            return false;
+        };
+        if checklist_status(&t.checklist, it.checklist_item_id.as_str()) != ChecklistItemStatus::Done
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn group_is_complete_model(plan: &ModelPlan, g: &PlanWorkGroup) -> bool {
+    if g.items.is_empty() {
+        return true;
+    }
+    for it in g.items.iter() {
+        let Some(t) = plan.tasks.iter().find(|t| t.name == it.task_id) else {
+            return false;
+        };
+        if checklist_status(&t.checklist, it.checklist_item_id.as_str()) != ChecklistItemStatus::Done
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn group_deps_satisfied(
+    completed: &std::collections::HashSet<String>,
+    depends_on: Option<&Vec<String>>,
+) -> bool {
+    let Some(deps) = depends_on else {
+        return true;
+    };
+    deps.iter().all(|d| completed.contains(d))
+}
+
+/// Returns the next work-group driven action for the cleanse plan.
+/// - If `work_groups` is empty, returns None (caller should fall back to `batches` heuristics).
+/// - For `AuthorSql` / `AuthorSchema`, returns up to 5 task_ids that still need that checklist item.
+/// - For `Validate`, returns the kind and an empty vec (caller should transition phases).
+pub fn cleanse_next_action(plan: &CleansePlan) -> Option<(WorkGroupKind, Vec<String>)> {
+    if plan.work_groups.is_empty() {
+        return None;
+    }
+
+    let mut completed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for g in plan.work_groups.iter() {
+        if group_is_complete_cleanse(plan, g) {
+            completed.insert(g.group_id.clone());
+        }
+    }
+
+    for g in plan.work_groups.iter() {
+        if completed.contains(&g.group_id) {
+            continue;
+        }
+        if !group_deps_satisfied(&completed, g.depends_on_group_ids.as_ref()) {
+            continue;
+        }
+
+        if g.kind == WorkGroupKind::Validate {
+            return Some((WorkGroupKind::Validate, vec![]));
+        }
+
+        let mut out: Vec<String> = Vec::new();
+        for it in g.items.iter() {
+            let need = match plan.tasks.iter().find(|t| t.dataset_id == it.task_id) {
+                Some(t) => {
+                    checklist_status(&t.checklist, it.checklist_item_id.as_str())
+                        != ChecklistItemStatus::Done
+                }
+                None => true,
+            };
+            if need {
+                if !out.contains(&it.task_id) {
+                    out.push(it.task_id.clone());
+                }
+                if out.len() >= 5 {
+                    break;
+                }
+            }
+        }
+        return Some((g.kind, out));
+    }
+
+    Some((WorkGroupKind::Validate, vec![]))
+}
+
+/// Returns the next work-group driven action for the model plan.
+/// - If `work_groups` is empty, returns None (caller should fall back to `batches` heuristics).
+/// - For `AuthorSql` / `AuthorSchema`, returns up to 5 task_ids that still need that checklist item.
+/// - For `Validate`, returns the kind and an empty vec (caller should transition phases).
+pub fn model_next_action(plan: &ModelPlan) -> Option<(WorkGroupKind, Vec<String>)> {
+    if plan.work_groups.is_empty() {
+        return None;
+    }
+
+    let mut completed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for g in plan.work_groups.iter() {
+        if group_is_complete_model(plan, g) {
+            completed.insert(g.group_id.clone());
+        }
+    }
+
+    for g in plan.work_groups.iter() {
+        if completed.contains(&g.group_id) {
+            continue;
+        }
+        if !group_deps_satisfied(&completed, g.depends_on_group_ids.as_ref()) {
+            continue;
+        }
+
+        if g.kind == WorkGroupKind::Validate {
+            return Some((WorkGroupKind::Validate, vec![]));
+        }
+
+        let mut out: Vec<String> = Vec::new();
+        for it in g.items.iter() {
+            let need = match plan.tasks.iter().find(|t| t.name == it.task_id) {
+                Some(t) => {
+                    checklist_status(&t.checklist, it.checklist_item_id.as_str())
+                        != ChecklistItemStatus::Done
+                }
+                None => true,
+            };
+            if need {
+                if !out.contains(&it.task_id) {
+                    out.push(it.task_id.clone());
+                }
+                if out.len() >= 5 {
+                    break;
+                }
+            }
+        }
+        return Some((g.kind, out));
+    }
+
+    Some((WorkGroupKind::Validate, vec![]))
+}
+
+pub fn cleanse_pending_schema_contracts(plan: &CleansePlan) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for batch in plan.batches.iter() {
+        for ds in batch.iter() {
+            let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) else {
+                continue;
+            };
+            if checklist_status(&t.checklist, CHECKLIST_SQL_MODEL) == ChecklistItemStatus::Done
+                && checklist_status(&t.checklist, CHECKLIST_SCHEMA_CONTRACT)
+                    != ChecklistItemStatus::Done
+            {
+                out.push(ds.clone());
+                if out.len() >= 5 {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn model_pending_schema_contracts(plan: &ModelPlan) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for batch in plan.batches.iter() {
+        for name in batch.iter() {
+            let Some(t) = plan.tasks.iter().find(|t| t.name == *name) else {
+                continue;
+            };
+            if checklist_status(&t.checklist, CHECKLIST_SQL_MODEL) == ChecklistItemStatus::Done
+                && checklist_status(&t.checklist, CHECKLIST_SCHEMA_CONTRACT)
+                    != ChecklistItemStatus::Done
+            {
+                out.push(name.clone());
+                if out.len() >= 5 {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn task_status_from_checklist(items: &[PlanChecklistItem]) -> TaskStatus {
+    // If checklist is missing (shouldn't happen in normal operation), be conservative.
+    if items.is_empty() {
+        return TaskStatus::Pending;
+    }
+    if items
+        .iter()
+        .any(|it| it.status == ChecklistItemStatus::NeedsUpdate)
+    {
+        return TaskStatus::NeedsUpdate;
+    }
+    if items.iter().any(|it| it.status == ChecklistItemStatus::Blocked) {
+        return TaskStatus::Blocked;
+    }
+    if items.iter().all(|it| it.status == ChecklistItemStatus::Done) {
+        return TaskStatus::Done;
+    }
+    if items
+        .iter()
+        .any(|it| it.status == ChecklistItemStatus::InProgress)
+    {
+        return TaskStatus::InProgress;
+    }
+    // If some items are complete but others remain pending, surface as in_progress.
+    if items.iter().any(|it| it.status == ChecklistItemStatus::Done) {
+        return TaskStatus::InProgress;
+    }
+    TaskStatus::Pending
+}
+
+fn recompute_cleanse_task_status(t: &mut CleanseTask) {
+    t.status = task_status_from_checklist(&t.checklist);
+}
+
+fn recompute_model_task_status(t: &mut ModelTask) {
+    t.status = task_status_from_checklist(&t.checklist);
+}
+
+fn evidence_from_tool_end(
+    step_idx: usize,
+    kind: &str,
+    tool_name: &str,
+    tool_id: &str,
+    ts: &str,
+) -> ChecklistEvidence {
+    ChecklistEvidence {
+        kind: kind.to_string(),
+        tool_name: Some(tool_name.to_string()),
+        tool_id: Some(tool_id.to_string()),
+        step_idx,
+        ts: Some(ts.to_string()),
+    }
+}
+
+fn push_evidence_unique(item: &mut PlanChecklistItem, ev: ChecklistEvidence) {
+    if item
+        .evidence
+        .iter()
+        .any(|e| e.kind == ev.kind && e.step_idx == ev.step_idx && e.tool_id == ev.tool_id)
+    {
+        return;
+    }
+    item.evidence.push(ev);
+}
+
+fn ensure_checklist_item<'a>(
+    items: &'a mut Vec<PlanChecklistItem>,
+    checklist_item_id: &str,
+    label: &str,
+) -> &'a mut PlanChecklistItem {
+    if let Some(i) = items
+        .iter()
+        .position(|it| it.checklist_item_id.trim() == checklist_item_id)
+    {
+        return &mut items[i];
+    }
+    items.push(PlanChecklistItem {
+        checklist_item_id: checklist_item_id.to_string(),
+        label: label.to_string(),
+        details: None,
+        status: ChecklistItemStatus::Pending,
+        origin: ChecklistOrigin::Initial,
+        origin_step_idx: None,
+        evidence: vec![],
+    });
+    let last = items.len().saturating_sub(1);
+    &mut items[last]
+}
+
+fn set_checklist_status(
+    item: &mut PlanChecklistItem,
+    status: ChecklistItemStatus,
+    ev: Option<ChecklistEvidence>,
+) {
+    item.status = status;
+    if let Some(e) = ev {
+        push_evidence_unique(item, e);
+    }
+}
+
 pub fn cleanse_mark_done(plan: &mut CleansePlan, dataset_id: &str) {
     if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == dataset_id) {
-        t.status = TaskStatus::Done;
+        let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
+        set_checklist_status(it, ChecklistItemStatus::Done, None);
+        recompute_cleanse_task_status(t);
     }
 }
 
 pub fn model_mark_done(plan: &mut ModelPlan, name: &str) {
     if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == name) {
-        t.status = TaskStatus::Done;
+        let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author gold SQL");
+        set_checklist_status(it, ChecklistItemStatus::Done, None);
+        recompute_model_task_status(t);
+    }
+}
+
+pub fn cleanse_mark_needs_update(plan: &mut CleansePlan, dataset_id: &str) {
+    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == dataset_id) {
+        let it =
+            ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
+        set_checklist_status(it, ChecklistItemStatus::NeedsUpdate, None);
+        recompute_cleanse_task_status(t);
+    }
+}
+
+pub fn model_mark_needs_update(plan: &mut ModelPlan, name: &str) {
+    if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == name) {
+        let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author gold SQL");
+        set_checklist_status(it, ChecklistItemStatus::NeedsUpdate, None);
+        recompute_model_task_status(t);
+    }
+}
+
+pub fn cleanse_mark_in_progress(plan: &mut CleansePlan, dataset_id: &str) {
+    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == dataset_id) {
+        let it =
+            ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
+        set_checklist_status(it, ChecklistItemStatus::InProgress, None);
+        recompute_cleanse_task_status(t);
+    }
+}
+
+pub fn model_mark_in_progress(plan: &mut ModelPlan, name: &str) {
+    if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == name) {
+        let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author gold SQL");
+        set_checklist_status(it, ChecklistItemStatus::InProgress, None);
+        recompute_model_task_status(t);
     }
 }
 
@@ -556,270 +969,409 @@ pub fn model_all_done(plan: &ModelPlan) -> bool {
 pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog) {
     let start = plan.progress.last_applied_step_idx.min(log.steps.len());
     for (idx, step) in log.steps.iter().enumerate().skip(start) {
-        // Deterministic batch executor (preferred): derive progress from its structured output.
-        if let ThreadStep::ToolEnd {
-            name, observation, ..
-        } = step
-        {
-            if name == "apply_next_cleanse_batch" {
-                let ok = observation.ok;
-                let attempted: Vec<String> = observation
-                    .extra
-                    .get("attempted_dataset_ids")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let succeeded: Vec<String> = observation
-                    .extra
-                    .get("succeeded_dataset_ids")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let succ_set: std::collections::HashSet<String> =
-                    succeeded.iter().cloned().collect();
-                let failed: Vec<String> = attempted
-                    .iter()
-                    .filter(|ds| !succ_set.contains(*ds))
-                    .cloned()
-                    .collect();
-
-                for ds in attempted.iter() {
-                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-                        mark_task_in_progress(&mut t.status);
-                    }
-                }
-                for ds in succeeded.iter() {
-                    cleanse_mark_done(plan, ds);
-                }
-                if !ok || !failed.is_empty() {
-                    let err = observation
-                        .errors
-                        .first()
-                        .map(|s| s.as_str())
-                        .unwrap_or("apply_next_cleanse_batch failed");
-                    let note = format!("apply_next_cleanse_batch failed: {}", err.trim());
-                    for ds in failed.iter() {
-                        if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-                            mark_task_needs_update(&mut t.status);
-                            push_note_unique(&mut t.notes, note.clone());
-                        }
-                    }
-                }
-                plan.progress.last_applied_step_idx = idx + 1;
-                continue;
-            }
-        }
-
-        // Track BOTH success and failure so plans remain truthful and can drive remediation.
-        // IMPORTANT: do NOT `continue` for non-staging tools here; later handlers (dbt_validate, dbt_files)
-        // need to observe those tool steps too.
-        if let ThreadStep::ToolEnd {
+        let ThreadStep::ToolEnd {
+            tool_id,
             name,
             args,
             observation,
+            ts,
             ..
         } = step
-        {
-            if name != "staging_model" {
-                // not handled here
-            } else {
-                let ok = observation.ok;
-                let args_dataset_ids: Vec<String> = args
-                    .get("dataset_ids")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let errs: Vec<String> = observation.errors.clone();
+        else {
+            continue;
+        };
 
-                let succeeded: Vec<String> = observation
-                    .extra
-                    .get("succeeded_dataset_ids")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+        // Preferred: derive from structured batch tool output.
+        if name == "apply_next_cleanse_batch" {
+            let ok = observation.ok;
+            let attempted: Vec<String> = observation
+                .extra
+                .get("attempted_dataset_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let succeeded: Vec<String> = observation
+                .extra
+                .get("succeeded_dataset_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let succ_set: std::collections::HashSet<String> = succeeded.iter().cloned().collect();
+            let failed: Vec<String> = attempted
+                .iter()
+                .filter(|ds| !succ_set.contains(*ds))
+                .cloned()
+                .collect();
 
-                // Work signal: the suite is actively (re)working these tasks.
+            for ds in attempted.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                    let it = ensure_checklist_item(
+                        &mut t.checklist,
+                        CHECKLIST_SQL_MODEL,
+                        "Author staging SQL",
+                    );
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::InProgress,
+                        Some(evidence_from_tool_end(idx, "tool_end", name, tool_id, ts)),
+                    );
+                    recompute_cleanse_task_status(t);
+                }
+            }
+            for ds in succeeded.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                    let it = ensure_checklist_item(
+                        &mut t.checklist,
+                        CHECKLIST_SQL_MODEL,
+                        "Author staging SQL",
+                    );
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::Done,
+                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                    );
+                    recompute_cleanse_task_status(t);
+                }
+            }
+            if !ok || !failed.is_empty() {
+                for ds in failed.iter() {
+                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                        let it = ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SQL_MODEL,
+                            "Author staging SQL",
+                        );
+                        set_checklist_status(
+                            it,
+                            ChecklistItemStatus::NeedsUpdate,
+                            Some(evidence_from_tool_end(idx, "tool_end_failed", name, tool_id, ts)),
+                        );
+                        recompute_cleanse_task_status(t);
+                    }
+                }
+            }
+            plan.progress.last_applied_step_idx = idx + 1;
+            continue;
+        }
+
+        // Direct staging tool output (non-batched).
+        if name == "staging_model" {
+            let ok = observation.ok;
+            let args_dataset_ids: Vec<String> = args
+                .get("dataset_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let succeeded: Vec<String> = observation
+                .extra
+                .get("succeeded_dataset_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for ds in args_dataset_ids.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                    let it = ensure_checklist_item(
+                        &mut t.checklist,
+                        CHECKLIST_SQL_MODEL,
+                        "Author staging SQL",
+                    );
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::InProgress,
+                        Some(evidence_from_tool_end(idx, "tool_end", name, tool_id, ts)),
+                    );
+                    recompute_cleanse_task_status(t);
+                }
+            }
+            for ds in succeeded.iter() {
+                cleanse_mark_done(plan, ds);
+            }
+            if !ok {
                 for ds in args_dataset_ids.iter() {
+                    if succeeded.contains(ds) {
+                        continue;
+                    }
                     if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-                        mark_task_in_progress(&mut t.status);
+                        let it = ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SQL_MODEL,
+                            "Author staging SQL",
+                        );
+                        set_checklist_status(
+                            it,
+                            ChecklistItemStatus::NeedsUpdate,
+                            Some(evidence_from_tool_end(idx, "tool_end_failed", name, tool_id, ts)),
+                        );
+                        recompute_cleanse_task_status(t);
                     }
                 }
-
-                // Success path: mark done.
-                for ds in succeeded.iter() {
-                    cleanse_mark_done(plan, ds);
-                }
-
-                // Failure path: attach notes and flag tasks as needs_update (idempotent per step index).
-                if !ok {
-                    let mut msg = String::new();
-                    msg.push_str("staging_model failed");
-                    if !errs.is_empty() {
-                        msg.push_str(": ");
-                        msg.push_str(errs[0].trim());
-                    }
-                    if !msg.trim().is_empty() {
-                        for ds in args_dataset_ids.iter() {
-                            if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-                                // If the tool reported this dataset as succeeded, do not regress it.
-                                if !succeeded.contains(ds) {
-                                    mark_task_needs_update(&mut t.status);
-                                }
-                                push_note_unique(&mut t.notes, msg.clone());
-                            }
-                        }
-                    }
-                }
-
-                plan.progress.last_applied_step_idx = idx + 1;
-                continue;
             }
+            plan.progress.last_applied_step_idx = idx + 1;
+            continue;
         }
 
-        // dbt_validate failures: mark affected staging tasks as needs_update.
-        if let ThreadStep::ToolEnd {
-            name, observation, ..
-        } = step
-        {
-            if name == "dbt_validate" {
+        // Direct authoring tool (legacy / non-batched): track staging_model success/failure as sql_model progress.
+        if name == "staging_model" {
+            let ok = observation.ok;
+            let args_dataset_ids: Vec<String> = args
+                .get("dataset_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let succeeded: Vec<String> = observation
+                .extra
+                .get("succeeded_dataset_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            for ds in args_dataset_ids.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                    let it =
+                        ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::InProgress,
+                        Some(evidence_from_tool_end(idx, "tool_end", name, tool_id, ts)),
+                    );
+                    recompute_cleanse_task_status(t);
+                }
+            }
+            for ds in succeeded.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                    let it =
+                        ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::Done,
+                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                    );
+                    recompute_cleanse_task_status(t);
+                }
+            }
+            if !ok {
+                for ds in args_dataset_ids.iter() {
+                    if succeeded.contains(ds) {
+                        continue;
+                    }
+                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                        let it =
+                            ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
+                        set_checklist_status(
+                            it,
+                            ChecklistItemStatus::NeedsUpdate,
+                            Some(evidence_from_tool_end(
+                                idx,
+                                "tool_end_failed",
+                                name,
+                                tool_id,
+                                ts,
+                            )),
+                        );
+                        recompute_cleanse_task_status(t);
+                    }
+                }
+            }
+            plan.progress.last_applied_step_idx = idx + 1;
+            continue;
+        }
+
+        if name == "dbt_files" {
+            let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            if op == "patch" {
                 let ok = observation.ok;
-                if !ok {
-                    let err = observation
-                        .errors
-                        .first()
-                        .map(|s| s.as_str())
-                        .unwrap_or("dbt_validate failed");
-                    let note = format!("dbt_validate failed: {}", err.trim());
-                    let logs = observation
-                        .extra
-                        .get("logs")
-                        .cloned()
-                        .unwrap_or(Value::Null);
+                let preview = args
+                    .get("preview_diff")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
-                    // Extract failing models + runtime test failures from dbt stdout.
-                    let failed =
-                        crate::data_engineer::dbt_error::extract_failed_models_from_logs(&logs);
-                    let runtime =
-                        crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(&logs);
-
-                    let mut stems: Vec<String> = Vec::new();
-                    for f in failed.iter() {
-                        if let Some(file) = f.get("file").and_then(|v| v.as_str()) {
-                            if let Some(st) = file_stem(file) {
-                                stems.push(st);
-                            }
-                        }
-                        if let Some(name) = f.get("name").and_then(|v| v.as_str()) {
-                            if !name.trim().is_empty() {
-                                stems.push(name.trim().to_string());
-                            }
-                        }
-                    }
-                    for r in runtime.iter() {
-                        if let Some(mh) = r.get("model_hint").and_then(|v| v.as_str()) {
-                            if !mh.trim().is_empty() {
-                                stems.push(mh.trim().to_string());
-                            }
-                        }
-                    }
-                    stems.sort();
-                    stems.dedup();
-
+                let paths = extract_dbt_files_patch_paths(args);
+                // SQL patching can be used for targeted remediation; treat successful non-preview patches as progress.
+                let mut stems: Vec<String> = paths.iter().filter_map(|p| file_stem(p)).collect();
+                stems.sort();
+                stems.dedup();
+                if !stems.is_empty() {
                     for t in plan.tasks.iter_mut() {
                         let Some(p) = t.expected_model_path.as_deref() else {
                             continue;
                         };
-                        let Some(st) = file_stem(p) else { continue };
+                        let Some(st) = file_stem(p) else {
+                            continue;
+                        };
                         if stems.iter().any(|s| s == &st) {
-                            mark_task_needs_update(&mut t.status);
-                            push_note_unique(&mut t.notes, note.clone());
+                            let it = ensure_checklist_item(
+                                &mut t.checklist,
+                                CHECKLIST_SQL_MODEL,
+                                "Author staging SQL",
+                            );
+                            let new_status = if ok {
+                                ChecklistItemStatus::InProgress
+                            } else {
+                                ChecklistItemStatus::NeedsUpdate
+                            };
+                            let ev_kind = if ok { "tool_end_ok" } else { "tool_end_failed" };
+                            set_checklist_status(
+                                it,
+                                new_status,
+                                Some(evidence_from_tool_end(idx, ev_kind, name, tool_id, ts)),
+                            );
+                            recompute_cleanse_task_status(t);
                         }
+                    }
+                    if ok && !preview {
+                        plan.progress.consecutive_batch_failures = 0;
+                    }
+                }
+                let touched_schema_yml = paths.iter().any(|p| {
+                    p.trim() == "models/schema.yml"
+                        || (p.trim().starts_with("models/")
+                            && p.trim().ends_with(".yml")
+                            && !p.trim().contains("/_versions/"))
+                });
+                if touched_schema_yml {
+                    // Best-effort: match by expected_model_path stem.
+                    for t in plan.tasks.iter_mut() {
+                        let Some(p) = t.expected_model_path.as_deref() else {
+                            continue;
+                        };
+                        let Some(st) = file_stem(p) else {
+                            continue;
+                        };
+                        if stems.is_empty() || stems.iter().any(|s| s == &st) || paths.iter().any(|pp| pp.trim() == "models/schema.yml") {
+                            let it = ensure_checklist_item(
+                                &mut t.checklist,
+                                CHECKLIST_SCHEMA_CONTRACT,
+                                "Author schema contract",
+                            );
+                            let ev_kind = if ok { "tool_end_ok" } else { "tool_end_failed" };
+                            let new_status = if ok && !preview {
+                                ChecklistItemStatus::Done
+                            } else if ok {
+                                ChecklistItemStatus::InProgress
+                            } else {
+                                ChecklistItemStatus::NeedsUpdate
+                            };
+                            set_checklist_status(
+                                it,
+                                new_status,
+                                Some(evidence_from_tool_end(idx, ev_kind, name, tool_id, ts)),
+                            );
+                            recompute_cleanse_task_status(t);
+                        }
+                    }
+                    if ok && !preview {
+                        // Treat a successful non-preview schema patch as forward progress for batching.
+                        plan.progress.consecutive_batch_failures = 0;
                     }
                 }
                 plan.progress.last_applied_step_idx = idx + 1;
-                continue;
             }
+            continue;
         }
 
-        // Also capture dbt_files patch failures (repair steps) and attach them to the best matching task.
-        if let ThreadStep::ToolEnd {
-            name,
-            args,
-            observation,
-            ..
-        } = step
-        {
-            if name == "dbt_files" {
-                let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
-                if op == "patch" {
-                    let ok = observation.ok;
-                    let paths = extract_dbt_files_patch_paths(args);
-                    let mut stems: Vec<String> =
-                        paths.iter().filter_map(|p| file_stem(p)).collect();
-                    stems.sort();
-                    stems.dedup();
-                    // Work signal: any targeted model is being actively remediated.
-                    let mut matched_any = false;
-                    for t in plan.tasks.iter_mut() {
-                        let Some(p) = t.expected_model_path.as_deref() else {
-                            continue;
-                        };
-                        let Some(st) = file_stem(p) else { continue };
-                        if stems.iter().any(|s| s == &st) {
-                            t.status = TaskStatus::InProgress;
-                            matched_any = true;
-                        }
+        if name == "dbt_validate" {
+            let ok = observation.ok;
+            if ok {
+                for t in plan.tasks.iter_mut() {
+                    // Mark validate done for tasks that have authored their SQL.
+                    if checklist_status(&t.checklist, CHECKLIST_SQL_MODEL) != ChecklistItemStatus::Done
+                    {
+                        continue;
                     }
-                    if ok && matched_any {
-                        // Successful, non-preview mutation indicates forward progress; reset batch-failure budget.
-                        let preview = args
-                            .get("preview_diff")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        // NOTE: keep this intentionally simple: any successful non-preview patch
-                        // targeting a known task is treated as forward progress (even if it was a no-op write).
-                        if !preview {
-                            plan.progress.consecutive_batch_failures = 0;
-                        }
+                    let v = ensure_checklist_item(&mut t.checklist, CHECKLIST_VALIDATE, "Validate");
+                    if v.status == ChecklistItemStatus::Done {
+                        continue;
                     }
-                    if !ok {
-                        let err = observation
-                            .errors
-                            .first()
-                            .map(|s| s.as_str())
-                            .unwrap_or("unknown error");
-                        let note = format!("dbt_files patch failed: {}", err.trim());
-                        for t in plan.tasks.iter_mut() {
-                            let Some(p) = t.expected_model_path.as_deref() else {
-                                continue;
-                            };
-                            let Some(st) = file_stem(p) else { continue };
-                            if stems.iter().any(|s| s == &st) {
-                                mark_task_needs_update(&mut t.status);
-                                push_note_unique(&mut t.notes, note.clone());
-                            }
-                        }
-                    }
-                    plan.progress.last_applied_step_idx = idx + 1;
+                    set_checklist_status(
+                        v,
+                        ChecklistItemStatus::Done,
+                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                    );
+                    recompute_cleanse_task_status(t);
                 }
-                continue;
+            } else {
+                let logs = observation
+                    .extra
+                    .get("logs")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let failed = crate::data_engineer::dbt_error::extract_failed_models_from_logs(&logs);
+                let runtime =
+                    crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(&logs);
+
+                let mut names: Vec<String> = Vec::new();
+                for f in failed.iter() {
+                    if let Some(file) = f.get("file").and_then(|v| v.as_str()) {
+                        if let Some(st) = file_stem(file) {
+                            names.push(st);
+                        }
+                    }
+                    if let Some(nm) = f.get("name").and_then(|v| v.as_str()) {
+                        if !nm.trim().is_empty() {
+                            names.push(nm.trim().to_string());
+                        }
+                    }
+                }
+                for r in runtime.iter() {
+                    if let Some(mh) = r.get("model_hint").and_then(|v| v.as_str()) {
+                        if !mh.trim().is_empty() {
+                            names.push(mh.trim().to_string());
+                        }
+                    }
+                }
+                names.sort();
+                names.dedup();
+
+                for t in plan.tasks.iter_mut() {
+                    let implicated = if names.is_empty() {
+                        true
+                    } else if let Some(p) = t.expected_model_path.as_deref() {
+                        if let Some(st) = file_stem(p) {
+                            names.iter().any(|n| n == &st)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !implicated {
+                        continue;
+                    }
+                    let v = ensure_checklist_item(&mut t.checklist, CHECKLIST_VALIDATE, "Validate");
+                    set_checklist_status(
+                        v,
+                        ChecklistItemStatus::NeedsUpdate,
+                        Some(evidence_from_tool_end(idx, "tool_end_failed", name, tool_id, ts)),
+                    );
+                    recompute_cleanse_task_status(t);
+                }
             }
+            plan.progress.last_applied_step_idx = idx + 1;
+            continue;
         }
     }
 }
@@ -827,238 +1379,326 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
 pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
     let start = plan.progress.last_applied_step_idx.min(log.steps.len());
     for (idx, step) in log.steps.iter().enumerate().skip(start) {
-        // Deterministic batch executor (preferred): derive progress from its structured output.
-        if let ThreadStep::ToolEnd {
-            name, observation, ..
+        let ThreadStep::ToolEnd {
+            tool_id,
+            name,
+            args,
+            observation,
+            ts,
+            ..
         } = step
-        {
-            if name == "apply_next_model_batch" {
-                let ok = observation.ok;
-                let attempted: Vec<String> = observation
-                    .extra
-                    .get("attempted_item_names")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let succeeded: Vec<String> = observation
-                    .extra
-                    .get("succeeded_item_names")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let succ_set: std::collections::HashSet<String> =
-                    succeeded.iter().cloned().collect();
-                let failed: Vec<String> = attempted
-                    .iter()
-                    .filter(|n| !succ_set.contains(*n))
-                    .cloned()
-                    .collect();
+        else {
+            continue;
+        };
 
-                for n in attempted.iter() {
+        // Preferred: derive from structured batch tool output.
+        if name == "apply_next_model_batch" {
+            let ok = observation.ok;
+            let attempted: Vec<String> = observation
+                .extra
+                .get("attempted_item_names")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let succeeded: Vec<String> = observation
+                .extra
+                .get("succeeded_item_names")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let succ_set: std::collections::HashSet<String> = succeeded.iter().cloned().collect();
+            let failed: Vec<String> = attempted
+                .iter()
+                .filter(|n| !succ_set.contains(*n))
+                .cloned()
+                .collect();
+
+            for n in attempted.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
+                    let it = ensure_checklist_item(
+                        &mut t.checklist,
+                        CHECKLIST_SQL_MODEL,
+                        "Author gold SQL",
+                    );
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::InProgress,
+                        Some(evidence_from_tool_end(idx, "tool_end", name, tool_id, ts)),
+                    );
+                    recompute_model_task_status(t);
+                }
+            }
+            for n in succeeded.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
+                    let it = ensure_checklist_item(
+                        &mut t.checklist,
+                        CHECKLIST_SQL_MODEL,
+                        "Author gold SQL",
+                    );
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::Done,
+                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                    );
+                    recompute_model_task_status(t);
+                }
+            }
+            if !ok || !failed.is_empty() {
+                for n in failed.iter() {
                     if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
-                        mark_task_in_progress(&mut t.status);
+                        let it = ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SQL_MODEL,
+                            "Author gold SQL",
+                        );
+                        set_checklist_status(
+                            it,
+                            ChecklistItemStatus::NeedsUpdate,
+                            Some(evidence_from_tool_end(
+                                idx,
+                                "tool_end_failed",
+                                name,
+                                tool_id,
+                                ts,
+                            )),
+                        );
+                        recompute_model_task_status(t);
                     }
                 }
-                for n in succeeded.iter() {
-                    model_mark_done(plan, n);
-                }
-                if !ok || !failed.is_empty() {
-                    let err = observation
-                        .errors
-                        .first()
-                        .map(|s| s.as_str())
-                        .unwrap_or("apply_next_model_batch failed");
-                    let note = format!("apply_next_model_batch failed: {}", err.trim());
-                    for n in failed.iter() {
-                        if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
-                            mark_task_needs_update(&mut t.status);
-                            push_note_unique(&mut t.notes, note.clone());
-                        }
-                    }
-                }
-                plan.progress.last_applied_step_idx = idx + 1;
-                continue;
             }
+            plan.progress.last_applied_step_idx = idx + 1;
+            continue;
         }
 
-        if let ThreadStep::ToolEnd {
-            name,
-            args,
-            observation,
-            ..
-        } = step
-        {
-            if name != "gold_model" {
-                // fall through
+        if name == "gold_model" {
+            let ok = observation.ok;
+            let succeeded: Vec<String> = observation
+                .extra
+                .get("succeeded_item_names")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let arg_names: Vec<String> = args
+                .get("items")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|it| {
+                            it.get("name")
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for nm in arg_names.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *nm) {
+                    let it = ensure_checklist_item(
+                        &mut t.checklist,
+                        CHECKLIST_SQL_MODEL,
+                        "Author gold SQL",
+                    );
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::InProgress,
+                        Some(evidence_from_tool_end(idx, "tool_end", name, tool_id, ts)),
+                    );
+                    recompute_model_task_status(t);
+                }
+            }
+
+            for n in succeeded.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
+                    let it = ensure_checklist_item(
+                        &mut t.checklist,
+                        CHECKLIST_SQL_MODEL,
+                        "Author gold SQL",
+                    );
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::Done,
+                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                    );
+                    recompute_model_task_status(t);
+                }
+            }
+
+            if !ok {
+                for nm in arg_names.iter() {
+                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *nm) {
+                        let it = ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SQL_MODEL,
+                            "Author gold SQL",
+                        );
+                        if !succeeded.contains(nm) {
+                            set_checklist_status(
+                                it,
+                                ChecklistItemStatus::NeedsUpdate,
+                                Some(evidence_from_tool_end(
+                                    idx,
+                                    "tool_end_failed",
+                                    name,
+                                    tool_id,
+                                    ts,
+                                )),
+                            );
+                        }
+                        recompute_model_task_status(t);
+                    }
+                }
+            }
+
+            plan.progress.last_applied_step_idx = idx + 1;
+            continue;
+        }
+
+        if name == "dbt_validate" {
+            let ok = observation.ok;
+            if ok {
+                // Treat a successful validate as satisfying `validate` for the whole plan.
+                for t in plan.tasks.iter_mut() {
+                    let it = ensure_checklist_item(
+                        &mut t.checklist,
+                        CHECKLIST_VALIDATE,
+                        "Validate DBT",
+                    );
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::Done,
+                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                    );
+                    recompute_model_task_status(t);
+                }
             } else {
-                let ok = observation.ok;
-                let succeeded: Vec<String> = observation
+                let logs = observation
                     .extra
-                    .get("succeeded_item_names")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                    .get("logs")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let failed =
+                    crate::data_engineer::dbt_error::extract_failed_models_from_logs(&logs);
+                let runtime =
+                    crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(&logs);
 
-                // Work signal: any referenced item names are being actively (re)worked.
-                let arg_names: Vec<String> = args
-                    .get("items")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|it| {
-                                it.get("name")
-                                    .and_then(|n| n.as_str())
-                                    .map(|s| s.to_string())
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                for name in arg_names.iter() {
-                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *name) {
-                        mark_task_in_progress(&mut t.status);
+                let mut names: Vec<String> = Vec::new();
+                for f in failed.iter() {
+                    if let Some(file) = f.get("file").and_then(|v| v.as_str()) {
+                        if let Some(st) = file_stem(file) {
+                            names.push(st);
+                        }
                     }
-                }
-
-                for n in succeeded.iter() {
-                    model_mark_done(plan, n);
-                }
-                if !ok {
-                    let err = observation
-                        .errors
-                        .first()
-                        .map(|s| s.as_str())
-                        .unwrap_or("unknown error");
-                    let note = format!("gold_model failed: {}", err.trim());
-                    for name in arg_names.iter() {
-                        if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *name) {
-                            // Don't regress tasks already marked done in this same step's success list.
-                            if !succeeded.contains(name) {
-                                mark_task_needs_update(&mut t.status);
-                            }
-                            push_note_unique(&mut t.notes, note.clone());
+                    if let Some(nm) = f.get("name").and_then(|v| v.as_str()) {
+                        if !nm.trim().is_empty() {
+                            names.push(nm.trim().to_string());
                         }
                     }
                 }
-                plan.progress.last_applied_step_idx = idx + 1;
-                continue;
+                for r in runtime.iter() {
+                    if let Some(mh) = r.get("model_hint").and_then(|v| v.as_str()) {
+                        if !mh.trim().is_empty() {
+                            names.push(mh.trim().to_string());
+                        }
+                    }
+                }
+                names.sort();
+                names.dedup();
+
+                for t in plan.tasks.iter_mut() {
+                    if names.iter().any(|n| n == &t.name) {
+                        let it = ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_VALIDATE,
+                            "Validate DBT",
+                        );
+                        set_checklist_status(
+                            it,
+                            ChecklistItemStatus::NeedsUpdate,
+                            Some(evidence_from_tool_end(
+                                idx,
+                                "tool_end_failed",
+                                name,
+                                tool_id,
+                                ts,
+                            )),
+                        );
+                        recompute_model_task_status(t);
+                    }
+                }
             }
+            plan.progress.last_applied_step_idx = idx + 1;
+            continue;
         }
 
-        // dbt_validate failures: mark affected gold tasks as needs_update (best-effort).
-        if let ThreadStep::ToolEnd {
-            name, observation, ..
-        } = step
-        {
-            if name == "dbt_validate" {
+        // Capture dbt_files patch activity and map to schema-contract checklist items.
+        if name == "dbt_files" {
+            let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            if op == "patch" {
                 let ok = observation.ok;
-                if !ok {
-                    let err = observation
-                        .errors
-                        .first()
-                        .map(|s| s.as_str())
-                        .unwrap_or("dbt_validate failed");
-                    let note = format!("dbt_validate failed: {}", err.trim());
-                    let logs = observation
-                        .extra
-                        .get("logs")
-                        .cloned()
-                        .unwrap_or(Value::Null);
-                    let failed =
-                        crate::data_engineer::dbt_error::extract_failed_models_from_logs(&logs);
-                    let runtime =
-                        crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(&logs);
+                let preview = args
+                    .get("preview_diff")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let paths = extract_dbt_files_patch_paths(args);
+                let mut stems: Vec<String> = paths.iter().filter_map(|p| file_stem(p)).collect();
+                stems.sort();
+                stems.dedup();
 
-                    let mut names: Vec<String> = Vec::new();
-                    for f in failed.iter() {
-                        if let Some(file) = f.get("file").and_then(|v| v.as_str()) {
-                            if let Some(st) = file_stem(file) {
-                                names.push(st);
-                            }
+                for t in plan.tasks.iter_mut() {
+                    if stems.iter().any(|s| s == &t.name) {
+                        let it = ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SCHEMA_CONTRACT,
+                            "Author schema contract",
+                        );
+                        if ok {
+                            let status = if preview {
+                                ChecklistItemStatus::InProgress
+                            } else {
+                                ChecklistItemStatus::Done
+                            };
+                            set_checklist_status(
+                                it,
+                                status,
+                                Some(evidence_from_tool_end(
+                                    idx,
+                                    if preview { "tool_end_preview" } else { "tool_end_ok" },
+                                    name,
+                                    tool_id,
+                                    ts,
+                                )),
+                            );
+                        } else {
+                            set_checklist_status(
+                                it,
+                                ChecklistItemStatus::NeedsUpdate,
+                                Some(evidence_from_tool_end(
+                                    idx,
+                                    "tool_end_failed",
+                                    name,
+                                    tool_id,
+                                    ts,
+                                )),
+                            );
                         }
-                        if let Some(name) = f.get("name").and_then(|v| v.as_str()) {
-                            if !name.trim().is_empty() {
-                                names.push(name.trim().to_string());
-                            }
-                        }
-                    }
-                    for r in runtime.iter() {
-                        if let Some(mh) = r.get("model_hint").and_then(|v| v.as_str()) {
-                            if !mh.trim().is_empty() {
-                                names.push(mh.trim().to_string());
-                            }
-                        }
-                    }
-                    names.sort();
-                    names.dedup();
-
-                    for t in plan.tasks.iter_mut() {
-                        if names.iter().any(|n| n == &t.name) {
-                            mark_task_needs_update(&mut t.status);
-                            push_note_unique(&mut t.notes, note.clone());
-                        }
+                        recompute_model_task_status(t);
                     }
                 }
+
                 plan.progress.last_applied_step_idx = idx + 1;
-                continue;
-            }
-        }
-
-        // Capture dbt_files patch failures during gold repairs too.
-        if let ThreadStep::ToolEnd {
-            name,
-            args,
-            observation,
-            ..
-        } = step
-        {
-            if name == "dbt_files" {
-                let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
-                if op == "patch" {
-                    let ok = observation.ok;
-                    let paths = extract_dbt_files_patch_paths(args);
-                    let mut stems: Vec<String> =
-                        paths.iter().filter_map(|p| file_stem(p)).collect();
-                    stems.sort();
-                    stems.dedup();
-                    // Work signal: patching a gold model implies active remediation of that model task.
-                    let mut matched_any = false;
-                    for t in plan.tasks.iter_mut() {
-                        if stems.iter().any(|s| s == &t.name) {
-                            t.status = TaskStatus::InProgress;
-                            matched_any = true;
-                        }
-                    }
-                    if ok && matched_any {
-                        plan.progress.consecutive_batch_failures = 0;
-                    }
-                    if !ok {
-                        let err = observation
-                            .errors
-                            .first()
-                            .map(|s| s.as_str())
-                            .unwrap_or("unknown error");
-                        let note = format!("dbt_files patch failed: {}", err.trim());
-                        for t in plan.tasks.iter_mut() {
-                            if stems.iter().any(|s| s == &t.name) {
-                                mark_task_needs_update(&mut t.status);
-                                push_note_unique(&mut t.notes, note.clone());
-                            }
-                        }
-                    }
-                    plan.progress.last_applied_step_idx = idx + 1;
-                }
                 continue;
             }
         }
@@ -1138,8 +1778,48 @@ mod tests {
         }
     }
 
+    fn std_checklist(sql_label: &str) -> Vec<PlanChecklistItem> {
+        vec![
+            PlanChecklistItem {
+                checklist_item_id: CHECKLIST_SQL_MODEL.to_string(),
+                label: sql_label.to_string(),
+                details: None,
+                status: ChecklistItemStatus::Pending,
+                origin: ChecklistOrigin::Initial,
+                origin_step_idx: None,
+                evidence: vec![],
+            },
+            PlanChecklistItem {
+                checklist_item_id: CHECKLIST_SCHEMA_CONTRACT.to_string(),
+                label: "Author schema contract".to_string(),
+                details: None,
+                status: ChecklistItemStatus::Pending,
+                origin: ChecklistOrigin::Initial,
+                origin_step_idx: None,
+                evidence: vec![],
+            },
+            PlanChecklistItem {
+                checklist_item_id: CHECKLIST_VALIDATE.to_string(),
+                label: "Validate".to_string(),
+                details: None,
+                status: ChecklistItemStatus::Pending,
+                origin: ChecklistOrigin::Initial,
+                origin_step_idx: None,
+                evidence: vec![],
+            },
+        ]
+    }
+
+    fn status_of(items: &[PlanChecklistItem], id: &str) -> ChecklistItemStatus {
+        items
+            .iter()
+            .find(|it| it.checklist_item_id == id)
+            .map(|it| it.status)
+            .unwrap_or(ChecklistItemStatus::Pending)
+    }
+
     #[test]
-    fn cleanse_progress_marks_done_from_succeeded_ids_and_completes() {
+    fn cleanse_progress_marks_sql_done_but_task_not_done_until_schema_and_validate() {
         let mut plan = CleansePlan {
             plan_key: "k".to_string(),
             status: PlanStatus::Approved,
@@ -1150,17 +1830,18 @@ mod tests {
                     expected_model_path: None,
                     invariants: vec![],
                     status: TaskStatus::Pending,
-                    notes: vec![],
+                    checklist: std_checklist("Author staging SQL"),
                 },
                 CleanseTask {
                     dataset_id: "d.e.f".to_string(),
                     expected_model_path: None,
                     invariants: vec![],
                     status: TaskStatus::Pending,
-                    notes: vec![],
+                    checklist: std_checklist("Author staging SQL"),
                 },
             ],
             batches: vec![vec!["a.b.c".to_string()], vec!["d.e.f".to_string()]],
+            work_groups: vec![],
             progress: PlanProgress::default(),
         };
 
@@ -1181,14 +1862,25 @@ mod tests {
         };
 
         update_cleanse_progress_from_log(&mut plan, &log);
-        assert!(cleanse_all_done(&plan));
+        assert_eq!(
+            status_of(&plan.tasks[0].checklist, CHECKLIST_SQL_MODEL),
+            ChecklistItemStatus::Done
+        );
+        assert_eq!(
+            status_of(&plan.tasks[1].checklist, CHECKLIST_SQL_MODEL),
+            ChecklistItemStatus::Done
+        );
+        // Other checklist items remain pending, so tasks are not done.
+        assert_eq!(plan.tasks[0].status, TaskStatus::InProgress);
+        assert_eq!(plan.tasks[1].status, TaskStatus::InProgress);
+        assert!(!cleanse_all_done(&plan));
         // Note: being "done" is tracked at the task level. PlanStatus::Completed is reserved for
         // "validate passed", and is set by the suite after dbt_validate succeeds.
         assert_eq!(plan.status, PlanStatus::Approved);
     }
 
     #[test]
-    fn model_progress_marks_done_from_succeeded_names_and_completes() {
+    fn model_progress_marks_sql_done_but_task_not_done_until_schema_and_validate() {
         let mut plan = ModelPlan {
             plan_key: "k".to_string(),
             status: PlanStatus::Approved,
@@ -1202,7 +1894,7 @@ mod tests {
                     expected_model_path: None,
                     invariants: vec![],
                     status: TaskStatus::Pending,
-                    notes: vec![],
+                    checklist: std_checklist("Author gold SQL"),
                 },
                 ModelTask {
                     name: "dim_b".to_string(),
@@ -1212,10 +1904,11 @@ mod tests {
                     expected_model_path: None,
                     invariants: vec![],
                     status: TaskStatus::Pending,
-                    notes: vec![],
+                    checklist: std_checklist("Author gold SQL"),
                 },
             ],
             batches: vec![vec!["fct_a".to_string(), "dim_b".to_string()]],
+            work_groups: vec![],
             progress: PlanProgress::default(),
         };
 
@@ -1229,7 +1922,17 @@ mod tests {
         };
 
         update_model_progress_from_log(&mut plan, &log);
-        assert!(model_all_done(&plan));
+        assert_eq!(
+            status_of(&plan.tasks[0].checklist, CHECKLIST_SQL_MODEL),
+            ChecklistItemStatus::Done
+        );
+        assert_eq!(
+            status_of(&plan.tasks[1].checklist, CHECKLIST_SQL_MODEL),
+            ChecklistItemStatus::Done
+        );
+        assert_eq!(plan.tasks[0].status, TaskStatus::InProgress);
+        assert_eq!(plan.tasks[1].status, TaskStatus::InProgress);
+        assert!(!model_all_done(&plan));
         // Note: PlanStatus::Completed is set only after dbt_validate passes.
         assert_eq!(plan.status, PlanStatus::Approved);
     }
@@ -1246,20 +1949,21 @@ mod tests {
                     expected_model_path: None,
                     invariants: vec![],
                     status: TaskStatus::Pending,
-                    notes: vec![],
+                    checklist: vec![],
                 },
                 CleanseTask {
                     dataset_id: "AwsDataCatalog.test_raw.raw_products".to_string(),
                     expected_model_path: None,
                     invariants: vec![],
                     status: TaskStatus::Pending,
-                    notes: vec![],
+                    checklist: vec![],
                 },
             ],
             batches: vec![vec![
                 "AwsDataCatalog.test_raw.raw_customers".to_string(),
                 "AwsDataCatalog.test_raw.raw_products".to_string(),
             ]],
+            work_groups: vec![],
             progress: PlanProgress::default(),
         };
         let mut allowed = std::collections::BTreeSet::new();
@@ -1293,7 +1997,7 @@ mod tests {
                     expected_model_path: None,
                     invariants: vec![],
                     status: TaskStatus::Pending,
-                    notes: vec![],
+                    checklist: vec![],
                 },
                 ModelTask {
                     name: "fct_bad".to_string(),
@@ -1303,10 +2007,11 @@ mod tests {
                     expected_model_path: None,
                     invariants: vec![],
                     status: TaskStatus::Pending,
-                    notes: vec![],
+                    checklist: vec![],
                 },
             ],
             batches: vec![vec!["fct_ok".to_string(), "fct_bad".to_string()]],
+            work_groups: vec![],
             progress: PlanProgress::default(),
         };
         let mut allowed = std::collections::BTreeSet::new();
@@ -1344,9 +2049,10 @@ mod tests {
                 expected_model_path: None,
                 invariants: vec![],
                 status: TaskStatus::Pending,
-                notes: vec![],
+                checklist: std_checklist("Author gold SQL"),
             }],
             batches: vec![vec!["dim_customers".to_string()]],
+            work_groups: vec![],
             progress: PlanProgress {
                 // Critical: scope progress cursor beyond the historical log we already have.
                 last_applied_step_idx: log.steps.len(),
@@ -1370,9 +2076,10 @@ mod tests {
                 expected_model_path: None,
                 invariants: vec![],
                 status: TaskStatus::Pending,
-                notes: vec![],
+                checklist: vec![],
             }],
             batches: vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]],
+            work_groups: vec![],
             progress: PlanProgress::default(),
         };
         ensure_expected_model_paths_cleanse(&mut plan);
@@ -1395,9 +2102,10 @@ mod tests {
                 ),
                 invariants: vec![],
                 status: TaskStatus::NeedsUpdate,
-                notes: vec![],
+                checklist: vec![],
             }],
             batches: vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]],
+            work_groups: vec![],
             progress: PlanProgress {
                 consecutive_batch_failures: 3,
                 total_batch_failures: 3,
@@ -1417,5 +2125,126 @@ mod tests {
         };
         update_cleanse_progress_from_log(&mut plan, &log);
         assert_eq!(plan.progress.consecutive_batch_failures, 0);
+    }
+
+    #[test]
+    fn cleanse_validate_ok_marks_validate_done_for_sql_done_tasks() {
+        let mut plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![
+                CleanseTask {
+                    dataset_id: "AwsDataCatalog.test_raw.raw_orders".to_string(),
+                    expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
+                    invariants: vec![],
+                    status: TaskStatus::Pending,
+                    checklist: std_checklist("Author staging SQL"),
+                },
+                CleanseTask {
+                    dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
+                    expected_model_path: Some(
+                        "models/staging/stg_test_raw_raw_customers.sql".to_string(),
+                    ),
+                    invariants: vec![],
+                    status: TaskStatus::Pending,
+                    checklist: std_checklist("Author staging SQL"),
+                },
+            ],
+            batches: vec![vec![
+                "AwsDataCatalog.test_raw.raw_orders".to_string(),
+                "AwsDataCatalog.test_raw.raw_customers".to_string(),
+            ]],
+            work_groups: vec![],
+            progress: PlanProgress::default(),
+        };
+
+        // Pretend SQL authoring is done so validate can be marked complete.
+        for t in plan.tasks.iter_mut() {
+            let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
+            it.status = ChecklistItemStatus::Done;
+            recompute_cleanse_task_status(t);
+        }
+
+        let log = ThreadLog {
+            steps: vec![step(
+                "dbt_validate",
+                serde_json::json!({}),
+                serde_json::json!({"ok": true}),
+            )],
+            ..Default::default()
+        };
+        update_cleanse_progress_from_log(&mut plan, &log);
+
+        for t in plan.tasks.iter() {
+            assert_eq!(
+                status_of(&t.checklist, CHECKLIST_VALIDATE),
+                ChecklistItemStatus::Done
+            );
+        }
+    }
+
+    #[test]
+    fn cleanse_validate_failure_marks_needs_update_for_implicated_tasks_only() {
+        let mut plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![
+                CleanseTask {
+                    dataset_id: "AwsDataCatalog.test_raw.raw_orders".to_string(),
+                    expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
+                    invariants: vec![],
+                    status: TaskStatus::Pending,
+                    checklist: std_checklist("Author staging SQL"),
+                },
+                CleanseTask {
+                    dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
+                    expected_model_path: Some(
+                        "models/staging/stg_test_raw_raw_customers.sql".to_string(),
+                    ),
+                    invariants: vec![],
+                    status: TaskStatus::Pending,
+                    checklist: std_checklist("Author staging SQL"),
+                },
+            ],
+            batches: vec![vec![
+                "AwsDataCatalog.test_raw.raw_orders".to_string(),
+                "AwsDataCatalog.test_raw.raw_customers".to_string(),
+            ]],
+            work_groups: vec![],
+            progress: PlanProgress::default(),
+        };
+
+        // Mark both as SQL-done so validate failures are meaningful.
+        for t in plan.tasks.iter_mut() {
+            let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
+            it.status = ChecklistItemStatus::Done;
+            recompute_cleanse_task_status(t);
+        }
+
+        let stdout = "Failure in model stg_test_raw_raw_orders (models/staging/stg_test_raw_raw_orders.sql)\n";
+        let log = ThreadLog {
+            steps: vec![step(
+                "dbt_validate",
+                serde_json::json!({}),
+                serde_json::json!({
+                    "ok": false,
+                    "logs": { "run_or_build": { "stdout": stdout } }
+                }),
+            )],
+            ..Default::default()
+        };
+
+        update_cleanse_progress_from_log(&mut plan, &log);
+
+        assert_eq!(
+            status_of(&plan.tasks[0].checklist, CHECKLIST_VALIDATE),
+            ChecklistItemStatus::NeedsUpdate
+        );
+        assert_eq!(
+            status_of(&plan.tasks[1].checklist, CHECKLIST_VALIDATE),
+            ChecklistItemStatus::Pending
+        );
     }
 }

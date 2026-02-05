@@ -9,7 +9,7 @@ use react_core::tools::Tool;
 
 use crate::data_engineer::dataset_truth;
 use crate::data_engineer::plan;
-use crate::data_engineer::plan::{CleansePlan, ModelPlan, TaskStatus};
+use crate::data_engineer::plan::{CleansePlan, ModelPlan};
 use crate::data_engineer::tools;
 
 pub(crate) const MAX_CONSECUTIVE_BATCH_FAILURES: usize = 3;
@@ -23,39 +23,27 @@ fn extract_string_arg(args: &Value, key: &str) -> Option<String> {
 
 fn mark_in_progress_cleanse(plan: &mut CleansePlan, dataset_ids: &[String]) {
     for ds in dataset_ids.iter() {
-        if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-            t.status = TaskStatus::InProgress;
-        }
+        plan::cleanse_mark_in_progress(plan, ds);
     }
 }
 
 fn mark_in_progress_model(plan: &mut ModelPlan, names: &[String]) {
     for n in names.iter() {
-        if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
-            t.status = TaskStatus::InProgress;
-        }
+        plan::model_mark_in_progress(plan, n);
     }
 }
 
 fn mark_needs_update_cleanse(plan: &mut CleansePlan, dataset_ids: &[String], note: &str) {
+    let _ = note; // errors are surfaced via tool output; plan tracks needs_update
     for ds in dataset_ids.iter() {
-        if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-            t.status = TaskStatus::NeedsUpdate;
-            if !note.trim().is_empty() && !t.notes.iter().any(|n| n.trim() == note.trim()) {
-                t.notes.push(note.trim().to_string());
-            }
-        }
+        plan::cleanse_mark_needs_update(plan, ds);
     }
 }
 
 fn mark_needs_update_model(plan: &mut ModelPlan, names: &[String], note: &str) {
+    let _ = note; // errors are surfaced via tool output; plan tracks needs_update
     for n in names.iter() {
-        if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
-            t.status = TaskStatus::NeedsUpdate;
-            if !note.trim().is_empty() && !t.notes.iter().any(|x| x.trim() == note.trim()) {
-                t.notes.push(note.trim().to_string());
-            }
-        }
+        plan::model_mark_needs_update(plan, n);
     }
 }
 

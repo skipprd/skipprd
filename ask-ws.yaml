@@ -761,7 +761,7 @@ components:
     PlanSnapshot:
       type: object
       additionalProperties: false
-      required: [planKind, planKey, status, tasks]
+      required: [planKind, planKey, status, tasks, workGroups]
       properties:
         planKind:
           type: string
@@ -774,6 +774,14 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PlanTask'
+        workGroups:
+          type: array
+          description: |
+            Ordered, suite-authored work groups for this plan. Each group references one or more
+            checklist items (by taskId + checklistItemId) so clients can render a coherent work plan
+            and the server can deterministically execute the next incomplete group.
+          items:
+            $ref: '#/components/schemas/PlanWorkGroup'
         projectSnapshot:
           type: object
           additionalProperties: true
@@ -857,6 +865,85 @@ components:
       type: string
       enum: [pending, in_progress, done, blocked, needs_update]
 
+    PlanChecklistItemStatus:
+      type: string
+      enum: [pending, in_progress, done, blocked, needs_update]
+
+    PlanChecklistOrigin:
+      type: string
+      enum: [initial, review_actionable]
+
+    PlanChecklistEvidence:
+      type: object
+      additionalProperties: false
+      required: [kind, stepIdx]
+      properties:
+        kind:
+          type: string
+          description: Evidence kind (e.g. tool_end, phase_end).
+        toolName: { type: string, nullable: true }
+        toolId: { type: string, nullable: true }
+        stepIdx: { type: integer }
+        ts: { type: string, nullable: true }
+
+    PlanChecklistItem:
+      type: object
+      additionalProperties: false
+      required: [checklistItemId, label, status, origin]
+      properties:
+        checklistItemId:
+          type: string
+          description: Stable identifier within the task (e.g. sql_model, schema_contract, validate).
+        label:
+          type: string
+          description: Short UI label.
+        details:
+          type: string
+          nullable: true
+          description: Optional longer-form instructions/details.
+        status:
+          $ref: '#/components/schemas/PlanChecklistItemStatus'
+        origin:
+          $ref: '#/components/schemas/PlanChecklistOrigin'
+        originStepIdx:
+          type: integer
+          nullable: true
+          description: Thread step index that introduced this requirement (null for initial items).
+        evidence:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlanChecklistEvidence'
+
+    PlanWorkGroupKind:
+      type: string
+      enum: [author_sql, author_schema, validate]
+
+    PlanWorkGroupItemRef:
+      type: object
+      additionalProperties: false
+      required: [taskId, checklistItemId]
+      properties:
+        taskId: { type: string }
+        checklistItemId: { type: string }
+
+    PlanWorkGroup:
+      type: object
+      additionalProperties: false
+      required: [groupId, label, kind, items]
+      properties:
+        groupId: { type: string }
+        label: { type: string }
+        kind:
+          $ref: '#/components/schemas/PlanWorkGroupKind'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlanWorkGroupItemRef'
+        dependsOnGroupIds:
+          type: array
+          nullable: true
+          items: { type: string }
+
     PlanTask:
       oneOf:
         - $ref: '#/components/schemas/CleanseTaskSnapshot'
@@ -870,7 +957,7 @@ components:
     CleanseTaskSnapshot:
       type: object
       additionalProperties: false
-      required: [taskId, dataset_id, status]
+      required: [taskId, dataset_id, status, checklist]
       properties:
         taskId: { type: string }
         dataset_id: { type: string }
@@ -880,14 +967,15 @@ components:
           items: { type: string }
         status:
           $ref: '#/components/schemas/PlanTaskStatus'
-        notes:
+        checklist:
           type: array
-          items: { type: string }
+          items:
+            $ref: '#/components/schemas/PlanChecklistItem'
 
     ModelTaskSnapshot:
       type: object
       additionalProperties: false
-      required: [taskId, name, status]
+      required: [taskId, name, status, checklist]
       properties:
         taskId: { type: string }
         name: { type: string }
@@ -902,9 +990,10 @@ components:
           items: { type: string }
         status:
           $ref: '#/components/schemas/PlanTaskStatus'
-        notes:
+        checklist:
           type: array
-          items: { type: string }
+          items:
+            $ref: '#/components/schemas/PlanChecklistItem'
 
     # Legacy plan diff/change schemas removed (hard cutover to thread_state + plans).
 

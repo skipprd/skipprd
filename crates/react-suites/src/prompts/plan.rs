@@ -19,13 +19,34 @@ Plan output rules (CRITICAL):
       "expected_model_path": "models/staging/<...>.sql",
       "invariants": ["..."],
       "status":"pending",
-      "notes": ["..."]
+      "checklist": [{
+        "checklist_item_id": "sql_model|schema_contract|validate|...",
+        "label": "<short UI label>",
+        "details": "<optional long instructions>",
+        "status": "pending|in_progress|done|blocked|needs_update",
+        "origin": "initial|review_actionable",
+        "origin_step_idx": <optional integer>,
+        "evidence": []
+      }, ...]
     }, ...],
     "batches": [["<dataset_id>", "... up to 5 ..."], ...],
+    "work_groups": [{
+      "group_id": "<stable id>",
+      "label": "<short label>",
+      "kind": "author_sql|author_schema|validate",
+      "items": [{"task_id":"<dataset_id>","checklist_item_id":"<id>"}],
+      "depends_on_group_ids": ["<group_id>", ...]
+    }, ...],
     "progress": {"last_applied_step_idx": 0}
   }
 - Every batch MUST have at most 5 dataset_ids.
-- Include ALL relevant raw/bronze datasets in scope by default; if you must exclude, mention why in task notes.
+- `work_groups` is the canonical ordered execution plan for the UI and the deterministic runner. It MUST be present and should encode the same ordering as `batches`.
+- Every work group MUST have at most 5 `items` (the runner executes at most 5 at a time).
+- You MUST include, per task, the standard checklist items with stable checklist_item_id values:
+  - sql_model
+  - schema_contract
+  - validate
+- If you exclude a dataset, you MUST omit it from tasks/batches/work_groups (do not add prose about it).
 
 Discovery requirements (CRITICAL - do these before finalizing the plan):
 - You MUST call dbt_files at least once to understand existing project state:
@@ -77,13 +98,34 @@ Plan output rules (CRITICAL):
       "expected_model_path":"models/<folder>/<name>.sql",
       "invariants":["..."],
       "status":"pending",
-      "notes":[]
+      "checklist": [{
+        "checklist_item_id": "sql_model|schema_contract|validate|...",
+        "label": "<short UI label>",
+        "details": "<optional long instructions>",
+        "status": "pending|in_progress|done|blocked|needs_update",
+        "origin": "initial|review_actionable",
+        "origin_step_idx": <optional integer>,
+        "evidence": []
+      }, ...]
     }, ...],
     "batches": [["<model_name>", "... up to 5 ..."], ...],
+    "work_groups": [{
+      "group_id": "<stable id>",
+      "label": "<short label>",
+      "kind": "author_sql|author_schema|validate",
+      "items": [{"task_id":"<model_name>","checklist_item_id":"<id>"}],
+      "depends_on_group_ids": ["<group_id>", ...]
+    }, ...],
     "progress": {"last_applied_step_idx": 0}
   }
 - Every batch MUST have at most 5 model names.
 - Gold models MUST ONLY read from existing silver/staging models (ref('stg_*')). Do NOT plan any source() usage.
+- `work_groups` is the canonical ordered execution plan for the UI and the deterministic runner. It MUST be present and should encode the same ordering as `batches`.
+- Every work group MUST have at most 5 `items`.
+- You MUST include, per task, the standard checklist items with stable checklist_item_id values:
+  - sql_model
+  - schema_contract
+  - validate
 
 Discovery requirements (CRITICAL - do these before finalizing the plan):
 - You MUST call dbt_files at least once to inventory existing staging models under models/staging/ and any existing marts/core models.

@@ -246,25 +246,29 @@ Hard rules:\n\
         }
     }
 
-    fn entered_from_actionable_review(
+    fn actionable_review_entry_step_idx(
         log: Option<&react_core::session::ThreadLog>,
         phase: control_flow::Phase,
-    ) -> bool {
+    ) -> Option<usize> {
         let Some(l) = log else {
-            return false;
+            return None;
         };
-        // Inspect the most recent Phase step for this phase to determine entry reason.
-        let Some(step) = l.steps.iter().rev().find(|s| match s {
+        // Inspect the most recent Phase step for this phase to determine entry reason and step index.
+        let Some((idx, step)) = l.steps.iter().enumerate().rev().find(|(_i, s)| match s {
             react_core::session::ThreadStep::Phase { phase: p, .. } => p == phase.as_str(),
             _ => false,
         }) else {
-            return false;
+            return None;
         };
         match step {
             react_core::session::ThreadStep::Phase { reason_code, .. } => {
-                reason_code.as_deref() == Some("review_actionable_true")
+                if reason_code.as_deref() == Some("review_actionable_true") {
+                    Some(idx)
+                } else {
+                    None
+                }
             }
-            _ => false,
+            _ => None,
         }
     }
 
@@ -1862,8 +1866,10 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                     // plan to storage and then drive the subsequent authoring phase deterministically.
                     let is_cleanse = phase == Phase::CleansePlan;
                     let actx = Self::plan_agent_ctx(thread_id, sctx);
+                    let actionable_review_entry_step_idx =
+                        Self::actionable_review_entry_step_idx(log.as_ref(), phase);
                     let entered_from_actionable_review =
-                        Self::entered_from_actionable_review(log.as_ref(), phase);
+                        actionable_review_entry_step_idx.is_some();
 
                     // If the user already approved an existing draft, mark it approved and proceed.
                     if let Some(ref l) = log {
@@ -2067,6 +2073,18 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         {
                             if p.status == crate::data_engineer::plan::PlanStatus::Draft {
                                 if entered_from_actionable_review {
+                                    let mut detail = serde_json::json!({
+                                        "plan_key": p.plan_key,
+                                        "entry_reason_code": "review_actionable_true"
+                                    });
+                                    if let Some(idx) = actionable_review_entry_step_idx {
+                                        if let Some(obj) = detail.as_object_mut() {
+                                            obj.insert(
+                                                "entry_step_idx".to_string(),
+                                                serde_json::json!(idx),
+                                            );
+                                        }
+                                    }
                                     let advanced = Self::approve_cleanse_plan_draft_and_advance(
                                         &thread_store,
                                         thread_id,
@@ -2074,10 +2092,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         &actx,
                                         log.as_ref().map(|l| l.steps.len()).unwrap_or(0),
                                         "plan_auto_approved",
-                                        serde_json::json!({
-                                            "plan_key": p.plan_key,
-                                            "entry_reason_code": "review_actionable_true"
-                                        }),
+                                        detail,
                                     )
                                     .await?;
                                     if advanced {
@@ -2096,6 +2111,18 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         if let Some(p) = crate::data_engineer::plan::load_model_plan(&actx).await {
                             if p.status == crate::data_engineer::plan::PlanStatus::Draft {
                                 if entered_from_actionable_review {
+                                    let mut detail = serde_json::json!({
+                                        "plan_key": p.plan_key,
+                                        "entry_reason_code": "review_actionable_true"
+                                    });
+                                    if let Some(idx) = actionable_review_entry_step_idx {
+                                        if let Some(obj) = detail.as_object_mut() {
+                                            obj.insert(
+                                                "entry_step_idx".to_string(),
+                                                serde_json::json!(idx),
+                                            );
+                                        }
+                                    }
                                     let advanced = Self::approve_model_plan_draft_and_advance(
                                         &thread_store,
                                         thread_id,
@@ -2103,10 +2130,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         &actx,
                                         log.as_ref().map(|l| l.steps.len()).unwrap_or(0),
                                         "plan_auto_approved",
-                                        serde_json::json!({
-                                            "plan_key": p.plan_key,
-                                            "entry_reason_code": "review_actionable_true"
-                                        }),
+                                        detail,
                                     )
                                     .await?;
                                     if advanced {
@@ -2314,6 +2338,12 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 _ => ("", None),
                             };
                             if reason_code == "review_actionable_true" {
+                                if let Some(idx) = actionable_review_entry_step_idx {
+                                    q.push_str(&format!(
+                                        "\nReview entry step idx: {}\nIMPORTANT: Any NEW checklist items introduced due to this review MUST set origin=\"review_actionable\" and origin_step_idx={}.\n",
+                                        idx, idx
+                                    ));
+                                }
                                 if let Some(ans) = reason_detail
                                     .and_then(|v| v.get("answer"))
                                     .and_then(|v| v.as_str())
@@ -2501,6 +2531,20 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
                                     "dbt_project_yml_etag": actx.storage.head_etag(&actx.keyspace.dbt_project_key(&actx.scope)).await.ok().flatten(),
                                 });
+                                if entered_from_actionable_review {
+                                    if let Some(obj) = plan.project_snapshot.as_object_mut() {
+                                        obj.insert(
+                                            "entry_reason_code".to_string(),
+                                            serde_json::json!("review_actionable_true"),
+                                        );
+                                        if let Some(idx) = actionable_review_entry_step_idx {
+                                            obj.insert(
+                                                "entry_step_idx".to_string(),
+                                                serde_json::json!(idx),
+                                            );
+                                        }
+                                    }
+                                }
                                 // Persist schema facts observed during this plan phase (no ambiguity).
                                 if let Some(ref l) = log {
                                     let start = Self::phase_start_idx(l, phase).unwrap_or(0);
@@ -2586,6 +2630,18 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 }
                                 crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await?;
                                 if entered_from_actionable_review {
+                                    let mut detail = serde_json::json!({
+                                        "plan_key": plan.plan_key,
+                                        "entry_reason_code": "review_actionable_true"
+                                    });
+                                    if let Some(idx) = actionable_review_entry_step_idx {
+                                        if let Some(obj) = detail.as_object_mut() {
+                                            obj.insert(
+                                                "entry_step_idx".to_string(),
+                                                serde_json::json!(idx),
+                                            );
+                                        }
+                                    }
                                     let advanced = Self::approve_cleanse_plan_draft_and_advance(
                                         &thread_store,
                                         thread_id,
@@ -2593,10 +2649,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         &actx,
                                         log.as_ref().map(|l| l.steps.len()).unwrap_or(0),
                                         "plan_auto_approved",
-                                        serde_json::json!({
-                                            "plan_key": plan.plan_key,
-                                            "entry_reason_code": "review_actionable_true"
-                                        }),
+                                        detail,
                                     )
                                     .await?;
                                     if advanced {
@@ -2673,6 +2726,20 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
                                     "dbt_project_yml_etag": actx.storage.head_etag(&actx.keyspace.dbt_project_key(&actx.scope)).await.ok().flatten(),
                                 });
+                                if entered_from_actionable_review {
+                                    if let Some(obj) = plan.project_snapshot.as_object_mut() {
+                                        obj.insert(
+                                            "entry_reason_code".to_string(),
+                                            serde_json::json!("review_actionable_true"),
+                                        );
+                                        if let Some(idx) = actionable_review_entry_step_idx {
+                                            obj.insert(
+                                                "entry_step_idx".to_string(),
+                                                serde_json::json!(idx),
+                                            );
+                                        }
+                                    }
+                                }
                                 // Persist schema facts observed during this plan phase (no ambiguity).
                                 if let Some(ref l) = log {
                                     let start = Self::phase_start_idx(l, phase).unwrap_or(0);
@@ -2740,6 +2807,18 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 }
                                 crate::data_engineer::plan::save_model_plan(&actx, &plan).await?;
                                 if entered_from_actionable_review {
+                                    let mut detail = serde_json::json!({
+                                        "plan_key": plan.plan_key,
+                                        "entry_reason_code": "review_actionable_true"
+                                    });
+                                    if let Some(idx) = actionable_review_entry_step_idx {
+                                        if let Some(obj) = detail.as_object_mut() {
+                                            obj.insert(
+                                                "entry_step_idx".to_string(),
+                                                serde_json::json!(idx),
+                                            );
+                                        }
+                                    }
                                     let advanced = Self::approve_model_plan_draft_and_advance(
                                         &thread_store,
                                         thread_id,
@@ -2747,10 +2826,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         &actx,
                                         log.as_ref().map(|l| l.steps.len()).unwrap_or(0),
                                         "plan_auto_approved",
-                                        serde_json::json!({
-                                            "plan_key": plan.plan_key,
-                                            "entry_reason_code": "review_actionable_true"
-                                        }),
+                                        detail,
                                     )
                                     .await?;
                                     if advanced {
@@ -2874,7 +2950,13 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             if plan.progress.consecutive_batch_failures
                             >= crate::data_engineer::tools::apply_next_batch::MAX_CONSECUTIVE_BATCH_FAILURES
                         {
-                            let next = crate::data_engineer::plan::cleanse_next_batch(&plan);
+                            let next = match crate::data_engineer::plan::cleanse_next_action(&plan)
+                            {
+                                Some((crate::data_engineer::plan::WorkGroupKind::AuthorSql, ds)) => {
+                                    ds
+                                }
+                                _ => crate::data_engineer::plan::cleanse_next_batch(&plan),
+                            };
                             let mut expected_paths: Vec<String> = Vec::new();
                             for ds in next.iter() {
                                 if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
@@ -2922,7 +3004,16 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             .await;
                                 continue;
                             }
-                            let next = crate::data_engineer::plan::cleanse_next_batch(&plan);
+                            // Work-group driven selection (preferred). Fall back to batch scanning if work_groups
+                            // are absent (older plans).
+                            let next_action =
+                                crate::data_engineer::plan::cleanse_next_action(&plan);
+                            let next = match next_action.as_ref() {
+                                Some((crate::data_engineer::plan::WorkGroupKind::AuthorSql, ds)) => {
+                                    ds.clone()
+                                }
+                                _ => crate::data_engineer::plan::cleanse_next_batch(&plan),
+                            };
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_cleanse_batch; force repair-mode guidance.
@@ -2953,50 +3044,131 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 }
                                 (ctx, None)
                             } else if next.is_empty() {
-                                // If validation previously failed, do NOT bounce straight back to validate.
-                                // Run a repair authoring pass grounded in the failing model/file evidence.
-                                if guard.last_validate_failed {
-                                    let mut ctx = format!(
-                                    "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
-                                    plan.plan_key
-                                );
-                                    if !last_validate_failed_models.is_empty() {
-                                        for fm in last_validate_failed_models.iter().take(6) {
-                                            let name = fm
-                                                .get("name")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("unknown_model");
-                                            let file = fm
-                                                .get("file")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("(unknown file)");
-                                            ctx.push_str(&format!("- {} ({})\n", name, file));
+                                // If work-groups exist, interpret "no next SQL batch" as:
+                                // - either we're blocked on schema contract authoring, OR
+                                // - we're ready to transition to validate.
+                                if let Some((
+                                    crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
+                                    ids,
+                                )) = next_action.as_ref()
+                                {
+                                    let mut expected_paths: Vec<String> = Vec::new();
+                                    for ds in ids.iter() {
+                                        if let Some(t) =
+                                            plan.tasks.iter().find(|t| t.dataset_id == *ds)
+                                        {
+                                            if let Some(p) = t.expected_model_path.as_deref() {
+                                                if !p.trim().is_empty() {
+                                                    expected_paths.push(p.trim().to_string());
+                                                }
+                                            }
                                         }
-                                    } else if let Some(ref brief) = last_validate_brief {
-                                        ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
-                                        ctx.push_str("\nLast dbt_validate summary:\n");
-                                        ctx.push_str(brief);
-                                        ctx.push('\n');
-                                    } else {
-                                        ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
                                     }
-                                    (
-                                        ctx,
-                                        None, // allow freeform dbt_files patching for targeted repair
-                                    )
+                                    expected_paths.sort();
+                                    expected_paths.dedup();
+                                    let mut ctx = format!(
+                                        "Approved cleanse plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: patch schema YAML with dbt_files op=patch.\n- Prefer `models/staging/<model>.yml` entries where possible.\n- Or update `models/schema.yml` if that is your canonical schema file.\n\nExpected model SQL paths:\n- {}\n",
+                                        plan.plan_key,
+                                        ids.join("\n- "),
+                                        expected_paths.join("\n- "),
+                                    );
+                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                    (ctx, None)
                                 } else {
-                                    // All plan tasks are done; advance to validate.
-                                    control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        Phase::CleanseValidate,
-                                        Some("plan_tasks_done"),
-                                        Some(serde_json::json!({ "plan_key": plan.plan_key })),
-                                    )
-                                    .await;
-                                    continue;
+                                    if let Some((
+                                        crate::data_engineer::plan::WorkGroupKind::Validate,
+                                        _ids,
+                                    )) = next_action.as_ref()
+                                    {
+                                        control_flow::append_phase_with_reason(
+                                            &thread_store,
+                                            thread_id,
+                                            Some("agent".to_string()),
+                                            Some(phase),
+                                            Phase::CleanseValidate,
+                                            Some("work_group_validate"),
+                                            Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+
+                                    // If validation previously failed, do NOT bounce straight back to validate.
+                                    // Run a repair authoring pass grounded in the failing model/file evidence.
+                                    if guard.last_validate_failed {
+                                        let mut ctx = format!(
+                                        "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
+                                        plan.plan_key
+                                    );
+                                        if !last_validate_failed_models.is_empty() {
+                                            for fm in last_validate_failed_models.iter().take(6) {
+                                                let name = fm
+                                                    .get("name")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("unknown_model");
+                                                let file = fm
+                                                    .get("file")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("(unknown file)");
+                                                ctx.push_str(&format!("- {} ({})\n", name, file));
+                                            }
+                                        } else if let Some(ref brief) = last_validate_brief {
+                                            ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
+                                            ctx.push_str("\nLast dbt_validate summary:\n");
+                                            ctx.push_str(brief);
+                                            ctx.push('\n');
+                                        } else {
+                                            ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
+                                        }
+                                        (
+                                            ctx,
+                                            None, // allow freeform dbt_files patching for targeted repair
+                                        )
+                                    } else {
+                                        // If schema contract work remains (legacy plans without work_groups),
+                                        // stay in authoring and request YAML patching.
+                                        let pending_schema =
+                                            crate::data_engineer::plan::cleanse_pending_schema_contracts(
+                                                &plan,
+                                            );
+                                        if !pending_schema.is_empty() {
+                                            let mut expected_paths: Vec<String> = Vec::new();
+                                            for ds in pending_schema.iter() {
+                                                if let Some(t) =
+                                                    plan.tasks.iter().find(|t| t.dataset_id == *ds)
+                                                {
+                                                    if let Some(p) = t.expected_model_path.as_deref() {
+                                                        if !p.trim().is_empty() {
+                                                            expected_paths.push(p.trim().to_string());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            expected_paths.sort();
+                                            expected_paths.dedup();
+                                            let mut ctx = format!(
+                                                "Approved cleanse plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: patch schema YAML with dbt_files op=patch.\n\nExpected model SQL paths:\n- {}\n",
+                                                plan.plan_key,
+                                                pending_schema.join("\n- "),
+                                                expected_paths.join("\n- "),
+                                            );
+                                            ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                            (ctx, None)
+                                        } else {
+                                            // All SQL + schema tasks are done; advance to validate.
+                                            control_flow::append_phase_with_reason(
+                                                &thread_store,
+                                                thread_id,
+                                                Some("agent".to_string()),
+                                                Some(phase),
+                                                Phase::CleanseValidate,
+                                                Some("plan_tasks_done"),
+                                                Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                                            )
+                                            .await;
+                                            continue;
+                                        }
+                                    }
                                 }
                             } else {
                                 (
@@ -3050,7 +3222,12 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             if plan.progress.consecutive_batch_failures
                             >= crate::data_engineer::tools::apply_next_batch::MAX_CONSECUTIVE_BATCH_FAILURES
                         {
-                            let next = crate::data_engineer::plan::model_next_batch(&plan);
+                            let next = match crate::data_engineer::plan::model_next_action(&plan) {
+                                Some((crate::data_engineer::plan::WorkGroupKind::AuthorSql, names)) => {
+                                    names
+                                }
+                                _ => crate::data_engineer::plan::model_next_batch(&plan),
+                            };
                             let mut expected_paths: Vec<String> = Vec::new();
                             for n in next.iter() {
                                 if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
@@ -3098,7 +3275,15 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             .await;
                                 continue;
                             }
-                            let next_names = crate::data_engineer::plan::model_next_batch(&plan);
+                            // Work-group driven selection (preferred). Fall back to batch scanning if work_groups
+                            // are absent (older plans).
+                            let next_action = crate::data_engineer::plan::model_next_action(&plan);
+                            let next_names = match next_action.as_ref() {
+                                Some((crate::data_engineer::plan::WorkGroupKind::AuthorSql, names)) => {
+                                    names.clone()
+                                }
+                                _ => crate::data_engineer::plan::model_next_batch(&plan),
+                            };
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_model_batch; force repair-mode guidance.
@@ -3129,7 +3314,51 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 }
                                 (ctx, None)
                             } else if next_names.is_empty() {
-                                if guard.last_validate_failed {
+                                if let Some((
+                                    crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
+                                    ids,
+                                )) = next_action.as_ref()
+                                {
+                                    let mut expected_paths: Vec<String> = Vec::new();
+                                    for n in ids.iter() {
+                                        if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
+                                            if let Some(p) = t.expected_model_path.as_deref() {
+                                                if !p.trim().is_empty() {
+                                                    expected_paths.push(p.trim().to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    expected_paths.sort();
+                                    expected_paths.dedup();
+                                    let mut ctx = format!(
+                                        "Approved model plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: patch schema YAML with dbt_files op=patch.\n\nExpected model SQL paths:\n- {}\n",
+                                        plan.plan_key,
+                                        ids.join("\n- "),
+                                        expected_paths.join("\n- "),
+                                    );
+                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                    (ctx, None)
+                                } else {
+                                    if let Some((
+                                        crate::data_engineer::plan::WorkGroupKind::Validate,
+                                        _ids,
+                                    )) = next_action.as_ref()
+                                    {
+                                        control_flow::append_phase_with_reason(
+                                            &thread_store,
+                                            thread_id,
+                                            Some("agent".to_string()),
+                                            Some(phase),
+                                            Phase::ModelValidate,
+                                            Some("work_group_validate"),
+                                            Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+
+                                    if guard.last_validate_failed {
                                     // Same repair-mode behavior as cleanse: run authoring to patch failing files.
                                     let mut ctx = format!(
                                     "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
@@ -3157,17 +3386,45 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     }
                                     (ctx, None)
                                 } else {
-                                    control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        Phase::ModelValidate,
-                                        Some("plan_tasks_done"),
-                                        Some(serde_json::json!({ "plan_key": plan.plan_key })),
-                                    )
-                                    .await;
-                                    continue;
+                                    let pending_schema =
+                                        crate::data_engineer::plan::model_pending_schema_contracts(
+                                            &plan,
+                                        );
+                                    if !pending_schema.is_empty() {
+                                        let mut expected_paths: Vec<String> = Vec::new();
+                                        for n in pending_schema.iter() {
+                                            if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
+                                                if let Some(p) = t.expected_model_path.as_deref() {
+                                                    if !p.trim().is_empty() {
+                                                        expected_paths.push(p.trim().to_string());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        expected_paths.sort();
+                                        expected_paths.dedup();
+                                        let mut ctx = format!(
+                                            "Approved model plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: patch schema YAML with dbt_files op=patch.\n\nExpected model SQL paths:\n- {}\n",
+                                            plan.plan_key,
+                                            pending_schema.join("\n- "),
+                                            expected_paths.join("\n- "),
+                                        );
+                                        ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                        (ctx, None)
+                                    } else {
+                                        control_flow::append_phase_with_reason(
+                                            &thread_store,
+                                            thread_id,
+                                            Some("agent".to_string()),
+                                            Some(phase),
+                                            Phase::ModelValidate,
+                                            Some("plan_tasks_done"),
+                                            Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                }
                                 }
                             } else {
                                 let allowed =
@@ -4031,15 +4288,10 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     if want_model_names.contains(&expected)
                                         || want_file_stems.contains(&expected)
                                     {
-                                        t.status =
-                                            crate::data_engineer::plan::TaskStatus::InProgress;
-                                        let note = format!(
-                                            "Reopened due to dbt_validate failure:\n{}",
-                                            brief.trim()
-                                        );
-                                        if !t.notes.iter().any(|n| n.trim() == note.trim()) {
-                                            t.notes.push(note);
-                                        }
+                                        // Mark the task as needing attention again. Task status should be derived
+                                        // from checklist items; we only adjust the coarse status here as a hint and
+                                        // store detailed failure context into plan.project_snapshot.
+                                        t.status = crate::data_engineer::plan::TaskStatus::InProgress;
                                         reopened.push(t.dataset_id.clone());
                                     }
                                 }
@@ -4112,15 +4364,9 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     }
                                     let Some(exp) = expected else { continue };
                                     if want_names.contains(&exp) {
-                                        t.status =
-                                            crate::data_engineer::plan::TaskStatus::InProgress;
-                                        let note = format!(
-                                            "Reopened due to dbt_validate failure:\n{}",
-                                            brief.trim()
-                                        );
-                                        if !t.notes.iter().any(|n| n.trim() == note.trim()) {
-                                            t.notes.push(note);
-                                        }
+                                        // Mark the task as needing attention again. Task status should be derived
+                                        // from checklist items; we only adjust the coarse status here as a hint.
+                                        t.status = crate::data_engineer::plan::TaskStatus::InProgress;
                                         reopened.push(t.name.clone());
                                     }
                                 }
@@ -5232,9 +5478,10 @@ mod tests {
                 expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
                 invariants: vec![],
                 status: crate::data_engineer::plan::TaskStatus::Pending,
-                notes: vec![],
+                checklist: vec![],
             }],
             batches: vec![vec![ds.clone()]],
+            work_groups: vec![],
             progress: crate::data_engineer::plan::PlanProgress::default(),
         };
         crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
@@ -5253,10 +5500,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(DataEngineerSuite::entered_from_actionable_review(
+        assert!(DataEngineerSuite::actionable_review_entry_step_idx(
             Some(&log),
             control_flow::Phase::CleansePlan
-        ));
+        )
+        .is_some());
 
         let advanced = DataEngineerSuite::approve_cleanse_plan_draft_and_advance(
             &thread_store,
@@ -5323,9 +5571,10 @@ mod tests {
                 expected_model_path: Some("models/marts/fct_orders.sql".to_string()),
                 invariants: vec![],
                 status: crate::data_engineer::plan::TaskStatus::Pending,
-                notes: vec![],
+                checklist: vec![],
             }],
             batches: vec![vec!["fct_orders".to_string()]],
+            work_groups: vec![],
             progress: crate::data_engineer::plan::PlanProgress::default(),
         };
         crate::data_engineer::plan::save_model_plan(&actx, &plan)
@@ -5344,10 +5593,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(DataEngineerSuite::entered_from_actionable_review(
+        assert!(DataEngineerSuite::actionable_review_entry_step_idx(
             Some(&log),
             control_flow::Phase::ModelPlan
-        ));
+        )
+        .is_some());
 
         let advanced = DataEngineerSuite::approve_model_plan_draft_and_advance(
             &thread_store,

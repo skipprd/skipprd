@@ -562,13 +562,13 @@ fn parse_review_meta_line(text: &str) -> (bool, String, Vec<String>) {
 fn resolve_cleanse_batch_paths(
     plan: &de_plan::CleansePlan,
     batch: &[String],
-) -> Vec<(String, String, Vec<String>, Vec<String>)> {
-    // returns (dataset_id, expected_path, invariants, notes)
-    let mut out: Vec<(String, String, Vec<String>, Vec<String>)> = Vec::new();
+) -> Vec<(String, String, Vec<String>, Vec<de_plan::PlanChecklistItem>)> {
+    // returns (dataset_id, expected_path, invariants, checklist)
+    let mut out: Vec<(String, String, Vec<String>, Vec<de_plan::PlanChecklistItem>)> = Vec::new();
     for ds in batch.iter() {
         if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
             let p = t.expected_model_path.clone().unwrap_or_default();
-            out.push((ds.clone(), p, t.invariants.clone(), t.notes.clone()));
+            out.push((ds.clone(), p, t.invariants.clone(), t.checklist.clone()));
         } else {
             out.push((ds.clone(), String::new(), vec![], vec![]));
         }
@@ -579,13 +579,13 @@ fn resolve_cleanse_batch_paths(
 fn resolve_model_batch_paths(
     plan: &de_plan::ModelPlan,
     batch: &[String],
-) -> Vec<(String, String, Vec<String>, Vec<String>)> {
-    // returns (name, expected_path, invariants, notes)
-    let mut out: Vec<(String, String, Vec<String>, Vec<String>)> = Vec::new();
+) -> Vec<(String, String, Vec<String>, Vec<de_plan::PlanChecklistItem>)> {
+    // returns (name, expected_path, invariants, checklist)
+    let mut out: Vec<(String, String, Vec<String>, Vec<de_plan::PlanChecklistItem>)> = Vec::new();
     for name in batch.iter() {
         if let Some(t) = plan.tasks.iter().find(|t| t.name == *name) {
             let p = t.expected_model_path.clone().unwrap_or_default();
-            out.push((name.clone(), p, t.invariants.clone(), t.notes.clone()));
+            out.push((name.clone(), p, t.invariants.clone(), t.checklist.clone()));
         } else {
             out.push((name.clone(), String::new(), vec![], vec![]));
         }
@@ -875,12 +875,12 @@ pub async fn run_batched_review(
                     let mut map: Vec<Value> = Vec::new();
                     for b in batches.iter() {
                         let resolved = resolve_cleanse_batch_paths(&p, b);
-                        for (ds, path, inv, notes) in resolved {
+                        for (ds, path, inv, checklist) in resolved {
                             map.push(serde_json::json!({
                                 "item": ds,
                                 "expected_model_path": path,
                                 "invariants": inv,
-                                "notes": notes
+                                "checklist": checklist
                             }));
                         }
                     }
@@ -909,12 +909,12 @@ pub async fn run_batched_review(
                     let mut map: Vec<Value> = Vec::new();
                     for b in batches.iter() {
                         let resolved = resolve_model_batch_paths(&p, b);
-                        for (name, path, inv, notes) in resolved {
+                        for (name, path, inv, checklist) in resolved {
                             map.push(serde_json::json!({
                                 "item": name,
                                 "expected_model_path": path,
                                 "invariants": inv,
-                                "notes": notes
+                                "checklist": checklist
                             }));
                         }
                     }
@@ -959,12 +959,12 @@ pub async fn run_batched_review(
                         let mut map: Vec<Value> = Vec::new();
                         for b in batches.iter() {
                             let resolved = resolve_cleanse_batch_paths(&p, b);
-                            for (ds, path, inv, notes) in resolved {
+                            for (ds, path, inv, checklist) in resolved {
                                 map.push(serde_json::json!({
                                     "item": ds,
                                     "expected_model_path": path,
                                     "invariants": inv,
-                                    "notes": notes
+                                    "checklist": checklist
                                 }));
                             }
                         }
@@ -989,12 +989,12 @@ pub async fn run_batched_review(
                         let mut map: Vec<Value> = Vec::new();
                         for b in batches.iter() {
                             let resolved = resolve_model_batch_paths(&p, b);
-                            for (name, path, inv, notes) in resolved {
+                            for (name, path, inv, checklist) in resolved {
                                 map.push(serde_json::json!({
                                     "item": name,
                                     "expected_model_path": path,
                                     "invariants": inv,
-                                    "notes": notes
+                                    "checklist": checklist
                                 }));
                             }
                         }
@@ -1390,17 +1390,18 @@ mod tests {
                     expected_model_path: Some("models/staging/stg_a.sql".to_string()),
                     invariants: vec!["inv".to_string()],
                     status: de_plan::TaskStatus::Done,
-                    notes: vec![],
+                    checklist: vec![],
                 },
                 de_plan::CleanseTask {
                     dataset_id: "a.b.b".to_string(),
                     expected_model_path: Some("models/staging/stg_b.sql".to_string()),
                     invariants: vec![],
                     status: de_plan::TaskStatus::Done,
-                    notes: vec![],
+                    checklist: vec![],
                 },
             ],
             batches: vec![vec!["a.b.a".to_string()], vec!["a.b.b".to_string()]],
+            work_groups: vec![],
             progress: de_plan::PlanProgress::default(),
         };
         // Persist plan under standard plans prefix so loader finds it.

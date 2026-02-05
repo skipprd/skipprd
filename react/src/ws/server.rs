@@ -271,17 +271,30 @@ async fn upsert_thread_state_from_plans(
         .to_string()
     }
 
-    fn task_notes_and_error(notes: &[String]) -> Option<String> {
-        // Prefer most recent note that looks like an error.
-        for n in notes.iter().rev() {
-            let l = n.to_lowercase();
-            if l.contains("failed") || l.contains("error") || l.contains("exception") {
-                if !n.trim().is_empty() {
-                    return Some(n.clone());
+    fn task_error_from_checklist(items: &[api::PlanChecklistItem]) -> Option<String> {
+        // Prefer the most actionable remaining work: needs_update > blocked.
+        let mut pick: Option<&api::PlanChecklistItem> = None;
+        for it in items.iter() {
+            match it.status {
+                api::PlanChecklistItemStatus::NeedsUpdate => {
+                    pick = Some(it);
+                    break;
                 }
+                api::PlanChecklistItemStatus::Blocked => {
+                    if pick.is_none() {
+                        pick = Some(it);
+                    }
+                }
+                _ => {}
             }
         }
-        None
+        let Some(it) = pick else { return None };
+        let details = it.details.as_deref().unwrap_or("").trim();
+        if details.is_empty() {
+            Some(it.label.clone())
+        } else {
+            Some(format!("{}: {}", it.label, details))
+        }
     }
 
     for (kind, plan_opt) in [("cleanse", cleanse), ("model", model)] {
@@ -290,11 +303,11 @@ async fn upsert_thread_state_from_plans(
                 .insert(kind.to_string(), summarize_plan(p));
 
             for t in p.tasks.iter() {
-                let (task_id, status, notes, outputs) = match t {
+                let (task_id, status, checklist, outputs) = match t {
                     api::PlanTask::Cleanse(c) => (
                         c.task_id.clone(),
                         c.status,
-                        c.notes.clone().unwrap_or_default(),
+                        c.checklist.clone(),
                         serde_json::json!({
                             "expected_model_path": c.expected_model_path,
                         }),
@@ -302,7 +315,7 @@ async fn upsert_thread_state_from_plans(
                     api::PlanTask::Model(mo) => (
                         mo.task_id.clone(),
                         mo.status,
-                        mo.notes.clone().unwrap_or_default(),
+                        mo.checklist.clone(),
                         serde_json::json!({
                             "expected_model_path": mo.expected_model_path,
                             "folder": mo.folder,
@@ -326,7 +339,7 @@ async fn upsert_thread_state_from_plans(
                 ent.kind = "task".to_string();
                 ent.status = map_task_status_to_item_status(status);
                 ent.outputs = Some(outputs);
-                if let Some(err) = task_notes_and_error(&notes) {
+                if let Some(err) = task_error_from_checklist(&checklist) {
                     ent.last_error = Some(CoreThreadItemError {
                         summary: err,
                         tool_step_idx: None,
@@ -1956,6 +1969,65 @@ fn map_task_status(s: de_plan::TaskStatus) -> api::PlanTaskStatus {
     }
 }
 
+fn map_checklist_item_status(s: de_plan::ChecklistItemStatus) -> api::PlanChecklistItemStatus {
+    match s {
+        de_plan::ChecklistItemStatus::Pending => api::PlanChecklistItemStatus::Pending,
+        de_plan::ChecklistItemStatus::InProgress => api::PlanChecklistItemStatus::InProgress,
+        de_plan::ChecklistItemStatus::Done => api::PlanChecklistItemStatus::Done,
+        de_plan::ChecklistItemStatus::Blocked => api::PlanChecklistItemStatus::Blocked,
+        de_plan::ChecklistItemStatus::NeedsUpdate => api::PlanChecklistItemStatus::NeedsUpdate,
+    }
+}
+
+fn map_checklist_origin(s: de_plan::ChecklistOrigin) -> api::PlanChecklistOrigin {
+    match s {
+        de_plan::ChecklistOrigin::Initial => api::PlanChecklistOrigin::Initial,
+        de_plan::ChecklistOrigin::ReviewActionable => api::PlanChecklistOrigin::ReviewActionable,
+    }
+}
+
+fn map_checklist_evidence(e: de_plan::ChecklistEvidence) -> api::PlanChecklistEvidence {
+    let mut out = api::PlanChecklistEvidence::new(e.kind, e.step_idx as i32);
+    out.tool_name = e.tool_name;
+    out.tool_id = e.tool_id;
+    out.ts = e.ts;
+    out
+}
+
+fn map_checklist_item(it: de_plan::PlanChecklistItem) -> api::PlanChecklistItem {
+    let mut out = api::PlanChecklistItem::new(
+        it.checklist_item_id,
+        it.label,
+        map_checklist_item_status(it.status),
+        map_checklist_origin(it.origin),
+    );
+    out.details = it.details;
+    out.origin_step_idx = it.origin_step_idx.map(|x| x as i32);
+    if !it.evidence.is_empty() {
+        out.evidence = Some(it.evidence.into_iter().map(map_checklist_evidence).collect());
+    }
+    out
+}
+
+fn map_work_group_kind(k: de_plan::WorkGroupKind) -> api::PlanWorkGroupKind {
+    match k {
+        de_plan::WorkGroupKind::AuthorSql => api::PlanWorkGroupKind::AuthorSql,
+        de_plan::WorkGroupKind::AuthorSchema => api::PlanWorkGroupKind::AuthorSchema,
+        de_plan::WorkGroupKind::Validate => api::PlanWorkGroupKind::Validate,
+    }
+}
+
+fn map_work_group(wg: de_plan::PlanWorkGroup) -> api::PlanWorkGroup {
+    let items = wg
+        .items
+        .into_iter()
+        .map(|it| api::PlanWorkGroupItemRef::new(it.task_id, it.checklist_item_id))
+        .collect::<Vec<_>>();
+    let mut out = api::PlanWorkGroup::new(wg.group_id, wg.label, map_work_group_kind(wg.kind), items);
+    out.depends_on_group_ids = wg.depends_on_group_ids;
+    out
+}
+
 fn map_project_snapshot(v: serde_json::Value) -> Option<HashMap<String, serde_json::Value>> {
     let obj = v.as_object()?;
     let mut out: HashMap<String, serde_json::Value> = HashMap::new();
@@ -1963,6 +2035,53 @@ fn map_project_snapshot(v: serde_json::Value) -> Option<HashMap<String, serde_js
         out.insert(k.clone(), vv.clone());
     }
     Some(out)
+}
+
+fn plan_parse_error_snapshot(
+    plan_kind: api::plan_snapshot::PlanKind,
+    plan_key: String,
+    err: String,
+) -> api::PlanSnapshot {
+    let mut item = api::PlanChecklistItem::new(
+        "parse_error".to_string(),
+        "Plan failed to deserialize".to_string(),
+        api::PlanChecklistItemStatus::NeedsUpdate,
+        api::PlanChecklistOrigin::Initial,
+    );
+    item.details = Some(err.clone());
+
+    let task = match plan_kind {
+        api::plan_snapshot::PlanKind::Cleanse => {
+            let snap = api::CleanseTaskSnapshot::new(
+                "parse_error".to_string(),
+                "parse_error".to_string(),
+                api::PlanTaskStatus::NeedsUpdate,
+                vec![item],
+            );
+            api::PlanTask::Cleanse(snap)
+        }
+        api::plan_snapshot::PlanKind::Model => {
+            let snap = api::ModelTaskSnapshot::new(
+                "parse_error".to_string(),
+                "parse_error".to_string(),
+                api::PlanTaskStatus::NeedsUpdate,
+                vec![item],
+            );
+            api::PlanTask::Model(snap)
+        }
+    };
+
+    let mut snap = api::PlanSnapshot::new(
+        plan_kind,
+        plan_key,
+        api::PlanStatus::Cancelled,
+        vec![task],
+        vec![],
+    );
+    let mut ps: HashMap<String, serde_json::Value> = HashMap::new();
+    ps.insert("parse_error".to_string(), serde_json::json!(err));
+    snap.project_snapshot = Some(ps);
+    snap
 }
 
 // load_active_plan_snapshot removed (hard cutover to `plans` + `thread_state`).
@@ -1987,44 +2106,64 @@ async fn load_latest_plans(
     let mut newest_terminal_cleanse: Option<de_plan::CleansePlan> = None;
     for k in keys.iter().filter(|k| k.ends_with("_cleanse.json")) {
         if let Ok(bytes) = ctx.storage.get_bytes(k).await {
-            if let Ok(mut p) = serde_json::from_slice::<de_plan::CleansePlan>(&bytes) {
-                if p.plan_key.trim().is_empty() {
-                    p.plan_key = k.to_string();
+            match serde_json::from_slice::<de_plan::CleansePlan>(&bytes) {
+                Ok(mut p) => {
+                    if p.plan_key.trim().is_empty() {
+                        p.plan_key = k.to_string();
+                    }
+                    if !p.status.is_terminal() {
+                        let project_snapshot = p.project_snapshot;
+                        let plan_key = p.plan_key;
+                        let status = p.status;
+                        let work_groups = p
+                            .work_groups
+                            .into_iter()
+                            .map(map_work_group)
+                            .collect::<Vec<_>>();
+                        let tasks = p
+                            .tasks
+                            .into_iter()
+                            .map(|t| {
+                                let checklist = t
+                                    .checklist
+                                    .into_iter()
+                                    .map(map_checklist_item)
+                                    .collect::<Vec<_>>();
+                                let mut snap = api::CleanseTaskSnapshot::new(
+                                    t.dataset_id.clone(),
+                                    t.dataset_id.clone(),
+                                    map_task_status(t.status),
+                                    checklist,
+                                );
+                                snap.expected_model_path = t.expected_model_path;
+                                if !t.invariants.is_empty() {
+                                    snap.invariants = Some(t.invariants);
+                                }
+                                api::PlanTask::Cleanse(snap)
+                            })
+                            .collect::<Vec<_>>();
+                        let mut snap = api::PlanSnapshot::new(
+                            api::plan_snapshot::PlanKind::Cleanse,
+                            plan_key,
+                            map_plan_status(status),
+                            tasks,
+                            work_groups,
+                        );
+                        snap.project_snapshot = map_project_snapshot(project_snapshot);
+                        cleanse_active = Some(snap);
+                        break;
+                    } else {
+                        newest_terminal_cleanse = Some(p);
+                    }
                 }
-                if !p.status.is_terminal() {
-                    let project_snapshot = p.project_snapshot;
-                    let plan_key = p.plan_key;
-                    let status = p.status;
-                    let tasks = p
-                        .tasks
-                        .into_iter()
-                        .map(|t| {
-                            let mut snap = api::CleanseTaskSnapshot::new(
-                                t.dataset_id.clone(),
-                                t.dataset_id.clone(),
-                                map_task_status(t.status),
-                            );
-                            snap.expected_model_path = t.expected_model_path;
-                            if !t.invariants.is_empty() {
-                                snap.invariants = Some(t.invariants);
-                            }
-                            if !t.notes.is_empty() {
-                                snap.notes = Some(t.notes);
-                            }
-                            api::PlanTask::Cleanse(snap)
-                        })
-                        .collect::<Vec<_>>();
-                    let mut snap = api::PlanSnapshot::new(
+                Err(e) => {
+                    // Hard cutover: surface a parse error snapshot so the UI doesn't silently drop plans.
+                    cleanse_active = Some(plan_parse_error_snapshot(
                         api::plan_snapshot::PlanKind::Cleanse,
-                        plan_key,
-                        map_plan_status(status),
-                        tasks,
-                    );
-                    snap.project_snapshot = map_project_snapshot(project_snapshot);
-                    cleanse_active = Some(snap);
+                        k.to_string(),
+                        format!("failed to parse cleanse plan JSON at {}: {}", k, e),
+                    ));
                     break;
-                } else {
-                    newest_terminal_cleanse = Some(p);
                 }
             }
         }
@@ -2036,21 +2175,26 @@ async fn load_latest_plans(
         let project_snapshot = p.project_snapshot;
         let plan_key = p.plan_key;
         let status = p.status;
+        let work_groups = p
+            .work_groups
+            .into_iter()
+            .map(map_work_group)
+            .collect::<Vec<_>>();
         let tasks = p
             .tasks
             .into_iter()
             .map(|t| {
+                let checklist =
+                    t.checklist.into_iter().map(map_checklist_item).collect::<Vec<_>>();
                 let mut snap = api::CleanseTaskSnapshot::new(
                     t.dataset_id.clone(),
                     t.dataset_id.clone(),
                     map_task_status(t.status),
+                    checklist,
                 );
                 snap.expected_model_path = t.expected_model_path;
                 if !t.invariants.is_empty() {
                     snap.invariants = Some(t.invariants);
-                }
-                if !t.notes.is_empty() {
-                    snap.notes = Some(t.notes);
                 }
                 api::PlanTask::Cleanse(snap)
             })
@@ -2060,6 +2204,7 @@ async fn load_latest_plans(
             plan_key,
             map_plan_status(status),
             tasks,
+            work_groups,
         );
         snap.project_snapshot = map_project_snapshot(project_snapshot);
         Some(snap)
@@ -2071,53 +2216,72 @@ async fn load_latest_plans(
     let mut newest_terminal_model: Option<de_plan::ModelPlan> = None;
     for k in keys.iter().filter(|k| k.ends_with("_model.json")) {
         if let Ok(bytes) = ctx.storage.get_bytes(k).await {
-            if let Ok(mut p) = serde_json::from_slice::<de_plan::ModelPlan>(&bytes) {
-                if p.plan_key.trim().is_empty() {
-                    p.plan_key = k.to_string();
+            match serde_json::from_slice::<de_plan::ModelPlan>(&bytes) {
+                Ok(mut p) => {
+                    if p.plan_key.trim().is_empty() {
+                        p.plan_key = k.to_string();
+                    }
+                    if !p.status.is_terminal() {
+                        let project_snapshot = p.project_snapshot;
+                        let plan_key = p.plan_key;
+                        let status = p.status;
+                        let work_groups = p
+                            .work_groups
+                            .into_iter()
+                            .map(map_work_group)
+                            .collect::<Vec<_>>();
+                        let tasks = p
+                            .tasks
+                            .into_iter()
+                            .map(|t| {
+                                let checklist = t
+                                    .checklist
+                                    .into_iter()
+                                    .map(map_checklist_item)
+                                    .collect::<Vec<_>>();
+                                let mut snap = api::ModelTaskSnapshot::new(
+                                    t.name.clone(),
+                                    t.name.clone(),
+                                    map_task_status(t.status),
+                                    checklist,
+                                );
+                                if !t.folder.trim().is_empty() {
+                                    snap.folder = Some(t.folder);
+                                }
+                                if !t.goal.trim().is_empty() {
+                                    snap.goal = Some(t.goal);
+                                }
+                                if !t.inputs.is_empty() {
+                                    snap.inputs = Some(t.inputs);
+                                }
+                                snap.expected_model_path = t.expected_model_path;
+                                if !t.invariants.is_empty() {
+                                    snap.invariants = Some(t.invariants);
+                                }
+                                api::PlanTask::Model(snap)
+                            })
+                            .collect::<Vec<_>>();
+                        let mut snap = api::PlanSnapshot::new(
+                            api::plan_snapshot::PlanKind::Model,
+                            plan_key,
+                            map_plan_status(status),
+                            tasks,
+                            work_groups,
+                        );
+                        snap.project_snapshot = map_project_snapshot(project_snapshot);
+                        model_active = Some(snap);
+                        break;
+                    } else {
+                        newest_terminal_model = Some(p);
+                    }
                 }
-                if !p.status.is_terminal() {
-                    let project_snapshot = p.project_snapshot;
-                    let plan_key = p.plan_key;
-                    let status = p.status;
-                    let tasks = p
-                        .tasks
-                        .into_iter()
-                        .map(|t| {
-                            let mut snap = api::ModelTaskSnapshot::new(
-                                t.name.clone(),
-                                t.name.clone(),
-                                map_task_status(t.status),
-                            );
-                            if !t.folder.trim().is_empty() {
-                                snap.folder = Some(t.folder);
-                            }
-                            if !t.goal.trim().is_empty() {
-                                snap.goal = Some(t.goal);
-                            }
-                            if !t.inputs.is_empty() {
-                                snap.inputs = Some(t.inputs);
-                            }
-                            snap.expected_model_path = t.expected_model_path;
-                            if !t.invariants.is_empty() {
-                                snap.invariants = Some(t.invariants);
-                            }
-                            if !t.notes.is_empty() {
-                                snap.notes = Some(t.notes);
-                            }
-                            api::PlanTask::Model(snap)
-                        })
-                        .collect::<Vec<_>>();
-                    let mut snap = api::PlanSnapshot::new(
+                Err(e) => {
+                    model_active = Some(plan_parse_error_snapshot(
                         api::plan_snapshot::PlanKind::Model,
-                        plan_key,
-                        map_plan_status(status),
-                        tasks,
-                    );
-                    snap.project_snapshot = map_project_snapshot(project_snapshot);
-                    model_active = Some(snap);
+                        k.to_string(),
+                        format!("failed to parse model plan JSON at {}: {}", k, e),
+                    ));
                     break;
-                } else {
-                    newest_terminal_model = Some(p);
                 }
             }
         }
@@ -2129,14 +2293,22 @@ async fn load_latest_plans(
         let project_snapshot = p.project_snapshot;
         let plan_key = p.plan_key;
         let status = p.status;
+        let work_groups = p
+            .work_groups
+            .into_iter()
+            .map(map_work_group)
+            .collect::<Vec<_>>();
         let tasks = p
             .tasks
             .into_iter()
             .map(|t| {
+                let checklist =
+                    t.checklist.into_iter().map(map_checklist_item).collect::<Vec<_>>();
                 let mut snap = api::ModelTaskSnapshot::new(
                     t.name.clone(),
                     t.name.clone(),
                     map_task_status(t.status),
+                    checklist,
                 );
                 if !t.folder.trim().is_empty() {
                     snap.folder = Some(t.folder);
@@ -2151,9 +2323,6 @@ async fn load_latest_plans(
                 if !t.invariants.is_empty() {
                     snap.invariants = Some(t.invariants);
                 }
-                if !t.notes.is_empty() {
-                    snap.notes = Some(t.notes);
-                }
                 api::PlanTask::Model(snap)
             })
             .collect::<Vec<_>>();
@@ -2162,6 +2331,7 @@ async fn load_latest_plans(
             plan_key,
             map_plan_status(status),
             tasks,
+            work_groups,
         );
         snap.project_snapshot = map_project_snapshot(project_snapshot);
         Some(snap)
@@ -3882,6 +4052,7 @@ mod tests {
             project_snapshot: serde_json::json!({}),
             tasks: vec![],
             batches: vec![],
+            work_groups: vec![],
             progress: de_plan::PlanProgress::default(),
         };
         suite_ctx
@@ -3901,6 +4072,7 @@ mod tests {
             project_snapshot: serde_json::json!({}),
             tasks: vec![],
             batches: vec![],
+            work_groups: vec![],
             progress: de_plan::PlanProgress::default(),
         };
         suite_ctx
@@ -3920,6 +4092,139 @@ mod tests {
         assert_eq!(resp.for_cid.as_deref(), Some("c1"));
         assert!(resp.cleanse.is_some());
         assert!(resp.model.is_some());
+    }
+
+    #[tokio::test]
+    async fn plans_request_includes_checklist_and_omits_notes() {
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
+        let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let suite_ctx = SuiteCtx::new(
+            storage.clone(),
+            Arc::new(NullSecretsProvider::default()),
+            Arc::new(NullModel::new()),
+            scope.clone(),
+            keyspace.clone(),
+        );
+        let reg = Arc::new(react_suites::default_registry());
+        let mut state = ConnState::new(reg, suite_ctx.clone());
+
+        let thread_id = uuid::Uuid::new_v4().to_string();
+        let base = keyspace
+            .threads_prefix(&scope)
+            .trim_end_matches("/threads")
+            .trim_end_matches('/')
+            .to_string();
+
+        let cleanse_key = format!("{}/plans/{}/20260126T000000Z_cleanse.json", base, thread_id);
+        let cleanse = de_plan::CleansePlan {
+            plan_key: cleanse_key.clone(),
+            status: de_plan::PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![de_plan::CleanseTask {
+                dataset_id: "AwsDataCatalog.test_raw.raw_orders".to_string(),
+                expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
+                invariants: vec![],
+                status: de_plan::TaskStatus::Pending,
+                checklist: vec![de_plan::PlanChecklistItem {
+                    checklist_item_id: "sql_model".to_string(),
+                    label: "Author staging SQL".to_string(),
+                    details: None,
+                    status: de_plan::ChecklistItemStatus::Pending,
+                    origin: de_plan::ChecklistOrigin::Initial,
+                    origin_step_idx: None,
+                    evidence: vec![],
+                }],
+            }],
+            batches: vec![vec!["AwsDataCatalog.test_raw.raw_orders".to_string()]],
+            work_groups: vec![],
+            progress: de_plan::PlanProgress::default(),
+        };
+        suite_ctx
+            .storage
+            .put_bytes(
+                &cleanse_key,
+                &serde_json::to_vec_pretty(&cleanse).unwrap(),
+                "application/json",
+            )
+            .await
+            .unwrap();
+
+        let msg = json!({"v":1,"type":"plans","cid":"c1","thread_id":thread_id}).to_string();
+        let frames = handle_message(&msg, &mut state).await.unwrap();
+        assert_eq!(frames.len(), 1);
+
+        let v: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
+        let cleanse_snap = v.get("cleanse").expect("cleanse");
+        let tasks = cleanse_snap.get("tasks").and_then(|x| x.as_array()).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].get("taskKind").and_then(|x| x.as_str()),
+            Some("cleanse")
+        );
+        let cl = tasks[0].get("checklist").and_then(|x| x.as_array()).unwrap();
+        assert_eq!(
+            cl[0].get("checklistItemId").and_then(|x| x.as_str()),
+            Some("sql_model")
+        );
+        assert!(tasks[0].get("notes").is_none());
+    }
+
+    #[tokio::test]
+    async fn plans_request_surfaces_parse_error_snapshot_for_corrupt_plan_json() {
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
+        let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let suite_ctx = SuiteCtx::new(
+            storage.clone(),
+            Arc::new(NullSecretsProvider::default()),
+            Arc::new(NullModel::new()),
+            scope.clone(),
+            keyspace.clone(),
+        );
+        let reg = Arc::new(react_suites::default_registry());
+        let mut state = ConnState::new(reg, suite_ctx.clone());
+
+        let thread_id = uuid::Uuid::new_v4().to_string();
+        let base = keyspace
+            .threads_prefix(&scope)
+            .trim_end_matches("/threads")
+            .trim_end_matches('/')
+            .to_string();
+        let cleanse_key = format!("{}/plans/{}/20260126T000000Z_cleanse.json", base, thread_id);
+        suite_ctx
+            .storage
+            .put_bytes(&cleanse_key, b"{not valid json", "application/json")
+            .await
+            .unwrap();
+
+        let msg = json!({"v":1,"type":"plans","cid":"c1","thread_id":thread_id}).to_string();
+        let frames = handle_message(&msg, &mut state).await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
+        let cleanse_snap = v.get("cleanse").expect("cleanse");
+        assert_eq!(
+            cleanse_snap.get("status").and_then(|x| x.as_str()),
+            Some("cancelled")
+        );
+        let tasks = cleanse_snap.get("tasks").and_then(|x| x.as_array()).unwrap();
+        let cl = tasks[0].get("checklist").and_then(|x| x.as_array()).unwrap();
+        assert_eq!(
+            cl[0].get("checklistItemId").and_then(|x| x.as_str()),
+            Some("parse_error")
+        );
+        let ps = cleanse_snap
+            .get("projectSnapshot")
+            .and_then(|x| x.as_object())
+            .expect("projectSnapshot");
+        assert!(ps.get("parse_error").is_some());
     }
 
     #[tokio::test]

@@ -124,6 +124,27 @@ pub use llm_end_response::LlmEndResponse;
 pub mod plan_snapshot;
 pub use plan_snapshot::PlanSnapshot;
 
+pub mod plan_checklist_item_status;
+pub use plan_checklist_item_status::PlanChecklistItemStatus;
+
+pub mod plan_checklist_origin;
+pub use plan_checklist_origin::PlanChecklistOrigin;
+
+pub mod plan_checklist_evidence;
+pub use plan_checklist_evidence::PlanChecklistEvidence;
+
+pub mod plan_checklist_item;
+pub use plan_checklist_item::PlanChecklistItem;
+
+pub mod plan_work_group_kind;
+pub use plan_work_group_kind::PlanWorkGroupKind;
+
+pub mod plan_work_group_item_ref;
+pub use plan_work_group_item_ref::PlanWorkGroupItemRef;
+
+pub mod plan_work_group;
+pub use plan_work_group::PlanWorkGroup;
+
 pub mod plan_status;
 pub use plan_status::PlanStatus;
 

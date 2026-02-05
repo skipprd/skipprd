@@ -183,7 +183,10 @@ fn build_staging_sys_prompt(
     )
 }
 
-fn render_plan_driven_instructions(invariants: &[String], notes: &[String]) -> String {
+fn render_plan_driven_instructions(
+    invariants: &[String],
+    checklist: &[crate::data_engineer::plan::PlanChecklistItem],
+) -> String {
     let mut out = String::new();
     if !invariants.is_empty() {
         out.push_str("Plan invariants (MUST satisfy):\n");
@@ -198,17 +201,41 @@ fn render_plan_driven_instructions(invariants: &[String], notes: &[String]) -> S
         }
         out.push('\n');
     }
-    if !notes.is_empty() {
-        out.push_str("Plan notes (implementation guidance):\n");
-        for n in notes.iter() {
-            let t = n.trim();
-            if t.is_empty() {
-                continue;
-            }
-            out.push_str("- ");
-            out.push_str(t);
-            out.push('\n');
+    let mut any = false;
+    for it in checklist.iter() {
+        let has_details = it
+            .details
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let include = it.status != crate::data_engineer::plan::ChecklistItemStatus::Done || has_details;
+        if !include {
+            continue;
         }
+        if !any {
+            out.push_str("Plan checklist (remaining work):\n");
+            any = true;
+        }
+        let origin = match it.origin {
+            crate::data_engineer::plan::ChecklistOrigin::Initial => "initial",
+            crate::data_engineer::plan::ChecklistOrigin::ReviewActionable => "review_actionable",
+        };
+        out.push_str("- ");
+        out.push_str(it.label.trim());
+        out.push_str(" (id=");
+        out.push_str(it.checklist_item_id.trim());
+        out.push_str(", status=");
+        out.push_str(&format!("{:?}", it.status));
+        out.push_str(", origin=");
+        out.push_str(origin);
+        out.push(')');
+        if let Some(d) = it.details.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            out.push_str(": ");
+            out.push_str(d);
+        }
+        out.push('\n');
+    }
+    if any {
         out.push('\n');
     }
     out.trim().to_string()
@@ -660,18 +687,18 @@ impl Tool for StagingModelTool {
                 .map(|b| String::from_utf8_lossy(&b).to_string())
                 .unwrap_or_default();
 
-            let (plan_invariants, plan_notes, plan_expected_model_path) = plan_opt
+            let (plan_invariants, plan_checklist, plan_expected_model_path) = plan_opt
                 .as_ref()
                 .and_then(|p| p.tasks.iter().find(|t| t.dataset_id == *ds))
                 .map(|t| {
                     (
                         t.invariants.clone(),
-                        t.notes.clone(),
+                        t.checklist.clone(),
                         t.expected_model_path.clone().unwrap_or_default(),
                     )
                 })
                 .unwrap_or_else(|| (vec![], vec![], String::new()));
-            let plan_instr = render_plan_driven_instructions(&plan_invariants, &plan_notes);
+            let plan_instr = render_plan_driven_instructions(&plan_invariants, &plan_checklist);
             let effective_instructions = combine_instructions(&user_instructions, &plan_instr);
 
             let user = serde_json::json!({
@@ -679,7 +706,7 @@ impl Tool for StagingModelTool {
                 "schema_columns": cols_json,
                 "user_instructions": effective_instructions,
                 "plan_invariants": plan_invariants,
-                "plan_notes": plan_notes,
+                "plan_checklist": plan_checklist,
                 "plan_expected_model_path": plan_expected_model_path,
                 "expected_model_path": rel_path,
                 "existing_model_sql": existing_sql,
@@ -1262,7 +1289,7 @@ mod tests {
             runtime: Some(cfg as Arc<dyn std::any::Any + Send + Sync>),
         };
 
-        // Seed an approved cleanse plan with invariants/notes for this dataset.
+        // Seed an approved cleanse plan with invariants/checklist for this dataset.
         let ds = "AwsDataCatalog.test_raw.raw_orders".to_string();
         let plan_key = crate::data_engineer::plan::new_cleanse_plan_key(&ctx);
         let plan = crate::data_engineer::plan::CleansePlan {
@@ -1274,9 +1301,18 @@ mod tests {
                 expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
                 invariants: vec!["Staging grain: exactly 1 row per order_pk.".to_string()],
                 status: crate::data_engineer::plan::TaskStatus::Pending,
-                notes: vec!["Add a canonical order_pk and document behavior.".to_string()],
+                checklist: vec![crate::data_engineer::plan::PlanChecklistItem {
+                    checklist_item_id: "sql_model".to_string(),
+                    label: "Author staging SQL".to_string(),
+                    details: Some("Add a canonical order_pk and document behavior.".to_string()),
+                    status: crate::data_engineer::plan::ChecklistItemStatus::Pending,
+                    origin: crate::data_engineer::plan::ChecklistOrigin::Initial,
+                    origin_step_idx: None,
+                    evidence: vec![],
+                }],
             }],
             batches: vec![vec![ds.clone()]],
+            work_groups: vec![],
             progress: crate::data_engineer::plan::PlanProgress::default(),
         };
         crate::data_engineer::plan::save_cleanse_plan(&ctx, &plan)
@@ -1297,7 +1333,7 @@ mod tests {
             .unwrap_or_default();
         assert!(got.contains("Plan invariants"));
         assert!(got.contains("exactly 1 row"));
-        assert!(got.contains("Plan notes"));
+        assert!(got.contains("Plan checklist"));
         assert!(got.contains("canonical order_pk"));
 
         // Avoid unused var warning in case future refactors remove ctx mutability.
