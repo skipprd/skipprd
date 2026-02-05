@@ -1,9 +1,9 @@
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
- 
+
 use crate::providers::RequestScope;
-use react_core::providers::{DEFAULT_ATHENA_MAX_CONCURRENCY, clamp_athena_concurrency};
+use react_core::providers::DEFAULT_WAREHOUSE_MAX_CONCURRENCY;
 
 /// # `react` configuration
 ///
@@ -72,7 +72,7 @@ use react_core::providers::{DEFAULT_ATHENA_MAX_CONCURRENCY, clamp_athena_concurr
 /// Notes:
 /// - Secrets remain env-driven (e.g. `LLM_API_KEY`).
 /// - `storage.bucket` can also be provided via env `SKIPPR_S3_BUCKET` or CLI `--bucket`.
- 
+
 /// CLI overrides for `react serve`.
 ///
 /// Any `Some` value takes precedence over env and file config.
@@ -84,7 +84,7 @@ pub struct ServeOverrides {
     pub workspace: Option<String>,
     pub project_id: Option<String>,
 }
- 
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ReactConfigFile {
     pub version: Option<u32>,
@@ -94,24 +94,24 @@ pub struct ReactConfigFile {
     pub llm: Option<LlmFile>,
     pub providers: Option<ProvidersFile>,
 }
- 
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ServerFile {
     pub port: Option<u16>,
 }
- 
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct StorageFile {
     pub bucket: Option<String>,
 }
- 
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ScopeFile {
     pub tenant: Option<String>,
     pub workspace: Option<String>,
     pub project_id: Option<String>,
 }
- 
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct LlmFile {
     pub provider: Option<String>,
@@ -120,53 +120,74 @@ pub struct LlmFile {
     pub embed_model: Option<String>,
     pub context_length: Option<usize>,
     pub gpu_layers: Option<usize>,
- 
+
     // Common tuning knobs already supported via env in `react` today.
     pub http_timeout_secs: Option<u64>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
 }
- 
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ProvidersFile {
-    pub athena: Option<AthenaFile>,
+    pub warehouse: Option<WarehouseFile>,
     pub catalog: Option<CatalogFile>,
     pub dbt: Option<DbtFile>,
     pub vector: Option<VectorFile>,
 }
- 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct AthenaFile {
-    pub enabled: Option<bool>,
-    pub workgroup: Option<String>,
-    pub region: Option<String>,
-    pub result_s3: Option<String>,
-    /// Max number of in-flight Athena queries to allow (soft-limited by Athena/workgroup).
-    pub max_concurrency: Option<usize>,
-    /// Bronze/raw schema (preferred name). For Athena this is a Glue database.
-    pub source_schema: Option<String>,
-    /// Back-compat alias for `source_schema`.
-    pub source_database: Option<String>,
-    /// Athena Data Catalog (preferred name).
-    pub target_catalog: Option<String>,
-    /// Back-compat alias for `target_catalog`.
-    pub catalog: Option<String>,
-    /// Legacy explicit full schemas (deprecated when using dbt suffix naming).
-    pub silver_database: Option<String>,
-    pub gold_database: Option<String>,
-    /// Back-compat (deprecated): treated as `silver_database` if `silver_database` is not set.
-    pub modeled_database: Option<String>,
-    pub discovery_cache_ttl_secs: Option<u64>,
+
+/// Warehouse configuration for a single provider (source or target).
+///
+/// Hard-cutover: no legacy aliases. Keep secrets in env, only non-secret wiring here.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WarehouseFile {
+    /// AWS Athena + Glue.
+    Athena {
+        workgroup: Option<String>,
+        region: Option<String>,
+        result_s3: Option<String>,
+        max_concurrency: Option<usize>,
+        /// Container above schema: Athena catalog (Glue Data Catalog). Default: AwsDataCatalog.
+        catalog: Option<String>,
+        /// Optional default schema/database for discovery + unqualified queries.
+        schema: Option<String>,
+        discovery_cache_ttl_secs: Option<u64>,
+    },
+    /// PostgreSQL.
+    Postgres {
+        /// Optional default database name (container above schema).
+        database: Option<String>,
+        /// Optional default schema for discovery/unqualified references.
+        schema: Option<String>,
+    },
+    /// Microsoft SQL Server.
+    Mssql {
+        database: Option<String>,
+        schema: Option<String>,
+    },
+    /// Snowflake (warehouse database+schema live in Snowflake).
+    Snowflake {
+        database: Option<String>,
+        schema: Option<String>,
+        warehouse: Option<String>,
+        role: Option<String>,
+    },
+    /// BigQuery (project+dataset+table).
+    Bigquery {
+        project: Option<String>,
+        dataset: Option<String>,
+        location: Option<String>,
+    },
 }
- 
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct CatalogFile {
     pub enabled: Option<bool>,
     pub refresh_secs: Option<u64>,
     pub max_concurrency: Option<usize>,
 }
- 
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct DbtNamingFile {
     pub target_schema: Option<String>,
@@ -188,12 +209,12 @@ pub struct DbtFile {
     pub docker_network: Option<String>,
     pub docker_mount_aws_dir: Option<bool>,
 }
- 
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct VectorFile {
     pub enabled: Option<bool>,
 }
- 
+
 #[derive(Clone, Debug)]
 pub struct ReactResolvedConfig {
     pub server: ServerResolved,
@@ -202,17 +223,17 @@ pub struct ReactResolvedConfig {
     pub llm: LlmResolved,
     pub providers: ProvidersResolved,
 }
- 
+
 #[derive(Clone, Debug)]
 pub struct ServerResolved {
     pub port: u16,
 }
- 
+
 #[derive(Clone, Debug)]
 pub struct StorageResolved {
     pub bucket: String,
 }
- 
+
 #[derive(Clone, Debug, Default)]
 pub struct LlmResolved {
     pub provider: Option<String>,
@@ -226,39 +247,33 @@ pub struct LlmResolved {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
 }
- 
+
 #[derive(Clone, Debug)]
 pub struct ProvidersResolved {
-    pub athena: AthenaResolved,
+    pub warehouse: WarehouseResolved,
     pub catalog: CatalogResolved,
     pub dbt: DbtResolved,
     pub vector: VectorResolved,
 }
- 
+
 #[derive(Clone, Debug)]
-pub struct AthenaResolved {
-    pub enabled: bool,
-    pub workgroup: Option<String>,
-    pub region: Option<String>,
-    pub result_s3: Option<String>,
-    pub max_concurrency: usize,
-    /// Default schema for source discovery + unqualified queries.
-    pub source_schema: Option<String>,
-    /// Athena Data Catalog (Glue). This is dbt-athena profile key `database:`.
-    pub target_catalog: String,
-    /// Back-compat / derived full schemas (may be computed from dbt.naming).
-    pub silver_schema: Option<String>,
-    pub gold_schema: Option<String>,
-    pub discovery_cache_ttl_secs: u64,
+pub struct WarehouseResolved {
+    pub kind: String, // snake_case kind
+    /// Provider-specific container name (catalog/project/database) if applicable.
+    pub container: Option<String>,
+    /// Provider-specific default namespace (schema/dataset) if applicable.
+    pub namespace: Option<String>,
+    /// Provider-specific additional parameters (non-secret).
+    pub extras: serde_json::Value,
 }
- 
+
 #[derive(Clone, Debug)]
 pub struct CatalogResolved {
     pub enabled: bool,
     pub refresh_secs: u64,
     pub max_concurrency: usize,
 }
- 
+
 #[derive(Clone, Debug)]
 pub struct DbtResolved {
     pub enabled: bool,
@@ -271,7 +286,7 @@ pub struct DbtResolved {
     pub docker_network: Option<String>,
     pub docker_mount_aws_dir: bool,
 }
- 
+
 #[derive(Clone, Debug, Default)]
 pub struct DbtNamingResolved {
     pub target_schema: Option<String>,
@@ -283,21 +298,25 @@ pub struct DbtNamingResolved {
 pub struct VectorResolved {
     pub enabled: bool,
 }
- 
+
 fn getenv_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().and_then(|v| {
         let t = v.trim();
-        if t.is_empty() { None } else { Some(t.to_string()) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
     })
 }
- 
+
 fn set_env_if_unset(key: &str, value: &str) {
     if getenv_nonempty(key).is_some() {
         return;
     }
     std::env::set_var(key, value);
 }
- 
+
 fn ensure_safe_segment(name: &str, v: &str) -> Result<(), String> {
     let t = v.trim();
     if t.is_empty() {
@@ -311,7 +330,7 @@ fn ensure_safe_segment(name: &str, v: &str) -> Result<(), String> {
     }
     Ok(())
 }
- 
+
 impl ReactConfigFile {
     pub fn load_yaml(path: &Path) -> Result<Self, String> {
         let bytes = fs::read(path).map_err(|e| format!("failed to read config file: {}", e))?;
@@ -319,21 +338,21 @@ impl ReactConfigFile {
             .map_err(|e| format!("failed to parse YAML config: {}", e))
     }
 }
- 
+
 impl ReactResolvedConfig {
     pub fn resolve(file: ReactConfigFile, ov: ServeOverrides) -> Result<Self, String> {
         let server_port = ov
             .port
             .or_else(|| file.server.as_ref().and_then(|s| s.port))
             .unwrap_or(8787);
- 
+
         // Bucket: CLI > env > YAML
         let bucket = ov
             .bucket
             .or_else(|| getenv_nonempty("SKIPPR_S3_BUCKET"))
             .or_else(|| file.storage.as_ref().and_then(|s| s.bucket.clone()))
             .ok_or_else(|| "missing storage bucket (set --bucket, env SKIPPR_S3_BUCKET, or storage.bucket in YAML)".to_string())?;
- 
+
         let tenant = ov
             .tenant
             .or_else(|| file.scope.as_ref().and_then(|s| s.tenant.clone()))
@@ -346,63 +365,20 @@ impl ReactResolvedConfig {
             .project_id
             .or_else(|| file.scope.as_ref().and_then(|s| s.project_id.clone()))
             .unwrap_or_else(|| "default".to_string());
- 
+
         ensure_safe_segment("tenant", &tenant)?;
         ensure_safe_segment("workspace", &workspace)?;
         ensure_safe_segment("project_id", &project_id)?;
- 
-        // Providers (defaults preserve current behavior: all enabled)
+
+        // Providers
         let pf = file.providers.unwrap_or_default();
-        let ath_f = pf.athena.unwrap_or_default();
+        let wh_f = pf
+            .warehouse
+            .ok_or_else(|| "missing providers.warehouse in YAML config".to_string())?;
         let cat_f = pf.catalog.unwrap_or_default();
         let dbt_f = pf.dbt.unwrap_or_default();
         let vec_f = pf.vector.unwrap_or_default();
- 
-        // Athena env surface (preserve current aliases)
-        let ath_workgroup = getenv_nonempty("ATHENA_WORKGROUP")
-            .or_else(|| getenv_nonempty("DATA_OUTPUT_ATHENA_WORKGROUP_NAME"))
-            .or_else(|| ath_f.workgroup);
-        let ath_region = getenv_nonempty("ATHENA_REGION")
-            .or_else(|| getenv_nonempty("AWS_REGION"))
-            .or_else(|| getenv_nonempty("AWS_DEFAULT_REGION"))
-            .or_else(|| ath_f.region);
-        let ath_source_schema = getenv_nonempty("ATHENA_SOURCE_SCHEMA")
-            .or_else(|| getenv_nonempty("ATHENA_SOURCE_DATABASE"))
-            .or_else(|| ath_f.source_schema)
-            .or_else(|| ath_f.source_database);
-        // Back-compat explicit schemas (deprecated when using suffix naming)
-        let ath_silver_schema_legacy = getenv_nonempty("ATHENA_SILVER_DATABASE")
-            .or_else(|| ath_f.silver_database.clone())
-            .or_else(|| getenv_nonempty("ATHENA_MODELED_DATABASE"))
-            .or_else(|| ath_f.modeled_database.clone());
-        let ath_gold_schema_legacy = getenv_nonempty("ATHENA_GOLD_DATABASE").or_else(|| ath_f.gold_database.clone());
-        let ath_target_catalog = getenv_nonempty("ATHENA_TARGET_CATALOG")
-            .or_else(|| getenv_nonempty("ATHENA_CATALOG"))
-            .unwrap_or_else(|| {
-                ath_f
-                    .target_catalog
-                    .or(ath_f.catalog)
-                    .unwrap_or_else(|| "AwsDataCatalog".to_string())
-            });
- 
-        let ath_result_s3 = getenv_nonempty("ATHENA_RESULT_S3").or_else(|| {
-            getenv_nonempty("DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET").map(|b| format!("s3://{}/", b.trim_end_matches('/')))
-        }).or_else(|| ath_f.result_s3);
- 
-        let ath_conc_env = getenv_nonempty("ATHENA_MAX_CONCURRENCY").and_then(|v| v.parse::<usize>().ok());
-        let ath_max_concurrency = clamp_athena_concurrency(
-            ath_conc_env
-                .or(ath_f.max_concurrency)
-                .unwrap_or(DEFAULT_ATHENA_MAX_CONCURRENCY),
-        );
 
-        let ttl_env = getenv_nonempty("ATHENA_DISCOVERY_CACHE_TTL_SECS").and_then(|v| v.parse::<u64>().ok());
-        let ath_ttl = ttl_env
-            .or(ath_f.discovery_cache_ttl_secs)
-            .unwrap_or(120)
-            .max(5)
-            .min(3600);
- 
         // LLM env surface
         let llmf = file.llm.unwrap_or_default();
         let llm = LlmResolved {
@@ -429,44 +405,90 @@ impl ReactResolvedConfig {
                 .and_then(|v| v.parse::<f32>().ok())
                 .or(llmf.top_p),
         };
- 
+
         // DBT naming (suffix strategy). If configured, dbt will materialize schemas like:
         //   <target_schema>_<silver_suffix> and <target_schema>_<gold_suffix>
         let dbt_naming_f = dbt_f.naming.clone().unwrap_or_default();
-        let naming_target_schema = getenv_nonempty("DBT_TARGET_SCHEMA").or(dbt_naming_f.target_schema);
-        let naming_silver_suffix = getenv_nonempty("DBT_SILVER_SUFFIX").or(dbt_naming_f.silver_suffix).or(Some("silver".to_string()));
-        let naming_gold_suffix = getenv_nonempty("DBT_GOLD_SUFFIX").or(dbt_naming_f.gold_suffix).or(Some("warehouse".to_string()));
+        let naming_target_schema =
+            getenv_nonempty("DBT_TARGET_SCHEMA").or(dbt_naming_f.target_schema);
+        let naming_silver_suffix = getenv_nonempty("DBT_SILVER_SUFFIX")
+            .or(dbt_naming_f.silver_suffix)
+            .or(Some("silver".to_string()));
+        let naming_gold_suffix = getenv_nonempty("DBT_GOLD_SUFFIX")
+            .or(dbt_naming_f.gold_suffix)
+            .or(Some("warehouse".to_string()));
 
-        // If suffix naming is enabled (target_schema is set), compute derived full schemas for Athena.
-        let (ath_silver_schema, ath_gold_schema) = if let (Some(base), Some(silver_suf), Some(gold_suf)) =
-            (naming_target_schema.clone(), naming_silver_suffix.clone(), naming_gold_suffix.clone())
-        {
-            (
-                Some(format!("{}_{}", base, silver_suf)),
-                Some(format!("{}_{}", base, gold_suf)),
-            )
-        } else {
-            (ath_silver_schema_legacy.clone(), ath_gold_schema_legacy.clone().or_else(|| ath_silver_schema_legacy.clone()))
-        };
+        fn resolve_warehouse(w: WarehouseFile) -> WarehouseResolved {
+            match w {
+                WarehouseFile::Athena {
+                    workgroup,
+                    region,
+                    result_s3,
+                    max_concurrency,
+                    catalog,
+                    schema,
+                    discovery_cache_ttl_secs,
+                } => WarehouseResolved {
+                    kind: "athena".to_string(),
+                    container: Some(catalog.unwrap_or_else(|| "AwsDataCatalog".to_string())),
+                    namespace: schema,
+                    extras: serde_json::json!({
+                        "workgroup": workgroup,
+                        "region": region,
+                        "result_s3": result_s3,
+                        "max_concurrency": max_concurrency,
+                        "discovery_cache_ttl_secs": discovery_cache_ttl_secs,
+                    }),
+                },
+                WarehouseFile::Postgres { database, schema } => WarehouseResolved {
+                    kind: "postgres".to_string(),
+                    container: database,
+                    namespace: schema,
+                    extras: serde_json::json!({}),
+                },
+                WarehouseFile::Mssql { database, schema } => WarehouseResolved {
+                    kind: "mssql".to_string(),
+                    container: database,
+                    namespace: schema,
+                    extras: serde_json::json!({}),
+                },
+                WarehouseFile::Snowflake {
+                    database,
+                    schema,
+                    warehouse,
+                    role,
+                } => WarehouseResolved {
+                    kind: "snowflake".to_string(),
+                    container: database,
+                    namespace: schema,
+                    extras: serde_json::json!({ "warehouse": warehouse, "role": role }),
+                },
+                WarehouseFile::Bigquery {
+                    project,
+                    dataset,
+                    location,
+                } => WarehouseResolved {
+                    kind: "bigquery".to_string(),
+                    container: project,
+                    namespace: dataset,
+                    extras: serde_json::json!({ "location": location }),
+                },
+            }
+        }
 
         let cfg = Self {
             server: ServerResolved { port: server_port },
-            storage: StorageResolved { bucket: bucket.clone() },
-            scope: RequestScope { tenant, workspace, project_id },
+            storage: StorageResolved {
+                bucket: bucket.clone(),
+            },
+            scope: RequestScope {
+                tenant,
+                workspace,
+                project_id,
+            },
             llm,
             providers: ProvidersResolved {
-                athena: AthenaResolved {
-                    enabled: ath_f.enabled.unwrap_or(true),
-                    workgroup: ath_workgroup,
-                    region: ath_region,
-                    result_s3: ath_result_s3,
-                    max_concurrency: ath_max_concurrency,
-                    source_schema: ath_source_schema,
-                    target_catalog: ath_target_catalog,
-                    silver_schema: ath_silver_schema,
-                    gold_schema: ath_gold_schema,
-                    discovery_cache_ttl_secs: ath_ttl,
-                },
+                warehouse: resolve_warehouse(wh_f),
                 catalog: CatalogResolved {
                     enabled: cat_f.enabled.unwrap_or(true),
                     refresh_secs: cat_f.refresh_secs.unwrap_or(60),
@@ -481,9 +503,12 @@ impl ReactResolvedConfig {
                         silver_suffix: naming_silver_suffix,
                         gold_suffix: naming_gold_suffix,
                     },
-                    runner: getenv_nonempty("DBT_RUNNER").or(dbt_f.runner).unwrap_or_else(|| "host".to_string()),
+                    runner: getenv_nonempty("DBT_RUNNER")
+                        .or(dbt_f.runner)
+                        .unwrap_or_else(|| "host".to_string()),
                     docker_image: getenv_nonempty("DBT_DOCKER_IMAGE").or(dbt_f.docker_image),
-                    docker_platform: getenv_nonempty("DBT_DOCKER_PLATFORM").or(dbt_f.docker_platform),
+                    docker_platform: getenv_nonempty("DBT_DOCKER_PLATFORM")
+                        .or(dbt_f.docker_platform),
                     docker_network: getenv_nonempty("DBT_DOCKER_NETWORK").or(dbt_f.docker_network),
                     docker_mount_aws_dir: getenv_nonempty("DBT_DOCKER_MOUNT_AWS_DIR")
                         .map(|v| {
@@ -498,50 +523,75 @@ impl ReactResolvedConfig {
                 },
             },
         };
- 
+
         // Fill env defaults for subsystems that still read env internally.
         // IMPORTANT: we never overwrite an explicitly set env var.
-        if let Some(v) = cfg.llm.provider.as_ref() { set_env_if_unset("LLM_PROVIDER", v); }
-        if let Some(v) = cfg.llm.base_url.as_ref() { set_env_if_unset("LLM_BASE_URL", v); }
-        if let Some(v) = cfg.llm.chat_model.as_ref() { set_env_if_unset("LLM_CHAT_MODEL", v); }
-        if let Some(v) = cfg.llm.embed_model.as_ref() { set_env_if_unset("LLM_EMBED_MODEL", v); }
-        if let Some(v) = cfg.llm.context_length.as_ref() { set_env_if_unset("LLM_CONTEXT_LENGTH", &v.to_string()); }
-        if let Some(v) = cfg.llm.gpu_layers.as_ref() { set_env_if_unset("LLM_GPU_LAYERS", &v.to_string()); }
-        if let Some(v) = cfg.llm.http_timeout_secs.as_ref() { set_env_if_unset("LLM_HTTP_TIMEOUT_SECS", &v.to_string()); }
-        if let Some(v) = cfg.llm.max_tokens.as_ref() { set_env_if_unset("LLM_MAX_TOKENS", &v.to_string()); }
-        if let Some(v) = cfg.llm.temperature.as_ref() { set_env_if_unset("LLM_TEMPERATURE", &v.to_string()); }
-        if let Some(v) = cfg.llm.top_p.as_ref() { set_env_if_unset("LLM_TOP_P", &v.to_string()); }
- 
-        if let Some(v) = cfg.providers.dbt.profiles_dir.as_ref() { set_env_if_unset("DBT_PROFILES_DIR", v); }
-        if let Some(v) = cfg.providers.dbt.target.as_ref() { set_env_if_unset("DBT_TARGET", v); }
-        if let Some(v) = cfg.providers.athena.region.as_ref() {
-            set_env_if_unset("AWS_REGION", v);
-            set_env_if_unset("AWS_DEFAULT_REGION", v);
+        if let Some(v) = cfg.llm.provider.as_ref() {
+            set_env_if_unset("LLM_PROVIDER", v);
         }
-        // Athena env defaults (new names + back-compat aliases)
-        set_env_if_unset("ATHENA_TARGET_CATALOG", &cfg.providers.athena.target_catalog);
-        set_env_if_unset("ATHENA_CATALOG", &cfg.providers.athena.target_catalog);
-        if let Some(v) = cfg.providers.athena.source_schema.as_ref() {
-            set_env_if_unset("ATHENA_SOURCE_SCHEMA", v);
-            set_env_if_unset("ATHENA_SOURCE_DATABASE", v); // back-compat
+        if let Some(v) = cfg.llm.base_url.as_ref() {
+            set_env_if_unset("LLM_BASE_URL", v);
         }
-        if let Some(v) = cfg.providers.athena.silver_schema.as_ref() {
-            set_env_if_unset("ATHENA_SILVER_DATABASE", v);
-            set_env_if_unset("ATHENA_MODELED_DATABASE", v); // back-compat
+        if let Some(v) = cfg.llm.chat_model.as_ref() {
+            set_env_if_unset("LLM_CHAT_MODEL", v);
         }
-        if let Some(v) = cfg.providers.athena.gold_schema.as_ref() {
-            set_env_if_unset("ATHENA_GOLD_DATABASE", v);
+        if let Some(v) = cfg.llm.embed_model.as_ref() {
+            set_env_if_unset("LLM_EMBED_MODEL", v);
+        }
+        if let Some(v) = cfg.llm.context_length.as_ref() {
+            set_env_if_unset("LLM_CONTEXT_LENGTH", &v.to_string());
+        }
+        if let Some(v) = cfg.llm.gpu_layers.as_ref() {
+            set_env_if_unset("LLM_GPU_LAYERS", &v.to_string());
+        }
+        if let Some(v) = cfg.llm.http_timeout_secs.as_ref() {
+            set_env_if_unset("LLM_HTTP_TIMEOUT_SECS", &v.to_string());
+        }
+        if let Some(v) = cfg.llm.max_tokens.as_ref() {
+            set_env_if_unset("LLM_MAX_TOKENS", &v.to_string());
+        }
+        if let Some(v) = cfg.llm.temperature.as_ref() {
+            set_env_if_unset("LLM_TEMPERATURE", &v.to_string());
+        }
+        if let Some(v) = cfg.llm.top_p.as_ref() {
+            set_env_if_unset("LLM_TOP_P", &v.to_string());
+        }
+
+        if let Some(v) = cfg.providers.dbt.profiles_dir.as_ref() {
+            set_env_if_unset("DBT_PROFILES_DIR", v);
+        }
+        if let Some(v) = cfg.providers.dbt.target.as_ref() {
+            set_env_if_unset("DBT_TARGET", v);
         }
         // DBT naming env defaults (portable)
-        if let Some(v) = cfg.providers.dbt.naming.target_schema.as_ref() { set_env_if_unset("DBT_TARGET_SCHEMA", v); }
-        if let Some(v) = cfg.providers.dbt.naming.silver_suffix.as_ref() { set_env_if_unset("DBT_SILVER_SUFFIX", v); }
-        if let Some(v) = cfg.providers.dbt.naming.gold_suffix.as_ref() { set_env_if_unset("DBT_GOLD_SUFFIX", v); }
+        if let Some(v) = cfg.providers.dbt.naming.target_schema.as_ref() {
+            set_env_if_unset("DBT_TARGET_SCHEMA", v);
+        }
+        if let Some(v) = cfg.providers.dbt.naming.silver_suffix.as_ref() {
+            set_env_if_unset("DBT_SILVER_SUFFIX", v);
+        }
+        if let Some(v) = cfg.providers.dbt.naming.gold_suffix.as_ref() {
+            set_env_if_unset("DBT_GOLD_SUFFIX", v);
+        }
         set_env_if_unset("DBT_RUNNER", &cfg.providers.dbt.runner);
-        if let Some(v) = cfg.providers.dbt.docker_image.as_ref() { set_env_if_unset("DBT_DOCKER_IMAGE", v); }
-        if let Some(v) = cfg.providers.dbt.docker_platform.as_ref() { set_env_if_unset("DBT_DOCKER_PLATFORM", v); }
-        if let Some(v) = cfg.providers.dbt.docker_network.as_ref() { set_env_if_unset("DBT_DOCKER_NETWORK", v); }
-        set_env_if_unset("DBT_DOCKER_MOUNT_AWS_DIR", if cfg.providers.dbt.docker_mount_aws_dir { "true" } else { "false" });
- 
+        if let Some(v) = cfg.providers.dbt.docker_image.as_ref() {
+            set_env_if_unset("DBT_DOCKER_IMAGE", v);
+        }
+        if let Some(v) = cfg.providers.dbt.docker_platform.as_ref() {
+            set_env_if_unset("DBT_DOCKER_PLATFORM", v);
+        }
+        if let Some(v) = cfg.providers.dbt.docker_network.as_ref() {
+            set_env_if_unset("DBT_DOCKER_NETWORK", v);
+        }
+        set_env_if_unset(
+            "DBT_DOCKER_MOUNT_AWS_DIR",
+            if cfg.providers.dbt.docker_mount_aws_dir {
+                "true"
+            } else {
+                "false"
+            },
+        );
+
         Ok(cfg)
     }
 }
@@ -569,10 +619,22 @@ mod tests {
         std::env::set_var("SKIPPR_S3_BUCKET", "env-bucket");
 
         let file = ReactConfigFile {
-            storage: Some(StorageFile { bucket: Some("yaml-bucket".into()) }),
+            storage: Some(StorageFile {
+                bucket: Some("yaml-bucket".into()),
+            }),
+            providers: Some(ProvidersFile {
+                warehouse: Some(WarehouseFile::Postgres {
+                    database: None,
+                    schema: None,
+                }),
+                ..Default::default()
+            }),
             ..Default::default()
         };
-        let ov = ServeOverrides { bucket: Some("cli-bucket".into()), ..Default::default() };
+        let ov = ServeOverrides {
+            bucket: Some("cli-bucket".into()),
+            ..Default::default()
+        };
 
         let cfg = ReactResolvedConfig::resolve(file, ov).expect("resolve");
         assert_eq!(cfg.storage.bucket, "cli-bucket");
@@ -584,9 +646,20 @@ mod tests {
     fn resolve_bucket_errors_if_missing_everywhere() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_env(&["SKIPPR_S3_BUCKET"]);
-        let file = ReactConfigFile::default();
+        let file = ReactConfigFile {
+            providers: Some(ProvidersFile {
+                warehouse: Some(WarehouseFile::Postgres {
+                    database: None,
+                    schema: None,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         let ov = ServeOverrides::default();
-        let err = ReactResolvedConfig::resolve(file, ov).err().unwrap_or_default();
+        let err = ReactResolvedConfig::resolve(file, ov)
+            .err()
+            .unwrap_or_default();
         assert!(err.contains("missing storage bucket"));
     }
 
@@ -595,12 +668,26 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_env(&["SKIPPR_S3_BUCKET"]);
         let file = ReactConfigFile {
-            storage: Some(StorageFile { bucket: Some("b".into()) }),
-            scope: Some(ScopeFile { tenant: Some("a/b".into()), workspace: Some("w".into()), project_id: Some("p".into()) }),
+            storage: Some(StorageFile {
+                bucket: Some("b".into()),
+            }),
+            scope: Some(ScopeFile {
+                tenant: Some("a/b".into()),
+                workspace: Some("w".into()),
+                project_id: Some("p".into()),
+            }),
+            providers: Some(ProvidersFile {
+                warehouse: Some(WarehouseFile::Postgres {
+                    database: None,
+                    schema: None,
+                }),
+                ..Default::default()
+            }),
             ..Default::default()
         };
-        let err = ReactResolvedConfig::resolve(file, ServeOverrides::default()).err().unwrap_or_default();
+        let err = ReactResolvedConfig::resolve(file, ServeOverrides::default())
+            .err()
+            .unwrap_or_default();
         assert!(err.contains("must not contain path separators"));
     }
 }
- 

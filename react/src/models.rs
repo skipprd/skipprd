@@ -2,4 +2,3 @@
 // The generated code expects `crate::models::*` to exist at the crate root.
 
 pub use crate::ws::api_gen::src::models::*;
-

@@ -39,7 +39,14 @@ impl Tool for SearchDbtExamplesTool {
         )
         .await;
         let embed_chars = query.len();
-        let results = crate::dbt::examples::search_examples(ctx.scope.clone(), ctx.llm.clone(), ctx.vector.clone(), &query, k).await?;
+        let results = crate::dbt::examples::search_examples(
+            ctx.scope.clone(),
+            ctx.llm.clone(),
+            ctx.vector.clone(),
+            &query,
+            k,
+        )
+        .await?;
         // Map to compact response
         let mut examples: Vec<Value> = Vec::new();
         for sc in results.into_iter() {
@@ -82,7 +89,8 @@ impl Tool for SearchDbtExamplesTool {
             }));
         }
         let est_tokens = ((embed_chars as f32) / 4.0).round() as i64;
-        Ok(serde_json::json!({"ok": true, "examples": examples, "llm_expense": {"embed_chars": embed_chars, "est_tokens": est_tokens}}))
+        Ok(
+            serde_json::json!({"ok": true, "examples": examples, "llm_expense": {"embed_chars": embed_chars, "est_tokens": est_tokens}}),
+        )
     }
 }
-

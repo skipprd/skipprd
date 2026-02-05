@@ -1,8 +1,8 @@
-use serde_json::Value;
-use tracing::{info, warn};
 use crate::adapters::storage::StorageAdapter;
 use crate::providers::VectorStore;
+use serde_json::Value;
 use std::sync::Arc;
+use tracing::{info, warn};
 
 pub async fn sync_pipeline(
     storage: Arc<dyn crate::adapters::storage::StorageAdapter>,
@@ -16,11 +16,12 @@ pub async fn sync_pipeline(
     // (Catalogs are the discovery/cache layer; no sqlrt registry usage.)
     let catalog_prefix = format!(
         "{}/{}/{}/catalog/",
-        scope.tenant,
-        scope.workspace,
-        scope.project_id
+        scope.tenant, scope.workspace, scope.project_id
     );
-    let keys = storage.list_prefix(&catalog_prefix).await.unwrap_or_default();
+    let keys = storage
+        .list_prefix(&catalog_prefix)
+        .await
+        .unwrap_or_default();
     let mut dataset_ids: Vec<String> = Vec::new();
     // Key format: <prefix>/<encoded_dataset_id>.yaml
     for k in keys.iter() {
@@ -36,7 +37,11 @@ pub async fn sync_pipeline(
     }
     dataset_ids.sort();
     dataset_ids.dedup();
-    info!("Embeddings: starting sync for project_id='{}' (catalogs={})", scope.project_id, dataset_ids.len());
+    info!(
+        "Embeddings: starting sync for project_id='{}' (catalogs={})",
+        scope.project_id,
+        dataset_ids.len()
+    );
     if dataset_ids.is_empty() {
         warn!("No catalogs found under prefix '{}'", catalog_prefix);
     }
@@ -79,7 +84,12 @@ pub async fn sync_pipeline(
                     let synonyms = f
                         .get("synonyms")
                         .and_then(|x| x.as_array())
-                        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
                         .unwrap_or_default();
                     let fdesc = f.get("description").and_then(|x| x.as_str()).unwrap_or("");
                     let mut stats_snip = String::new();
@@ -137,10 +147,14 @@ pub async fn sync_pipeline(
                     if let Some(fname) = f.get("name").and_then(|x| x.as_str()) {
                         let st = f.get("stats");
                         let mut parts: Vec<String> = Vec::new();
-                        if let Some(d) = st.and_then(|x| x.get("approx_distinct")).and_then(|x| x.as_u64()) {
+                        if let Some(d) = st
+                            .and_then(|x| x.get("approx_distinct"))
+                            .and_then(|x| x.as_u64())
+                        {
                             parts.push(format!("distinct≈{}", d));
                         }
-                        if let Some(mx) = st.and_then(|x| x.get("max_len")).and_then(|x| x.as_u64()) {
+                        if let Some(mx) = st.and_then(|x| x.get("max_len")).and_then(|x| x.as_u64())
+                        {
                             parts.push(format!("max_len={}", mx));
                         }
                         if !parts.is_empty() {
@@ -163,7 +177,11 @@ pub async fn sync_pipeline(
             let preview = if dataset_text.len() <= 200 {
                 dataset_text.clone()
             } else {
-                match dataset_text.char_indices().take_while(|(i, _)| *i <= 200).last() {
+                match dataset_text
+                    .char_indices()
+                    .take_while(|(i, _)| *i <= 200)
+                    .last()
+                {
                     Some((i, _)) => dataset_text[..i].to_string(),
                     None => String::new(),
                 }
@@ -187,23 +205,55 @@ pub async fn sync_pipeline(
             let base = keyspace.dbt_prefix(scope).trim_end_matches('/').to_string();
             // Directory scanners with inferred types
             #[derive(Clone, Copy)]
-            struct Scan<'a> { dir: &'a str, type_hint: &'a str }
+            struct Scan<'a> {
+                dir: &'a str,
+                type_hint: &'a str,
+            }
             let scans_ns = [
-                Scan { dir: "models", type_hint: "dbt_model" },
-                Scan { dir: "metrics", type_hint: "dbt_metricflow" },
-                Scan { dir: "macros", type_hint: "dbt_macro" },
-                Scan { dir: "snapshots", type_hint: "dbt_snapshot" },
-                Scan { dir: "seeds", type_hint: "dbt_seed" },
-                Scan { dir: "analyses", type_hint: "dbt_analysis" },
-                Scan { dir: "tests", type_hint: "dbt_test" },
-                Scan { dir: "exposures", type_hint: "dbt_exposure" },
-                Scan { dir: "docs", type_hint: "dbt_doc" },
+                Scan {
+                    dir: "models",
+                    type_hint: "dbt_model",
+                },
+                Scan {
+                    dir: "metrics",
+                    type_hint: "dbt_metricflow",
+                },
+                Scan {
+                    dir: "macros",
+                    type_hint: "dbt_macro",
+                },
+                Scan {
+                    dir: "snapshots",
+                    type_hint: "dbt_snapshot",
+                },
+                Scan {
+                    dir: "seeds",
+                    type_hint: "dbt_seed",
+                },
+                Scan {
+                    dir: "analyses",
+                    type_hint: "dbt_analysis",
+                },
+                Scan {
+                    dir: "tests",
+                    type_hint: "dbt_test",
+                },
+                Scan {
+                    dir: "exposures",
+                    type_hint: "dbt_exposure",
+                },
+                Scan {
+                    dir: "docs",
+                    type_hint: "dbt_doc",
+                },
             ];
             for sc in scans_ns.iter() {
                 let prefix = format!("{}/{}/{}/", base, sc.dir, ns);
                 let keys = storage.list_prefix(&prefix).await.unwrap_or_default();
                 for k in keys {
-                    if k.contains("/_versions/") { continue; }
+                    if k.contains("/_versions/") {
+                        continue;
+                    }
                     // fetch content (best-effort; skip very large objects by size hint)
                     // NOTE: StorageAdapter doesn't expose size; accept best-effort for now.
                     if let Ok(bytes) = storage.get_bytes(&k).await {
@@ -223,7 +273,10 @@ pub async fn sync_pipeline(
                 }
             }
             // Top-level project files (no dataset_id folder)
-            let top_files = [("dbt_project.yml", "dbt_project"), ("packages.yml", "dbt_packages")];
+            let top_files = [
+                ("dbt_project.yml", "dbt_project"),
+                ("packages.yml", "dbt_packages"),
+            ];
             for (fname, tname) in top_files.iter() {
                 let key = format!("{}/{}", base, fname);
                 if let Ok(bytes) = storage.get_bytes(&key).await {
@@ -271,7 +324,10 @@ fn extract_artifact_name(key: &str) -> String {
     // expect .../{dataset_id}/{name}.ext
     if let Some(pos) = key.rfind('/') {
         let name_ext = &key[pos + 1..];
-        name_ext.trim_end_matches(".sql").trim_end_matches(".yaml").to_string()
+        name_ext
+            .trim_end_matches(".sql")
+            .trim_end_matches(".yaml")
+            .to_string()
     } else {
         key.to_string()
     }
@@ -280,26 +336,45 @@ fn extract_artifact_name(key: &str) -> String {
 fn infer_type_from_key(key: &str, default_hint: &str) -> String {
     // Derive type from directory and extension; fallback to provided hint
     let lower = key.to_lowercase();
-    let t = if lower.contains("/models/") && lower.ends_with(".sql") { "dbt_model" }
-        else if lower.contains("/models/") && (lower.ends_with(".yml") || lower.ends_with(".yaml")) { "dbt_schema" }
-        else if lower.contains("/metrics/") { "dbt_metricflow" }
-        else if lower.contains("/macros/") { "dbt_macro" }
-        else if lower.contains("/snapshots/") { "dbt_snapshot" }
-        else if lower.contains("/seeds/") && (lower.ends_with(".csv") || lower.ends_with(".parquet")) { "dbt_seed" }
-        else if lower.contains("/analyses/") { "dbt_analysis" }
-        else if lower.contains("/tests/") { "dbt_test" }
-        else if lower.contains("/exposures/") { "dbt_exposure" }
-        else if lower.contains("/docs/") { "dbt_doc" }
-        else if lower.ends_with("/dbt_project.yml") { "dbt_project" }
-        else if lower.ends_with("/packages.yml") { "dbt_packages" }
-        else {
-            // generic based on extension
-            if lower.ends_with(".sql") { "file_sql" }
-            else if lower.ends_with(".yaml") || lower.ends_with(".yml") { "file_yaml" }
-            else if lower.ends_with(".md") { "file_md" }
-            else if lower.ends_with(".py") { "file_py" }
-            else { default_hint }
-        };
+    let t = if lower.contains("/models/") && lower.ends_with(".sql") {
+        "dbt_model"
+    } else if lower.contains("/models/") && (lower.ends_with(".yml") || lower.ends_with(".yaml")) {
+        "dbt_schema"
+    } else if lower.contains("/metrics/") {
+        "dbt_metricflow"
+    } else if lower.contains("/macros/") {
+        "dbt_macro"
+    } else if lower.contains("/snapshots/") {
+        "dbt_snapshot"
+    } else if lower.contains("/seeds/") && (lower.ends_with(".csv") || lower.ends_with(".parquet"))
+    {
+        "dbt_seed"
+    } else if lower.contains("/analyses/") {
+        "dbt_analysis"
+    } else if lower.contains("/tests/") {
+        "dbt_test"
+    } else if lower.contains("/exposures/") {
+        "dbt_exposure"
+    } else if lower.contains("/docs/") {
+        "dbt_doc"
+    } else if lower.ends_with("/dbt_project.yml") {
+        "dbt_project"
+    } else if lower.ends_with("/packages.yml") {
+        "dbt_packages"
+    } else {
+        // generic based on extension
+        if lower.ends_with(".sql") {
+            "file_sql"
+        } else if lower.ends_with(".yaml") || lower.ends_with(".yml") {
+            "file_yaml"
+        } else if lower.ends_with(".md") {
+            "file_md"
+        } else if lower.ends_with(".py") {
+            "file_py"
+        } else {
+            default_hint
+        }
+    };
     t.to_string()
 }
 
@@ -333,5 +408,3 @@ fn percent_decode(s: &str) -> String {
 }
 
 // NOTE: Removed sync_all_pipelines legacy entrypoint; call `sync_pipeline(...)` with explicit providers.
-
-

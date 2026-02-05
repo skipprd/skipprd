@@ -9,7 +9,7 @@ pub trait LargeLanguageModel: Send + Sync {
 
 #[derive(Clone, Debug)]
 pub struct ChatMessage {
-    pub role: String,  // "system" | "user" | "assistant"
+    pub role: String, // "system" | "user" | "assistant"
     pub content: String,
 }
 
@@ -59,7 +59,10 @@ pub fn config_from_env() -> LlmConfig {
         _ => LlmProviderType::Local,
     };
     let ctx_len_opt = crate::helpers::configuration::Config::llm_context_length_opt();
-    let ctx_len = match ctx_len_opt { Some(v) => Some(v), None => Some(crate::helpers::configuration::Config::llm_context_length()) };
+    let ctx_len = match ctx_len_opt {
+        Some(v) => Some(v),
+        None => Some(crate::helpers::configuration::Config::llm_context_length()),
+    };
     LlmConfig {
         provider,
         chat_model: crate::helpers::configuration::Config::llm_chat_model(),
@@ -75,7 +78,9 @@ pub fn config_from_env() -> LlmConfig {
 pub struct NullModel {}
 
 impl NullModel {
-    pub fn new() -> Self { Self {} }
+    pub fn new() -> Self {
+        Self {}
+    }
 }
 
 impl LargeLanguageModel for NullModel {
@@ -87,16 +92,16 @@ impl LargeLanguageModel for NullModel {
     }
 }
 
-pub mod llama_cpp;
-pub mod openai_compat;
-pub mod session;
-pub mod types;
 pub mod adapter;
+pub mod llama_cpp;
+pub mod llama_cpp_adapter;
+pub mod openai_chat_adapter;
+pub mod openai_compat;
+pub mod openai_responses_adapter;
 pub mod registry;
 pub mod router;
-pub mod openai_chat_adapter;
-pub mod openai_responses_adapter;
-pub mod llama_cpp_adapter;
+pub mod session;
+pub mod types;
 
 #[cfg(test)]
 mod tests {
@@ -105,7 +110,10 @@ mod tests {
     #[test]
     fn config_defaults() {
         let cfg = super::config_from_env();
-        assert!(matches!(cfg.provider, LlmProviderType::Local) || matches!(cfg.provider, LlmProviderType::OpenAICompat));
+        assert!(
+            matches!(cfg.provider, LlmProviderType::Local)
+                || matches!(cfg.provider, LlmProviderType::OpenAICompat)
+        );
         // context_length may be None (auto-tune) or a positive value from env
         assert!(cfg.context_length.is_none() || cfg.context_length.unwrap() > 0);
     }
@@ -118,5 +126,3 @@ mod tests {
         std::env::remove_var("LLM_PROVIDER");
     }
 }
-
-

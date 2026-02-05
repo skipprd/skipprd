@@ -120,7 +120,10 @@ fn is_safe_ident(s: &str) -> bool {
 
 fn is_complex_type(ty: &str) -> bool {
     let t = ty.trim().to_lowercase();
-    t.starts_with("struct<") || t.starts_with("row(") || t.starts_with("array<") || t.starts_with("map<")
+    t.starts_with("struct<")
+        || t.starts_with("row(")
+        || t.starts_with("array<")
+        || t.starts_with("map<")
 }
 
 fn strip_wrapped<'a>(s: &'a str, prefix: &str, closing: char) -> Option<&'a str> {
@@ -233,7 +236,10 @@ mod tests {
 
     #[test]
     fn flattens_struct_nested() {
-        let v = flatten_athena_type("context", "struct<device:struct<type:string>,session:struct<id:string>>");
+        let v = flatten_athena_type(
+            "context",
+            "struct<device:struct<type:string>,session:struct<id:string>>",
+        );
         let paths = v.into_iter().map(|f| f.path).collect::<Vec<_>>();
         assert!(paths.contains(&"context.device.type".to_string()));
         assert!(paths.contains(&"context.session.id".to_string()));
@@ -241,10 +247,12 @@ mod tests {
 
     #[test]
     fn flattens_row_nested() {
-        let v = flatten_athena_type("context", "row(app row(version varchar), session row(id varchar))");
+        let v = flatten_athena_type(
+            "context",
+            "row(app row(version varchar), session row(id varchar))",
+        );
         let paths = v.into_iter().map(|f| f.path).collect::<Vec<_>>();
         assert!(paths.contains(&"context.app.version".to_string()));
         assert!(paths.contains(&"context.session.id".to_string()));
     }
 }
-

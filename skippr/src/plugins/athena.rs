@@ -3,45 +3,52 @@ use crate::converters::skippr_hive::SkipprHive;
 use crate::discover::{OutputMetadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PluginConfig};
 use crate::helpers::Helpers;
-use crate::{METADATA};
 use crate::metrics::counters as metrics_counters;
-use aws_sdk_athena::types::{EncryptionConfiguration, EncryptionOption, ResultConfiguration, ResultConfigurationUpdates, Tag, WorkGroupConfiguration, WorkGroupConfigurationUpdates};
+use crate::METADATA;
+use aws_sdk_athena::types::{
+    EncryptionConfiguration, EncryptionOption, ResultConfiguration, ResultConfigurationUpdates,
+    Tag, WorkGroupConfiguration, WorkGroupConfigurationUpdates,
+};
 use aws_sdk_athena::Client as AthenaClient;
-use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, TableInput};
+use aws_sdk_glue::types::{
+    Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, TableInput,
+};
 use aws_sdk_glue::Client as GlueClient;
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::{Client as S3Client, Error};
-use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+use aws_sdk_s3::{Client as S3Client, Error};
 
-use std::collections::HashMap;
-use std::io;
 use async_trait::async_trait;
 use aws_sdk_glue::error::SdkError;
 use aws_sdk_glue::operation::get_table::{GetTableError, GetTableOutput};
 use bytes::Bytes;
 use datafusion::physical_plan::SendableRecordBatchStream;
-use futures::{StreamExt};
+use futures::StreamExt;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use std::collections::HashMap;
+use std::io;
 use tokio::task::block_in_place;
 
-use serde_derive::Deserialize;
 use crate::ingest::partition_time::TimePartitioner;
 use crate::plugins::DataOutputPlugin;
-use tokio::sync::{Semaphore, Mutex, Notify};
-use std::sync::Arc;
-use once_cell::sync::Lazy;
-use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use rand::Rng;
+use serde_derive::Deserialize;
 use std::sync::atomic::{AtomicUsize, Ordering as AO};
+use std::sync::Arc;
+use tokio::sync::{Mutex, Notify, Semaphore};
+use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use tracing::{debug, error, info, warn};
 
 // Global control-plane throttling and serialization
 static GLUE_MAX_CONCURRENCY: Lazy<usize> = Lazy::new(|| {
-    Config::getenv("GLUE_MAX_CONCURRENCY", "2").parse::<usize>().unwrap_or(2)
+    Config::getenv("GLUE_MAX_CONCURRENCY", "2")
+        .parse::<usize>()
+        .unwrap_or(2)
 });
 static GLUE_CP_SEM: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(*GLUE_MAX_CONCURRENCY));
 static ATHENA_WG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -61,14 +68,12 @@ pub struct DataOutputAwsAthenaPluginConfig {
     pub format: Option<String>,
     // pub batch_size_seconds: Option<i64>,
     // pub batch_size_bytes: Option<i64>,
-
     pub s3_bucket: String,
     pub s3_prefix: String,
     // pub time_bucket: Option<String>,
     pub athena_workgroup_name: String,
     pub glue_database_name: String,
     pub athena_results_s3_bucket: String,
-
 }
 
 pub struct ParquetBytes {
@@ -88,8 +93,12 @@ impl From<PluginConfig> for DataOutputAwsAthenaPluginConfig {
 
 #[async_trait]
 impl DataOutputPlugin for DataOutputAwsAthenaPlugin {
-    async fn sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
-    // async fn sync(&mut self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
+    async fn sync(
+        &self,
+        stream: SendableRecordBatchStream,
+        filename: String,
+    ) -> Result<(), std::io::Error> {
+        // async fn sync(&mut self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
         self.inner_sync(stream, filename).await
     }
 }
@@ -109,9 +118,7 @@ pub struct DataOutputAwsAthenaPlugin {
     upload_sem: Arc<Semaphore>,
 }
 
-
 impl DataOutputAwsAthenaPlugin {
-
     pub fn get_config() -> DataOutputAwsAthenaPluginConfig {
         match Config::get_pipline_plugin_config("output") {
             Ok(config) => config.into(),
@@ -121,13 +128,18 @@ impl DataOutputAwsAthenaPlugin {
                 s3_prefix: Config::getenv("DATA_OUTPUT_S3_PREFIX", ""),
                 athena_workgroup_name: Config::getenv("DATA_OUTPUT_ATHENA_WORKGROUP_NAME", ""),
                 glue_database_name: Config::getenv("SCHEMA_OUTPUT_GLUE_DATABASE_NAME", ""),
-                athena_results_s3_bucket: Config::getenv("DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET", ""),
-            }
+                athena_results_s3_bucket: Config::getenv(
+                    "DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET",
+                    "",
+                ),
+            },
         }
     }
 
     pub async fn new(buffer_name: String) -> DataOutputAwsAthenaPlugin {
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
 
         let s3_client = S3Client::new(&aws_config);
         let athena_client = AthenaClient::new(&aws_config);
@@ -137,11 +149,13 @@ impl DataOutputAwsAthenaPlugin {
         // let time_bucket = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
         // let athena_config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
-        let athena_config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
+        let athena_config: DataOutputAwsAthenaPluginConfig =
+            DataOutputAwsAthenaPlugin::get_config();
 
         let max_async_uploads_env = Config::getenv("DATA_OUTPUT_MAX_ASYNC_UPLOADS", "16");
         let env_uploads = max_async_uploads_env.parse::<usize>().ok();
-        let tuned_uploads = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
+        let tuned_uploads = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET
+            .load(std::sync::atomic::Ordering::Relaxed);
         let max_async_uploads = env_uploads.unwrap_or(tuned_uploads);
 
         Self {
@@ -154,7 +168,11 @@ impl DataOutputAwsAthenaPlugin {
         }
     }
 
-    pub async fn inner_sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
+    pub async fn inner_sync(
+        &self,
+        stream: SendableRecordBatchStream,
+        filename: String,
+    ) -> Result<(), std::io::Error> {
         let mut partition_cache: Vec<String> = vec![];
 
         let _bucket = &self.config.s3_bucket;
@@ -212,10 +230,16 @@ impl DataOutputAwsAthenaPlugin {
                 Ok(time_partition_values) => {
                     let granularity_names = TimePartitioner::get_granularity_names();
                     partition_values.extend(time_partition_values.iter().map(|v| v.to_string()));
-                    granularity_names.iter().enumerate().for_each(|(i, granularity)| {
-                        full_key = format!("{}/{}={}", full_key, granularity, time_partition_values[i]);
-                    });
-                },
+                    granularity_names
+                        .iter()
+                        .enumerate()
+                        .for_each(|(i, granularity)| {
+                            full_key = format!(
+                                "{}/{}={}",
+                                full_key, granularity, time_partition_values[i]
+                            );
+                        });
+                }
                 Err(e) => {
                     warn!("Failed to derive time partitions from filename '{}': {}. Proceeding without time partitions.", filename, e);
                 }
@@ -223,13 +247,21 @@ impl DataOutputAwsAthenaPlugin {
         }
 
         // Spawn Glue partition creation concurrently; await later before upload completion
-        let glue_task: Option<tokio::task::JoinHandle<Result<bool, Error>>> = if !partition_values.is_empty() {
+        let glue_task: Option<tokio::task::JoinHandle<Result<bool, Error>>> = if !partition_values
+            .is_empty()
+        {
             let flatten = Config::get_transform_flatten_events();
             let metadata: PipelineMetadata = METADATA.load().as_ref().clone();
             let ns_md_opt = metadata.metadata.get(&namespace);
             let partition_metadata_opt = if let Some(ns_md) = ns_md_opt {
-                Some(if flatten { OutputMetadata::from_flatterened_metadata(ns_md) } else { OutputMetadata::from_metadata(ns_md) })
-            } else { None };
+                Some(if flatten {
+                    OutputMetadata::from_flatterened_metadata(ns_md)
+                } else {
+                    OutputMetadata::from_metadata(ns_md)
+                })
+            } else {
+                None
+            };
 
             // Require metadata present to proceed; if missing, log and proceed without partition
             let partition_metadata = match partition_metadata_opt {
@@ -247,10 +279,21 @@ impl DataOutputAwsAthenaPlugin {
                 // Use a fresh cache in the task scope (single partition)
                 Some(tokio::spawn(async move {
                     let mut cache_local: Vec<String> = Vec::with_capacity(1);
-                    AwsAthena::glue_create_partition(&ns_clone, pvals, &key_clone, &mut cache_local, &pm).await
+                    AwsAthena::glue_create_partition(
+                        &ns_clone,
+                        pvals,
+                        &key_clone,
+                        &mut cache_local,
+                        &pm,
+                    )
+                    .await
                 }))
-            } else { None }
-        } else { None };
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Use deterministic hashed filename to avoid leaking internal encodings
         let md5_digest = md5::compute(&filename);
@@ -258,7 +301,11 @@ impl DataOutputAwsAthenaPlugin {
         let final_key = format!("{}/{}.parquet", full_key, md5_string);
 
         // Prepare S3 tagging string
-        let tags_str = tags.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
+        let tags_str = tags
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<String>>()
+            .join("&");
 
         // Resize semaphore if target changed dynamically (clamp to 1..256)
         {
@@ -267,13 +314,24 @@ impl DataOutputAwsAthenaPlugin {
                 .clamp(1, 256);
             let current = self.upload_sem.available_permits() + 1; // approx
             if target as usize != current {
-                if target as usize > current { self.upload_sem.add_permits(target as usize - current); }
+                if target as usize > current {
+                    self.upload_sem.add_permits(target as usize - current);
+                }
                 if Config::log_wal_enabled() {
-                    info!("tune: upload_sem target={} available={} (approx)", target, self.upload_sem.available_permits());
+                    info!(
+                        "tune: upload_sem target={} available={} (approx)",
+                        target,
+                        self.upload_sem.available_permits()
+                    );
                 }
             }
         }
-        let _permit = self.upload_sem.clone().acquire_owned().await.map_err(|_| io::Error::new(io::ErrorKind::Other, "Semaphore closed"))?;
+        let _permit = self
+            .upload_sem
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Semaphore closed"))?;
         let upload_start = std::time::Instant::now();
         crate::metrics::counters::inc_uploads_in_flight();
 
@@ -292,29 +350,42 @@ impl DataOutputAwsAthenaPlugin {
         // Initiate multipart upload with timeout
         let create_out = match tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            self
-            .s3_client
-            .create_multipart_upload()
-            .bucket(&bucket)
-            .key(&key_for_upload)
-            .content_type("application/octet-stream")
-            .tagging(tags_str)
-            .send()
-        ).await {
+            self.s3_client
+                .create_multipart_upload()
+                .bucket(&bucket)
+                .key(&key_for_upload)
+                .content_type("application/octet-stream")
+                .tagging(tags_str)
+                .send(),
+        )
+        .await
+        {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => {
                 crate::metrics::counters::dec_uploads_in_flight();
-                return Err(io::Error::new(io::ErrorKind::Other, format!("Failed to initiate multipart upload: {}", e.into_service_error())));
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "Failed to initiate multipart upload: {}",
+                        e.into_service_error()
+                    ),
+                ));
             }
             Err(_) => {
                 crate::metrics::counters::dec_uploads_in_flight();
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "Timeout initiating multipart upload"));
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Timeout initiating multipart upload",
+                ));
             }
         };
         let upload_id = create_out.upload_id().unwrap_or("").to_string();
         if upload_id.is_empty() {
             crate::metrics::counters::dec_uploads_in_flight();
-            return Err(io::Error::new(io::ErrorKind::Other, "Missing upload_id from S3"));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Missing upload_id from S3",
+            ));
         }
 
         // Writer that uploads parts as bytes are produced
@@ -331,7 +402,13 @@ impl DataOutputAwsAthenaPlugin {
         }
 
         impl MultipartWriter {
-            fn new(client: S3Client, bucket: String, key: String, upload_id: String, part_size: usize) -> Self {
+            fn new(
+                client: S3Client,
+                bucket: String,
+                key: String,
+                upload_id: String,
+                part_size: usize,
+            ) -> Self {
                 Self {
                     client,
                     bucket,
@@ -372,19 +449,28 @@ impl DataOutputAwsAthenaPlugin {
                                 .upload_id(upload_id)
                                 .part_number(part_number)
                                 .body(body)
-                                .send()
+                                .send(),
                         )
                         .await
                     };
                     match tokio::runtime::Handle::current().block_on(fut) {
                         Ok(Ok(resp)) => {
                             let etag = resp.e_tag().unwrap_or("").to_string();
-                            let part = CompletedPart::builder().e_tag(etag).part_number(part_number).build();
+                            let part = CompletedPart::builder()
+                                .e_tag(etag)
+                                .part_number(part_number)
+                                .build();
                             self.parts.push(part);
                             Ok(())
                         }
-                        Ok(Err(e)) => Err(io::Error::new(io::ErrorKind::Other, format!("upload_part failed: {}", e.into_service_error()))),
-                        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "upload_part timed out")),
+                        Ok(Err(e)) => Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("upload_part failed: {}", e.into_service_error()),
+                        )),
+                        Err(_) => Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "upload_part timed out",
+                        )),
                     }
                 })
             }
@@ -431,14 +517,23 @@ impl DataOutputAwsAthenaPlugin {
                                         .set_parts(Some(parts))
                                         .build(),
                                 )
-                                .send()
+                                .send(),
                         )
                         .await
                     };
                     match tokio::runtime::Handle::current().block_on(fut) {
                         Ok(Ok(_)) => Ok(()),
-                        Ok(Err(e)) => Err(io::Error::new(io::ErrorKind::Other, format!("complete_multipart_upload failed: {}", e.into_service_error()))),
-                        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "complete_multipart_upload timed out")),
+                        Ok(Err(e)) => Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!(
+                                "complete_multipart_upload failed: {}",
+                                e.into_service_error()
+                            ),
+                        )),
+                        Err(_) => Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "complete_multipart_upload timed out",
+                        )),
                     }
                 })?;
                 Ok(self.total_bytes)
@@ -489,30 +584,48 @@ impl DataOutputAwsAthenaPlugin {
             bucket.clone(),
             key_for_upload.clone(),
             upload_id.clone(),
-            Config::getenv("PARQUET_MULTIPART_PART_BYTES", "67108864").parse::<usize>().unwrap_or(64 * 1024 * 1024),
+            Config::getenv("PARQUET_MULTIPART_PART_BYTES", "67108864")
+                .parse::<usize>()
+                .unwrap_or(64 * 1024 * 1024),
         );
 
         let schema = stream.schema();
-        let mut parquet_writer = ArrowWriter::try_new(&mut writer, schema, Some(props))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to init ArrowWriter: {}", e)))?;
+        let mut parquet_writer =
+            ArrowWriter::try_new(&mut writer, schema, Some(props)).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to init ArrowWriter: {}", e),
+                )
+            })?;
 
         let mut rows_written: u64 = 0;
         let mut batches = stream;
         // Drive streaming write with small in-loop yields to allow multiple uploads interleave fairly
         let mut batch_index: u64 = 0;
         while let Some(batch_res) = batches.next().await {
-            let batch = batch_res.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Stream error: {}", e)))?;
+            let batch = batch_res.map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("Stream error: {}", e))
+            })?;
             rows_written += batch.num_rows() as u64;
-            parquet_writer.write(&batch).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Parquet write error: {}", e)))?;
+            parquet_writer.write(&batch).map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("Parquet write error: {}", e))
+            })?;
             if Config::debug_enabled() {
-                debug!("Uploader: wrote batch idx={} rows={} key={}", batch_index, batch.num_rows(), key_for_upload);
+                debug!(
+                    "Uploader: wrote batch idx={} rows={} key={}",
+                    batch_index,
+                    batch.num_rows(),
+                    key_for_upload
+                );
             }
             batch_index += 1;
             // Cooperative yield for fairness among concurrent tasks
             tokio::task::yield_now().await;
         }
 
-        let _meta = parquet_writer.close().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Parquet close error: {}", e)))?;
+        let _meta = parquet_writer.close().map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("Parquet close error: {}", e))
+        })?;
         // Await Glue partition creation before completing upload; proceed on failure
         if let Some(task) = glue_task {
             match tokio::time::timeout(std::time::Duration::from_secs(300), task).await {
@@ -521,7 +634,10 @@ impl DataOutputAwsAthenaPlugin {
                     warn!("Glue partition creation failed for {}: {}", final_key, e);
                 }
                 Ok(Err(join_err)) => {
-                    warn!("Glue partition task join error for {}: {}", final_key, join_err);
+                    warn!(
+                        "Glue partition task join error for {}: {}",
+                        final_key, join_err
+                    );
                 }
                 Err(_) => {
                     warn!("Glue partition creation timed out for {}", final_key);
@@ -538,47 +654,71 @@ impl DataOutputAwsAthenaPlugin {
                 return Err(e);
             }
         };
-        info!("Uploaded {} to S3 (rows={}, bytes={})", final_key, rows_written, uploaded_bytes);
+        info!(
+            "Uploaded {} to S3 (rows={}, bytes={})",
+            final_key, rows_written, uploaded_bytes
+        );
         if Config::debug_enabled() || Config::log_wal_enabled() {
             debug!(
                 "Uploader: complete key={} upload_id={} parts={} total_bytes={} rows={}",
-                key_for_upload, upload_id, writer.parts.len(), uploaded_bytes, rows_written
+                key_for_upload,
+                upload_id,
+                writer.parts.len(),
+                uploaded_bytes,
+                rows_written
             );
         }
         metrics_counters::add_parquet_bytes(uploaded_bytes);
-                metrics_counters::add_parquet_objects(1);
+        metrics_counters::add_parquet_objects(1);
         metrics_counters::add_parquet_rows(rows_written);
-                crate::metrics::counters::add_upload(1);
-                crate::metrics::counters::add_upload_latency_ns(upload_start.elapsed().as_nanos() as u64);
-                crate::metrics::counters::dec_uploads_in_flight();
-                // Update manifest with the canonical namespace root prefix (absolute s3:// URL)
-                // Canonical: s3://{bucket}/{s3_prefix}/{namespace}/
-                let trimmed_key_root = key.trim_matches('/').to_string();
-                let ns_root = if !namespace.is_empty() {
-                    if trimmed_key_root.is_empty() { namespace.clone() } else { format!("{}/{}", trimmed_key_root, namespace) }
-                } else {
-                    trimmed_key_root.clone()
-                };
-                let mut abs_prefix = format!("s3://{}/{}", bucket, ns_root.trim_start_matches('/'));
-                if !abs_prefix.ends_with('/') { abs_prefix.push('/'); }
-                // best-effort manifest update (async fire-and-forget)
-                {
-                    let ns = namespace.to_string();
-                    let prefix_for_manifest = abs_prefix.clone();
-                    tokio::spawn(async move {
-                        // Write manifest JSON
-                        crate::helpers::configuration::Config::update_manifest_with_prefix(&ns, &prefix_for_manifest).await;
-                        // Update manifest for DataFusion queries (record prefix and database=pipeline)
-                        let db = crate::helpers::configuration::Config::get_pipeline_name();
-                        crate::helpers::configuration::Config::update_manifest_with_prefix_and_db(&ns, &prefix_for_manifest, &db).await;
-                    });
-                }
-                Ok(())
+        crate::metrics::counters::add_upload(1);
+        crate::metrics::counters::add_upload_latency_ns(upload_start.elapsed().as_nanos() as u64);
+        crate::metrics::counters::dec_uploads_in_flight();
+        // Update manifest with the canonical namespace root prefix (absolute s3:// URL)
+        // Canonical: s3://{bucket}/{s3_prefix}/{namespace}/
+        let trimmed_key_root = key.trim_matches('/').to_string();
+        let ns_root = if !namespace.is_empty() {
+            if trimmed_key_root.is_empty() {
+                namespace.clone()
+            } else {
+                format!("{}/{}", trimmed_key_root, namespace)
             }
+        } else {
+            trimmed_key_root.clone()
+        };
+        let mut abs_prefix = format!("s3://{}/{}", bucket, ns_root.trim_start_matches('/'));
+        if !abs_prefix.ends_with('/') {
+            abs_prefix.push('/');
+        }
+        // best-effort manifest update (async fire-and-forget)
+        {
+            let ns = namespace.to_string();
+            let prefix_for_manifest = abs_prefix.clone();
+            tokio::spawn(async move {
+                // Write manifest JSON
+                crate::helpers::configuration::Config::update_manifest_with_prefix(
+                    &ns,
+                    &prefix_for_manifest,
+                )
+                .await;
+                // Update manifest for DataFusion queries (record prefix and database=pipeline)
+                let db = crate::helpers::configuration::Config::get_pipeline_name();
+                crate::helpers::configuration::Config::update_manifest_with_prefix_and_db(
+                    &ns,
+                    &prefix_for_manifest,
+                    &db,
+                )
+                .await;
+            });
+        }
+        Ok(())
+    }
 
     pub async fn await_partition_tasks_zero() {
         loop {
-            if PARTITION_TASKS_IN_FLIGHT.load(AO::Relaxed) == 0 { break; }
+            if PARTITION_TASKS_IN_FLIGHT.load(AO::Relaxed) == 0 {
+                break;
+            }
             PARTITIONS_NOTIFY.notified().await;
         }
     }
@@ -598,11 +738,7 @@ impl DataOutputAwsAthenaPlugin {
             .set_compression(Compression::SNAPPY)
             .build();
 
-        let mut writer = ArrowWriter::try_new(
-            &mut bytes,
-            schema,
-            Some(props),
-        )?;
+        let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(props))?;
 
         // Process batches asynchronously
         while let Some(batch) = batches.next().await {
@@ -613,7 +749,10 @@ impl DataOutputAwsAthenaPlugin {
         // Close writer and get metadata
         let writer_meta = writer.close()?;
         if writer_meta.num_rows == 0 {
-            return Err(io::Error::new(io::ErrorKind::Other, "No rows to write to parquet"));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "No rows to write to parquet",
+            ));
         }
 
         let size_bytes = bytes.len() as u64;
@@ -630,10 +769,13 @@ impl DataOutputAwsAthenaPlugin {
         _bucket: String,
         _key: String,
         stream: SendableRecordBatchStream,
-        tag_hashmap: HashMap<String, String>
+        tag_hashmap: HashMap<String, String>,
     ) -> Result<(), std::io::Error> {
-
-        let _tags = tag_hashmap.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
+        let _tags = tag_hashmap
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<String>>()
+            .join("&");
 
         // Serialize to parquet asynchronously
         let parquet = Self::serialize_to_parquet(stream).await?;
@@ -667,13 +809,22 @@ impl AwsAthena {
                         return Err(s);
                     }
                     // Transient or explicit retry signal
-                    if s.contains("Throttling") || s.contains("TooManyRequests") || s.contains("ConcurrentModification") || s == "RETRY_TRANSIENT" {
+                    if s.contains("Throttling")
+                        || s.contains("TooManyRequests")
+                        || s.contains("ConcurrentModification")
+                        || s == "RETRY_TRANSIENT"
+                    {
                         attempt += 1;
-                        if attempt > 6 { return Err(s); }
+                        if attempt > 6 {
+                            return Err(s);
+                        }
                         let base = 200u64 * (1u64 << attempt.min(6));
                         let jitter: u64 = rand::thread_rng().gen_range(0..100);
                         let delay_ms = base + jitter;
-                        warn!("Glue/Athena {} retry {} in {}ms: {}", op_name, attempt, delay_ms, s);
+                        warn!(
+                            "Glue/Athena {} retry {} in {}ms: {}",
+                            op_name, attempt, delay_ms, s
+                        );
                         tokio_sleep(TokioDuration::from_millis(delay_ms)).await;
                         continue;
                     }
@@ -692,16 +843,14 @@ impl AwsAthena {
                 Ok(_) => {
                     info!("Created Athena Workgroup");
                 }
-                Err(_err) => {
-                    match AwsAthena::update_workgroup().await {
-                        Ok(_) => {
-                            info!("Updated Athena Workgroup");
-                        }
-                        Err(err) => {
-                            error!("creating/updating Athena Workgroup: {}", err);
-                        }
+                Err(_err) => match AwsAthena::update_workgroup().await {
+                    Ok(_) => {
+                        info!("Updated Athena Workgroup");
                     }
-                }
+                    Err(err) => {
+                        error!("creating/updating Athena Workgroup: {}", err);
+                    }
+                },
             },
         }
         drop(_wg_guard);
@@ -718,7 +867,12 @@ impl AwsAthena {
             Ok(false) => {}
             Err(_err) => {
                 // Create database with backoff; AlreadyExists => success
-                if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_create_database(), "create_database").await {
+                if let Err(err) = AwsAthena::backoff_retry(
+                    || AwsAthena::glue_create_database(),
+                    "create_database",
+                )
+                .await
+                {
                     error!("creating Glue database: {}", err);
                 }
             }
@@ -726,13 +880,23 @@ impl AwsAthena {
 
         match AwsAthena::glue_get_table(namespace).await {
             Ok(table) => {
-                if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_update_table(namespace, schema, table.clone()), "update_table").await {
+                if let Err(err) = AwsAthena::backoff_retry(
+                    || AwsAthena::glue_update_table(namespace, schema, table.clone()),
+                    "update_table",
+                )
+                .await
+                {
                     error!("updating Glue table: {}", err);
                 }
             }
             Err(_err) => {
                 // Create table with backoff; AlreadyExists => success
-                if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_create_table(namespace, schema), "create_table").await {
+                if let Err(err) = AwsAthena::backoff_retry(
+                    || AwsAthena::glue_create_table(namespace, schema),
+                    "create_table",
+                )
+                .await
+                {
                     error!("creating glue table: {}", err);
                 }
                 // println!("Create Hive Table Error: {}", err.into_service_error().to_string())
@@ -743,7 +907,9 @@ impl AwsAthena {
     pub async fn get_work_group() -> Result<bool, String> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
         let workgroup = config.athena_workgroup_name;
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
 
         let athena_client = AthenaClient::new(&aws_config);
 
@@ -775,7 +941,9 @@ impl AwsAthena {
 
         let database_name = config.glue_database_name;
 
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -791,12 +959,16 @@ impl AwsAthena {
         }
     }
 
-    pub async fn glue_get_table(namespace: &str) -> Result<GetTableOutput, SdkError<GetTableError>> {
+    pub async fn glue_get_table(
+        namespace: &str,
+    ) -> Result<GetTableOutput, SdkError<GetTableError>> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let database_name = config.glue_database_name;
 
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -823,7 +995,9 @@ impl AwsAthena {
             .unwrap()
             .to_string();
 
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
 
         let glue_client = AthenaClient::new(&aws_config);
 
@@ -875,7 +1049,9 @@ impl AwsAthena {
             .unwrap()
             .to_string();
 
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
 
         let glue_client = AthenaClient::new(&aws_config);
 
@@ -923,7 +1099,9 @@ impl AwsAthena {
             .unwrap()
             .to_string();
 
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -952,7 +1130,6 @@ impl AwsAthena {
     }
 
     pub async fn delete_glue_database(database_name: &str) -> Result<bool, String> {
-
         loop {
             println!("Are you sure you want to drop the database? To confirm, please type the database name ('{}'). Type 'exit' or ctrl+c to cancel:", database_name);
 
@@ -964,30 +1141,40 @@ impl AwsAthena {
 
                 let mut timeout = 10;
 
-                println!("Waiting {} seconds before dropping database '{}', ctrl+c to cancel", timeout, database_name);
+                println!(
+                    "Waiting {} seconds before dropping database '{}', ctrl+c to cancel",
+                    timeout, database_name
+                );
 
                 loop {
                     if timeout > 0 {
                         tokio::time::sleep(tokio::time::Duration::from_secs(timeout)).await;
                         timeout -= 1;
-                    }  else {
+                    } else {
                         break;
                     }
                 }
-                
-                break;
 
+                break;
             } else if input.trim().eq_ignore_ascii_case("exit") {
                 // println!("Drop canceled. Exiting without dropping database.");
-                return Err(format!("Drop canceled. Exiting without dropping database '{}'.", database_name));
+                return Err(format!(
+                    "Drop canceled. Exiting without dropping database '{}'.",
+                    database_name
+                ));
             } else {
                 // println!("Incorrect database name. Please try again, or type 'exit' to cancel.");
-                return Err(format!("Incorrect database name entered: '{}'.", input.trim()));
+                return Err(format!(
+                    "Incorrect database name entered: '{}'.",
+                    input.trim()
+                ));
                 // The loop will continue, prompting the user again
             }
         }
 
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -1005,7 +1192,6 @@ impl AwsAthena {
         };
 
         if let Some(tables) = output.table_list {
-
             if tables.is_empty() {
                 println!("No tables found in database '{}'", database_name);
             }
@@ -1014,7 +1200,7 @@ impl AwsAthena {
 
             for table in tables {
                 let table_name = table.name;
-                
+
                 println!("Deleting table '{}'", table_name);
 
                 let mut next_token = "".to_string();
@@ -1030,12 +1216,15 @@ impl AwsAthena {
                     .await
                 {
                     if let Some(partitions) = partitions.partitions {
-
                         if partitions.is_empty() {
                             break;
                         }
 
-                        println!("Deleting {} partitions in table '{}'", partitions.len(), table_name);
+                        println!(
+                            "Deleting {} partitions in table '{}'",
+                            partitions.len(),
+                            table_name
+                        );
 
                         for partition in partitions {
                             glue_client
@@ -1067,7 +1256,6 @@ impl AwsAthena {
                     .await
                 {
                     if let Some(table_versions) = table_versions.table_versions {
-
                         if table_versions.is_empty() {
                             println!("No table versions found for table '{}'", table_name);
                             break;
@@ -1110,7 +1298,7 @@ impl AwsAthena {
         }
 
         // get database s3 bucket and path
-        let location_uri= glue_client
+        let location_uri = glue_client
             .get_database()
             .name(database_name)
             .send()
@@ -1122,7 +1310,11 @@ impl AwsAthena {
             .unwrap();
 
         let bucket = location_uri.split('/').nth(2).unwrap();
-        let path = location_uri.split('/').skip(3).collect::<Vec<&str>>().join("/");
+        let path = location_uri
+            .split('/')
+            .skip(3)
+            .collect::<Vec<&str>>()
+            .join("/");
 
         match glue_client
             .delete_database()
@@ -1157,21 +1349,19 @@ impl AwsAthena {
             .max_keys(1000)
             .set_continuation_token(next_token.clone())
             .send()
-            .await {
+            .await
+        {
             let mut delete_objects: Vec<ObjectIdentifier> = vec![];
 
             if resp.contents.is_none() {
-                continue
+                continue;
             };
 
             let objects = resp.contents();
 
             for obj in objects {
-                
-                let obj_id = ObjectIdentifier::builder()
-                    .set_key(obj.key.clone())
-                    .build();
-                
+                let obj_id = ObjectIdentifier::builder().set_key(obj.key.clone()).build();
+
                 match obj_id {
                     Ok(obj_id) => {
                         delete_objects.push(obj_id);
@@ -1181,11 +1371,13 @@ impl AwsAthena {
                     }
                 }
             }
-            
 
             if !delete_objects.is_empty() {
-
-                println!("Deleting {} S3 objects from bucket {}", delete_objects.len(), bucket);
+                println!(
+                    "Deleting {} S3 objects from bucket {}",
+                    delete_objects.len(),
+                    bucket
+                );
 
                 s3_client
                     .delete_objects()
@@ -1197,7 +1389,8 @@ impl AwsAthena {
                             .unwrap(),
                     )
                     .send()
-                    .await.unwrap();
+                    .await
+                    .unwrap();
             }
 
             if resp.next_continuation_token.is_none() {
@@ -1210,7 +1403,6 @@ impl AwsAthena {
     }
 
     fn get_partition_by_fields(partitions: &mut Vec<Column>) {
-
         let partition_config = Config::get_transform_batch_partition_fields();
 
         if !partition_config.is_empty() {
@@ -1234,15 +1426,14 @@ impl AwsAthena {
         }
     }
 
-
-    pub async fn glue_delete_table(
-        namespace: &str,
-    ) -> Result<bool, String> {
+    pub async fn glue_delete_table(namespace: &str) -> Result<bool, String> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let database = config.glue_database_name;
 
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -1317,7 +1508,9 @@ impl AwsAthena {
 
         let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -1374,7 +1567,7 @@ impl AwsAthena {
     pub async fn glue_update_table(
         namespace: &str,
         metadata: &OutputMetadata,
-        existing_table: GetTableOutput
+        existing_table: GetTableOutput,
     ) -> Result<bool, String> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
@@ -1392,7 +1585,9 @@ impl AwsAthena {
 
         let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -1420,7 +1615,6 @@ impl AwsAthena {
                     .build(),
             )
             .table_type("EXTERNAL_TABLE");
-
 
         // Not valid to update partitions, would require a migration of all data and partition indexes.
         // Additionally, when issuing `ALTER SCHEMA` - we may be local and not have a config file specifying
@@ -1490,7 +1684,9 @@ impl AwsAthena {
 
         let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -1536,13 +1732,24 @@ impl AwsAthena {
                 Err(e) => {
                     if let SdkError::ServiceError(se) = &e {
                         if matches!(se.err(), GetTableError::EntityNotFoundException(_)) {
-                            println!("Glue table '{}' not found in database '{}'; creating it...", namespace, database);
+                            println!(
+                                "Glue table '{}' not found in database '{}'; creating it...",
+                                namespace, database
+                            );
                             // Ensure database exists
                             match AwsAthena::glue_get_database().await {
                                 Ok(true) => {}
                                 _ => {
-                                    if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_create_database(), "create_database").await {
-                                        println!("ERROR creating Glue database '{}': {}", database, err);
+                                    if let Err(err) = AwsAthena::backoff_retry(
+                                        || AwsAthena::glue_create_database(),
+                                        "create_database",
+                                    )
+                                    .await
+                                    {
+                                        println!(
+                                            "ERROR creating Glue database '{}': {}",
+                                            database, err
+                                        );
                                         // Cannot proceed without DB; skip partition creation this time
                                         partition_cache.push(md5_digest);
                                         return Ok(true);
@@ -1550,8 +1757,16 @@ impl AwsAthena {
                                 }
                             }
                             // Create table with backoff; if it already exists due to race, it's fine
-                            if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_create_table(namespace, metadata), "create_table").await {
-                                println!("ERROR creating Glue table '{}.{}': {}", database, namespace, err);
+                            if let Err(err) = AwsAthena::backoff_retry(
+                                || AwsAthena::glue_create_table(namespace, metadata),
+                                "create_table",
+                            )
+                            .await
+                            {
+                                println!(
+                                    "ERROR creating Glue table '{}.{}': {}",
+                                    database, namespace, err
+                                );
                                 // Skip partition creation for this key to avoid hot-looping
                                 partition_cache.push(md5_digest);
                                 return Ok(true);
@@ -1575,18 +1790,23 @@ impl AwsAthena {
             {
                 Ok(_) => {
                     // partition exists, update it with backoff
-                    let update_res: Result<(), String> = AwsAthena::backoff_retry(|| async {
-                        glue_client
-                            .update_partition()
-                            .database_name(database.clone())
-                            .table_name(namespace)
-                            .partition_input(partition_conf.clone())
-                            .set_partition_value_list(Some(partition_values.clone()))
-                            .send()
-                            .await
-                            .map(|_| true)
-                            .map_err(|e| e.into_service_error().to_string())
-                    }, "update_partition").await.map(|_| ());
+                    let update_res: Result<(), String> = AwsAthena::backoff_retry(
+                        || async {
+                            glue_client
+                                .update_partition()
+                                .database_name(database.clone())
+                                .table_name(namespace)
+                                .partition_input(partition_conf.clone())
+                                .set_partition_value_list(Some(partition_values.clone()))
+                                .send()
+                                .await
+                                .map(|_| true)
+                                .map_err(|e| e.into_service_error().to_string())
+                        },
+                        "update_partition",
+                    )
+                    .await
+                    .map(|_| ());
 
                     if let Err(err) = update_res {
                         error!("Failed to update Athena partition: {}", err);
@@ -1596,21 +1816,31 @@ impl AwsAthena {
                 }
                 Err(_err) => {
                     // partition does not exist, create it with backoff; AlreadyExists is fine
-                    let create_res: Result<(), String> = AwsAthena::backoff_retry(|| async {
-                        match glue_client
-                            .create_partition()
-                            .database_name(&database)
-                            .table_name(namespace)
-                            .partition_input(partition_conf.clone())
-                            .send()
-                            .await {
+                    let create_res: Result<(), String> = AwsAthena::backoff_retry(
+                        || async {
+                            match glue_client
+                                .create_partition()
+                                .database_name(&database)
+                                .table_name(namespace)
+                                .partition_input(partition_conf.clone())
+                                .send()
+                                .await
+                            {
                                 Ok(_) => Ok(true),
                                 Err(e) => {
                                     let s = e.into_service_error().to_string();
-                                    if s.contains("AlreadyExistsException") { Ok(true) } else { Err(s) }
+                                    if s.contains("AlreadyExistsException") {
+                                        Ok(true)
+                                    } else {
+                                        Err(s)
+                                    }
                                 }
                             }
-                    }, "create_partition").await.map(|_| ());
+                        },
+                        "create_partition",
+                    )
+                    .await
+                    .map(|_| ());
 
                     match create_res {
                         Ok(_) => {
@@ -1618,7 +1848,10 @@ impl AwsAthena {
                         }
                         Err(err) => {
                             error!("Failed to create new Athena partition: {}", err);
-                            error!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
+                            error!(
+                                "Database: {}, Table: {}, Values: {:?}",
+                                database, namespace, partition_values
+                            );
                         }
                     }
                 }
@@ -1628,4 +1861,3 @@ impl AwsAthena {
         Ok(true)
     }
 }
-

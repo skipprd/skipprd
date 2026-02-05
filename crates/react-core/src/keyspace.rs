@@ -62,7 +62,10 @@ impl DefaultKeyspace {
 
 impl Keyspace for DefaultKeyspace {
     fn threads_prefix(&self, scope: &RequestScope) -> String {
-        format!("{}/{}/{}/threads", scope.tenant, scope.workspace, scope.project_id)
+        format!(
+            "{}/{}/{}/threads",
+            scope.tenant, scope.workspace, scope.project_id
+        )
     }
 
     fn thread_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String> {
@@ -70,7 +73,10 @@ impl Keyspace for DefaultKeyspace {
         Self::ensure_safe_segment(&scope.workspace)?;
         Self::ensure_safe_segment(&scope.project_id)?;
         Self::ensure_safe_segment(thread_id)?;
-        Ok(format!("{}/{}/{}/threads/{}.json", scope.tenant, scope.workspace, scope.project_id, thread_id))
+        Ok(format!(
+            "{}/{}/{}/threads/{}.json",
+            scope.tenant, scope.workspace, scope.project_id, thread_id
+        ))
     }
 
     fn thread_state_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String> {
@@ -86,26 +92,41 @@ impl Keyspace for DefaultKeyspace {
 
     fn catalog_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
         let id = Self::encode_key_component(dataset_id);
-        format!("{}/{}/{}/catalog/{}.yaml", scope.tenant, scope.workspace, scope.project_id, id)
+        format!(
+            "{}/{}/{}/catalog/{}.yaml",
+            scope.tenant, scope.workspace, scope.project_id, id
+        )
     }
 
     fn semantic_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
         let id = Self::encode_key_component(dataset_id);
-        format!("{}/{}/{}/semantic/{}.yaml", scope.tenant, scope.workspace, scope.project_id, id)
+        format!(
+            "{}/{}/{}/semantic/{}.yaml",
+            scope.tenant, scope.workspace, scope.project_id, id
+        )
     }
 
     fn stats_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
         let id = Self::encode_key_component(dataset_id);
-        format!("{}/{}/{}/stats/{}.json", scope.tenant, scope.workspace, scope.project_id, id)
+        format!(
+            "{}/{}/{}/stats/{}.json",
+            scope.tenant, scope.workspace, scope.project_id, id
+        )
     }
 
     fn manifest_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
         let filename = format!("{}.json", Self::encode_key_component(dataset_id));
-        format!("{}/{}/{}/manifest/{}", scope.tenant, scope.workspace, scope.project_id, filename)
+        format!(
+            "{}/{}/{}/manifest/{}",
+            scope.tenant, scope.workspace, scope.project_id, filename
+        )
     }
 
     fn lancedb_uri(&self, scope: &RequestScope) -> String {
-        format!("s3://{}/{}/{}/{}/lancedb", self.bucket, scope.tenant, scope.workspace, scope.project_id)
+        format!(
+            "s3://{}/{}/{}/{}/lancedb",
+            self.bucket, scope.tenant, scope.workspace, scope.project_id
+        )
     }
 
     fn global_dbt_examples_lancedb_uri(&self) -> String {
@@ -113,7 +134,10 @@ impl Keyspace for DefaultKeyspace {
     }
 
     fn dbt_prefix(&self, scope: &RequestScope) -> String {
-        format!("{}/{}/{}/dbt/", scope.tenant, scope.workspace, scope.project_id)
+        format!(
+            "{}/{}/{}/dbt/",
+            scope.tenant, scope.workspace, scope.project_id
+        )
     }
 
     fn dbt_project_key(&self, scope: &RequestScope) -> String {
@@ -140,7 +164,11 @@ mod tests {
     #[test]
     fn keyspace_rejects_bad_segments() {
         let ks = DefaultKeyspace::new("b".to_string());
-        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
         assert!(ks.thread_key(&scope, "../x").is_err());
         assert!(ks.thread_key(&scope, "a/b").is_err());
         assert!(ks.thread_key(&scope, "").is_err());
@@ -149,7 +177,11 @@ mod tests {
     #[test]
     fn keyspace_builds_thread_key() {
         let ks = DefaultKeyspace::new("b".to_string());
-        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
         let k = ks.thread_key(&scope, "123").unwrap();
         assert_eq!(k, "t/w/p/threads/123.json");
     }
@@ -157,9 +189,12 @@ mod tests {
     #[test]
     fn keyspace_builds_thread_state_key() {
         let ks = DefaultKeyspace::new("b".to_string());
-        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
         let k = ks.thread_state_key(&scope, "123").unwrap();
         assert_eq!(k, "t/w/p/threads/123.state.json");
     }
 }
-

@@ -1,17 +1,17 @@
-use std::collections::HashMap;
-use std::io;
-use std::time::SystemTime;
-use arrow::array::RecordBatch;
-use url::Url;
-use crate::helpers::configuration::Config;
 use crate::buffer::segment_file::{PartitionKey, SegmentFile};
 use crate::buffer::segment_object::SegmentObject;
-use std::fs;
-use std::path::PathBuf;
+use crate::helpers::configuration::Config;
+use arrow::array::RecordBatch;
 use arrow::ipc::reader::StreamReader;
+use std::collections::HashMap;
+use std::fs;
+use std::io;
 use std::io::{Read, Seek};
-use tokio::runtime::Handle;
+use std::path::PathBuf;
 use std::thread;
+use std::time::SystemTime;
+use tokio::runtime::Handle;
+use url::Url;
 
 /// Minimal WAL store interface (synchronous facade).
 pub trait WalStore {
@@ -21,8 +21,8 @@ pub trait WalStore {
         snapshot_id: &str,
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
-        partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/ )>,
-    ) -> io::Result<(u64, u64, u32, [u8;32])>;
+        partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/)>,
+    ) -> io::Result<(u64, u64, u32, [u8; 32])>;
 }
 
 pub struct S3WalStore {
@@ -32,7 +32,9 @@ pub struct S3WalStore {
 
 impl S3WalStore {
     pub fn new(prefix_url: &str) -> Self {
-        S3WalStore { prefix_url: prefix_url.to_string() }
+        S3WalStore {
+            prefix_url: prefix_url.to_string(),
+        }
     }
 
     // no extra helpers; streaming lives in SegmentObject
@@ -44,8 +46,8 @@ impl WalStore for S3WalStore {
         snapshot_id: &str,
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
-        partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/ )>,
-    ) -> io::Result<(u64, u64, u32, [u8;32])> {
+        partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/)>,
+    ) -> io::Result<(u64, u64, u32, [u8; 32])> {
         // Make owned clones to satisfy 'static for spawned thread
         let prefix = self.prefix_url.clone();
         let sid = snapshot_id.to_string();
@@ -54,18 +56,33 @@ impl WalStore for S3WalStore {
         let parts_owned = partitions_meta.clone();
         let fut = async move {
             let client = crate::helpers::s3::get_s3_client().await;
-            SegmentObject::stream_snapshot_to_s3(&client, &prefix, &sid, &offs, &batches_owned, &parts_owned).await
+            SegmentObject::stream_snapshot_to_s3(
+                &client,
+                &prefix,
+                &sid,
+                &offs,
+                &batches_owned,
+                &parts_owned,
+            )
+            .await
         };
         if Handle::try_current().is_ok() {
             // Inside a runtime: run the async work on a dedicated thread with its own small runtime
             let join = thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
                 rt.block_on(fut)
             });
-            join.join().map_err(|_| io::Error::new(io::ErrorKind::Other, "join panic"))?
+            join.join()
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "join panic"))?
         } else {
-            let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
             rt.block_on(fut)
         }
@@ -81,11 +98,12 @@ impl WalStore for DiskWalStore {
         snapshot_id: &str,
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
-        partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/ )>,
-    ) -> io::Result<(u64, u64, u32, [u8;32])> {
+        partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/)>,
+    ) -> io::Result<(u64, u64, u32, [u8; 32])> {
         let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
         let seg_file = SegmentFile::new(&seg_dir, snapshot_id)?;
-        let (bytes, rows, parts, sha) = seg_file.write_snapshot(offsets, batches, partitions_meta)?;
+        let (bytes, rows, parts, sha) =
+            seg_file.write_snapshot(offsets, batches, partitions_meta)?;
         let header = SegmentFile::build_commit_header_bytes(parts, bytes, &sha);
         let commit_path = seg_file.path.with_extension("seg.commit");
         fs::write(&commit_path, &header)?;
@@ -96,7 +114,9 @@ impl WalStore for DiskWalStore {
 pub struct WalStoreFactory;
 
 impl WalStoreFactory {
-    pub fn for_batches(batches: &HashMap<PartitionKey, Vec<RecordBatch>>) -> Box<dyn WalStore + Send + Sync> {
+    pub fn for_batches(
+        batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
+    ) -> Box<dyn WalStore + Send + Sync> {
         let _ = batches; // unused; selection via root-level storage
         if Config::get_wal_storage().eq_ignore_ascii_case("s3") {
             let bucket = Config::get_wal_s3_bucket();
@@ -110,39 +130,72 @@ impl WalStoreFactory {
 
 /// Read-side abstraction for WAL
 pub trait WalReader {
-    fn load_committed_batches(&self, pipeline: &str, limit_files: usize) -> io::Result<Vec<RecordBatch>>;
+    fn load_committed_batches(
+        &self,
+        pipeline: &str,
+        limit_files: usize,
+    ) -> io::Result<Vec<RecordBatch>>;
 }
 
 pub struct DiskWalReader;
 
 impl WalReader for DiskWalReader {
-    fn load_committed_batches(&self, pipeline: &str, limit_files: usize) -> io::Result<Vec<RecordBatch>> {
+    fn load_committed_batches(
+        &self,
+        pipeline: &str,
+        limit_files: usize,
+    ) -> io::Result<Vec<RecordBatch>> {
         let mut out: Vec<RecordBatch> = Vec::new();
         let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
-        if !seg_dir.exists() { return Ok(out); }
+        if !seg_dir.exists() {
+            return Ok(out);
+        }
         let mut used = 0usize;
         for entry in fs::read_dir(&seg_dir)? {
-            if used >= limit_files { break; }
-            let entry = match entry { Ok(e) => e, Err(_) => continue };
+            if used >= limit_files {
+                break;
+            }
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+            if path.extension().and_then(|s| s.to_str()) != Some("seg") {
+                continue;
+            }
             let commit = path.with_extension("seg.commit");
-            if !commit.exists() { continue; }
+            if !commit.exists() {
+                continue;
+            }
             let seg = SegmentFile { path: path.clone() };
-            let meta = match seg.read_metadata() { Ok(m) => m, Err(_) => continue };
+            let meta = match seg.read_metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
             for idx in meta.index.iter() {
-                if idx.key.0 != pipeline { continue; }
-                let mut file = match fs::OpenOptions::new().read(true).open(&path) { Ok(f) => f, Err(_) => continue };
-                if file.seek(std::io::SeekFrom::Start(idx.start)).is_err() { continue; }
+                if idx.key.0 != pipeline {
+                    continue;
+                }
+                let mut file = match fs::OpenOptions::new().read(true).open(&path) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                if file.seek(std::io::SeekFrom::Start(idx.start)).is_err() {
+                    continue;
+                }
                 let reader = std::io::BufReader::new(file);
                 let mut take = reader.take(idx.len);
                 if let Ok(sr) = StreamReader::try_new(&mut take, None) {
                     for it in sr {
-                        if let Ok(b) = it { out.push(b); }
+                        if let Ok(b) = it {
+                            out.push(b);
+                        }
                     }
                 }
                 used += 1;
-                if used >= limit_files { break; }
+                if used >= limit_files {
+                    break;
+                }
             }
         }
         Ok(out)
@@ -154,67 +207,101 @@ pub struct S3WalReader {
 }
 
 impl WalReader for S3WalReader {
-    fn load_committed_batches(&self, pipeline: &str, limit_files: usize) -> io::Result<Vec<RecordBatch>> {
+    fn load_committed_batches(
+        &self,
+        pipeline: &str,
+        limit_files: usize,
+    ) -> io::Result<Vec<RecordBatch>> {
         let prefix = self.prefix_url.clone();
         let pipe = pipeline.to_string();
         let fut = async move {
             let mut out: Vec<RecordBatch> = Vec::new();
-            let u = match Url::parse(&prefix) { Ok(u) => u, Err(_) => return Ok(out) };
-            if u.scheme() != "s3" { return Ok(out); }
-            let bucket = match u.host_str() { Some(b) => b.to_string(), None => return Ok(out) };
-            let base = u.path().trim_start_matches('/').trim_end_matches('/').to_string();
+            let u = match Url::parse(&prefix) {
+                Ok(u) => u,
+                Err(_) => return Ok(out),
+            };
+            if u.scheme() != "s3" {
+                return Ok(out);
+            }
+            let bucket = match u.host_str() {
+                Some(b) => b.to_string(),
+                None => return Ok(out),
+            };
+            let base = u
+                .path()
+                .trim_start_matches('/')
+                .trim_end_matches('/')
+                .to_string();
             let client = crate::helpers::s3::get_s3_client().await;
             // list objects
             let mut token: Option<String> = None;
             let mut all: Vec<String> = Vec::new();
             loop {
                 let mut req = client.list_objects_v2().bucket(&bucket).prefix(&base);
-                if let Some(t) = &token { req = req.continuation_token(t); }
+                if let Some(t) = &token {
+                    req = req.continuation_token(t);
+                }
                 match req.send().await {
                     Ok(resp) => {
                         if let Some(contents) = resp.contents {
                             for obj in contents {
-                                if let Some(k) = obj.key() { all.push(k.to_string()); }
+                                if let Some(k) = obj.key() {
+                                    all.push(k.to_string());
+                                }
                             }
                         }
-                        if resp.is_truncated.unwrap_or(false) { token = resp.next_continuation_token; } else { break; }
+                        if resp.is_truncated.unwrap_or(false) {
+                            token = resp.next_continuation_token;
+                        } else {
+                            break;
+                        }
                     }
                     Err(_) => break,
                 }
-                if all.len() > 10_000 { break; }
+                if all.len() > 10_000 {
+                    break;
+                }
             }
             use std::collections::HashSet;
             let set: HashSet<String> = all.iter().cloned().collect();
             let mut used = 0usize;
             for k in all.into_iter().filter(|k| k.ends_with(".seg")) {
-                if used >= limit_files { break; }
+                if used >= limit_files {
+                    break;
+                }
                 let commit = format!("{}.commit", k);
-                if !set.contains(&commit) { continue; }
+                if !set.contains(&commit) {
+                    continue;
+                }
                 match client.get_object().bucket(&bucket).key(&k).send().await {
-                    Ok(resp) => {
-                        match resp.body.collect().await {
-                            Ok(agg) => {
-                                let bytes = agg.into_bytes().to_vec();
-                                if let Ok(meta) = SegmentFile::read_metadata_from_bytes(&bytes) {
-                                    for idx in meta.index.iter() {
-                                        if idx.key.0 != pipe { continue; }
-                                        let start = idx.start as usize;
-                                        let end = start.saturating_add(idx.len as usize);
-                                        if end > bytes.len() { continue; }
-                                        let slice = &bytes[start..end];
-                                        let mut cursor = std::io::Cursor::new(slice);
-                                        if let Ok(sr) = StreamReader::try_new(&mut cursor, None) {
-                                            for it in sr {
-                                                if let Ok(b) = it { out.push(b); }
+                    Ok(resp) => match resp.body.collect().await {
+                        Ok(agg) => {
+                            let bytes = agg.into_bytes().to_vec();
+                            if let Ok(meta) = SegmentFile::read_metadata_from_bytes(&bytes) {
+                                for idx in meta.index.iter() {
+                                    if idx.key.0 != pipe {
+                                        continue;
+                                    }
+                                    let start = idx.start as usize;
+                                    let end = start.saturating_add(idx.len as usize);
+                                    if end > bytes.len() {
+                                        continue;
+                                    }
+                                    let slice = &bytes[start..end];
+                                    let mut cursor = std::io::Cursor::new(slice);
+                                    if let Ok(sr) = StreamReader::try_new(&mut cursor, None) {
+                                        for it in sr {
+                                            if let Ok(b) = it {
+                                                out.push(b);
                                             }
                                         }
                                     }
-                                    used += 1;
                                 }
+                                used += 1;
                             }
-                            Err(_) => {}
                         }
-                    }
+                        Err(_) => {}
+                    },
                     Err(_) => {}
                 }
             }
@@ -222,13 +309,20 @@ impl WalReader for S3WalReader {
         };
         if Handle::try_current().is_ok() {
             let join = thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
                 rt.block_on(fut)
             });
-            join.join().map_err(|_| io::Error::new(io::ErrorKind::Other, "join panic"))?
+            join.join()
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "join panic"))?
         } else {
-            let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
             rt.block_on(fut)
         }
@@ -258,5 +352,3 @@ impl WalReaderFactory {
         Box::new(DiskWalReader)
     }
 }
-
-

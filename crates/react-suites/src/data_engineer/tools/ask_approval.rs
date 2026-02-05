@@ -23,4 +23,3 @@ impl Tool for AskApprovalTool {
         Ok(serde_json::json!({"ok": true, "prompt": prompt}))
     }
 }
-

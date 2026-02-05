@@ -1,16 +1,16 @@
-use std::collections::HashMap;
-use std::io;
-use std::time::Duration;
-use std::time::SystemTime;
+use crate::buffer::segment_file::{PartitionKey, SegmentFile};
+use crate::metrics::counters as metrics_counters;
 use arrow::array::RecordBatch;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::CompletedPart;
-use sha2::{Sha256, Digest};
-use url::Url;
-use crate::buffer::segment_file::{PartitionKey, SegmentFile};
 use rand::{thread_rng, Rng};
-use crate::metrics::counters as metrics_counters;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::io;
+use std::time::Duration;
+use std::time::SystemTime;
+use url::Url;
 
 const MPU_PART_SIZE: usize = 8 * 1024 * 1024;
 
@@ -33,7 +33,8 @@ impl S3MultipartWriter {
         let resp = {
             let mut attempts: u32 = 0;
             loop {
-                let res = client.create_multipart_upload()
+                let res = client
+                    .create_multipart_upload()
                     .bucket(&bucket)
                     .key(&key)
                     .content_type("application/octet-stream")
@@ -46,7 +47,10 @@ impl S3MultipartWriter {
                         metrics_counters::add_s3_wal_retry(1);
                         if attempts >= 5 {
                             metrics_counters::add_s3_wal_error(1);
-                            return Err(io::Error::new(io::ErrorKind::Other, format!("s3 mpu create: {}", e)));
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("s3 mpu create: {}", e),
+                            ));
                         }
                         let base = 200u64.saturating_mul(1u64 << attempts.min(10));
                         let jitter: u64 = thread_rng().gen_range(0..100);
@@ -58,7 +62,10 @@ impl S3MultipartWriter {
         };
         let upload_id = resp.upload_id().unwrap_or_default().to_string();
         Ok(S3MultipartWriter {
-            bucket, key, upload_id, client,
+            bucket,
+            key,
+            upload_id,
+            client,
             buf: Vec::with_capacity(MPU_PART_SIZE),
             chunk_size: MPU_PART_SIZE,
             parts: Vec::new(),
@@ -69,14 +76,18 @@ impl S3MultipartWriter {
     }
 
     async fn flush_part(&mut self) -> io::Result<()> {
-        if self.buf.is_empty() { return Ok(()); }
+        if self.buf.is_empty() {
+            return Ok(());
+        }
         let body = std::mem::take(&mut self.buf);
         let pn = self.part_number;
         // Retry part upload to mitigate transient dispatch/socket errors
         let out = {
             let mut attempts: u32 = 0;
             loop {
-                let res = self.client.upload_part()
+                let res = self
+                    .client
+                    .upload_part()
                     .bucket(&self.bucket)
                     .key(&self.key)
                     .upload_id(&self.upload_id)
@@ -91,7 +102,10 @@ impl S3MultipartWriter {
                         metrics_counters::add_s3_wal_retry(1);
                         if attempts >= 5 {
                             metrics_counters::add_s3_wal_error(1);
-                            return Err(io::Error::new(io::ErrorKind::Other, format!("s3 upload part {}: {}", pn, e)));
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("s3 upload part {}: {}", pn, e),
+                            ));
                         }
                         let base = 200u64.saturating_mul(1u64 << attempts.min(10));
                         let jitter: u64 = thread_rng().gen_range(0..100);
@@ -102,7 +116,12 @@ impl S3MultipartWriter {
             }
         };
         let etag = out.e_tag().unwrap_or_default().to_string();
-        self.parts.push(CompletedPart::builder().set_e_tag(Some(etag)).part_number(pn).build());
+        self.parts.push(
+            CompletedPart::builder()
+                .set_e_tag(Some(etag))
+                .part_number(pn)
+                .build(),
+        );
         self.part_number += 1;
         Ok(())
     }
@@ -121,10 +140,10 @@ impl S3MultipartWriter {
         Ok(())
     }
 
-    fn current_sha256(&self) -> [u8;32] {
+    fn current_sha256(&self) -> [u8; 32] {
         let mut h = self.hasher.clone();
         let digest = h.finalize();
-        let mut sha = [0u8;32];
+        let mut sha = [0u8; 32];
         sha.copy_from_slice(&digest[..]);
         sha
     }
@@ -137,7 +156,9 @@ impl S3MultipartWriter {
             let comp = aws_sdk_s3::types::CompletedMultipartUpload::builder()
                 .set_parts(Some(self.parts.clone()))
                 .build();
-            let res = self.client.complete_multipart_upload()
+            let res = self
+                .client
+                .complete_multipart_upload()
                 .bucket(&self.bucket)
                 .key(&self.key)
                 .upload_id(&self.upload_id)
@@ -151,7 +172,10 @@ impl S3MultipartWriter {
                     metrics_counters::add_s3_wal_retry(1);
                     if attempts >= 5 {
                         metrics_counters::add_s3_wal_error(1);
-                        return Err(io::Error::new(io::ErrorKind::Other, format!("s3 mpu complete: {}", e)));
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("s3 mpu complete: {}", e),
+                        ));
                     }
                     let base = 200u64.saturating_mul(1u64 << attempts.min(10));
                     let jitter: u64 = thread_rng().gen_range(0..100);
@@ -168,12 +192,31 @@ pub struct SegmentObject;
 
 impl SegmentObject {
     fn compute_keys(prefix_url: &str, snapshot_id: &str) -> io::Result<(String, String, String)> {
-        let u = Url::parse(prefix_url).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-        if u.scheme() != "s3" { return Err(io::Error::new(io::ErrorKind::InvalidInput, "prefix must be s3://")); }
-        let bucket = u.host_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing bucket"))?.to_string();
-        let base = u.path().trim_start_matches('/').trim_end_matches('/').to_string();
+        let u = Url::parse(prefix_url)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        if u.scheme() != "s3" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "prefix must be s3://",
+            ));
+        }
+        let bucket = u
+            .host_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing bucket"))?
+            .to_string();
+        let base = u
+            .path()
+            .trim_start_matches('/')
+            .trim_end_matches('/')
+            .to_string();
         let now = chrono::Utc::now();
-        let key_prefix = format!("{}/p_year={}/p_month={}/p_day={}", base, now.format("%Y"), now.format("%m"), now.format("%d"));
+        let key_prefix = format!(
+            "{}/p_year={}/p_month={}/p_day={}",
+            base,
+            now.format("%Y"),
+            now.format("%m"),
+            now.format("%d")
+        );
         let seg_key = format!("{}/{}.seg", key_prefix, snapshot_id);
         let commit_key = format!("{}.commit", seg_key);
         Ok((bucket, seg_key, commit_key))
@@ -186,14 +229,18 @@ impl SegmentObject {
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
         parts_meta: &HashMap<PartitionKey, (u64, SystemTime)>,
-    ) -> io::Result<(u64, u64, u32, [u8;32])> {
+    ) -> io::Result<(u64, u64, u32, [u8; 32])> {
         let (bucket, seg_key, commit_key) = Self::compute_keys(prefix_url, snapshot_id)?;
-        let mut writer = S3MultipartWriter::begin(client.clone(), bucket.clone(), seg_key.clone()).await?;
+        let mut writer =
+            S3MultipartWriter::begin(client.clone(), bucket.clone(), seg_key.clone()).await?;
 
         // Header MAGIC + VERSION + created_at
         writer.write_bytes(b"SEGF")?;
         writer.write_bytes(&2u32.to_le_bytes())?;
-        let created_at_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let created_at_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         writer.write_bytes(&created_at_secs.to_le_bytes())?;
 
         // Offsets block
@@ -208,15 +255,23 @@ impl SegmentObject {
         let mut total_bytes: u64 = 0;
         let mut parts_count: u32 = 0;
         for (key, rbatches) in batches.iter() {
-            if rbatches.is_empty() { continue; }
+            if rbatches.is_empty() {
+                continue;
+            }
             parts_count = parts_count.saturating_add(1);
             writer.write_bytes(b"PART")?;
             let key_blob = bincode::serialize(key).unwrap();
             let key_len = key_blob.len() as u64;
             writer.write_bytes(&key_len.to_le_bytes())?;
             writer.write_bytes(&key_blob)?;
-            let (p_bytes, p_updated) = parts_meta.get(key).cloned().unwrap_or((0, SystemTime::now()));
-            let updated_secs = p_updated.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let (p_bytes, p_updated) = parts_meta
+                .get(key)
+                .cloned()
+                .unwrap_or((0, SystemTime::now()));
+            let updated_secs = p_updated
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             writer.write_bytes(&p_bytes.to_le_bytes())?;
             writer.write_bytes(&updated_secs.to_le_bytes())?;
 
@@ -224,13 +279,20 @@ impl SegmentObject {
             let mut data_buf: Vec<u8> = Vec::new();
             {
                 let options = IpcWriteOptions::default();
-                let mut aw = StreamWriter::try_new_with_options(&mut data_buf, &rbatches[0].schema(), options)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
+                let mut aw = StreamWriter::try_new_with_options(
+                    &mut data_buf,
+                    &rbatches[0].schema(),
+                    options,
+                )
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
                 for b in rbatches.iter() {
                     total_rows += b.num_rows() as u64;
-                    aw.write(b).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
+                    aw.write(b).map_err(|e| {
+                        io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e))
+                    })?;
                 }
-                aw.finish().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
+                aw.finish()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
             }
             let data_len = data_buf.len() as u64;
             total_bytes = total_bytes.saturating_add(data_len);
@@ -255,10 +317,14 @@ impl SegmentObject {
         {
             let mut attempts: u32 = 0;
             loop {
-                let res = client.put_object().bucket(&bucket).key(&commit_key)
+                let res = client
+                    .put_object()
+                    .bucket(&bucket)
+                    .key(&commit_key)
                     .body(ByteStream::from(commit_bytes.clone().to_vec()))
                     .content_type("application/octet-stream")
-                    .send().await;
+                    .send()
+                    .await;
                 match res {
                     Ok(_) => break,
                     Err(e) => {
@@ -266,7 +332,10 @@ impl SegmentObject {
                         metrics_counters::add_s3_wal_retry(1);
                         if attempts >= 5 {
                             metrics_counters::add_s3_wal_error(1);
-                            return Err(io::Error::new(io::ErrorKind::Other, format!("s3 put commit: {}", e)));
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("s3 put commit: {}", e),
+                            ));
                         }
                         let base = 200u64.saturating_mul(1u64 << attempts.min(10));
                         let jitter: u64 = thread_rng().gen_range(0..100);
@@ -280,5 +349,3 @@ impl SegmentObject {
         Ok((total_bytes, total_rows, parts_count, sha))
     }
 }
-
-

@@ -27,11 +27,13 @@ fn llm_embed_local_provider_returns_vectors() {
     }
     let mut cmd = Command::cargo_bin("skippr").unwrap();
     cmd.env("LLM_PROVIDER", "LOCAL");
-    cmd.arg("llm").arg("--embed").arg("alpha").arg("--embed").arg("beta");
+    cmd.arg("llm")
+        .arg("--embed")
+        .arg("alpha")
+        .arg("--embed")
+        .arg("beta");
     let assert = cmd.assert().success();
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     // Expect lines like "0:NNN" "1:NNN" (dimension depends on model)
     assert!(out.contains("0:"), "expected index prefix");
 }
-
-

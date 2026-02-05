@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::data_engineer::naming;
 use react_core::agent::AgentCtx;
 use react_core::session::{ThreadLog, ThreadStep};
-use crate::data_engineer::naming;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -229,7 +229,9 @@ fn ensure_expected_model_paths_cleanse(plan: &mut CleansePlan) {
         if !missing {
             continue;
         }
-        let Some((_cat, schema, table)) = parse_dataset_id_3(&t.dataset_id) else { continue };
+        let Some((_cat, schema, table)) = parse_dataset_id_3(&t.dataset_id) else {
+            continue;
+        };
         t.expected_model_path = Some(naming::canonical_staging_rel_path(&schema, &table));
     }
 }
@@ -244,12 +246,19 @@ fn ensure_expected_model_paths_model(plan: &mut ModelPlan) {
         if !missing {
             continue;
         }
-        let folder = if t.folder.trim().is_empty() { "marts" } else { t.folder.trim() };
+        let folder = if t.folder.trim().is_empty() {
+            "marts"
+        } else {
+            t.folder.trim()
+        };
         t.expected_model_path = Some(format!("models/{}/{}.sql", folder, t.name.trim()));
     }
 }
 
-pub fn prune_cleanse_plan_to_grounded_raw_datasets(plan: &mut CleansePlan, allowed_raw: &std::collections::BTreeSet<String>) {
+pub fn prune_cleanse_plan_to_grounded_raw_datasets(
+    plan: &mut CleansePlan,
+    allowed_raw: &std::collections::BTreeSet<String>,
+) {
     // Drop tasks that reference unproven datasets.
     let mut removed: Vec<String> = Vec::new();
     plan.tasks.retain(|t| {
@@ -548,22 +557,34 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
     let start = plan.progress.last_applied_step_idx.min(log.steps.len());
     for (idx, step) in log.steps.iter().enumerate().skip(start) {
         // Deterministic batch executor (preferred): derive progress from its structured output.
-        if let ThreadStep::ToolEnd { name, observation, .. } = step {
+        if let ThreadStep::ToolEnd {
+            name, observation, ..
+        } = step
+        {
             if name == "apply_next_cleanse_batch" {
                 let ok = observation.ok;
                 let attempted: Vec<String> = observation
                     .extra
                     .get("attempted_dataset_ids")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let succeeded: Vec<String> = observation
                     .extra
                     .get("succeeded_dataset_ids")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let succ_set: std::collections::HashSet<String> = succeeded.iter().cloned().collect();
+                let succ_set: std::collections::HashSet<String> =
+                    succeeded.iter().cloned().collect();
                 let failed: Vec<String> = attempted
                     .iter()
                     .filter(|ds| !succ_set.contains(*ds))
@@ -600,75 +621,102 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
         // Track BOTH success and failure so plans remain truthful and can drive remediation.
         // IMPORTANT: do NOT `continue` for non-staging tools here; later handlers (dbt_validate, dbt_files)
         // need to observe those tool steps too.
-        if let ThreadStep::ToolEnd { name, args, observation, .. } = step {
+        if let ThreadStep::ToolEnd {
+            name,
+            args,
+            observation,
+            ..
+        } = step
+        {
             if name != "staging_model" {
                 // not handled here
             } else {
-            let ok = observation.ok;
-            let args_dataset_ids: Vec<String> = args
-                .get("dataset_ids")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-                .unwrap_or_default();
-            let errs: Vec<String> = observation.errors.clone();
+                let ok = observation.ok;
+                let args_dataset_ids: Vec<String> = args
+                    .get("dataset_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let errs: Vec<String> = observation.errors.clone();
 
-            let succeeded: Vec<String> = observation
-                .extra
-                .get("succeeded_dataset_ids")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-                .unwrap_or_default();
+                let succeeded: Vec<String> = observation
+                    .extra
+                    .get("succeeded_dataset_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-            // Work signal: the suite is actively (re)working these tasks.
-            for ds in args_dataset_ids.iter() {
-                if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-                    mark_task_in_progress(&mut t.status);
+                // Work signal: the suite is actively (re)working these tasks.
+                for ds in args_dataset_ids.iter() {
+                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                        mark_task_in_progress(&mut t.status);
+                    }
                 }
-            }
 
-            // Success path: mark done.
-            for ds in succeeded.iter() {
-                cleanse_mark_done(plan, ds);
-            }
-
-            // Failure path: attach notes and flag tasks as needs_update (idempotent per step index).
-            if !ok {
-                let mut msg = String::new();
-                msg.push_str("staging_model failed");
-                if !errs.is_empty() {
-                    msg.push_str(": ");
-                    msg.push_str(errs[0].trim());
+                // Success path: mark done.
+                for ds in succeeded.iter() {
+                    cleanse_mark_done(plan, ds);
                 }
-                if !msg.trim().is_empty() {
-                    for ds in args_dataset_ids.iter() {
-                        if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-                            // If the tool reported this dataset as succeeded, do not regress it.
-                            if !succeeded.contains(ds) {
-                                mark_task_needs_update(&mut t.status);
+
+                // Failure path: attach notes and flag tasks as needs_update (idempotent per step index).
+                if !ok {
+                    let mut msg = String::new();
+                    msg.push_str("staging_model failed");
+                    if !errs.is_empty() {
+                        msg.push_str(": ");
+                        msg.push_str(errs[0].trim());
+                    }
+                    if !msg.trim().is_empty() {
+                        for ds in args_dataset_ids.iter() {
+                            if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                                // If the tool reported this dataset as succeeded, do not regress it.
+                                if !succeeded.contains(ds) {
+                                    mark_task_needs_update(&mut t.status);
+                                }
+                                push_note_unique(&mut t.notes, msg.clone());
                             }
-                            push_note_unique(&mut t.notes, msg.clone());
                         }
                     }
                 }
-            }
 
-            plan.progress.last_applied_step_idx = idx + 1;
-            continue;
+                plan.progress.last_applied_step_idx = idx + 1;
+                continue;
             }
         }
 
         // dbt_validate failures: mark affected staging tasks as needs_update.
-        if let ThreadStep::ToolEnd { name, observation, .. } = step {
+        if let ThreadStep::ToolEnd {
+            name, observation, ..
+        } = step
+        {
             if name == "dbt_validate" {
                 let ok = observation.ok;
                 if !ok {
-                    let err = observation.errors.first().map(|s| s.as_str()).unwrap_or("dbt_validate failed");
+                    let err = observation
+                        .errors
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or("dbt_validate failed");
                     let note = format!("dbt_validate failed: {}", err.trim());
-                    let logs = observation.extra.get("logs").cloned().unwrap_or(Value::Null);
+                    let logs = observation
+                        .extra
+                        .get("logs")
+                        .cloned()
+                        .unwrap_or(Value::Null);
 
                     // Extract failing models + runtime test failures from dbt stdout.
-                    let failed = crate::data_engineer::dbt_error::extract_failed_models_from_logs(&logs);
-                    let runtime = crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(&logs);
+                    let failed =
+                        crate::data_engineer::dbt_error::extract_failed_models_from_logs(&logs);
+                    let runtime =
+                        crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(&logs);
 
                     let mut stems: Vec<String> = Vec::new();
                     for f in failed.iter() {
@@ -694,7 +742,9 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                     stems.dedup();
 
                     for t in plan.tasks.iter_mut() {
-                        let Some(p) = t.expected_model_path.as_deref() else { continue };
+                        let Some(p) = t.expected_model_path.as_deref() else {
+                            continue;
+                        };
                         let Some(st) = file_stem(p) else { continue };
                         if stems.iter().any(|s| s == &st) {
                             mark_task_needs_update(&mut t.status);
@@ -708,19 +758,28 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
         }
 
         // Also capture dbt_files patch failures (repair steps) and attach them to the best matching task.
-        if let ThreadStep::ToolEnd { name, args, observation, .. } = step {
+        if let ThreadStep::ToolEnd {
+            name,
+            args,
+            observation,
+            ..
+        } = step
+        {
             if name == "dbt_files" {
                 let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
                 if op == "patch" {
                     let ok = observation.ok;
                     let paths = extract_dbt_files_patch_paths(args);
-                    let mut stems: Vec<String> = paths.iter().filter_map(|p| file_stem(p)).collect();
+                    let mut stems: Vec<String> =
+                        paths.iter().filter_map(|p| file_stem(p)).collect();
                     stems.sort();
                     stems.dedup();
                     // Work signal: any targeted model is being actively remediated.
                     let mut matched_any = false;
                     for t in plan.tasks.iter_mut() {
-                        let Some(p) = t.expected_model_path.as_deref() else { continue };
+                        let Some(p) = t.expected_model_path.as_deref() else {
+                            continue;
+                        };
                         let Some(st) = file_stem(p) else { continue };
                         if stems.iter().any(|s| s == &st) {
                             t.status = TaskStatus::InProgress;
@@ -729,7 +788,10 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                     }
                     if ok && matched_any {
                         // Successful, non-preview mutation indicates forward progress; reset batch-failure budget.
-                        let preview = args.get("preview_diff").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let preview = args
+                            .get("preview_diff")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
                         // NOTE: keep this intentionally simple: any successful non-preview patch
                         // targeting a known task is treated as forward progress (even if it was a no-op write).
                         if !preview {
@@ -737,10 +799,16 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                         }
                     }
                     if !ok {
-                        let err = observation.errors.first().map(|s| s.as_str()).unwrap_or("unknown error");
+                        let err = observation
+                            .errors
+                            .first()
+                            .map(|s| s.as_str())
+                            .unwrap_or("unknown error");
                         let note = format!("dbt_files patch failed: {}", err.trim());
                         for t in plan.tasks.iter_mut() {
-                            let Some(p) = t.expected_model_path.as_deref() else { continue };
+                            let Some(p) = t.expected_model_path.as_deref() else {
+                                continue;
+                            };
                             let Some(st) = file_stem(p) else { continue };
                             if stems.iter().any(|s| s == &st) {
                                 mark_task_needs_update(&mut t.status);
@@ -760,22 +828,34 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
     let start = plan.progress.last_applied_step_idx.min(log.steps.len());
     for (idx, step) in log.steps.iter().enumerate().skip(start) {
         // Deterministic batch executor (preferred): derive progress from its structured output.
-        if let ThreadStep::ToolEnd { name, observation, .. } = step {
+        if let ThreadStep::ToolEnd {
+            name, observation, ..
+        } = step
+        {
             if name == "apply_next_model_batch" {
                 let ok = observation.ok;
                 let attempted: Vec<String> = observation
                     .extra
                     .get("attempted_item_names")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let succeeded: Vec<String> = observation
                     .extra
                     .get("succeeded_item_names")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let succ_set: std::collections::HashSet<String> = succeeded.iter().cloned().collect();
+                let succ_set: std::collections::HashSet<String> =
+                    succeeded.iter().cloned().collect();
                 let failed: Vec<String> = attempted
                     .iter()
                     .filter(|n| !succ_set.contains(*n))
@@ -809,65 +889,96 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
             }
         }
 
-        if let ThreadStep::ToolEnd { name, args, observation, .. } = step {
+        if let ThreadStep::ToolEnd {
+            name,
+            args,
+            observation,
+            ..
+        } = step
+        {
             if name != "gold_model" {
                 // fall through
             } else {
-            let ok = observation.ok;
-            let succeeded: Vec<String> = observation
-                .extra
-                .get("succeeded_item_names")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-                .unwrap_or_default();
+                let ok = observation.ok;
+                let succeeded: Vec<String> = observation
+                    .extra
+                    .get("succeeded_item_names")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-            // Work signal: any referenced item names are being actively (re)worked.
-            let arg_names: Vec<String> = args
-                .get("items")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|it| it.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            for name in arg_names.iter() {
-                if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *name) {
-                    mark_task_in_progress(&mut t.status);
-                }
-            }
-
-            for n in succeeded.iter() {
-                model_mark_done(plan, n);
-            }
-            if !ok {
-                let err = observation.errors.first().map(|s| s.as_str()).unwrap_or("unknown error");
-                let note = format!("gold_model failed: {}", err.trim());
+                // Work signal: any referenced item names are being actively (re)worked.
+                let arg_names: Vec<String> = args
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|it| {
+                                it.get("name")
+                                    .and_then(|n| n.as_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 for name in arg_names.iter() {
                     if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *name) {
-                        // Don't regress tasks already marked done in this same step's success list.
-                        if !succeeded.contains(name) {
-                            mark_task_needs_update(&mut t.status);
-                        }
-                        push_note_unique(&mut t.notes, note.clone());
+                        mark_task_in_progress(&mut t.status);
                     }
                 }
-            }
-            plan.progress.last_applied_step_idx = idx + 1;
-            continue;
+
+                for n in succeeded.iter() {
+                    model_mark_done(plan, n);
+                }
+                if !ok {
+                    let err = observation
+                        .errors
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or("unknown error");
+                    let note = format!("gold_model failed: {}", err.trim());
+                    for name in arg_names.iter() {
+                        if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *name) {
+                            // Don't regress tasks already marked done in this same step's success list.
+                            if !succeeded.contains(name) {
+                                mark_task_needs_update(&mut t.status);
+                            }
+                            push_note_unique(&mut t.notes, note.clone());
+                        }
+                    }
+                }
+                plan.progress.last_applied_step_idx = idx + 1;
+                continue;
             }
         }
 
         // dbt_validate failures: mark affected gold tasks as needs_update (best-effort).
-        if let ThreadStep::ToolEnd { name, observation, .. } = step {
+        if let ThreadStep::ToolEnd {
+            name, observation, ..
+        } = step
+        {
             if name == "dbt_validate" {
                 let ok = observation.ok;
                 if !ok {
-                    let err = observation.errors.first().map(|s| s.as_str()).unwrap_or("dbt_validate failed");
+                    let err = observation
+                        .errors
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or("dbt_validate failed");
                     let note = format!("dbt_validate failed: {}", err.trim());
-                    let logs = observation.extra.get("logs").cloned().unwrap_or(Value::Null);
-                    let failed = crate::data_engineer::dbt_error::extract_failed_models_from_logs(&logs);
-                    let runtime = crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(&logs);
+                    let logs = observation
+                        .extra
+                        .get("logs")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let failed =
+                        crate::data_engineer::dbt_error::extract_failed_models_from_logs(&logs);
+                    let runtime =
+                        crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(&logs);
 
                     let mut names: Vec<String> = Vec::new();
                     for f in failed.iter() {
@@ -905,39 +1016,50 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
         }
 
         // Capture dbt_files patch failures during gold repairs too.
-        if let ThreadStep::ToolEnd { name, args, observation, .. } = step {
+        if let ThreadStep::ToolEnd {
+            name,
+            args,
+            observation,
+            ..
+        } = step
+        {
             if name == "dbt_files" {
-            let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
-            if op == "patch" {
-                let ok = observation.ok;
-                let paths = extract_dbt_files_patch_paths(args);
-                let mut stems: Vec<String> = paths.iter().filter_map(|p| file_stem(p)).collect();
-                stems.sort();
-                stems.dedup();
-                // Work signal: patching a gold model implies active remediation of that model task.
-                let mut matched_any = false;
-                for t in plan.tasks.iter_mut() {
-                    if stems.iter().any(|s| s == &t.name) {
-                        t.status = TaskStatus::InProgress;
-                        matched_any = true;
-                    }
-                }
-                if ok && matched_any {
-                    plan.progress.consecutive_batch_failures = 0;
-                }
-                if !ok {
-                    let err = observation.errors.first().map(|s| s.as_str()).unwrap_or("unknown error");
-                    let note = format!("dbt_files patch failed: {}", err.trim());
+                let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                if op == "patch" {
+                    let ok = observation.ok;
+                    let paths = extract_dbt_files_patch_paths(args);
+                    let mut stems: Vec<String> =
+                        paths.iter().filter_map(|p| file_stem(p)).collect();
+                    stems.sort();
+                    stems.dedup();
+                    // Work signal: patching a gold model implies active remediation of that model task.
+                    let mut matched_any = false;
                     for t in plan.tasks.iter_mut() {
                         if stems.iter().any(|s| s == &t.name) {
-                            mark_task_needs_update(&mut t.status);
-                            push_note_unique(&mut t.notes, note.clone());
+                            t.status = TaskStatus::InProgress;
+                            matched_any = true;
                         }
                     }
+                    if ok && matched_any {
+                        plan.progress.consecutive_batch_failures = 0;
+                    }
+                    if !ok {
+                        let err = observation
+                            .errors
+                            .first()
+                            .map(|s| s.as_str())
+                            .unwrap_or("unknown error");
+                        let note = format!("dbt_files patch failed: {}", err.trim());
+                        for t in plan.tasks.iter_mut() {
+                            if stems.iter().any(|s| s == &t.name) {
+                                mark_task_needs_update(&mut t.status);
+                                push_note_unique(&mut t.notes, note.clone());
+                            }
+                        }
+                    }
+                    plan.progress.last_applied_step_idx = idx + 1;
                 }
-                plan.progress.last_applied_step_idx = idx + 1;
-            }
-            continue;
+                continue;
             }
         }
     }
@@ -945,9 +1067,16 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
 
 pub fn summarize_cleanse_plan(plan: &CleansePlan, max_lines: usize) -> String {
     let total = plan.tasks.len();
-    let done = plan.tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
+    let done = plan
+        .tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Done)
+        .count();
     let mut lines: Vec<String> = Vec::new();
-    lines.push(format!("Cleanse plan: status={:?} ({done}/{total} done)", plan.status));
+    lines.push(format!(
+        "Cleanse plan: status={:?} ({done}/{total} done)",
+        plan.status
+    ));
     lines.push("Next batches (dataset_ids):".to_string());
     for (i, b) in plan.batches.iter().take(6).enumerate() {
         lines.push(format!("- batch {}: {}", i + 1, b.join(", ")));
@@ -960,9 +1089,16 @@ pub fn summarize_cleanse_plan(plan: &CleansePlan, max_lines: usize) -> String {
 
 pub fn summarize_model_plan(plan: &ModelPlan, max_lines: usize) -> String {
     let total = plan.tasks.len();
-    let done = plan.tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
+    let done = plan
+        .tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Done)
+        .count();
     let mut lines: Vec<String> = Vec::new();
-    lines.push(format!("Model plan: status={:?} ({done}/{total} done)", plan.status));
+    lines.push(format!(
+        "Model plan: status={:?} ({done}/{total} done)",
+        plan.status
+    ));
     lines.push("Next batches (model names):".to_string());
     for (i, b) in plan.batches.iter().take(6).enumerate() {
         lines.push(format!("- batch {}: {}", i + 1, b.join(", ")));
@@ -990,7 +1126,11 @@ mod tests {
             name: action.to_string(),
             clean_name: action.to_string(),
             args,
-            status: if obs.ok { "ok".to_string() } else { "failed".to_string() },
+            status: if obs.ok {
+                "ok".to_string()
+            } else {
+                "failed".to_string()
+            },
             payload: None,
             observation: obs,
             ts: "t".to_string(),
@@ -1127,9 +1267,15 @@ mod tests {
 
         prune_cleanse_plan_to_grounded_raw_datasets(&mut plan, &allowed);
         assert_eq!(plan.tasks.len(), 1);
-        assert_eq!(plan.tasks[0].dataset_id, "AwsDataCatalog.test_raw.raw_customers");
+        assert_eq!(
+            plan.tasks[0].dataset_id,
+            "AwsDataCatalog.test_raw.raw_customers"
+        );
         assert_eq!(plan.batches.len(), 1);
-        assert_eq!(plan.batches[0], vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]);
+        assert_eq!(
+            plan.batches[0],
+            vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]
+        );
     }
 
     #[test]
@@ -1244,7 +1390,9 @@ mod tests {
             project_snapshot: serde_json::json!({}),
             tasks: vec![CleanseTask {
                 dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
-                expected_model_path: Some("models/staging/stg_test_raw_raw_customers.sql".to_string()),
+                expected_model_path: Some(
+                    "models/staging/stg_test_raw_raw_customers.sql".to_string(),
+                ),
                 invariants: vec![],
                 status: TaskStatus::NeedsUpdate,
                 notes: vec![],
@@ -1271,4 +1419,3 @@ mod tests {
         assert_eq!(plan.progress.consecutive_batch_failures, 0);
     }
 }
-

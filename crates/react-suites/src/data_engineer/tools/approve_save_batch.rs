@@ -59,7 +59,10 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
         if items.is_empty() {
             return Ok(serde_json::json!({"ok": true, "keys": []}));
         }
-        let preview = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+        let preview = args
+            .get("preview_diff")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
         let mut out_diffs: Vec<Value> = Vec::new();
         let mut out_keys: Vec<String> = Vec::new();
         let mut out_files: Vec<Value> = Vec::new();
@@ -76,7 +79,11 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            let content = it.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let content = it
+                .get("content")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             // Refactor: replace legacy {pipeline,namespace} with {dataset_id} for grouping,
             // and allow saving to models/<dataset_id>/<name>.sql and metrics/<dataset_id>/<name>.yaml.
             // Back-compat: accept legacy `namespace` as an alias for `dataset_id`.
@@ -87,13 +94,20 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            let explicit_path = it.get("path").and_then(|x| x.as_str()).map(|s| s.to_string());
+            let explicit_path = it
+                .get("path")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
             if content.trim().is_empty() {
                 return Err(
                     "each item requires {content} and either a {path} (kind='file') or {dataset_id,name} (kind='model'|'metric')".to_string(),
                 );
             }
-            let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+            let base = ctx
+                .keyspace
+                .dbt_prefix(&ctx.scope)
+                .trim_end_matches('/')
+                .to_string();
 
             // Derive path and type
             let (current_key, content_type, rel_path) = if let Some(path) = explicit_path {
@@ -125,7 +139,9 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 (current, ct, rel)
             } else if kind == "model" {
                 // Special-case: dbt schema.yml
-                if dataset_id == "models" && name == "schema" && content.trim_start().to_lowercase().starts_with("version:")
+                if dataset_id == "models"
+                    && name == "schema"
+                    && content.trim_start().to_lowercase().starts_with("version:")
                 {
                     let rel = project_files::MODELS_SCHEMA_YML.to_string();
                     let current = format!("{}/{}", base, rel);
@@ -141,7 +157,10 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 }
             } else if kind == "metric" {
                 if dataset_id.is_empty() || name.is_empty() {
-                    return Err("metric items require {dataset_id,name} (or use kind='file' with a path)".to_string());
+                    return Err(
+                        "metric items require {dataset_id,name} (or use kind='file' with a path)"
+                            .to_string(),
+                    );
                 }
                 let dir = encode_key_component(&dataset_id);
                 let rel = format!("metrics/{}/{}.yaml", dir, name);
@@ -180,7 +199,10 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
             }
 
             // Ensure minimal project file
-            let dbt = ctx.dbt.as_ref().ok_or_else(|| "dbt provider missing".to_string())?;
+            let dbt = ctx
+                .dbt
+                .as_ref()
+                .ok_or_else(|| "dbt provider missing".to_string())?;
             if let Err(e) = dbt.ensure_minimal_project(&ctx.scope).await {
                 return Ok(serde_json::json!({
                     "ok": false,
@@ -218,7 +240,8 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
         if preview {
             return Ok(serde_json::json!({"ok": true, "diffs": out_diffs}));
         }
-        Ok(serde_json::json!({"ok": true, "keys": out_keys, "files": out_files, "warnings": warnings}))
+        Ok(
+            serde_json::json!({"ok": true, "keys": out_keys, "files": out_files, "warnings": warnings}),
+        )
     }
 }
-

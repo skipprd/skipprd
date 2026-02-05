@@ -19,17 +19,27 @@ pub async fn run_discovery(
     limits: &DiscoveryLimits,
     sctx: &crate::suite::SuiteCtx,
 ) -> DiscoveryBundle {
-    let k = if limits.top_k_datasets == 0 { 12 } else { limits.top_k_datasets };
+    let k = if limits.top_k_datasets == 0 {
+        12
+    } else {
+        limits.top_k_datasets
+    };
     let vector = match sctx.vector.as_ref() {
         Some(v) => v,
-        None => return DiscoveryBundle { datasets: Vec::new() },
+        None => {
+            return DiscoveryBundle {
+                datasets: Vec::new(),
+            }
+        }
     };
     let vec = match sctx.llm.embed(&[question.to_string()]) {
         Ok(mut v) => v.pop().unwrap_or_default(),
         Err(_) => Vec::new(),
     };
     if vec.is_empty() {
-        return DiscoveryBundle { datasets: Vec::new() };
+        return DiscoveryBundle {
+            datasets: Vec::new(),
+        };
     }
 
     // Query within the current ReAct project scope.
@@ -44,11 +54,12 @@ pub async fn run_discovery(
     let mut best: HashMap<String, f32> = HashMap::new();
     for (ds, s) in all.into_iter() {
         let entry = best.entry(ds).or_insert(s);
-        if s < *entry { *entry = s; }
+        if s < *entry {
+            *entry = s;
+        }
     }
     let mut pairs: Vec<(String, f32)> = best.into_iter().collect();
     pairs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     let datasets = pairs.into_iter().take(k).collect();
     DiscoveryBundle { datasets }
 }
-

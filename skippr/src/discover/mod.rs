@@ -16,8 +16,8 @@ pub(crate) mod date_formats;
 use crate::discover::date_formats::DateFormats;
 
 pub mod evolution;
-pub mod stats;
 mod filter_float;
+pub mod stats;
 
 mod filter_bool;
 use crate::discover::filter_bool::parse_bool;
@@ -25,14 +25,15 @@ mod filter_parse_int;
 
 use crate::helpers::configuration::Config;
 
-use crate::ingest::ingest::{IngestRecord};
+use crate::ingest::ingest::IngestRecord;
 
 use crate::serdes::json::SerdeJson;
 
 use crate::discover::evolution::Evolution;
 use crate::helpers::timed_rwlock::TimedRwLock;
 
-pub static NUM_ANALYSED_RECORDS: Lazy<TimedRwLock<u64>> = Lazy::new(|| TimedRwLock::new("num_analyised_records".to_string(), 0));
+pub static NUM_ANALYSED_RECORDS: Lazy<TimedRwLock<u64>> =
+    Lazy::new(|| TimedRwLock::new("num_analyised_records".to_string(), 0));
 
 thread_local! {
     static LAST_SUCCESSFUL_EVOLUTION: std::cell::RefCell<HashMap<String, String>> = std::cell::RefCell::new(HashMap::new());
@@ -76,17 +77,14 @@ pub fn discover_ingest(
         return "".to_string();
     }
 
-    AnalyseSchema::analyse_field(
-        &_foo,
-        &field.to_string(),
-        &mut value.clone(),
-        metadata,
-    );
+    AnalyseSchema::analyse_field(&_foo, &field.to_string(), &mut value.clone(), metadata);
 
     // If this is an array of records, make sure repetition_count matches the array length
     if value.is_array() {
         if let Some(field_metadata) = metadata.get_mut(field) {
-            if field_metadata.is_type(SkipprDataType::Array) && field_metadata.is_values_type(SkipprDataType::Record) {
+            if field_metadata.is_type(SkipprDataType::Array)
+                && field_metadata.is_values_type(SkipprDataType::Record)
+            {
                 let array_length = value.as_array().unwrap().len() as i32;
                 if array_length > field_metadata.repetition_count {
                     field_metadata.repetition_count = array_length;
@@ -111,7 +109,8 @@ pub fn discover_ingest(
     // Derive parser kind once per field to avoid repeated string scans in ingest
     if discoverd_data_type == "date" {
         if let Some(meta) = metadata.get_mut(field) {
-            meta.date_parser_kind = Some(AnalyseSchema::derive_date_parser_kind(value, meta.timezone));
+            meta.date_parser_kind =
+                Some(AnalyseSchema::derive_date_parser_kind(value, meta.timezone));
         }
     }
 
@@ -157,7 +156,7 @@ impl OutputMetadata {
         let mut fields = HashMap::new();
         for (field, metadata) in metadata.fields.iter() {
             fields.insert(field.clone(), OutputMetadata::from_metadata(metadata));
-        };
+        }
         let fields_outer: Box<HashMap<String, OutputMetadata>> = Box::new(fields);
 
         output_metadata.fields = fields_outer;
@@ -192,8 +191,13 @@ impl crate::discover::PipelineMetadata {
     #[must_use]
     pub fn new() -> Self {
         let pipeline_name = Config::get_pipeline_name();
-        let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
-        
+        let flatten = Config::truth_value(
+            &Config::get_transform_config()
+                .flatten_events
+                .or(Some("no".to_string()))
+                .unwrap(),
+        );
+
         Self {
             name: pipeline_name,
             metadata: HashMap::new(),
@@ -205,8 +209,13 @@ impl crate::discover::PipelineMetadata {
 
     pub fn from_metadata(metadata: HashMap<String, Metadata>) -> Result<Self, bool> {
         let pipeline_name = Config::get_pipeline_name();
-        let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
-        
+        let flatten = Config::truth_value(
+            &Config::get_transform_config()
+                .flatten_events
+                .or(Some("no".to_string()))
+                .unwrap(),
+        );
+
         Ok(Self {
             name: pipeline_name,
             metadata: metadata,
@@ -221,7 +230,7 @@ impl crate::discover::PipelineMetadata {
         match sql {
             Some(pipeline_sql) => {
                 pipeline_sql.push(sql_str);
-            },
+            }
             None => {
                 self.sql = Some(vec![sql_str]);
             }
@@ -266,32 +275,32 @@ impl Metadata {
             repetition_count: 5,
         })
     }
-    
+
     /// Gets the data type as a SkipprDataType enum
     pub fn data_type(&self) -> SkipprDataType {
         SkipprDataType::from_str(&self.determined_type)
     }
-    
+
     /// Sets the data type using a SkipprDataType enum
     pub fn set_data_type(&mut self, data_type: SkipprDataType) {
         self.determined_type = data_type.as_str().to_string();
     }
-    
+
     /// Gets the values data type as a SkipprDataType enum
     pub fn values_data_type(&self) -> SkipprDataType {
         SkipprDataType::from_str(&self.determined_type_values)
     }
-    
+
     /// Sets the values data type using a SkipprDataType enum
     pub fn set_values_data_type(&mut self, data_type: SkipprDataType) {
         self.determined_type_values = data_type.as_str().to_string();
     }
-    
+
     /// Check if the data type matches a specific type
     pub fn is_type(&self, data_type: SkipprDataType) -> bool {
         self.data_type() == data_type
     }
-    
+
     /// Check if the values data type matches a specific type
     pub fn is_values_type(&self, data_type: SkipprDataType) -> bool {
         self.values_data_type() == data_type
@@ -324,20 +333,28 @@ impl Metadata {
                     // Process each field in the array template
                     for (_sub_key, sub_val) in array_template.fields.iter() {
                         // Create the field path for this array element's field
-                        let field_element_path = format!("{}_{}", element_path, sub_val.out_field_name);
-                        
-                        if sub_val.determined_type == "record" || sub_val.determined_type == "map" || sub_val.determined_type == "array" {
+                        let field_element_path =
+                            format!("{}_{}", element_path, sub_val.out_field_name);
+
+                        if sub_val.determined_type == "record"
+                            || sub_val.determined_type == "map"
+                            || sub_val.determined_type == "array"
+                        {
                             // Recursively process complex types
                             let mut temp_metadata = sub_val.clone();
                             temp_metadata.out_field_name = sub_val.out_field_name.clone();
-                            Self::_flatten_metadata(&temp_metadata, flattened, element_path.clone());
+                            Self::_flatten_metadata(
+                                &temp_metadata,
+                                flattened,
+                                element_path.clone(),
+                            );
                         } else {
                             // Add primitive type to flattened fields
                             let mut el = OutputMetadata::new();
                             el.out_field_name = field_element_path.clone();
                             el.determined_type = sub_val.determined_type.clone();
                             el.determined_type_values = sub_val.determined_type_values.clone();
-                            
+
                             flattened.fields.insert(field_element_path.clone(), el);
                         }
                     }
@@ -354,13 +371,13 @@ impl Metadata {
                 } else {
                     format!("{}_{}", field_path, val.out_field_name)
                 };
-                
+
                 // Add the primitive array to the flattened fields
                 let mut el = OutputMetadata::new();
                 el.out_field_name = new_field_path.clone();
                 el.determined_type = val.determined_type.clone();
                 el.determined_type_values = val.determined_type_values.clone();
-                
+
                 flattened.fields.insert(new_field_path.clone(), el);
             } else {
                 // Standard path for non-array fields
@@ -374,7 +391,10 @@ impl Metadata {
                     format!("{}_{}", field_path, val.out_field_name)
                 };
 
-                if val.determined_type == "record" || val.determined_type == "map" || val.determined_type == "array" {
+                if val.determined_type == "record"
+                    || val.determined_type == "map"
+                    || val.determined_type == "array"
+                {
                     Self::_flatten_metadata(val, flattened, new_field_path);
                 } else {
                     let mut el = OutputMetadata::new();
@@ -389,30 +409,28 @@ impl Metadata {
     }
 
     /**
-    * Get the field name to use in the output schema
-    * @deprecated - this looks dumb, we pass the metadata and search for a property that we could have accessed directly.
-    *             - Unless we need to add conditions in the future, this is a waste of time.
-    * @param {string} field
-    * @returns {string}
-    */
+     * Get the field name to use in the output schema
+     * @deprecated - this looks dumb, we pass the metadata and search for a property that we could have accessed directly.
+     *             - Unless we need to add conditions in the future, this is a waste of time.
+     * @param {string} field
+     * @returns {string}
+     */
     pub fn get_field_out_field_name(metadata: &HashMap<String, Metadata>, field: &str) -> String {
         use std::cell::RefCell;
         use std::collections::HashMap;
-        
+
         // Thread-local cache for field name transformations
         thread_local! {
             static FIELD_NAME_CACHE: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
         }
-        
+
         // Check cache first
-        let cached_name = FIELD_NAME_CACHE.with(|cache| {
-            cache.borrow().get(field).cloned()
-        });
-        
+        let cached_name = FIELD_NAME_CACHE.with(|cache| cache.borrow().get(field).cloned());
+
         if let Some(cached) = cached_name {
             return cached;
         }
-        
+
         // Cache miss, perform the lookup
         let out_field_name = match metadata.get(field) {
             Some(metadata) => {
@@ -422,15 +440,15 @@ impl Metadata {
                     field.to_string()
                 }
             }
-            None => field.to_string()
+            None => field.to_string(),
         };
-        
+
         // Store result in cache
         FIELD_NAME_CACHE.with(|cache| {
             let mut cache_ref = cache.borrow_mut();
             cache_ref.insert(field.to_string(), out_field_name.clone());
         });
-        
+
         out_field_name
     }
 
@@ -440,7 +458,6 @@ impl Metadata {
         metadata: &'a mut Metadata,
         field_str: &str,
     ) -> Option<&'a mut Metadata> {
-
         if field_str.contains('.') {
             let mut fields: Vec<&str> = field_str.split('.').collect();
             return Metadata::get_nested_metadata_from_dot_notation(metadata, &mut fields);
@@ -449,13 +466,18 @@ impl Metadata {
         Metadata::get_nested_metadata_from_flat_notation(metadata, field_str)
     }
 
-    fn get_nested_metadata_from_flat_notation<'a>(metadata: &'a mut Metadata, field_str: &str) -> Option<&'a mut Metadata> {
+    fn get_nested_metadata_from_flat_notation<'a>(
+        metadata: &'a mut Metadata,
+        field_str: &str,
+    ) -> Option<&'a mut Metadata> {
         if metadata.out_field_name == field_str {
             return Some(metadata);
         }
 
         for nested_metadata in metadata.fields.values_mut() {
-            if let Some(found_metadata) = Metadata::get_nested_metadata_from_flat_notation(nested_metadata, field_str) {
+            if let Some(found_metadata) =
+                Metadata::get_nested_metadata_from_flat_notation(nested_metadata, field_str)
+            {
                 return Some(found_metadata);
             }
         }
@@ -463,8 +485,10 @@ impl Metadata {
         None
     }
 
-    fn get_nested_metadata_from_dot_notation<'a>(metadata: &'a mut Metadata, fields: &mut Vec<&str>) -> Option<&'a mut Metadata> {
-
+    fn get_nested_metadata_from_dot_notation<'a>(
+        metadata: &'a mut Metadata,
+        fields: &mut Vec<&str>,
+    ) -> Option<&'a mut Metadata> {
         let mut current_metadata = metadata;
         // remove and return first element from fields
         let field = fields.remove(0);
@@ -473,10 +497,11 @@ impl Metadata {
             if fields.len() == 0 {
                 return Some(next_metadata);
             }
-            current_metadata = match Metadata::get_nested_metadata_from_dot_notation(next_metadata, fields) {
-                Some(found_metadata) => found_metadata,
-                None => return None,
-            }
+            current_metadata =
+                match Metadata::get_nested_metadata_from_dot_notation(next_metadata, fields) {
+                    Some(found_metadata) => found_metadata,
+                    None => return None,
+                }
         } else {
             return None;
         }
@@ -484,8 +509,10 @@ impl Metadata {
         Some(current_metadata)
     }
 
-    pub fn remove_nested_metadata_from_dot_notation<'a>(metadata: &'a mut Metadata, field_str: &str) -> Option<&'a mut Metadata> {
-
+    pub fn remove_nested_metadata_from_dot_notation<'a>(
+        metadata: &'a mut Metadata,
+        field_str: &str,
+    ) -> Option<&'a mut Metadata> {
         let mut fields: Vec<&str> = Vec::new();
 
         if field_str.contains('.') {
@@ -504,34 +531,38 @@ impl Metadata {
                 return None;
             } else {
                 let next_metadata = current_metadata.fields.get_mut(field).unwrap();
-                Metadata::remove_nested_metadata_from_dot_notation(next_metadata, fields.join(".").as_str())
+                Metadata::remove_nested_metadata_from_dot_notation(
+                    next_metadata,
+                    fields.join(".").as_str(),
+                )
             }
             // current_metadata = match Metadata::remove_nested_metadata_from_dot_notation(next_metadata, fields.join(".").as_str()) {
-                // Some(found_metadata) => return found_metadata,
-                // None => return None,
+            // Some(found_metadata) => return found_metadata,
+            // None => return None,
             // }
         } else {
             return None;
         }
-
-
     }
 
     /**
-    * Look up a metadata entry by its output field name
-    * This is useful when we need to find the original metadata for a transformed field name
-    * @param {HashMap<String, Metadata>} metadata
-    * @param {String} out_field_name
-    * @returns {Option<&Metadata>}
-    */
-    pub fn get_metadata_by_out_field_name<'a>(metadata: &'a HashMap<String, Metadata>, out_field_name: &str) -> Option<(&'a String, &'a Metadata)> {
+     * Look up a metadata entry by its output field name
+     * This is useful when we need to find the original metadata for a transformed field name
+     * @param {HashMap<String, Metadata>} metadata
+     * @param {String} out_field_name
+     * @returns {Option<&Metadata>}
+     */
+    pub fn get_metadata_by_out_field_name<'a>(
+        metadata: &'a HashMap<String, Metadata>,
+        out_field_name: &str,
+    ) -> Option<(&'a String, &'a Metadata)> {
         // First try a direct match with the output field name
         for (key, meta) in metadata.iter() {
             if meta.out_field_name == out_field_name {
                 return Some((key, meta));
             }
         }
-        
+
         None
     }
 }
@@ -599,7 +630,7 @@ impl SkipprDataType {
             _ => SkipprDataType::Unknown,
         }
     }
-    
+
     /// Convert enum variant to string representation
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -618,7 +649,7 @@ impl SkipprDataType {
             SkipprDataType::Unknown => "unknown",
         }
     }
-    
+
     /// Convert SkipprDataType to SkipprTypes
     pub fn to_skippr_type(&self) -> Option<SkipprTypes> {
         match self {
@@ -637,7 +668,7 @@ impl SkipprDataType {
             SkipprDataType::Unknown => None,
         }
     }
-    
+
     /// Convert from SkipprTypes to SkipprDataType
     pub fn from_skippr_type(skippr_type: &SkipprTypes) -> Self {
         match skippr_type {
@@ -847,26 +878,30 @@ impl AnalyseSchema {
         let mut _skpr_namespace: String = "".to_string();
         let pipeline_name = Config::get_pipeline_name();
 
-        let _flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
-        
+        let _flatten = Config::truth_value(
+            &Config::get_transform_config()
+                .flatten_events
+                .or(Some("no".to_string()))
+                .unwrap(),
+        );
+
         let mut records: Vec<Value> = SerdeJson::deserialize(str);
-        
+
         let entity_field_dot = match Config::get_transform_config().record_field_path {
             Some(ref field) => field.clone(),
-            None => "".to_string()
+            None => "".to_string(),
         };
-        
+
         if !entity_field_dot.is_empty() {
             records = match Helpers::process_values(&records, &entity_field_dot) {
                 Some(records) => records,
-                None => Vec::new()
+                None => Vec::new(),
             };
         }
-        
+
         let mut unwrapped_records: Vec<Value> = Vec::new();
-        
+
         for record in records {
-        
             match record.as_object() {
                 Some(_v) => unwrapped_records.push(record),
                 None => {
@@ -876,36 +911,36 @@ impl AnalyseSchema {
                                 // println!("Item: {}", item);
                                 unwrapped_records.push(item.clone());
                             }
-                        },
+                        }
                         None => {
-                          continue;
+                            continue;
                         }
                     }
                 }
             };
         }
-        
+
         // println!("Unwrapped records: {:?}", unwrapped_records.len());
-        
+
         for v in unwrapped_records {
             _skpr_namespace = Helpers::parse_namespace_field(
                 &v,
                 pipeline_name.clone(),
                 &mut parse_namespace_cache,
             );
-        
+
             if !metadata.contains_key(&_skpr_namespace) {
                 metadata.insert(_skpr_namespace.clone(), Metadata::new().unwrap());
             }
-            
+
             if counts >= max_read_records.unwrap_or(1000) {
                 return counts;
             }
-            
+
             if v.is_null() {
                 continue;
             }
-            
+
             match v.type_id() {
                 _value => {
                     let mut ingest_record = IngestRecord {
@@ -916,12 +951,12 @@ impl AnalyseSchema {
                         skpr_partition: "".to_string(),
                         record: v,
                     };
-        
+
                     counts += 1;
-                    
+
                     // println!("Analyzing count: {}, record: {}", counts, ingest_record.record);
                     // println!("Analyzing count: {}", counts);
-        
+
                     self.analyse_payload(
                         &mut ingest_record.record,
                         &mut metadata
@@ -929,19 +964,15 @@ impl AnalyseSchema {
                             .unwrap()
                             .fields,
                     );
-                }
-                // Remove this unreachable pattern
+                } // Remove this unreachable pattern
             };
         }
-        
-        counts
 
-      
+        counts
     }
 
     // pub fn analyse_payload(&mut self, message: &HashMap<String, String>, metadata: &mut HashMap<String, Metadata>) {
     pub fn analyse_payload(&self, message: &Value, metadata: &mut HashMap<String, Metadata>) {
-
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
         for (field, value) in message.as_object().unwrap() {
@@ -997,7 +1028,9 @@ impl AnalyseSchema {
         if value.is_array() {
             // Update repetition_count only for arrays of records
             if let Some(field_metadata) = metadata.get_mut(field) {
-                if field_metadata.determined_type == "array" && field_metadata.determined_type_values == "record" {
+                if field_metadata.determined_type == "array"
+                    && field_metadata.determined_type_values == "record"
+                {
                     let array_length = value.as_array().unwrap().len() as i32;
                     if array_length > field_metadata.repetition_count {
                         field_metadata.repetition_count = array_length;
@@ -1131,9 +1164,7 @@ impl AnalyseSchema {
                 }
             }
 
-
             // let demoted_types = vec!["boolean".to_string(), "date".to_string(), "timestamp".to_string(), "timestamp_milli".to_string()];
-
 
             // if type_count.len() > 1 {
             //     for (type_1, count) in type_count.clone() {
@@ -1142,7 +1173,6 @@ impl AnalyseSchema {
             //         }
             //     }
             // }
-
 
             if type_count.contains_key("record") {
                 // If the value is actually an array (JSON array) but contains records,
@@ -1160,7 +1190,7 @@ impl AnalyseSchema {
             {
                 data_type = "record".to_string();
             }
-            
+
             // Set the initial repetition_count for arrays of records
             if data_type == "array" && value.is_array() {
                 // Check if this is an array of records by examining the first element
@@ -1169,11 +1199,12 @@ impl AnalyseSchema {
                     let array_length = array_values.len() as i32;
                     if let Some(field_metadata) = metadata.get_mut(field) {
                         field_metadata.determined_type_values = "record".to_string();
-                        field_metadata.repetition_count = array_length.max(field_metadata.repetition_count);
+                        field_metadata.repetition_count =
+                            array_length.max(field_metadata.repetition_count);
                     }
                 }
             }
-            
+
             // NOTE:
             //  - maps sometimes become records, any previously loaded data will be invalid.
             //       which has to be handled by evolution. Resulting in the original map field (e.g. `foo`)
@@ -1245,13 +1276,13 @@ impl AnalyseSchema {
                 .as_mut()
                 .is_none()
                 || metadata
-                .get_mut(field)
-                .unwrap()
-                .date_candidate
-                .as_mut()
-                .unwrap()
-                .check_count
-                < DATE_FIELD_VALIDATION_MIN_SAMPLE
+                    .get_mut(field)
+                    .unwrap()
+                    .date_candidate
+                    .as_mut()
+                    .unwrap()
+                    .check_count
+                    < DATE_FIELD_VALIDATION_MIN_SAMPLE
             {
                 // println!("Checking if {} is date type", field);
 
@@ -1262,7 +1293,10 @@ impl AnalyseSchema {
                     // self.set_date_field_candidate(field, metadata, &format);
                     self.increment_date_field_candidate_count(field, metadata, &format.to_string());
                     // If the string clearly includes a timezone indicator, mark metadata timezone as present
-                    if value_str.contains('Z') || value_str.rfind('+').is_some() || value_str.rfind('-').map(|i| i > 10).unwrap_or(false) {
+                    if value_str.contains('Z')
+                        || value_str.rfind('+').is_some()
+                        || value_str.rfind('-').map(|i| i > 10).unwrap_or(false)
+                    {
                         if let Some(meta) = metadata.get_mut(field) {
                             meta.timezone = true;
                         }
@@ -1311,7 +1345,7 @@ impl AnalyseSchema {
     pub fn check_string_or_int(&self, value: &mut String) -> String {
         let mut data_type = get_type(value);
 
-       // check is_32_bit_signed_int or is_64_bit_signed_int
+        // check is_32_bit_signed_int or is_64_bit_signed_int
 
         if data_type == *"string" {
             if self.is_32_bit_signed_int(value) {
@@ -1364,13 +1398,13 @@ impl AnalyseSchema {
             .as_mut()
             .is_some()
             && metadata
-            .get_mut(field)
-            .unwrap()
-            .date_candidate
-            .as_mut()
-            .unwrap()
-            .valid_count
-            == 0
+                .get_mut(field)
+                .unwrap()
+                .date_candidate
+                .as_mut()
+                .unwrap()
+                .valid_count
+                == 0
         {
             metadata
                 .get_mut(field)
@@ -1437,7 +1471,7 @@ impl AnalyseSchema {
             Ok(val) => val,
             Err(_) => {
                 return false;
-            },
+            }
         };
 
         if val >= MIN && val <= MAX {
@@ -1452,7 +1486,7 @@ impl AnalyseSchema {
             Ok(val) => val,
             Err(_) => {
                 return false;
-            },
+            }
         };
 
         const MIN: i64 = -9223372036854775808;
@@ -1476,14 +1510,14 @@ impl AnalyseSchema {
                 if timestamp_len != 13 {
                     return false;
                 }
-                
+
                 // Timestamps earlier than 2010-01-01 are less likely to be timestamps
                 // and more likely to be just large integers
                 let min_timestamp_ms = 1262304000000; // 2010-01-01 00:00:00 UTC in milliseconds
                 if millis < min_timestamp_ms {
                     return false;
                 }
-                
+
                 let date = Utc.timestamp_millis_opt(millis).unwrap();
                 let min_date = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap();
                 let max_date = Utc.with_ymd_and_hms(2040, 1, 1, 0, 0, 0).unwrap();
@@ -1495,7 +1529,7 @@ impl AnalyseSchema {
             Err(_) => false,
         }
     }
-    
+
     pub fn is_valid_timestamp(&self, timestamp: &mut String) -> bool {
         match timestamp.parse::<i64>() {
             Ok(seconds) => {
@@ -1505,14 +1539,14 @@ impl AnalyseSchema {
                 if timestamp_len < 10 || timestamp_len > 11 {
                     return false;
                 }
-                
+
                 // Timestamps earlier than 2010-01-01 are less likely to be timestamps
                 // and more likely to be just large integers
                 let min_timestamp = 1262304000; // 2010-01-01 00:00:00 UTC
                 if seconds < min_timestamp {
                     return false;
                 }
-                
+
                 match DateTime::from_timestamp(seconds, 0) {
                     Some(date) => {
                         // Use Unix epoch as minimum date instead of 2001
@@ -1538,7 +1572,7 @@ impl AnalyseSchema {
                 return Some(format.name());
             }
         }
-        
+
         // Then check for ISO8601 format without milliseconds
         if value.contains('T') && value.contains('Z') && !value.contains('.') {
             let format = DateFormats::Iso8601_2;
@@ -1569,40 +1603,46 @@ impl AnalyseSchema {
             }
         }
         // Check space separated with offset
-        if value.contains(' ') && (value.contains('+') || value.rfind('-').map(|i| i > 10).unwrap_or(false)) {
+        if value.contains(' ')
+            && (value.contains('+') || value.rfind('-').map(|i| i > 10).unwrap_or(false))
+        {
             let format = DateFormats::Iso8601SpaceOffset;
             if let Ok(_) = Helpers::parse_date_from_string(value, format.as_str()) {
                 return Some(format.name());
             }
         }
         // Fractional seconds with offset
-        if value.contains('T') && (value.contains('+') || value.rfind('-').map(|i| i > 10).unwrap_or(false)) && value.contains('.') {
+        if value.contains('T')
+            && (value.contains('+') || value.rfind('-').map(|i| i > 10).unwrap_or(false))
+            && value.contains('.')
+        {
             let format = DateFormats::Iso8601_4; // %f%z
             if let Ok(_) = Helpers::parse_date_from_string(value, format.as_str()) {
                 return Some(format.name());
             }
         }
-        if value.contains(' ') && (value.contains('+') || value.rfind('-').map(|i| i > 10).unwrap_or(false)) && value.contains('.') {
+        if value.contains(' ')
+            && (value.contains('+') || value.rfind('-').map(|i| i > 10).unwrap_or(false))
+            && value.contains('.')
+        {
             let fmt = "%Y-%m-%d %H:%M:%S.%f%z";
             if let Ok(_) = Helpers::parse_date_from_string(value, fmt) {
                 return Some("Iso8601_SpaceOffset");
             }
         }
-        
+
         // Check all remaining formats
         for format in DateFormats::iterator() {
             // Skip the formats we've already checked
             if *format == DateFormats::Iso8601 || *format == DateFormats::Iso8601_2 {
                 continue;
             }
-            
+
             let found_format = match Helpers::parse_date_from_string(value, format.as_str()) {
                 Ok(_) => {
                     return Some(format.name());
                 }
-                Err(_) => {
-                    None
-                }
+                Err(_) => None,
             };
 
             if found_format.is_some() {
@@ -1615,27 +1655,41 @@ impl AnalyseSchema {
         None
     }
 
-    fn derive_date_parser_kind(sample_value: &serde_json::Value, expect_timezone: bool) -> DateParserKind {
-        let s = match sample_value.as_str() { Some(x) => x, None => return DateParserKind::RFC3339 };
+    fn derive_date_parser_kind(
+        sample_value: &serde_json::Value,
+        expect_timezone: bool,
+    ) -> DateParserKind {
+        let s = match sample_value.as_str() {
+            Some(x) => x,
+            None => return DateParserKind::RFC3339,
+        };
         let has_ms = s.contains('.');
         let sep_t = s.contains('T');
         let has_z = s.ends_with('Z');
         let has_off = s.contains('+') || s.rfind('-').map(|i| i > 10).unwrap_or(false);
         if expect_timezone {
             match (has_ms, sep_t, has_z, has_off) {
-                (false, true,  true,  _    ) => DateParserKind::ZNoMsT,
-                (false, false, true,  _    ) => DateParserKind::ZNoMsSpace,
-                (true,  true,  true,  _    ) => DateParserKind::ZMsT,
-                (true,  false, true,  _    ) => DateParserKind::ZMsSpace,
-                (false, true,  _,     true ) => DateParserKind::OffNoMsT,
-                (false, false, _,     true ) => DateParserKind::OffNoMsSpace,
-                (true,  true,  _,     true ) => DateParserKind::OffMsT,
-                (true,  false, _,     true ) => DateParserKind::OffMsSpace,
+                (false, true, true, _) => DateParserKind::ZNoMsT,
+                (false, false, true, _) => DateParserKind::ZNoMsSpace,
+                (true, true, true, _) => DateParserKind::ZMsT,
+                (true, false, true, _) => DateParserKind::ZMsSpace,
+                (false, true, _, true) => DateParserKind::OffNoMsT,
+                (false, false, _, true) => DateParserKind::OffNoMsSpace,
+                (true, true, _, true) => DateParserKind::OffMsT,
+                (true, false, _, true) => DateParserKind::OffMsSpace,
                 _ => DateParserKind::RFC3339,
             }
         } else {
-            if s.len() == 19 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' && (s.as_bytes()[10] == b' ' || s.as_bytes()[10] == b'T') { return DateParserKind::NaiveMysql; }
-            if s.len() == 10 { return DateParserKind::NaiveDateOnly; }
+            if s.len() == 19
+                && s.as_bytes()[4] == b'-'
+                && s.as_bytes()[7] == b'-'
+                && (s.as_bytes()[10] == b' ' || s.as_bytes()[10] == b'T')
+            {
+                return DateParserKind::NaiveMysql;
+            }
+            if s.len() == 10 {
+                return DateParserKind::NaiveDateOnly;
+            }
             DateParserKind::RFC3339
         }
     }
@@ -1725,7 +1779,13 @@ impl AnalyseSchema {
             //     array.get_mut(field).unwrap().determined_type = data_type.to_string();
             // }
         } else {
-            let new_count: u32 = metadata.get_mut(field).unwrap().types.get(data_type).unwrap() + 1;
+            let new_count: u32 = metadata
+                .get_mut(field)
+                .unwrap()
+                .types
+                .get(data_type)
+                .unwrap()
+                + 1;
             metadata
                 .get_mut(field)
                 .unwrap()
@@ -1736,17 +1796,22 @@ impl AnalyseSchema {
         // I found in practice theres too many false possitives for array values types of timestamp
         // @todo - probably better handeled in determine_field_types, not sure why it isn't already working
         // if metadata.get(field).unwrap().parent_type != "array" {
-            if data_type == "integer" {
-                let valid_timestamp = self.is_valid_timestamp(value);
-                if valid_timestamp {
-                    self.set_discovered_occurrence(metadata, field, &"timestamp".to_string(), value);
-                }
-            } else if data_type == "long" {
-                let valid_timestamp = self.is_valid_timestamp_milli(value);
-                if valid_timestamp {
-                    self.set_discovered_occurrence(metadata, field, &"timestamp_milli".to_string(), value);
-                }
+        if data_type == "integer" {
+            let valid_timestamp = self.is_valid_timestamp(value);
+            if valid_timestamp {
+                self.set_discovered_occurrence(metadata, field, &"timestamp".to_string(), value);
             }
+        } else if data_type == "long" {
+            let valid_timestamp = self.is_valid_timestamp_milli(value);
+            if valid_timestamp {
+                self.set_discovered_occurrence(
+                    metadata,
+                    field,
+                    &"timestamp_milli".to_string(),
+                    value,
+                );
+            }
+        }
         // }
     }
 
@@ -1758,7 +1823,6 @@ impl AnalyseSchema {
         // let demoted_types = vec!["boolean", "date", "timestamp", "timestamp_milli"];
 
         for (field_name, field) in metadata.iter_mut() {
-
             // Useful for field evolution logic for maps, which only support one sub-field type
             if let Some(parent_type) = parent_type {
                 field.parent_type = parent_type.to_string();
@@ -1805,8 +1869,8 @@ impl AnalyseSchema {
                                 //     || (field.types.len() > 1
                                 //         && !demoted_types.contains(&data_type.as_str()))
                                 // {
-                                    highest_type = data_type.to_string();
-                                    highest_count = *data_type_count;
+                                highest_type = data_type.to_string();
+                                highest_count = *data_type_count;
                                 // }
                             }
                         }
@@ -1860,11 +1924,11 @@ impl AnalyseSchema {
                             //     || (type_count.len() > 1
                             //         && !demoted_types.contains(&data_type.as_str()))
                             // {
-                                if type_count.get(data_type).is_none() {
-                                    type_count.insert(data_type.to_string(), *data_type_count);
-                                } else {
-                                    *type_count.get_mut(data_type).unwrap() += data_type_count;
-                                }
+                            if type_count.get(data_type).is_none() {
+                                type_count.insert(data_type.to_string(), *data_type_count);
+                            } else {
+                                *type_count.get_mut(data_type).unwrap() += data_type_count;
+                            }
                             // }
                         }
                     }
@@ -1883,8 +1947,7 @@ impl AnalyseSchema {
 
                     field.determined_type_values = values_type.to_string();
 
-                    if field.determined_type == *"array"
-                        && field.determined_type_values != "record"
+                    if field.determined_type == *"array" && field.determined_type_values != "record"
                     {
                         field.fields.clear();
                     }
@@ -1894,9 +1957,9 @@ impl AnalyseSchema {
                 // println!("Field {} values type is {}", field_name, field.determined_type_values);
 
                 if field.determined_type != *"array"
-                    || (field.determined_type == *"array" && field.determined_type_values == "record")
+                    || (field.determined_type == *"array"
+                        && field.determined_type_values == "record")
                 {
-
                     AnalyseSchema::determine_field_types(
                         &mut field.fields,
                         Some(&field.determined_type),
@@ -1955,7 +2018,6 @@ impl AnalyseSchema {
 mod check_string_or_int_tests {
     use super::*;
 
-
     #[test]
     fn test_32_bit_signed_int() {
         let dummy = AnalyseSchema { i: 0 };
@@ -1981,7 +2043,6 @@ mod check_string_or_int_tests {
         let dummy = AnalyseSchema { i: 0 };
         let mut value = "Hello".to_string();
         assert_eq!(dummy.check_string_or_int(&mut value), "string"); // Assuming get_type returns "string"
-
     }
 }
 
@@ -2050,7 +2111,6 @@ mod is_64_int_tests {
         assert!(!dummy.is_64_bit_signed_int(&mut value));
     }
 }
-
 
 #[cfg(test)]
 mod get_type_bool_tests {
@@ -2144,13 +2204,11 @@ mod get_type_bool_tests {
         let subject = "no";
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
     }
-
 }
 
 #[cfg(test)]
 mod valid_timestamps_tests {
     use super::*;
-    
 
     #[test]
     fn test_valid_timestamps() {
@@ -2185,7 +2243,7 @@ mod valid_timestamps_tests {
         let my_struct = AnalyseSchema { i: 0 };
         assert!(!my_struct.is_valid_timestamp(&mut "abc".to_string()));
         assert!(!my_struct.is_valid_timestamp(&mut "1970-01-01".to_string())); // Non-numeric
-        // Add more non-numeric or malformed cases here
+                                                                               // Add more non-numeric or malformed cases here
     }
 
     #[test]
@@ -2193,17 +2251,17 @@ mod valid_timestamps_tests {
         let my_struct = AnalyseSchema { i: 0 };
         // Test cases for potential overflow or underflow conditions
         assert!(!my_struct.is_valid_timestamp(&mut "99999999999999999999".to_string())); // Very large number
-        assert!(!my_struct.is_valid_timestamp(&mut "-99999999999999999999".to_string())); // Very negative number
+        assert!(!my_struct.is_valid_timestamp(&mut "-99999999999999999999".to_string()));
+        // Very negative number
     }
 }
-
 
 #[cfg(test)]
 mod is_valid_date_tests {
     use super::*;
-    use serial_test::serial;
     #[allow(unused_imports)]
     use chrono::{DateTime, NaiveDate, NaiveDateTime};
+    use serial_test::serial;
 
     #[test]
     #[serial]
@@ -2285,9 +2343,9 @@ mod is_valid_date_tests {
 #[cfg(test)]
 mod discover_date_formats_tests {
     use super::*;
-    use serial_test::serial;
     #[allow(unused_imports)]
     use chrono::NaiveDateTime;
+    use serial_test::serial;
 
     #[test]
     #[serial]
@@ -2323,7 +2381,7 @@ mod tests {
     use serial_test::serial;
     use std::collections::HashMap;
     #[allow(unused_imports)]
-    use std::fs::{File, OpenOptions, remove_file};
+    use std::fs::{remove_file, File, OpenOptions};
     #[allow(unused_imports)]
     use std::io::{Seek, Write};
 
@@ -2366,7 +2424,7 @@ mod tests {
         let _data_dir = Config::get_data_dir();
 
         let _rng = rand::thread_rng(); // Removed mut since it's not needed
-        
+
         // let random_tmp_file_name = rng.gen::<i32>();
 
         // let mut test_file = OpenOptions::new()
@@ -2389,14 +2447,13 @@ mod tests {
 
         let mut _fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new()); // Removed mut since it's not needed
 
-        AnalyseSchema::infer_json_schema(
-            &_foo,
-            &mut record_line,
-            Some(1),
-            &mut _fields,
-        );
+        AnalyseSchema::infer_json_schema(&_foo, &mut record_line, Some(1), &mut _fields);
 
-        AnalyseSchema::determine_field_types(&mut _fields.get_mut("default").unwrap().fields, None, false);
+        AnalyseSchema::determine_field_types(
+            &mut _fields.get_mut("default").unwrap().fields,
+            None,
+            false,
+        );
 
         // This line was trying to remove a file that doesn't exist
         // let _ = remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
@@ -2416,21 +2473,93 @@ mod tests {
         // println!("{:?}", new_meta.get("default").unwrap().fields.get("abc2").unwrap().determined_type);
         // println!("{:?}", new_meta.get("default").unwrap().fields.get("abc2").unwrap().determined_type_values);
 
-        assert_eq!(_fields.get("default").unwrap().fields.get("abc1").unwrap().determined_type, "array");
-        assert_eq!(_fields.get("default").unwrap().fields.get("abc1").unwrap().determined_type_values, "integer");
-        assert_eq!(_fields.get("default").unwrap().fields.get("abc2").unwrap().determined_type, "array");
-        assert_eq!(_fields.get("default").unwrap().fields.get("abc2").unwrap().determined_type_values, "string");
+        assert_eq!(
+            _fields
+                .get("default")
+                .unwrap()
+                .fields
+                .get("abc1")
+                .unwrap()
+                .determined_type,
+            "array"
+        );
+        assert_eq!(
+            _fields
+                .get("default")
+                .unwrap()
+                .fields
+                .get("abc1")
+                .unwrap()
+                .determined_type_values,
+            "integer"
+        );
+        assert_eq!(
+            _fields
+                .get("default")
+                .unwrap()
+                .fields
+                .get("abc2")
+                .unwrap()
+                .determined_type,
+            "array"
+        );
+        assert_eq!(
+            _fields
+                .get("default")
+                .unwrap()
+                .fields
+                .get("abc2")
+                .unwrap()
+                .determined_type_values,
+            "string"
+        );
         // assert_eq!(_fields.get("default").unwrap().fields.get("abc3").unwrap().determined_type, "array");
         // assert_eq!(_fields.get("default").unwrap().fields.get("abc3").unwrap().determined_type_values, "string" );
         // assert_eq!(_fields.get("default").unwrap().fields.get("abc4").unwrap().determined_type, "array");
         // assert_eq!(_fields.get("default").unwrap().fields.get("abc4").unwrap().determined_type_values, "string");
         // assert_eq!(_fields.get("default").unwrap().fields.get("abc5").unwrap().determined_type, "array");
         // assert_eq!(_fields.get("default").unwrap().fields.get("abc5").unwrap().determined_type_values, "integer");
-        assert_eq!(_fields.get("default").unwrap().fields.get("abc6").unwrap().determined_type, "array");
-        assert_eq!(_fields.get("default").unwrap().fields.get("abc7").unwrap().determined_type, "record");
+        assert_eq!(
+            _fields
+                .get("default")
+                .unwrap()
+                .fields
+                .get("abc6")
+                .unwrap()
+                .determined_type,
+            "array"
+        );
+        assert_eq!(
+            _fields
+                .get("default")
+                .unwrap()
+                .fields
+                .get("abc7")
+                .unwrap()
+                .determined_type,
+            "record"
+        );
 
-        assert_eq!(_fields.get("default").unwrap().fields.get("abc8").unwrap().determined_type, "array");
-        assert_eq!(_fields.get("default").unwrap().fields.get("abc8").unwrap().determined_type_values, "record");
+        assert_eq!(
+            _fields
+                .get("default")
+                .unwrap()
+                .fields
+                .get("abc8")
+                .unwrap()
+                .determined_type,
+            "array"
+        );
+        assert_eq!(
+            _fields
+                .get("default")
+                .unwrap()
+                .fields
+                .get("abc8")
+                .unwrap()
+                .determined_type_values,
+            "record"
+        );
 
         // match _fields.get("default").unwrap().fields.get("abc8").unwrap().fields.get("1") {
         //     Some(_) => {
@@ -2449,7 +2578,6 @@ mod tests {
         // println!("{:?}", _fields.get("default").unwrap().fields.get("abc8").unwrap().fields.get("1").unwrap());
         // assert_eq!(_fields.get("default").unwrap().fields.get("abc8").unwrap().fields.get("1").unwrap().fields.get("a").unwrap().determined_type, "string");
         // assert_eq!(_fields.get("default").unwrap().fields.get("abc8").unwrap().fields.get("1").unwrap().fields.get("b").unwrap().determined_type, "integer");
-
     }
 
     #[test]
@@ -2478,7 +2606,7 @@ mod tests {
         let mut record_line = serde_json::to_string(&json).unwrap();
 
         let _rng = rand::thread_rng(); // Removed mut since it's not needed
-        
+
         // let random_tmp_file_name = rng.gen::<i32>();
 
         // let mut test_file = OpenOptions::new()
@@ -2503,7 +2631,11 @@ mod tests {
 
         AnalyseSchema::infer_json_schema(&_foo, &mut record_line, Some(1), &mut _fields);
 
-        AnalyseSchema::determine_field_types(&mut _fields.get_mut("default").unwrap().fields, None, false);
+        AnalyseSchema::determine_field_types(
+            &mut _fields.get_mut("default").unwrap().fields,
+            None,
+            false,
+        );
 
         // This line was trying to remove a file that doesn't exist
         // let _ = remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
@@ -2697,7 +2829,7 @@ mod tests {
         let mut record_line = serde_json::to_string(&json).unwrap();
 
         let _rng = rand::thread_rng(); // Removed mut since it's not needed
-        
+
         // let random_tmp_file_name = rng.gen::<i32>();
 
         // let mut test_file = OpenOptions::new()
@@ -2719,7 +2851,11 @@ mod tests {
 
         AnalyseSchema::infer_json_schema(&_foo, &mut record_line, Some(1), &mut _fields);
 
-        AnalyseSchema::determine_field_types(&mut _fields.get_mut("default").unwrap().fields, None, false);
+        AnalyseSchema::determine_field_types(
+            &mut _fields.get_mut("default").unwrap().fields,
+            None,
+            false,
+        );
 
         // remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
 
@@ -2923,8 +3059,6 @@ mod tests {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests_flatten_metadata {
     use super::*;
@@ -2975,9 +3109,11 @@ mod tests_flatten_metadata {
         println!("{:?}", flattened);
 
         assert_eq!(flattened.fields.len(), 1);
-        assert_eq!(flattened.fields.get("parent_child").unwrap().out_field_name, "parent_child");
+        assert_eq!(
+            flattened.fields.get("parent_child").unwrap().out_field_name,
+            "parent_child"
+        );
         // assert!(flattened.contains_key("parent_child"));
-
     }
 
     // @todo - support flattening of arrays of structs?
@@ -3008,7 +3144,7 @@ mod tests_flatten_metadata {
         metadata.get_mut("schema").unwrap().fields.insert(
             "contacts".into(),
             Metadata {
-                count: 1, 
+                count: 1,
                 types: HashMap::new(),
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
@@ -3023,60 +3159,87 @@ mod tests_flatten_metadata {
                 repetition_count: 2, // Explicitly setting repetition_count to 2
             },
         );
-        metadata.get_mut("schema").unwrap().fields.get_mut("contacts").unwrap().fields.insert(
-            "0".into(),
-            Metadata {
-                count: 2,
-                types: HashMap::new(),
-                parent_type: "".into(),
-                fields: Box::new(HashMap::new()),
-                date_candidate: None,
-                date_parser_kind: None,
-                timezone: false,
-                evolution: Box::new(HashMap::new()),
-                enabled: true,
-                out_field_name: "0".into(),
-                determined_type: "string".into(),
-                determined_type_values: "".into(),
-                repetition_count: 1, // New field to track array repetition count
-            },
-        );
-        metadata.get_mut("schema").unwrap().fields.get_mut("contacts").unwrap().fields.get_mut("0").unwrap().fields.insert(
-            "name".into(),
-            Metadata {
-                count: 2,
-                types: HashMap::new(),
-                parent_type: "".into(),
-                fields: Box::new(HashMap::new()),
-                date_candidate: None,
-                date_parser_kind: None,
-                timezone: false,
-                evolution: Box::new(HashMap::new()),
-                enabled: true,
-                out_field_name: "name".into(),
-                determined_type: "string".into(),
-                determined_type_values: "".into(),
-                repetition_count: 1, // New field to track array repetition count
-            },
-        );
-        metadata.get_mut("schema").unwrap().fields.get_mut("contacts").unwrap().fields.get_mut("0").unwrap().fields.insert(
-            "tel".into(),
-            Metadata {
-                count: 2,
-                types: HashMap::new(),
-                parent_type: "".into(),
-                fields: Box::new(HashMap::new()),
-                date_candidate: None,
-                date_parser_kind: None,
-                timezone: false,
-                evolution: Box::new(HashMap::new()),
-                enabled: true,
-                out_field_name: "tel".into(),
-                determined_type: "int".into(),
-                determined_type_values: "".into(),
-                repetition_count: 1, // New field to track array repetition count
-            },
-        );
+        metadata
+            .get_mut("schema")
+            .unwrap()
+            .fields
+            .get_mut("contacts")
+            .unwrap()
+            .fields
+            .insert(
+                "0".into(),
+                Metadata {
+                    count: 2,
+                    types: HashMap::new(),
+                    parent_type: "".into(),
+                    fields: Box::new(HashMap::new()),
+                    date_candidate: None,
+                    date_parser_kind: None,
+                    timezone: false,
+                    evolution: Box::new(HashMap::new()),
+                    enabled: true,
+                    out_field_name: "0".into(),
+                    determined_type: "string".into(),
+                    determined_type_values: "".into(),
+                    repetition_count: 1, // New field to track array repetition count
+                },
+            );
+        metadata
+            .get_mut("schema")
+            .unwrap()
+            .fields
+            .get_mut("contacts")
+            .unwrap()
+            .fields
+            .get_mut("0")
+            .unwrap()
+            .fields
+            .insert(
+                "name".into(),
+                Metadata {
+                    count: 2,
+                    types: HashMap::new(),
+                    parent_type: "".into(),
+                    fields: Box::new(HashMap::new()),
+                    date_candidate: None,
+                    date_parser_kind: None,
+                    timezone: false,
+                    evolution: Box::new(HashMap::new()),
+                    enabled: true,
+                    out_field_name: "name".into(),
+                    determined_type: "string".into(),
+                    determined_type_values: "".into(),
+                    repetition_count: 1, // New field to track array repetition count
+                },
+            );
+        metadata
+            .get_mut("schema")
+            .unwrap()
+            .fields
+            .get_mut("contacts")
+            .unwrap()
+            .fields
+            .get_mut("0")
+            .unwrap()
+            .fields
+            .insert(
+                "tel".into(),
+                Metadata {
+                    count: 2,
+                    types: HashMap::new(),
+                    parent_type: "".into(),
+                    fields: Box::new(HashMap::new()),
+                    date_candidate: None,
+                    date_parser_kind: None,
+                    timezone: false,
+                    evolution: Box::new(HashMap::new()),
+                    enabled: true,
+                    out_field_name: "tel".into(),
+                    determined_type: "int".into(),
+                    determined_type_values: "".into(),
+                    repetition_count: 1, // New field to track array repetition count
+                },
+            );
 
         let mut flattened: OutputMetadata = OutputMetadata::new();
 
@@ -3087,15 +3250,71 @@ mod tests_flatten_metadata {
         // Should have 4 fields: contacts_0_name, contacts_0_tel, contacts_1_name, contacts_1_tel
         assert_eq!(flattened.fields.len(), 4);
 
-        assert_eq!(flattened.fields.get("contacts_0_name").unwrap().out_field_name, "contacts_0_name");
-        assert_eq!(flattened.fields.get("contacts_0_tel").unwrap().out_field_name, "contacts_0_tel");
-        assert_eq!(flattened.fields.get("contacts_0_name").unwrap().determined_type, "string");
-        assert_eq!(flattened.fields.get("contacts_0_tel").unwrap().determined_type, "int");
+        assert_eq!(
+            flattened
+                .fields
+                .get("contacts_0_name")
+                .unwrap()
+                .out_field_name,
+            "contacts_0_name"
+        );
+        assert_eq!(
+            flattened
+                .fields
+                .get("contacts_0_tel")
+                .unwrap()
+                .out_field_name,
+            "contacts_0_tel"
+        );
+        assert_eq!(
+            flattened
+                .fields
+                .get("contacts_0_name")
+                .unwrap()
+                .determined_type,
+            "string"
+        );
+        assert_eq!(
+            flattened
+                .fields
+                .get("contacts_0_tel")
+                .unwrap()
+                .determined_type,
+            "int"
+        );
 
-        assert_eq!(flattened.fields.get("contacts_1_name").unwrap().out_field_name, "contacts_1_name");
-        assert_eq!(flattened.fields.get("contacts_1_tel").unwrap().out_field_name, "contacts_1_tel");
-        assert_eq!(flattened.fields.get("contacts_1_name").unwrap().determined_type, "string");
-        assert_eq!(flattened.fields.get("contacts_1_tel").unwrap().determined_type, "int");
+        assert_eq!(
+            flattened
+                .fields
+                .get("contacts_1_name")
+                .unwrap()
+                .out_field_name,
+            "contacts_1_name"
+        );
+        assert_eq!(
+            flattened
+                .fields
+                .get("contacts_1_tel")
+                .unwrap()
+                .out_field_name,
+            "contacts_1_tel"
+        );
+        assert_eq!(
+            flattened
+                .fields
+                .get("contacts_1_name")
+                .unwrap()
+                .determined_type,
+            "string"
+        );
+        assert_eq!(
+            flattened
+                .fields
+                .get("contacts_1_tel")
+                .unwrap()
+                .determined_type,
+            "int"
+        );
 
         // assert!(flattened.contains_key("parent_record_child"));
     }
@@ -3104,36 +3323,38 @@ mod tests_flatten_metadata {
     fn test_flatten_primitive_array_field() {
         // Create a record with a primitive array field
         let mut fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new());
-        
+
         // Create a primitive array field
         let mut array_field = Metadata::new().unwrap();
         array_field.out_field_name = "x_axis_linear_mean".to_string();
         array_field.determined_type = "array".to_string();
         array_field.determined_type_values = "double".to_string();
         array_field.enabled = true;
-        
+
         fields.insert("x_axis_linear_mean".to_string(), array_field.clone());
-        
+
         // Create the parent record
         let mut metadata = Metadata::new().unwrap();
         metadata.out_field_name = "imu".to_string();
         metadata.determined_type = "record".to_string();
         metadata.enabled = true;
         metadata.fields = fields;
-        
+
         let mut flattened: OutputMetadata = OutputMetadata::new();
-        
+
         // Flatten the metadata
         Metadata::flatten_metadata(&metadata, &mut flattened);
-        
+
         // The flattened metadata should contain the primitive array field
         println!("Flattened: {:?}", flattened);
-        
+
         // Check if the array field exists with the correct path
         let expected_field_name = "imu_x_axis_linear_mean";
-        assert!(flattened.fields.contains_key(expected_field_name), 
-                "Flattened metadata does not contain the primitive array field");
-                
+        assert!(
+            flattened.fields.contains_key(expected_field_name),
+            "Flattened metadata does not contain the primitive array field"
+        );
+
         // Verify the field properties
         let field = flattened.fields.get(expected_field_name).unwrap();
         assert_eq!(field.out_field_name, expected_field_name);

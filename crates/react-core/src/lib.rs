@@ -6,16 +6,15 @@
 //! - Thread transcript persistence (`session`)
 //! - Minimal capability traits/types (LLM + storage + scope/keyspace + optional providers)
 
-pub mod tools;
-pub mod llm;
-pub mod storage;
-pub mod scope;
-pub mod keyspace;
-pub mod providers;
-pub mod discover;
-pub mod helpers;
-pub mod session;
 pub mod agent;
-pub mod llm_observability;
+pub mod discover;
 pub mod error_context;
-
+pub mod helpers;
+pub mod keyspace;
+pub mod llm;
+pub mod llm_observability;
+pub mod providers;
+pub mod scope;
+pub mod session;
+pub mod storage;
+pub mod tools;

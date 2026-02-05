@@ -1,20 +1,16 @@
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 
-
-
-use std::{fs};
+use std::fs;
 use std::io::Write;
 
-
-use std::path::Path;
-use async_trait::async_trait;
-use datafusion::execution::SendableRecordBatchStream;
 use crate::ingest::partition_time::TimePartitioner;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
+use async_trait::async_trait;
+use datafusion::execution::SendableRecordBatchStream;
+use std::path::Path;
 use tracing::error;
-
 
 pub struct DataOutputFilePlugin {
     #[allow(dead_code)]
@@ -27,11 +23,14 @@ pub struct DataOutputFilePlugin {
 
 #[async_trait]
 impl DataOutputPlugin for DataOutputFilePlugin {
-    async fn sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
+    async fn sync(
+        &self,
+        stream: SendableRecordBatchStream,
+        filename: String,
+    ) -> Result<(), std::io::Error> {
         self.inner_sync(stream, filename).await
     }
 }
-
 
 impl DataOutputFilePlugin {
     pub async fn new(buffer_name: String) -> DataOutputFilePlugin {
@@ -49,11 +48,15 @@ impl DataOutputFilePlugin {
         Self {
             output_dir,
             time_bucket,
-            buffer_name: buffer_name
+            buffer_name: buffer_name,
         }
     }
 
-    pub async fn inner_sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
+    pub async fn inner_sync(
+        &self,
+        stream: SendableRecordBatchStream,
+        filename: String,
+    ) -> Result<(), std::io::Error> {
         // while let Some(filename) = BufferChunker::next_file(&self.buffer_name) {
 
         let namespace = BufferChunker::decode_file_namespace(&filename);
@@ -65,13 +68,17 @@ impl DataOutputFilePlugin {
 
         full_key = match BufferChunker::decode_file_partition(&filename).len() {
             0 => full_key,
-            _ => format!("{}/{}", full_key, BufferChunker::decode_file_partition(&filename)),
+            _ => format!(
+                "{}/{}",
+                full_key,
+                BufferChunker::decode_file_partition(&filename)
+            ),
         };
 
         let _key = match TimePartitioner::new(&filename).process() {
             Ok(k) => {
                 full_key = format!("{}/{}", full_key, k);
-            },
+            }
             Err(_e) => {}
         };
 
@@ -107,6 +114,5 @@ impl DataOutputFilePlugin {
         // println!("Created output file: {}", output_file.display());
 
         Ok(())
-
     }
 }

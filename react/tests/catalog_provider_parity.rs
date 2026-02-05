@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
-use react_core::keyspace::{DefaultKeyspace, Keyspace};
-use react_core::scope::RequestScope;
-use react_core::providers::{CatalogProvider, SemanticModel, DataCatalog};
-use react_core::llm::{LargeLanguageModel, NullModel};
 use react::providers::catalog::DefaultCatalogProvider;
+use react_core::keyspace::{DefaultKeyspace, Keyspace};
+use react_core::llm::{LargeLanguageModel, NullModel};
+use react_core::providers::{CatalogProvider, DataCatalog, SemanticModel};
+use react_core::scope::RequestScope;
+use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
 
 #[tokio::test]
 async fn provider_write_semantic_uses_keyspace_key_and_roundtrips() {
@@ -14,7 +14,11 @@ async fn provider_write_semantic_uses_keyspace_key_and_roundtrips() {
     let llm: Arc<dyn LargeLanguageModel> = Arc::new(NullModel::new());
     let provider = DefaultCatalogProvider::new(storage.clone(), keyspace.clone(), llm, 0, 8);
 
-    let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+    let scope = RequestScope {
+        tenant: "t".into(),
+        workspace: "w".into(),
+        project_id: "p".into(),
+    };
     let ns = "events";
     let sem = SemanticModel {
         dataset_id: ns.into(),
@@ -26,7 +30,10 @@ async fn provider_write_semantic_uses_keyspace_key_and_roundtrips() {
         metrics: vec![],
     };
 
-    provider.write_semantic(&scope, ns, &sem).await.expect("write_semantic");
+    provider
+        .write_semantic(&scope, ns, &sem)
+        .await
+        .expect("write_semantic");
 
     let key = keyspace.semantic_key(&scope, ns);
     let raw = storage.get_json(&key).await.expect("semantic stored");
@@ -42,7 +49,11 @@ async fn provider_write_catalog_uses_keyspace_key_and_roundtrips() {
     let llm: Arc<dyn LargeLanguageModel> = Arc::new(NullModel::new());
     let provider = DefaultCatalogProvider::new(storage.clone(), keyspace.clone(), llm, 0, 8);
 
-    let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+    let scope = RequestScope {
+        tenant: "t".into(),
+        workspace: "w".into(),
+        project_id: "p".into(),
+    };
     let ns = "events";
     let cat = DataCatalog {
         dataset_id: ns.into(),
@@ -58,7 +69,10 @@ async fn provider_write_catalog_uses_keyspace_key_and_roundtrips() {
         built_at_epoch_secs: None,
     };
 
-    provider.write_catalog(&scope, ns, &cat).await.expect("write_catalog");
+    provider
+        .write_catalog(&scope, ns, &cat)
+        .await
+        .expect("write_catalog");
 
     let key = keyspace.catalog_key(&scope, ns);
     let raw = storage.get_json(&key).await.expect("catalog stored");
@@ -66,4 +80,3 @@ async fn provider_write_catalog_uses_keyspace_key_and_roundtrips() {
     assert_eq!(cat2.dataset_id, ns);
     assert_eq!(cat2.description.as_deref(), Some("desc"));
 }
-

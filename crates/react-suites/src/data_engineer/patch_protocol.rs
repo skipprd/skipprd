@@ -5,8 +5,8 @@ use std::sync::Arc;
 use react_core::agent::AgentCtx;
 use react_core::llm::ChatMessage;
 use react_core::llm_observability::{self, PartInput};
-use react_core::session::{Observation, ThreadStep};
 use react_core::providers::DatasetCatalogProvider;
+use react_core::session::{Observation, ThreadStep};
 
 use crate::data_engineer::project_fs;
 
@@ -177,7 +177,11 @@ pub async fn llm_patch_loop_single_file(
 ) -> Result<(project_fs::PatchOutcome, Vec<String>), String> {
     let max_iters = max_iters.max(1).min(6);
 
-    let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+    let base = ctx
+        .keyspace
+        .dbt_prefix(&ctx.scope)
+        .trim_end_matches('/')
+        .to_string();
     let key = format!("{}/{}", base, expected_rel_path);
     let existing_opt = ctx
         .storage
@@ -219,12 +223,26 @@ pub async fn llm_patch_loop_single_file(
             Err(e) => {
                 // Persist LLM observability even on failure.
                 if llm_observability::llm_calls_enabled() {
-                    if let (Some(thread_id), Some(store)) = (ctx.thread_id.as_deref(), ctx.thread_store.as_ref()) {
+                    if let (Some(thread_id), Some(store)) =
+                        (ctx.thread_id.as_deref(), ctx.thread_store.as_ref())
+                    {
                         let call_id = llm_observability::next_call_id(thread_id);
                         let prompt_hash = llm_observability::prompt_hash_for_messages(&messages);
                         let parts = vec![
-                            PartInput { name: "system".to_string(), text: messages.get(0).map(|m| m.content.clone()).unwrap_or_default() },
-                            PartInput { name: "user".to_string(), text: messages.get(1).map(|m| m.content.clone()).unwrap_or_default() },
+                            PartInput {
+                                name: "system".to_string(),
+                                text: messages
+                                    .get(0)
+                                    .map(|m| m.content.clone())
+                                    .unwrap_or_default(),
+                            },
+                            PartInput {
+                                name: "user".to_string(),
+                                text: messages
+                                    .get(1)
+                                    .map(|m| m.content.clone())
+                                    .unwrap_or_default(),
+                            },
                         ];
                         let built = llm_observability::build_parts_for_thread(thread_id, &parts);
                         let response_hash = llm_observability::sha256_hex_str(&e);
@@ -233,7 +251,8 @@ pub async fn llm_patch_loop_single_file(
                         } else {
                             None
                         };
-                        let phase = format!("patch_protocol:{}:attempt_{}", expected_rel_path, attempt);
+                        let phase =
+                            format!("patch_protocol:{}:attempt_{}", expected_rel_path, attempt);
                         tracing::debug!(
                             "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_hash={} response_hash={}",
                             thread_id,
@@ -248,10 +267,22 @@ pub async fn llm_patch_loop_single_file(
                             let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
                             let hash = p.get("hash").and_then(|v| v.as_str()).unwrap_or("-");
                             let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                            tracing::debug!("LLM_PART thread_id={} call_id={} name={} hash={} text={}", thread_id, call_id, name, hash, text);
+                            tracing::debug!(
+                                "LLM_PART thread_id={} call_id={} name={} hash={} text={}",
+                                thread_id,
+                                call_id,
+                                name,
+                                hash,
+                                text
+                            );
                         }
                         if let Some(txt) = response_text.as_deref() {
-                            tracing::debug!("LLM_RESPONSE thread_id={} call_id={} text={}", thread_id, call_id, txt);
+                            tracing::debug!(
+                                "LLM_RESPONSE thread_id={} call_id={} text={}",
+                                thread_id,
+                                call_id,
+                                txt
+                            );
                         }
                         let _ = store
                             .append_step(
@@ -265,9 +296,14 @@ pub async fn llm_patch_loop_single_file(
                                     part_hashes: built.part_hashes,
                                     response_hash,
                                     response_text,
-                                    observation: Observation::fail(vec!["llm_call_failed".to_string()]),
+                                    observation: Observation::fail(vec![
+                                        "llm_call_failed".to_string()
+                                    ]),
                                     ts: chrono::Utc::now().to_rfc3339(),
-                                    agent: ctx.agent_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                                    agent: ctx
+                                        .agent_name
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".to_string()),
                                 },
                             )
                             .await;
@@ -279,12 +315,26 @@ pub async fn llm_patch_loop_single_file(
 
         // Persist observability for successful calls.
         if llm_observability::llm_calls_enabled() {
-            if let (Some(thread_id), Some(store)) = (ctx.thread_id.as_deref(), ctx.thread_store.as_ref()) {
+            if let (Some(thread_id), Some(store)) =
+                (ctx.thread_id.as_deref(), ctx.thread_store.as_ref())
+            {
                 let call_id = llm_observability::next_call_id(thread_id);
                 let prompt_hash = llm_observability::prompt_hash_for_messages(&messages);
                 let parts = vec![
-                    PartInput { name: "system".to_string(), text: messages.get(0).map(|m| m.content.clone()).unwrap_or_default() },
-                    PartInput { name: "user".to_string(), text: messages.get(1).map(|m| m.content.clone()).unwrap_or_default() },
+                    PartInput {
+                        name: "system".to_string(),
+                        text: messages
+                            .get(0)
+                            .map(|m| m.content.clone())
+                            .unwrap_or_default(),
+                    },
+                    PartInput {
+                        name: "user".to_string(),
+                        text: messages
+                            .get(1)
+                            .map(|m| m.content.clone())
+                            .unwrap_or_default(),
+                    },
                 ];
                 let built = llm_observability::build_parts_for_thread(thread_id, &parts);
                 let response_hash = llm_observability::sha256_hex_str(&resp_text);
@@ -308,10 +358,22 @@ pub async fn llm_patch_loop_single_file(
                     let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
                     let hash = p.get("hash").and_then(|v| v.as_str()).unwrap_or("-");
                     let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    tracing::debug!("LLM_PART thread_id={} call_id={} name={} hash={} text={}", thread_id, call_id, name, hash, text);
+                    tracing::debug!(
+                        "LLM_PART thread_id={} call_id={} name={} hash={} text={}",
+                        thread_id,
+                        call_id,
+                        name,
+                        hash,
+                        text
+                    );
                 }
                 if let Some(txt) = response_text.as_deref() {
-                    tracing::debug!("LLM_RESPONSE thread_id={} call_id={} text={}", thread_id, call_id, txt);
+                    tracing::debug!(
+                        "LLM_RESPONSE thread_id={} call_id={} text={}",
+                        thread_id,
+                        call_id,
+                        txt
+                    );
                 }
                 let _ = store
                     .append_step(
@@ -327,7 +389,10 @@ pub async fn llm_patch_loop_single_file(
                             response_text,
                             observation: Observation::ok(),
                             ts: chrono::Utc::now().to_rfc3339(),
-                            agent: ctx.agent_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                            agent: ctx
+                                .agent_name
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string()),
                         },
                     )
                     .await;
@@ -350,11 +415,16 @@ pub async fn llm_patch_loop_single_file(
         } else {
             // Build the intended final file contents deterministically from the selected primitive.
             // We avoid unified diff application entirely for structured primitives (too flaky).
-            let new_text_res: Result<String, String> = if let Some(rf) = parsed.replace_file.as_ref() {
+            let new_text_res: Result<String, String> = if let Some(rf) =
+                parsed.replace_file.as_ref()
+            {
                 if let Some(p) = rf.path.as_ref() {
                     let rel = project_fs::normalize_rel_path(p)?;
                     if rel != expected_rel_path {
-                        return Err(format!("replace_file.path '{}' did not match expected_rel_path '{}'", rel, expected_rel_path));
+                        return Err(format!(
+                            "replace_file.path '{}' did not match expected_rel_path '{}'",
+                            rel, expected_rel_path
+                        ));
                     }
                 }
                 // Require expected_sha256 on repair attempts to prevent drift.
@@ -371,7 +441,10 @@ pub async fn llm_patch_loop_single_file(
                 if let Some(p) = rr.path.as_ref() {
                     let rel = project_fs::normalize_rel_path(p)?;
                     if rel != expected_rel_path {
-                        return Err(format!("replace_range.path '{}' did not match expected_rel_path '{}'", rel, expected_rel_path));
+                        return Err(format!(
+                            "replace_range.path '{}' did not match expected_rel_path '{}'",
+                            rel, expected_rel_path
+                        ));
                     }
                 }
                 if attempt > 1 && rr.expected_sha256.as_deref().unwrap_or("") != base_sha256 {
@@ -387,7 +460,10 @@ pub async fn llm_patch_loop_single_file(
                 if let Some(p) = rl.path.as_ref() {
                     let rel = project_fs::normalize_rel_path(p)?;
                     if rel != expected_rel_path {
-                        return Err(format!("replace_list.path '{}' did not match expected_rel_path '{}'", rel, expected_rel_path));
+                        return Err(format!(
+                            "replace_list.path '{}' did not match expected_rel_path '{}'",
+                            rel, expected_rel_path
+                        ));
                     }
                 }
                 if attempt > 1 && rl.expected_sha256.as_deref().unwrap_or("") != base_sha256 {
@@ -433,7 +509,9 @@ pub async fn llm_patch_loop_single_file(
         }
 
         // Repair prompt: feed back the failing patch + error + expected file + current content.
-        let err = last_err.clone().unwrap_or_else(|| "unknown patch error".to_string());
+        let err = last_err
+            .clone()
+            .unwrap_or_else(|| "unknown patch error".to_string());
         let repair = serde_json::json!({
             "attempt": attempt,
             "error": err,
@@ -456,4 +534,3 @@ pub async fn llm_patch_loop_single_file(
         last_err.unwrap_or_else(|| "unknown error".to_string())
     ))
 }
-

@@ -3,12 +3,23 @@ use crate::llm::types::*;
 use serde::{Deserialize, Serialize};
 
 pub struct OpenAIResponsesAdapter;
-impl OpenAIResponsesAdapter { pub fn new() -> Self { Self {} } }
+impl OpenAIResponsesAdapter {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
 
 #[derive(Serialize)]
-struct RespPart { #[serde(rename="type")] r#type: String, text: String }
+struct RespPart {
+    #[serde(rename = "type")]
+    r#type: String,
+    text: String,
+}
 #[derive(Serialize)]
-struct RespMsg { role: String, content: Vec<RespPart> }
+struct RespMsg {
+    role: String,
+    content: Vec<RespPart>,
+}
 #[derive(Serialize)]
 struct RespReq {
     model: String,
@@ -19,9 +30,14 @@ struct RespReq {
     max_output_tokens: Option<i32>,
 }
 #[derive(Serialize)]
-struct RespText { format: RespFormat }
+struct RespText {
+    format: RespFormat,
+}
 #[derive(Serialize)]
-struct RespFormat { #[serde(rename="type")] r#type: String }
+struct RespFormat {
+    #[serde(rename = "type")]
+    r#type: String,
+}
 #[derive(Deserialize)]
 struct RespResp {
     #[serde(default)]
@@ -31,11 +47,18 @@ struct RespResp {
 }
 
 #[derive(Serialize)]
-struct OaiEmbReq { model: String, input: Vec<String> }
+struct OaiEmbReq {
+    model: String,
+    input: Vec<String>,
+}
 #[derive(Deserialize)]
-struct OaiEmbData { embedding: Vec<f32> }
+struct OaiEmbData {
+    embedding: Vec<f32>,
+}
 #[derive(Deserialize)]
-struct OaiEmbResp { data: Vec<OaiEmbData> }
+struct OaiEmbResp {
+    data: Vec<OaiEmbData>,
+}
 
 impl Adapter for OpenAIResponsesAdapter {
     fn capabilities(&self, _model: &str) -> Capabilities {
@@ -50,17 +73,39 @@ impl Adapter for OpenAIResponsesAdapter {
     fn build_chat_http(&self, req: &ChatRequest) -> Result<ProviderHttpRequest, String> {
         let mut msgs: Vec<RespMsg> = Vec::new();
         for m in req.messages.iter() {
-            let role = if m.role.eq_ignore_ascii_case("system") { "system" } else if m.role.eq_ignore_ascii_case("assistant") { "assistant" } else { "user" };
-            let part = RespPart { r#type: "input_text".to_string(), text: m.content.clone() };
-            msgs.push(RespMsg { role: role.to_string(), content: vec![part] });
+            let role = if m.role.eq_ignore_ascii_case("system") {
+                "system"
+            } else if m.role.eq_ignore_ascii_case("assistant") {
+                "assistant"
+            } else {
+                "user"
+            };
+            let part = RespPart {
+                r#type: "input_text".to_string(),
+                text: m.content.clone(),
+            };
+            msgs.push(RespMsg {
+                role: role.to_string(),
+                content: vec![part],
+            });
         }
         if msgs.is_empty() {
-            msgs.push(RespMsg { role: "user".to_string(), content: vec![RespPart { r#type: "input_text".to_string(), text: String::new() }] });
+            msgs.push(RespMsg {
+                role: "user".to_string(),
+                content: vec![RespPart {
+                    r#type: "input_text".to_string(),
+                    text: String::new(),
+                }],
+            });
         }
         let body = RespReq {
             model: req.model.clone(),
             input: msgs,
-            text: Some(RespText { format: RespFormat { r#type: "text".to_string() } }),
+            text: Some(RespText {
+                format: RespFormat {
+                    r#type: "text".to_string(),
+                },
+            }),
             max_output_tokens: req.max_output_tokens.map(|v| v as i32),
         };
         Ok(ProviderHttpRequest {
@@ -74,20 +119,32 @@ impl Adapter for OpenAIResponsesAdapter {
     fn parse_chat_http(&self, resp: &ProviderHttpResponse) -> Result<ChatResponse, String> {
         let obj: RespResp = serde_json::from_str(&resp.body_text).map_err(|e| e.to_string())?;
         if let Some(t) = obj.output_text {
-            return Ok(ChatResponse { text: t, raw: serde_json::from_str(&resp.body_text).ok() });
+            return Ok(ChatResponse {
+                text: t,
+                raw: serde_json::from_str(&resp.body_text).ok(),
+            });
         }
-        if let Some(t) = obj.output.get(0)
+        if let Some(t) = obj
+            .output
+            .get(0)
             .and_then(|v| v.get("content"))
             .and_then(|c| c.get(0))
             .and_then(|p| p.get("text"))
-            .and_then(|x| x.as_str()) {
-            return Ok(ChatResponse { text: t.to_string(), raw: serde_json::from_str(&resp.body_text).ok() });
+            .and_then(|x| x.as_str())
+        {
+            return Ok(ChatResponse {
+                text: t.to_string(),
+                raw: serde_json::from_str(&resp.body_text).ok(),
+            });
         }
         Err("empty response".to_string())
     }
 
     fn build_embed_http(&self, req: &EmbedRequest) -> Result<ProviderHttpRequest, String> {
-        let body = OaiEmbReq { model: req.model.clone(), input: req.inputs.clone() };
+        let body = OaiEmbReq {
+            model: req.model.clone(),
+            input: req.inputs.clone(),
+        };
         Ok(ProviderHttpRequest {
             method: "POST".to_string(),
             url: "/v1/embeddings".to_string(),
@@ -103,5 +160,3 @@ impl Adapter for OpenAIResponsesAdapter {
         Ok(EmbedResponse { vectors: vecs, dim })
     }
 }
-
-

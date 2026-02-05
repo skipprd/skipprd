@@ -1,15 +1,15 @@
-use react_core::agent::AgentCtx;
 use crate::config::ReactResolvedConfig;
+use react_core::agent::AgentCtx;
 use react_core::llm::ChatMessage;
 use react_core::llm_observability::{self, PartInput};
+use react_core::providers::{DatasetCatalogProvider, DatasetId};
 use react_core::session::{Observation, ThreadStep};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet as StdBTreeSet};
-use std::time::{SystemTime, UNIX_EPOCH};
-use react_core::providers::{DatasetCatalogProvider, DatasetId};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 async fn record_llm_call_observability_async(
     ctx: &AgentCtx,
@@ -23,8 +23,12 @@ async fn record_llm_call_observability_async(
     if !llm_observability::llm_calls_enabled() {
         return;
     }
-    let Some(thread_id) = ctx.thread_id.as_deref() else { return };
-    let Some(store) = ctx.thread_store.as_ref() else { return };
+    let Some(thread_id) = ctx.thread_id.as_deref() else {
+        return;
+    };
+    let Some(store) = ctx.thread_store.as_ref() else {
+        return;
+    };
     let agent = ctx
         .agent_name
         .clone()
@@ -64,7 +68,12 @@ async fn record_llm_call_observability_async(
         );
     }
     if let Some(txt) = response_text.as_deref() {
-        tracing::debug!("LLM_RESPONSE thread_id={} call_id={} text={}", thread_id, call_id, txt);
+        tracing::debug!(
+            "LLM_RESPONSE thread_id={} call_id={} text={}",
+            thread_id,
+            call_id,
+            txt
+        );
     }
 
     let _ = store
@@ -79,7 +88,11 @@ async fn record_llm_call_observability_async(
                 part_hashes: built.part_hashes,
                 response_hash,
                 response_text,
-                observation: if ok { Observation::ok() } else { Observation::fail(vec!["llm_call_failed".to_string()]) },
+                observation: if ok {
+                    Observation::ok()
+                } else {
+                    Observation::fail(vec!["llm_call_failed".to_string()])
+                },
                 ts: chrono::Utc::now().to_rfc3339(),
                 agent,
             },
@@ -105,7 +118,16 @@ fn record_llm_call_observability(
         let parts = parts.to_vec();
         let response_raw = response_raw.to_string();
         handle.spawn(async move {
-            record_llm_call_observability_async(&ctx, &phase, &model, &messages, &parts, &response_raw, ok).await;
+            record_llm_call_observability_async(
+                &ctx,
+                &phase,
+                &model,
+                &messages,
+                &parts,
+                &response_raw,
+                ok,
+            )
+            .await;
         });
     }
 }
@@ -231,11 +253,21 @@ pub struct LlmRemediationDecision {
 
 pub fn active_provider_dialect(cfg: &ReactResolvedConfig) -> String {
     // Human-readable label, consumed by the LLM prompt. Keep it stable (used in logs/tool outputs).
-    if cfg.providers.athena.enabled {
-        // Athena Engine v3 uses Trino SQL.
-        return "Amazon Athena (engine v3 / Trino SQL)".to_string();
+    match cfg
+        .providers
+        .warehouse
+        .kind
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "athena" => "Amazon Athena (engine v3 / Trino SQL)".to_string(),
+        "postgres" => "PostgreSQL".to_string(),
+        "mssql" | "sqlserver" => "Microsoft SQL Server (T-SQL)".to_string(),
+        "snowflake" => "Snowflake SQL".to_string(),
+        "bigquery" => "Google BigQuery (Standard SQL)".to_string(),
+        _ => "Unknown SQL dialect".to_string(),
     }
-    "Unknown SQL dialect".to_string()
 }
 
 fn now_epoch_secs() -> u64 {
@@ -362,14 +394,32 @@ pub fn llm_should_remediate_sql(
     .to_string();
 
     let messages = vec![
-        ChatMessage { role: "system".to_string(), content: sys.clone() },
-        ChatMessage { role: "user".to_string(), content: user.clone() },
+        ChatMessage {
+            role: "system".to_string(),
+            content: sys.clone(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user.clone(),
+        },
     ];
     let parts: Vec<PartInput> = vec![
-        PartInput { name: "system".to_string(), text: sys.clone() },
-        PartInput { name: "user.phase".to_string(), text: phase.to_string() },
-        PartInput { name: "user.error_brief".to_string(), text: error_brief.to_string() },
-        PartInput { name: "user.payload".to_string(), text: user.clone() },
+        PartInput {
+            name: "system".to_string(),
+            text: sys.clone(),
+        },
+        PartInput {
+            name: "user.phase".to_string(),
+            text: phase.to_string(),
+        },
+        PartInput {
+            name: "user.error_brief".to_string(),
+            text: error_brief.to_string(),
+        },
+        PartInput {
+            name: "user.payload".to_string(),
+            text: user.clone(),
+        },
     ];
     let resp_text = match ctx.llm.chat(&messages) {
         Ok(t) => {
@@ -383,8 +433,8 @@ pub fn llm_should_remediate_sql(
         }
     };
     let v = parse_json_from_llm(&resp_text)?;
-    let mut parsed: LlmRemediationDecision =
-        serde_json::from_value(v).map_err(|e| format!("failed to parse remediation decision JSON: {}", e))?;
+    let mut parsed: LlmRemediationDecision = serde_json::from_value(v)
+        .map_err(|e| format!("failed to parse remediation decision JSON: {}", e))?;
     if !(0.0..=1.0).contains(&parsed.confidence) {
         // Be conservative on malformed values.
         parsed.confidence = parsed.confidence.max(0.0).min(1.0);
@@ -393,7 +443,12 @@ pub fn llm_should_remediate_sql(
 }
 
 pub async fn list_sql_keys_for_scope(ctx: &AgentCtx) -> Result<Vec<String>, String> {
-    let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/";
+    let base = ctx
+        .keyspace
+        .dbt_prefix(&ctx.scope)
+        .trim_end_matches('/')
+        .to_string()
+        + "/";
     let keys = ctx.storage.list_prefix(&base).await.unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
     for k in keys {
@@ -409,7 +464,11 @@ pub async fn list_sql_keys_for_scope(ctx: &AgentCtx) -> Result<Vec<String>, Stri
     Ok(out)
 }
 
-pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: &[String]) -> Result<RemediationReport, String> {
+pub async fn remediate_dbt_sql_keys_with_llm(
+    ctx: &AgentCtx,
+    phase: &str,
+    keys: &[String],
+) -> Result<RemediationReport, String> {
     let Some(cfg) = crate::config::resolved_config_from_ctx(ctx) else {
         return Ok(RemediationReport {
             dialect: "Unknown SQL dialect".to_string(),
@@ -477,7 +536,8 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
             .iter()
             .map(|(k, c)| serde_json::json!({ "key": k, "content": c }))
             .collect();
-        let mut content_by_key: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut content_by_key: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for (k, c) in batch.iter() {
             content_by_key.insert(k.clone(), c.clone());
         }
@@ -506,29 +566,51 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
         .to_string();
 
         let messages = vec![
-            ChatMessage { role: "system".to_string(), content: sys.clone() },
-            ChatMessage { role: "user".to_string(), content: user.clone() },
+            ChatMessage {
+                role: "system".to_string(),
+                content: sys.clone(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: user.clone(),
+            },
         ];
         let parts: Vec<PartInput> = vec![
-            PartInput { name: "system".to_string(), text: sys.clone() },
-            PartInput { name: "user.phase".to_string(), text: phase.to_string() },
-            PartInput { name: "user.files".to_string(), text: serde_json::to_string_pretty(&input_files).unwrap_or_else(|_| "[]".to_string()) },
+            PartInput {
+                name: "system".to_string(),
+                text: sys.clone(),
+            },
+            PartInput {
+                name: "user.phase".to_string(),
+                text: phase.to_string(),
+            },
+            PartInput {
+                name: "user.files".to_string(),
+                text: serde_json::to_string_pretty(&input_files)
+                    .unwrap_or_else(|_| "[]".to_string()),
+            },
         ];
         let resp_text = match ctx.llm.chat(&messages) {
             Ok(t) => {
-                record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &t, true).await;
+                record_llm_call_observability_async(
+                    ctx, phase, "unknown", &messages, &parts, &t, true,
+                )
+                .await;
                 t
             }
             Err(e) => {
                 let raw = format!("LLM_ERROR: {}", e);
-                record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &raw, false).await;
+                record_llm_call_observability_async(
+                    ctx, phase, "unknown", &messages, &parts, &raw, false,
+                )
+                .await;
                 return Err(format!("dialect remediation LLM call failed: {}", e));
             }
         };
 
         let v = parse_json_from_llm(&resp_text)?;
-        let parsed: LlmRemediationResponse =
-            serde_json::from_value(v).map_err(|e| format!("failed to parse remediation JSON: {}", e))?;
+        let parsed: LlmRemediationResponse = serde_json::from_value(v)
+            .map_err(|e| format!("failed to parse remediation JSON: {}", e))?;
 
         for n in parsed.notes.iter() {
             if !n.trim().is_empty() {
@@ -544,7 +626,11 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
             if !keys.iter().any(|k| k == &ch.key) {
                 continue;
             }
-            let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+            let base = ctx
+                .keyspace
+                .dbt_prefix(&ctx.scope)
+                .trim_end_matches('/')
+                .to_string();
             let rel = ch
                 .key
                 .strip_prefix(&(base.clone() + "/"))
@@ -556,9 +642,15 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
                 .unwrap_or_else(|| String::new());
             let existing = content_by_key.get(&ch.key).cloned().unwrap_or_default();
             let mut provided = 0usize;
-            if ch.replace_file.is_some() { provided += 1; }
-            if ch.replace_range.is_some() { provided += 1; }
-            if ch.replace_list.is_some() { provided += 1; }
+            if ch.replace_file.is_some() {
+                provided += 1;
+            }
+            if ch.replace_range.is_some() {
+                provided += 1;
+            }
+            if ch.replace_list.is_some() {
+                provided += 1;
+            }
             if provided != 1 {
                 return Err("remediation change must include exactly one of: replace_file | replace_range | replace_list".to_string());
             }
@@ -571,7 +663,12 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
                         expected_base
                     ));
                 }
-                crate::data_engineer::project_fs::create_git_patch_text(&existing, &rf.new_text, &rel, true)?
+                crate::data_engineer::project_fs::create_git_patch_text(
+                    &existing,
+                    &rf.new_text,
+                    &rel,
+                    true,
+                )?
             } else if let Some(rr) = ch.replace_range.as_ref() {
                 if rr.expected_sha256.as_deref().unwrap_or("") != expected_base {
                     return Err(format!(
@@ -581,8 +678,15 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
                         expected_base
                     ));
                 }
-                let new_text = crate::data_engineer::project_fs::apply_replace_range(&existing, rr.start_line, rr.end_line, &rr.new_text)?;
-                crate::data_engineer::project_fs::create_git_patch_text(&existing, &new_text, &rel, true)?
+                let new_text = crate::data_engineer::project_fs::apply_replace_range(
+                    &existing,
+                    rr.start_line,
+                    rr.end_line,
+                    &rr.new_text,
+                )?;
+                crate::data_engineer::project_fs::create_git_patch_text(
+                    &existing, &new_text, &rel, true,
+                )?
             } else if let Some(rl) = ch.replace_list.as_ref() {
                 if rl.expected_sha256.as_deref().unwrap_or("") != expected_base {
                     return Err(format!(
@@ -601,8 +705,11 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
                         new_text: e.new_text.clone(),
                     })
                     .collect();
-                let new_text = crate::data_engineer::project_fs::apply_replace_list(&existing, &edits)?;
-                crate::data_engineer::project_fs::create_git_patch_text(&existing, &new_text, &rel, true)?
+                let new_text =
+                    crate::data_engineer::project_fs::apply_replace_list(&existing, &edits)?;
+                crate::data_engineer::project_fs::create_git_patch_text(
+                    &existing, &new_text, &rel, true,
+                )?
             } else {
                 return Err("invalid remediation change".to_string());
             };
@@ -611,7 +718,11 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
                 None,
                 &rel,
                 &patch_text,
-                if expected_base.is_empty() { None } else { Some(expected_base.as_str()) },
+                if expected_base.is_empty() {
+                    None
+                } else {
+                    Some(expected_base.as_str())
+                },
                 crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
             )
             .await?;
@@ -629,7 +740,9 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
 
     // Best-effort: add a note for traceability.
     if report.changed_files > 0 {
-        report.notes.push(format!("remediation_epoch_secs={}", now_epoch_secs()));
+        report
+            .notes
+            .push(format!("remediation_epoch_secs={}", now_epoch_secs()));
     }
 
     tracing::info!(
@@ -642,7 +755,10 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
     Ok(report)
 }
 
-pub async fn remediate_dbt_sql_with_llm(ctx: &AgentCtx, phase: &str) -> Result<RemediationReport, String> {
+pub async fn remediate_dbt_sql_with_llm(
+    ctx: &AgentCtx,
+    phase: &str,
+) -> Result<RemediationReport, String> {
     let keys = list_sql_keys_for_scope(ctx).await?;
     remediate_dbt_sql_keys_with_llm(ctx, phase, &keys).await
 }
@@ -676,16 +792,16 @@ async fn best_effort_samples_for_source(
 ) -> Option<Value> {
     let cfg = crate::config::resolved_config_from_ctx(ctx);
     let catalog = cfg
-        .map(|c| c.providers.athena.target_catalog.clone())
-        .unwrap_or_else(|| "AwsDataCatalog".to_string());
+        .map(|c| c.providers.warehouse.container.clone())
+        .unwrap_or_default();
     let fqn = format!("{}.{}.{}", catalog, source_schema, source_table);
 
-    let Some(q) = ctx.query.as_ref() else { return None };
     if limit == 0 {
         return None;
     }
 
-    let header: Vec<String> = q
+    let header: Vec<String> = ctx
+        .warehouse
         .schema(&fqn)
         .await
         .ok()
@@ -694,7 +810,7 @@ async fn best_effort_samples_for_source(
         .map(|(n, _t)| n)
         .collect();
 
-    let rows = q.sample(&fqn, limit).await.ok()?;
+    let rows = ctx.warehouse.sample(&fqn, limit).await.ok()?;
     Some(serde_json::json!({
         "dataset_fqn": fqn,
         "limit": limit,
@@ -734,7 +850,9 @@ fn extract_run_model_schema_map(errors: &[String]) -> BTreeMap<String, String> {
         let Some(tok) = rest.split_whitespace().next() else {
             continue;
         };
-        let tok = tok.trim_matches(|c: char| c == '(' || c == ')' || c == '"' || c == '\'' || c == ',' || c == ';');
+        let tok = tok.trim_matches(|c: char| {
+            c == '(' || c == ')' || c == '"' || c == '\'' || c == ',' || c == ';'
+        });
         // Expect <schema>.<model_name>
         let Some((schema, model)) = tok.split_once('.') else {
             continue;
@@ -744,11 +862,7 @@ fn extract_run_model_schema_map(errors: &[String]) -> BTreeMap<String, String> {
         if schema.is_empty() || model.is_empty() {
             continue;
         }
-        *counts
-            .entry(model)
-            .or_default()
-            .entry(schema)
-            .or_insert(0) += 1;
+        *counts.entry(model).or_default().entry(schema).or_insert(0) += 1;
     }
 
     let mut out: BTreeMap<String, String> = BTreeMap::new();
@@ -795,8 +909,13 @@ fn infer_schema_for_ref(errors: &[String], ref_name: &str) -> Option<String> {
     saw_gold.or(saw_silver)
 }
 
-async fn best_effort_schema_columns_for_relation(ctx: &AgentCtx, fqn: &str) -> Vec<(String, String)> {
-    let Some(q) = ctx.query.as_ref() else { return vec![] };
+async fn best_effort_schema_columns_for_relation(
+    ctx: &AgentCtx,
+    fqn: &str,
+) -> Vec<(String, String)> {
+    let Some(q) = ctx.query.as_ref() else {
+        return vec![];
+    };
     q.schema(fqn).await.ok().unwrap_or_default()
 }
 
@@ -825,15 +944,23 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         });
     };
     let dialect = active_provider_dialect(cfg);
-    let catalog = cfg.providers.athena.target_catalog.clone();
+    let catalog = cfg.providers.warehouse.container.clone();
 
     let mut keys: Vec<String> = keys.iter().cloned().collect();
     keys.sort();
     keys.dedup();
 
     // Only consider keys under dbt prefix and never in target/_versions.
-    let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
-    keys.retain(|k| k.starts_with(&(base.clone() + "/")) && !k.contains("/target/") && !k.contains("/_versions/"));
+    let base = ctx
+        .keyspace
+        .dbt_prefix(&ctx.scope)
+        .trim_end_matches('/')
+        .to_string();
+    keys.retain(|k| {
+        k.starts_with(&(base.clone() + "/"))
+            && !k.contains("/target/")
+            && !k.contains("/_versions/")
+    });
 
     // Add core project context files if present (editable, but must be justified by the error).
     for rel in crate::data_engineer::project_files::CORE_PROJECT_CONTEXT_FILES.iter() {
@@ -861,7 +988,8 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
 
     // Load contents.
     let mut files: Vec<Value> = Vec::new();
-    let mut content_by_key: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut content_by_key: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for k in keys.iter() {
         let bytes = ctx.storage.get_bytes(k).await.unwrap_or_default();
         let text = String::from_utf8_lossy(&bytes).to_string();
@@ -877,14 +1005,28 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
             "rel_path": rel_path,
             "content": text
         }));
-        content_by_key.insert(k.clone(), files.last().unwrap().get("content").and_then(|v| v.as_str()).unwrap_or("").to_string());
+        content_by_key.insert(
+            k.clone(),
+            files
+                .last()
+                .unwrap()
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        );
     }
 
     // Collect source schema facts for any source() calls we can detect.
-    let mut sources_set: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+    let mut sources_set: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
     for f in files.iter() {
-        let Some(content) = f.get("content").and_then(|v| v.as_str()) else { continue };
-        for (src_schema, src_table) in crate::data_engineer::naming::extract_source_calls(content).into_iter() {
+        let Some(content) = f.get("content").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        for (src_schema, src_table) in
+            crate::data_engineer::naming::extract_source_calls(content).into_iter()
+        {
             if !src_schema.trim().is_empty() && !src_table.trim().is_empty() {
                 sources_set.insert((src_schema, src_table));
             }
@@ -894,11 +1036,12 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
     let include_samples = errors_suggest_uncertainty(errors);
     let mut sources: Vec<Value> = Vec::new();
     for (source_schema, source_table) in sources_set.into_iter() {
-        let schema_cols: Vec<Value> = best_effort_schema_columns_for_source(ctx, datasets, &source_schema, &source_table)
-            .await
-            .into_iter()
-            .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
-            .collect();
+        let schema_cols: Vec<Value> =
+            best_effort_schema_columns_for_source(ctx, datasets, &source_schema, &source_table)
+                .await
+                .into_iter()
+                .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
+                .collect();
         let samples = if include_samples {
             best_effort_samples_for_source(ctx, &source_schema, &source_table, 5).await
         } else {
@@ -916,14 +1059,18 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
     // (when the warehouse relations exist) so the LLM does not invent columns like event_timestamp/session_id.
     let mut ref_names: StdBTreeSet<String> = StdBTreeSet::new();
     for f in files.iter() {
-        let Some(content) = f.get("content").and_then(|v| v.as_str()) else { continue };
+        let Some(content) = f.get("content").and_then(|v| v.as_str()) else {
+            continue;
+        };
         for r in crate::data_engineer::naming::extract_ref_calls(content).into_iter() {
             ref_names.insert(r);
         }
     }
     let mut ref_models: Vec<Value> = Vec::new();
     for ref_name in ref_names.into_iter().take(15) {
-        let Some(schema) = infer_schema_for_ref(errors, &ref_name) else { continue };
+        let Some(schema) = infer_schema_for_ref(errors, &ref_name) else {
+            continue;
+        };
         let fqn = format!("{}.{}.{}", catalog, schema, ref_name);
         let cols = best_effort_schema_columns_for_relation(ctx, &fqn).await;
         if cols.is_empty() {
@@ -977,33 +1124,64 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
     .to_string();
 
     let messages = vec![
-        ChatMessage { role: "system".to_string(), content: sys.clone() },
-        ChatMessage { role: "user".to_string(), content: user.clone() },
+        ChatMessage {
+            role: "system".to_string(),
+            content: sys.clone(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user.clone(),
+        },
     ];
     let parts: Vec<PartInput> = vec![
-        PartInput { name: "system".to_string(), text: sys.clone() },
-        PartInput { name: "user.phase".to_string(), text: phase.to_string() },
-        PartInput { name: "user.dbt_error_brief".to_string(), text: error_brief.clone() },
-        PartInput { name: "user.errors".to_string(), text: serde_json::to_string_pretty(&errors).unwrap_or_else(|_| "[]".to_string()) },
-        PartInput { name: "user.files".to_string(), text: serde_json::to_string_pretty(&files).unwrap_or_else(|_| "[]".to_string()) },
-        PartInput { name: "user.sources".to_string(), text: serde_json::to_string_pretty(&sources).unwrap_or_else(|_| "[]".to_string()) },
-        PartInput { name: "user.ref_models".to_string(), text: serde_json::to_string_pretty(&ref_models).unwrap_or_else(|_| "[]".to_string()) },
+        PartInput {
+            name: "system".to_string(),
+            text: sys.clone(),
+        },
+        PartInput {
+            name: "user.phase".to_string(),
+            text: phase.to_string(),
+        },
+        PartInput {
+            name: "user.dbt_error_brief".to_string(),
+            text: error_brief.clone(),
+        },
+        PartInput {
+            name: "user.errors".to_string(),
+            text: serde_json::to_string_pretty(&errors).unwrap_or_else(|_| "[]".to_string()),
+        },
+        PartInput {
+            name: "user.files".to_string(),
+            text: serde_json::to_string_pretty(&files).unwrap_or_else(|_| "[]".to_string()),
+        },
+        PartInput {
+            name: "user.sources".to_string(),
+            text: serde_json::to_string_pretty(&sources).unwrap_or_else(|_| "[]".to_string()),
+        },
+        PartInput {
+            name: "user.ref_models".to_string(),
+            text: serde_json::to_string_pretty(&ref_models).unwrap_or_else(|_| "[]".to_string()),
+        },
     ];
     let resp_text = match ctx.llm.chat(&messages) {
         Ok(t) => {
-            record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &t, true).await;
+            record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &t, true)
+                .await;
             t
         }
         Err(e) => {
             let raw = format!("LLM_ERROR: {}", e);
-            record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &raw, false).await;
+            record_llm_call_observability_async(
+                ctx, phase, "unknown", &messages, &parts, &raw, false,
+            )
+            .await;
             return Err(format!("grounded dbt repair LLM call failed: {}", e));
         }
     };
 
     let v = parse_json_from_llm(&resp_text)?;
-    let parsed: GroundedRepairResponse =
-        serde_json::from_value(v).map_err(|e| format!("failed to parse grounded repair JSON: {}", e))?;
+    let parsed: GroundedRepairResponse = serde_json::from_value(v)
+        .map_err(|e| format!("failed to parse grounded repair JSON: {}", e))?;
 
     let mut report = RemediationReport {
         dialect: dialect.clone(),
@@ -1033,9 +1211,15 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         let existing = content_by_key.get(&ch.key).cloned().unwrap_or_default();
         let expected_base = sha256_hex(&existing);
         let mut provided = 0usize;
-        if ch.replace_file.is_some() { provided += 1; }
-        if ch.replace_range.is_some() { provided += 1; }
-        if ch.replace_list.is_some() { provided += 1; }
+        if ch.replace_file.is_some() {
+            provided += 1;
+        }
+        if ch.replace_range.is_some() {
+            provided += 1;
+        }
+        if ch.replace_list.is_some() {
+            provided += 1;
+        }
         if provided != 1 {
             return Err("grounded repair change must include exactly one of: replace_file | replace_range | replace_list".to_string());
         }
@@ -1048,7 +1232,12 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
                     expected_base
                 ));
             }
-            crate::data_engineer::project_fs::create_git_patch_text(&existing, &rf.new_text, &rel, true)?
+            crate::data_engineer::project_fs::create_git_patch_text(
+                &existing,
+                &rf.new_text,
+                &rel,
+                true,
+            )?
         } else if let Some(rr) = ch.replace_range.as_ref() {
             if rr.expected_sha256.as_deref().unwrap_or("") != expected_base {
                 return Err(format!(
@@ -1058,8 +1247,15 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
                     expected_base
                 ));
             }
-            let new_text = crate::data_engineer::project_fs::apply_replace_range(&existing, rr.start_line, rr.end_line, &rr.new_text)?;
-            crate::data_engineer::project_fs::create_git_patch_text(&existing, &new_text, &rel, true)?
+            let new_text = crate::data_engineer::project_fs::apply_replace_range(
+                &existing,
+                rr.start_line,
+                rr.end_line,
+                &rr.new_text,
+            )?;
+            crate::data_engineer::project_fs::create_git_patch_text(
+                &existing, &new_text, &rel, true,
+            )?
         } else if let Some(rl) = ch.replace_list.as_ref() {
             if rl.expected_sha256.as_deref().unwrap_or("") != expected_base {
                 return Err(format!(
@@ -1079,7 +1275,9 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
                 })
                 .collect();
             let new_text = crate::data_engineer::project_fs::apply_replace_list(&existing, &edits)?;
-            crate::data_engineer::project_fs::create_git_patch_text(&existing, &new_text, &rel, true)?
+            crate::data_engineer::project_fs::create_git_patch_text(
+                &existing, &new_text, &rel, true,
+            )?
         } else {
             return Err("invalid grounded repair change".to_string());
         };
@@ -1091,7 +1289,7 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
             Some(expected_base.as_str()),
             crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
         )
-            .await?;
+        .await?;
         ctx.storage
             .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
             .await?;
@@ -1114,7 +1312,9 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
     }
 
     if report.changed_files > 0 {
-        report.notes.push(format!("remediation_epoch_secs={}", now_epoch_secs()));
+        report
+            .notes
+            .push(format!("remediation_epoch_secs={}", now_epoch_secs()));
     }
 
     Ok(report)
@@ -1149,15 +1349,13 @@ async fn best_effort_schema_columns_for_source(
 ) -> Vec<(String, String)> {
     let cfg = crate::config::resolved_config_from_ctx(ctx);
     let catalog = cfg
-        .map(|c| c.providers.athena.target_catalog.clone())
-        .unwrap_or_else(|| "AwsDataCatalog".to_string());
+        .map(|c| c.providers.warehouse.container.clone())
+        .unwrap_or_default();
 
-    // Prefer the query provider if present (ground truth for the current warehouse connection).
-    if let Some(q) = ctx.query.as_ref() {
-        let ds_id = format!("{}.{}.{}", catalog, source_schema, source_table);
-        if let Ok(cols) = q.schema(&ds_id).await {
-            return cols;
-        }
+    // Prefer the source warehouse provider (ground truth for the current connection).
+    let ds_id = format!("{}.{}.{}", catalog, source_schema, source_table);
+    if let Ok(cols) = ctx.warehouse.schema(&ds_id).await {
+        return cols;
     }
 
     // Fall back to dataset catalog provider (may be cached/partial).
@@ -1195,7 +1393,7 @@ pub async fn remediate_unresolved_columns_with_llm(
         });
     };
     let dialect = active_provider_dialect(cfg);
-    let catalog = cfg.providers.athena.target_catalog.clone();
+    let catalog = cfg.providers.warehouse.container.clone();
 
     let mut keys: Vec<String> = keys.iter().cloned().collect();
     keys.sort();
@@ -1215,12 +1413,18 @@ pub async fn remediate_unresolved_columns_with_llm(
     // Only consider model SQL files under models/ (never target/ or versions).
     let keys: Vec<String> = keys
         .into_iter()
-        .filter(|k| k.contains("/models/") && k.ends_with(".sql") && !k.contains("/target/") && !k.contains("/_versions/"))
+        .filter(|k| {
+            k.contains("/models/")
+                && k.ends_with(".sql")
+                && !k.contains("/target/")
+                && !k.contains("/_versions/")
+        })
         .collect();
 
     // Load files and pre-filter to those that mention the unresolved token(s).
     let mut candidates: Vec<Value> = Vec::new();
-    let mut content_by_key: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut content_by_key: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for k in keys.iter() {
         let bytes = ctx.storage.get_bytes(k).await.unwrap_or_default();
         let text = String::from_utf8_lossy(&bytes).to_string();
@@ -1266,7 +1470,16 @@ pub async fn remediate_unresolved_columns_with_llm(
             "source_table": source_table,
             "schema_columns": schema_cols
         }));
-        content_by_key.insert(k.clone(), candidates.last().unwrap().get("content").and_then(|v| v.as_str()).unwrap_or("").to_string());
+        content_by_key.insert(
+            k.clone(),
+            candidates
+                .last()
+                .unwrap()
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        );
     }
 
     if candidates.is_empty() {
@@ -1285,14 +1498,18 @@ pub async fn remediate_unresolved_columns_with_llm(
     // Preflight: attach live schema facts for any ref() dependencies mentioned in candidate files.
     let mut ref_names: StdBTreeSet<String> = StdBTreeSet::new();
     for f in candidates.iter() {
-        let Some(content) = f.get("content").and_then(|v| v.as_str()) else { continue };
+        let Some(content) = f.get("content").and_then(|v| v.as_str()) else {
+            continue;
+        };
         for r in crate::data_engineer::naming::extract_ref_calls(content).into_iter() {
             ref_names.insert(r);
         }
     }
     let mut ref_models: Vec<Value> = Vec::new();
     for ref_name in ref_names.into_iter().take(15) {
-        let Some(schema) = infer_schema_for_ref(errors, &ref_name) else { continue };
+        let Some(schema) = infer_schema_for_ref(errors, &ref_name) else {
+            continue;
+        };
         let fqn = format!("{}.{}.{}", catalog, schema, ref_name);
         let cols = best_effort_schema_columns_for_relation(ctx, &fqn).await;
         if cols.is_empty() {
@@ -1339,32 +1556,64 @@ pub async fn remediate_unresolved_columns_with_llm(
     .to_string();
 
     let messages = vec![
-        ChatMessage { role: "system".to_string(), content: sys.clone() },
-        ChatMessage { role: "user".to_string(), content: user.clone() },
+        ChatMessage {
+            role: "system".to_string(),
+            content: sys.clone(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user.clone(),
+        },
     ];
     let parts: Vec<PartInput> = vec![
-        PartInput { name: "system".to_string(), text: sys.clone() },
-        PartInput { name: "user.phase".to_string(), text: phase.to_string() },
-        PartInput { name: "user.dbt_error_brief".to_string(), text: error_brief.clone() },
-        PartInput { name: "user.unresolved_columns".to_string(), text: serde_json::to_string_pretty(&unresolved_columns).unwrap_or_else(|_| "[]".to_string()) },
-        PartInput { name: "user.files".to_string(), text: serde_json::to_string_pretty(&candidates).unwrap_or_else(|_| "[]".to_string()) },
-        PartInput { name: "user.ref_models".to_string(), text: serde_json::to_string_pretty(&ref_models).unwrap_or_else(|_| "[]".to_string()) },
+        PartInput {
+            name: "system".to_string(),
+            text: sys.clone(),
+        },
+        PartInput {
+            name: "user.phase".to_string(),
+            text: phase.to_string(),
+        },
+        PartInput {
+            name: "user.dbt_error_brief".to_string(),
+            text: error_brief.clone(),
+        },
+        PartInput {
+            name: "user.unresolved_columns".to_string(),
+            text: serde_json::to_string_pretty(&unresolved_columns)
+                .unwrap_or_else(|_| "[]".to_string()),
+        },
+        PartInput {
+            name: "user.files".to_string(),
+            text: serde_json::to_string_pretty(&candidates).unwrap_or_else(|_| "[]".to_string()),
+        },
+        PartInput {
+            name: "user.ref_models".to_string(),
+            text: serde_json::to_string_pretty(&ref_models).unwrap_or_else(|_| "[]".to_string()),
+        },
     ];
     let resp_text = match ctx.llm.chat(&messages) {
         Ok(t) => {
-            record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &t, true).await;
+            record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &t, true)
+                .await;
             t
         }
         Err(e) => {
             let raw = format!("LLM_ERROR: {}", e);
-            record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &raw, false).await;
-            return Err(format!("unresolved-column remediation LLM call failed: {}", e));
+            record_llm_call_observability_async(
+                ctx, phase, "unknown", &messages, &parts, &raw, false,
+            )
+            .await;
+            return Err(format!(
+                "unresolved-column remediation LLM call failed: {}",
+                e
+            ));
         }
     };
 
     let v = parse_json_from_llm(&resp_text)?;
-    let parsed: LlmUnresolvedColumnsResponse =
-        serde_json::from_value(v).map_err(|e| format!("failed to parse unresolved-columns remediation JSON: {}", e))?;
+    let parsed: LlmUnresolvedColumnsResponse = serde_json::from_value(v)
+        .map_err(|e| format!("failed to parse unresolved-columns remediation JSON: {}", e))?;
 
     let mut report = RemediationReport {
         dialect: dialect.clone(),
@@ -1385,7 +1634,11 @@ pub async fn remediate_unresolved_columns_with_llm(
         if !content_by_key.contains_key(&ch.key) {
             continue;
         }
-        let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+        let base = ctx
+            .keyspace
+            .dbt_prefix(&ctx.scope)
+            .trim_end_matches('/')
+            .to_string();
         let rel = ch
             .key
             .strip_prefix(&(base.clone() + "/"))
@@ -1395,9 +1648,15 @@ pub async fn remediate_unresolved_columns_with_llm(
         let existing = content_by_key.get(&ch.key).cloned().unwrap_or_default();
         let expected_base = sha256_hex(&existing);
         let mut provided = 0usize;
-        if ch.replace_file.is_some() { provided += 1; }
-        if ch.replace_range.is_some() { provided += 1; }
-        if ch.replace_list.is_some() { provided += 1; }
+        if ch.replace_file.is_some() {
+            provided += 1;
+        }
+        if ch.replace_range.is_some() {
+            provided += 1;
+        }
+        if ch.replace_list.is_some() {
+            provided += 1;
+        }
         if provided != 1 {
             return Err("unresolved-columns repair change must include exactly one of: replace_file | replace_range | replace_list".to_string());
         }
@@ -1410,7 +1669,12 @@ pub async fn remediate_unresolved_columns_with_llm(
                     expected_base
                 ));
             }
-            crate::data_engineer::project_fs::create_git_patch_text(&existing, &rf.new_text, &rel, true)?
+            crate::data_engineer::project_fs::create_git_patch_text(
+                &existing,
+                &rf.new_text,
+                &rel,
+                true,
+            )?
         } else if let Some(rr) = ch.replace_range.as_ref() {
             if rr.expected_sha256.as_deref().unwrap_or("") != expected_base {
                 return Err(format!(
@@ -1420,8 +1684,15 @@ pub async fn remediate_unresolved_columns_with_llm(
                     expected_base
                 ));
             }
-            let new_text = crate::data_engineer::project_fs::apply_replace_range(&existing, rr.start_line, rr.end_line, &rr.new_text)?;
-            crate::data_engineer::project_fs::create_git_patch_text(&existing, &new_text, &rel, true)?
+            let new_text = crate::data_engineer::project_fs::apply_replace_range(
+                &existing,
+                rr.start_line,
+                rr.end_line,
+                &rr.new_text,
+            )?;
+            crate::data_engineer::project_fs::create_git_patch_text(
+                &existing, &new_text, &rel, true,
+            )?
         } else if let Some(rl) = ch.replace_list.as_ref() {
             if rl.expected_sha256.as_deref().unwrap_or("") != expected_base {
                 return Err(format!(
@@ -1441,7 +1712,9 @@ pub async fn remediate_unresolved_columns_with_llm(
                 })
                 .collect();
             let new_text = crate::data_engineer::project_fs::apply_replace_list(&existing, &edits)?;
-            crate::data_engineer::project_fs::create_git_patch_text(&existing, &new_text, &rel, true)?
+            crate::data_engineer::project_fs::create_git_patch_text(
+                &existing, &new_text, &rel, true,
+            )?
         } else {
             return Err("invalid unresolved-columns repair change".to_string());
         };
@@ -1453,7 +1726,7 @@ pub async fn remediate_unresolved_columns_with_llm(
             Some(expected_base.as_str()),
             crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
         )
-            .await?;
+        .await?;
         ctx.storage
             .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
             .await?;
@@ -1467,7 +1740,9 @@ pub async fn remediate_unresolved_columns_with_llm(
     }
 
     if report.changed_files > 0 {
-        report.notes.push(format!("remediation_epoch_secs={}", now_epoch_secs()));
+        report
+            .notes
+            .push(format!("remediation_epoch_secs={}", now_epoch_secs()));
     }
 
     Ok(report)
@@ -1478,9 +1753,9 @@ mod tests {
     use super::*;
     use react_core::agent::DefaultPolicy;
     use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::llm::LargeLanguageModel;
     use react_core::scope::RequestScope;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
-    use react_core::llm::LargeLanguageModel;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -1508,20 +1783,27 @@ mod tests {
     fn minimal_cfg_athena() -> Arc<ReactResolvedConfig> {
         Arc::new(ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { bucket: "b".to_string() },
-            scope: RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
+            storage: crate::config::StorageResolved {
+                bucket: "b".to_string(),
+            },
+            scope: RequestScope {
+                tenant: "t".to_string(),
+                workspace: "w".to_string(),
+                project_id: "p".to_string(),
+            },
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
-                athena: crate::config::AthenaResolved {
-                    enabled: true,
-                    workgroup: "wg".to_string(),
-                    region: "eu-west-1".to_string(),
-                    result_s3: "s3://x/".to_string(),
-                    target_catalog: "AwsDataCatalog".to_string(),
-                    source_schema: "src".to_string(),
-                    discovery_cache_ttl_secs: 120,
+                warehouse: crate::config::WarehouseResolved {
+                    kind: "athena".to_string(),
+                    container: "AwsDataCatalog".to_string(),
+                    namespace: "src".to_string(),
+                    extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
                 },
-                catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
+                catalog: crate::config::CatalogResolved {
+                    enabled: false,
+                    refresh_secs: 60,
+                    max_concurrency: 8,
+                },
                 dbt: crate::config::DbtResolved {
                     enabled: true,
                     profiles_dir: None,
@@ -1543,7 +1825,11 @@ mod tests {
     }
 
     fn make_ctx(storage: Arc<dyn StorageAdapter>, llm: Arc<dyn LargeLanguageModel>) -> AgentCtx {
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
         AgentCtx {
             top_k: 1,
@@ -1560,6 +1846,7 @@ mod tests {
             scope: scope.clone(),
             keyspace,
             query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -1570,19 +1857,30 @@ mod tests {
     #[test]
     fn extract_run_model_schema_map_parses_model_lines() {
         let errors = vec![
-            "12:00:00  1 of 2 START sql view model test_silver.stg_orders ........ [RUN]".to_string(),
-            "12:00:01  2 of 2 START sql view model test_gold.fct_orders .......... [RUN]".to_string(),
-            "12:00:02  1 of 2 OK created sql view model test_silver.stg_orders ... [OK]".to_string(),
-            "12:00:03  2 of 2 ERROR creating sql view model test_gold.fct_orders . [ERROR]".to_string(),
+            "12:00:00  1 of 2 START sql view model test_silver.stg_orders ........ [RUN]"
+                .to_string(),
+            "12:00:01  2 of 2 START sql view model test_gold.fct_orders .......... [RUN]"
+                .to_string(),
+            "12:00:02  1 of 2 OK created sql view model test_silver.stg_orders ... [OK]"
+                .to_string(),
+            "12:00:03  2 of 2 ERROR creating sql view model test_gold.fct_orders . [ERROR]"
+                .to_string(),
         ];
         let map = super::extract_run_model_schema_map(&errors);
-        assert_eq!(map.get("stg_orders").cloned(), Some("test_silver".to_string()));
-        assert_eq!(map.get("fct_orders").cloned(), Some("test_gold".to_string()));
+        assert_eq!(
+            map.get("stg_orders").cloned(),
+            Some("test_silver".to_string())
+        );
+        assert_eq!(
+            map.get("fct_orders").cloned(),
+            Some("test_gold".to_string())
+        );
     }
 
     #[test]
     fn infer_schema_for_ref_prefers_direct_match() {
-        let errors = vec!["1 of 1 START sql view model test_silver.stg_users .... [RUN]".to_string()];
+        let errors =
+            vec!["1 of 1 START sql view model test_silver.stg_users .... [RUN]".to_string()];
         assert_eq!(
             super::infer_schema_for_ref(&errors, "stg_users"),
             Some("test_silver".to_string())
@@ -1594,10 +1892,27 @@ mod tests {
         let storage = Arc::new(InMemoryStorageAdapter::default());
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(MockLlm::default());
         let ctx = make_ctx(storage.clone(), llm);
-        let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
-        storage.put_bytes(&format!("{}/models/a.sql", base), b"select 1", "text/sql").await.unwrap();
-        storage.put_bytes(&format!("{}/target/manifest.sql", base), b"no", "text/sql").await.unwrap();
-        storage.put_bytes(&format!("{}/models/_versions/1.sql", base), b"no", "text/sql").await.unwrap();
+        let base = ctx
+            .keyspace
+            .dbt_prefix(&ctx.scope)
+            .trim_end_matches('/')
+            .to_string();
+        storage
+            .put_bytes(&format!("{}/models/a.sql", base), b"select 1", "text/sql")
+            .await
+            .unwrap();
+        storage
+            .put_bytes(&format!("{}/target/manifest.sql", base), b"no", "text/sql")
+            .await
+            .unwrap();
+        storage
+            .put_bytes(
+                &format!("{}/models/_versions/1.sql", base),
+                b"no",
+                "text/sql",
+            )
+            .await
+            .unwrap();
         let keys = list_sql_keys_for_scope(&ctx).await.unwrap();
         assert_eq!(keys.len(), 1);
         assert!(keys[0].ends_with("/models/a.sql"));
@@ -1616,12 +1931,18 @@ mod tests {
         .to_string()];
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(mock);
         let ctx = make_ctx(storage.clone(), llm);
-        storage.put_bytes("t/w/p/dbt/models/m.sql", b"select 1", "text/sql").await.unwrap();
-        let rep = remediate_dbt_sql_with_llm(&ctx, "pre_validate").await.unwrap();
+        storage
+            .put_bytes("t/w/p/dbt/models/m.sql", b"select 1", "text/sql")
+            .await
+            .unwrap();
+        let rep = remediate_dbt_sql_with_llm(&ctx, "pre_validate")
+            .await
+            .unwrap();
         assert_eq!(rep.changed_files, 1);
         let bytes = storage.get_bytes("t/w/p/dbt/models/m.sql").await.unwrap();
         let got = String::from_utf8_lossy(&bytes);
         assert!(got.contains("select 2"));
-        assert!(got.contains("config(schema=\"warehouse\""));
+        // Hard-cutover portability: do not inject `schema=` into model configs (dbt_project.yml governs schema).
+        assert!(!got.contains("config(schema="));
     }
 }

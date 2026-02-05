@@ -1,6 +1,6 @@
+use react_core::agent::AgentCtx;
 use react_core::scope::RequestScope;
 use std::sync::Arc;
-use react_core::agent::AgentCtx;
 
 #[derive(Clone, Debug)]
 pub struct ReactResolvedConfig {
@@ -37,7 +37,7 @@ pub struct LlmResolved {
 
 #[derive(Clone, Debug, Default)]
 pub struct ProvidersResolved {
-    pub athena: AthenaResolved,
+    pub warehouse: WarehouseResolved,
     pub catalog: CatalogResolved,
     pub dbt: DbtResolved,
     pub vector: VectorResolved,
@@ -55,14 +55,14 @@ pub fn resolved_config_from_ctx(ctx: &AgentCtx) -> Option<&ReactResolvedConfig> 
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct AthenaResolved {
-    pub enabled: bool,
-    pub workgroup: String,
-    pub region: String,
-    pub result_s3: String,
-    pub discovery_cache_ttl_secs: u64,
-    pub target_catalog: String,
-    pub source_schema: String,
+pub struct WarehouseResolved {
+    pub kind: String,
+    /// Provider-specific container name (catalog/project/database) if applicable.
+    pub container: String,
+    /// Provider-specific namespace name (schema/dataset) if applicable.
+    pub namespace: String,
+    /// Provider-specific additional parameters (non-secret).
+    pub extras: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -96,4 +96,3 @@ pub struct DbtResolved {
     pub docker_network: Option<String>,
     pub docker_mount_aws_dir: bool,
 }
-

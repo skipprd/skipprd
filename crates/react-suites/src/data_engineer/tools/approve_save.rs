@@ -29,7 +29,11 @@ fn parse_dataset_id(dataset_id: &str) -> Option<(String, String, String)> {
     if parts.len() != 3 {
         return None;
     }
-    Some((parts[0].to_string(), parts[1].to_string(), parts[2].to_string()))
+    Some((
+        parts[0].to_string(),
+        parts[1].to_string(),
+        parts[2].to_string(),
+    ))
 }
 
 fn resolve_single_dataset_id_from_args(args: &Value) -> Result<Option<String>, String> {
@@ -78,18 +82,33 @@ impl Tool for ApproveAndSaveArtifactTool {
         if name.is_empty() {
             return Err("name required".to_string());
         }
-        let content = args.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let content = args
+            .get("content")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         if content.trim().is_empty() {
             return Err("content required".to_string());
         }
-        let preview_diff = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+        let preview_diff = args
+            .get("preview_diff")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
         let mut warnings: Vec<String> = Vec::new();
 
         // Refactor: dataset_id replaces legacy (pipeline, namespace).
         // Back-compat: accept either args.dataset_id or args.pipeline+args.namespace.
         let explicit_dataset_id = resolve_single_dataset_id_from_args(&args)?.or_else(|| {
-            let p = args.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").trim();
-            let ns = args.get("namespace").and_then(|x| x.as_str()).unwrap_or("").trim();
+            let p = args
+                .get("pipeline")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim();
+            let ns = args
+                .get("namespace")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim();
             if !p.is_empty() && !ns.is_empty() {
                 Some(format!("{}.{}", p, ns))
             } else {
@@ -203,13 +222,21 @@ impl Tool for ApproveAndSaveArtifactTool {
 
         let (current_key, content_type) = match kind {
             "model" => {
-                let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+                let base = ctx
+                    .keyspace
+                    .dbt_prefix(&ctx.scope)
+                    .trim_end_matches('/')
+                    .to_string();
                 let dir = encode_key_component(&dataset_id);
                 let current = format!("{}/models/{}/{}.sql", base, dir, name_final);
                 (current, "text/sql")
             }
             _ => {
-                let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+                let base = ctx
+                    .keyspace
+                    .dbt_prefix(&ctx.scope)
+                    .trim_end_matches('/')
+                    .to_string();
                 let dir = encode_key_component(&dataset_id);
                 let current = format!("{}/metrics/{}/{}.yaml", base, dir, name_final);
                 (current, "text/yaml")
@@ -224,7 +251,14 @@ impl Tool for ApproveAndSaveArtifactTool {
 
         if preview_diff {
             let rel_path = current_key
-                .strip_prefix(&(ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/"))
+                .strip_prefix(
+                    &(ctx
+                        .keyspace
+                        .dbt_prefix(&ctx.scope)
+                        .trim_end_matches('/')
+                        .to_string()
+                        + "/"),
+                )
                 .unwrap_or(&current_key)
                 .to_string();
             let outcome = crate::data_engineer::project_fs::apply_patch(
@@ -257,7 +291,7 @@ impl Tool for ApproveAndSaveArtifactTool {
                             observation: react_core::session::Observation::ok(),
                             ts: chrono::Utc::now().to_rfc3339(),
                             agent,
-                        }
+                        },
                     )
                     .await;
             }
@@ -272,13 +306,25 @@ impl Tool for ApproveAndSaveArtifactTool {
         }
 
         // Ensure minimal dbt project scaffolding exists before first save
-        let dbt = ctx.dbt.as_ref().ok_or_else(|| "dbt provider missing".to_string())?;
+        let dbt = ctx
+            .dbt
+            .as_ref()
+            .ok_or_else(|| "dbt provider missing".to_string())?;
         if let Err(e) = dbt.ensure_minimal_project(&ctx.scope).await {
-            return Ok(serde_json::json!({"ok": false, "error": format!("failed to ensure minimal dbt project: {e}")}));
+            return Ok(
+                serde_json::json!({"ok": false, "error": format!("failed to ensure minimal dbt project: {e}")}),
+            );
         }
 
         let rel_path = current_key
-            .strip_prefix(&(ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/"))
+            .strip_prefix(
+                &(ctx
+                    .keyspace
+                    .dbt_prefix(&ctx.scope)
+                    .trim_end_matches('/')
+                    .to_string()
+                    + "/"),
+            )
             .unwrap_or(&current_key)
             .to_string();
         let outcome = crate::data_engineer::project_fs::apply_patch(
@@ -302,10 +348,17 @@ impl Tool for ApproveAndSaveArtifactTool {
         // Upsert/update embedding for this artifact (immediate availability)
         {
             let llm = ctx.llm.clone();
-            let vector = ctx.vector.as_ref().ok_or_else(|| "vector provider missing".to_string())?;
+            let vector = ctx
+                .vector
+                .as_ref()
+                .ok_or_else(|| "vector provider missing".to_string())?;
             if let Ok(vecs) = llm.embed(&[content_final.clone()]) {
                 if let Some(v) = vecs.get(0) {
-                    let atype = if kind == "model" { "dbt_model" } else { "dbt_metricflow" };
+                    let atype = if kind == "model" {
+                        "dbt_model"
+                    } else {
+                        "dbt_metricflow"
+                    };
                     let ds_id = dataset_id.clone();
                     let id = format!(
                         "artifact:{}:{}:{}",
@@ -354,13 +407,16 @@ impl Tool for ApproveAndSaveArtifactTool {
                         observation: react_core::session::Observation::ok(),
                         ts: chrono::Utc::now().to_rfc3339(),
                         agent: agent.clone(),
-                    }
+                    },
                 )
                 .await;
 
             // Immediately validate the DBT project and refresh compiled views to guarantee consistency
             let s3_prefix = ctx.keyspace.dbt_prefix(&ctx.scope);
-            let validate_tool = crate::data_engineer::tools::dbt_validate::DbtValidateTool { datasets: None, catalog: None };
+            let validate_tool = crate::data_engineer::tools::dbt_validate::DbtValidateTool {
+                datasets: None,
+                catalog: None,
+            };
             let project_name = format!("{}_project", ctx.scope.project_id.replace('/', "_"));
             let args = json!({
                 "project_name": project_name,
@@ -369,7 +425,10 @@ impl Tool for ApproveAndSaveArtifactTool {
             });
             match validate_tool.call(args, ctx).await {
                 Ok(obs) => {
-                    info!("approve_and_save_artifact: dbt_validate observation: {:?}", obs);
+                    info!(
+                        "approve_and_save_artifact: dbt_validate observation: {:?}",
+                        obs
+                    );
                     let obs_norm = react_core::session::ToolObservation::normalize(obs);
                     let tool_id = uuid::Uuid::new_v4().to_string();
                     let _ = store
@@ -380,7 +439,11 @@ impl Tool for ApproveAndSaveArtifactTool {
                                 name: "dbt_validate".to_string(),
                                 clean_name: "Validate DBT".to_string(),
                                 args: serde_json::json!({"s3_prefix": s3_prefix, "build": true}),
-                                status: if obs_norm.ok { "ok".to_string() } else { "failed".to_string() },
+                                status: if obs_norm.ok {
+                                    "ok".to_string()
+                                } else {
+                                    "failed".to_string()
+                                },
                                 payload: None,
                                 observation: obs_norm,
                                 ts: chrono::Utc::now().to_rfc3339(),
@@ -415,7 +478,9 @@ impl Tool for ApproveAndSaveArtifactTool {
             }
         }
 
-        Ok(serde_json::json!({"ok": true, "key": current_key, "status": status, "lines_added": outcome.lines_added, "lines_removed": outcome.lines_removed, "warnings": warnings}))
+        Ok(
+            serde_json::json!({"ok": true, "key": current_key, "status": status, "lines_added": outcome.lines_added, "lines_removed": outcome.lines_removed, "warnings": warnings}),
+        )
     }
 }
 
@@ -427,14 +492,20 @@ mod tests {
     fn resolve_single_dataset_id_from_args_accepts_dataset_id() {
         let args = serde_json::json!({"dataset_id":"AwsDataCatalog.test_raw.raw_customers"});
         let got = resolve_single_dataset_id_from_args(&args).expect("ok");
-        assert_eq!(got.as_deref(), Some("AwsDataCatalog.test_raw.raw_customers"));
+        assert_eq!(
+            got.as_deref(),
+            Some("AwsDataCatalog.test_raw.raw_customers")
+        );
     }
 
     #[test]
     fn resolve_single_dataset_id_from_args_accepts_dataset_ids_len1() {
         let args = serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_customers"]});
         let got = resolve_single_dataset_id_from_args(&args).expect("ok");
-        assert_eq!(got.as_deref(), Some("AwsDataCatalog.test_raw.raw_customers"));
+        assert_eq!(
+            got.as_deref(),
+            Some("AwsDataCatalog.test_raw.raw_customers")
+        );
     }
 
     #[test]
@@ -503,7 +574,10 @@ fn preprocess_model_sql(raw: &str) -> String {
                     let inner = expr.trim_start_matches("ref(").trim_end_matches(')').trim();
                     inner.trim_matches('"').trim_matches('\'').to_string()
                 } else if expr.starts_with("source(") {
-                    let inner = expr.trim_start_matches("source(").trim_end_matches(')').trim();
+                    let inner = expr
+                        .trim_start_matches("source(")
+                        .trim_end_matches(')')
+                        .trim();
                     let parts: Vec<&str> = inner
                         .split(',')
                         .map(|s| s.trim().trim_matches('"').trim_matches('\''))
@@ -522,10 +596,13 @@ fn preprocess_model_sql(raw: &str) -> String {
             }
         }
         // Remove line comments
-        let ll2 = if let Some(pos) = ll.find("--") { ll[..pos].to_string() } else { ll };
+        let ll2 = if let Some(pos) = ll.find("--") {
+            ll[..pos].to_string()
+        } else {
+            ll
+        };
         out.push_str(&ll2);
         out.push('\n');
     }
     out.trim().to_string()
 }
-

@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-use crate::helpers::progress::ProgressUi;
-use crate::scope::RequestScope;
 use crate::discover::Metadata;
+use crate::helpers::progress::ProgressUi;
 use crate::providers::dataset_catalog_provider::DatasetCatalogProvider;
+use crate::scope::RequestScope;
 
 pub mod types;
 
@@ -52,4 +52,3 @@ pub trait CatalogProvider: Send + Sync {
         dataset_ids: &HashMap<String, Metadata>,
     ) -> Result<(), String>;
 }
-

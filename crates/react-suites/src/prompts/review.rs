@@ -71,4 +71,3 @@ Usage guidance:
 - Always output only JSON."#
         .to_string()
 }
-

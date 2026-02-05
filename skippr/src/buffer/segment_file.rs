@@ -1,11 +1,11 @@
-use std::fs::{OpenOptions, File};
-use std::{io, fs};
-use std::io::{Seek, Read, Write};
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use crate::helpers::offsets::OffsetKey;
 use arrow::array::RecordBatch;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
-use crate::helpers::offsets::OffsetKey;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, Write};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+use std::{fs, io};
 pub type PartitionKey = (String, String, Option<i64>, String);
 use bincode;
 
@@ -40,14 +40,21 @@ pub struct SegmentFile {
 impl SegmentFile {
     /// Build the 60-byte commit header used to gate visibility of a segment file.
     /// Layout: MAGIC("SEGC"), VERSION(u32 LE), created_at(u64 LE), size(u64 LE), parts(u32 LE), sha256([u8;32])
-    pub fn build_commit_header_bytes(parts_count: u32, total_bytes: u64, sha256: &[u8;32]) -> [u8;60] {
+    pub fn build_commit_header_bytes(
+        parts_count: u32,
+        total_bytes: u64,
+        sha256: &[u8; 32],
+    ) -> [u8; 60] {
         let mut buf: [u8; 60] = [0u8; 60];
         // MAGIC
         buf[0..4].copy_from_slice(b"SEGC");
         // VERSION=1
         buf[4..8].copy_from_slice(&(COMMIT_HEADER_VERSION).to_le_bytes());
         // created_at
-        let created_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         buf[8..16].copy_from_slice(&created_at.to_le_bytes());
         // size
         buf[16..24].copy_from_slice(&total_bytes.to_le_bytes());
@@ -66,11 +73,16 @@ impl SegmentFile {
 
     /// Read segment metadata from any reader that implements Read+Seek.
     /// Used by `read_metadata_from_bytes`, and can also be used by external callers for S3 streaming.
-    pub fn read_metadata_from_reader<R: Read + Seek>(reader: &mut R) -> io::Result<SegmentFileMetadata> {
+    pub fn read_metadata_from_reader<R: Read + Seek>(
+        reader: &mut R,
+    ) -> io::Result<SegmentFileMetadata> {
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;
         if &magic != MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Compactor: bad segment magic"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Compactor: bad segment magic",
+            ));
         }
         let mut ver = [0u8; 4];
         reader.read_exact(&mut ver)?;
@@ -158,17 +170,33 @@ impl SegmentFile {
         &self,
         offsets: &std::collections::HashMap<OffsetKey, u64>,
         batches: &std::collections::HashMap<PartitionKey, Vec<RecordBatch>>,
-        partitions_meta: &std::collections::HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/ )>,
-    ) -> io::Result<(u64 /*bytes*/, u64 /*rows*/, u32 /*parts_count*/, [u8;32] /*sha256*/)> {
+        partitions_meta: &std::collections::HashMap<
+            PartitionKey,
+            (u64 /*bytes*/, SystemTime /*updated*/),
+        >,
+    ) -> io::Result<(
+        u64,      /*bytes*/
+        u64,      /*rows*/
+        u32,      /*parts_count*/
+        [u8; 32], /*sha256*/
+    )> {
         // Write directly to final path; visibility will be controlled by .seg.commit
-        let mut file = OpenOptions::new().create(true).write(true).read(true).truncate(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .truncate(true)
+            .open(&self.path)?;
         file.seek(io::SeekFrom::Start(0))?;
 
         // Header MAGIC + VERSION
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         // created_at
-        let created_at_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let created_at_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         file.write_all(&created_at_secs.to_le_bytes())?;
 
         // Offsets block
@@ -182,7 +210,9 @@ impl SegmentFile {
         let mut total_bytes: u64 = 0;
         let mut parts_count: u32 = 0;
         for (key, rbatches) in batches.iter() {
-            if rbatches.is_empty() { continue; }
+            if rbatches.is_empty() {
+                continue;
+            }
             parts_count = parts_count.saturating_add(1);
             // Partition header
             file.write_all(PART)?;
@@ -190,8 +220,14 @@ impl SegmentFile {
             let key_len = key_blob.len() as u64;
             file.write_all(&key_len.to_le_bytes())?;
             file.write_all(&key_blob)?;
-            let (p_bytes, p_updated) = partitions_meta.get(key).cloned().unwrap_or((0, SystemTime::now()));
-            let updated_secs = p_updated.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let (p_bytes, p_updated) = partitions_meta
+                .get(key)
+                .cloned()
+                .unwrap_or((0, SystemTime::now()));
+            let updated_secs = p_updated
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             file.write_all(&p_bytes.to_le_bytes())?;
             file.write_all(&updated_secs.to_le_bytes())?;
 
@@ -204,13 +240,21 @@ impl SegmentFile {
             {
                 // Write Arrow stream (scope to drop writer before querying file position)
                 let options = IpcWriteOptions::default();
-                let mut writer = StreamWriter::try_new_with_options(&mut file, &rbatches[0].schema(), options)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
+                let mut writer = StreamWriter::try_new_with_options(
+                    &mut file,
+                    &rbatches[0].schema(),
+                    options,
+                )
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
                 for b in rbatches.iter() {
                     total_rows += b.num_rows() as u64;
-                    writer.write(b).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
+                    writer.write(b).map_err(|e| {
+                        io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e))
+                    })?;
                 }
-                writer.finish().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
+                writer
+                    .finish()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
             }
             let end = file.stream_position()?;
             let len = end - start;
@@ -228,13 +272,17 @@ impl SegmentFile {
         let mut f2 = OpenOptions::new().read(true).open(&self.path)?;
         use sha2::Digest;
         let mut hasher = sha2::Sha256::new();
-        let mut buf = vec![0u8; 1<<20];
+        let mut buf = vec![0u8; 1 << 20];
         let mut remaining = end_before_footer as i64;
         loop {
-            if remaining <= 0 { break; }
+            if remaining <= 0 {
+                break;
+            }
             let to_read = std::cmp::min(remaining as usize, buf.len());
             let n = f2.read(&mut buf[..to_read])?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             hasher.update(&buf[..n]);
             remaining -= n as i64;
         }
@@ -256,15 +304,24 @@ impl SegmentFile {
         let mut file = OpenOptions::new().read(true).open(&self.path)?;
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic)?;
-        if &magic != MAGIC { return Err(io::Error::new(io::ErrorKind::InvalidData, "Compactor: bad segment magic")); }
+        if &magic != MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Compactor: bad segment magic",
+            ));
+        }
         let mut ver = [0u8; 4];
         file.read_exact(&mut ver)?;
         let version = u32::from_le_bytes(ver);
         if version != VERSION {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
-                "Compactor: read refused seg={} version={}",
-                self.path.to_string_lossy(), version
-            )));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Compactor: read refused seg={} version={}",
+                    self.path.to_string_lossy(),
+                    version
+                ),
+            ));
         }
         let mut created = [0u8; 8];
         file.read_exact(&mut created)?;
@@ -274,16 +331,26 @@ impl SegmentFile {
         let offsets_len = u64::from_le_bytes(off_len_buf);
         let mut offsets_blob = vec![0u8; offsets_len as usize];
         file.read_exact(&mut offsets_blob)?;
-        let offsets: std::collections::HashMap<OffsetKey, u64> = bincode::deserialize(&offsets_blob).unwrap_or_default();
+        let offsets: std::collections::HashMap<OffsetKey, u64> =
+            bincode::deserialize(&offsets_blob).unwrap_or_default();
 
         let mut index: Vec<SegmentPartitionIndexEntry> = Vec::new();
         let mut total_bytes: u64 = 0;
         loop {
             let mut tag = [0u8; 4];
-            match file.read_exact(&mut tag) { Ok(()) => {}, Err(e) => {
-                if e.kind() == io::ErrorKind::UnexpectedEof { break; } else { return Err(e); }
-            }}
-            if &tag != PART { break; }
+            match file.read_exact(&mut tag) {
+                Ok(()) => {}
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        break;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+            if &tag != PART {
+                break;
+            }
             let mut key_len_buf = [0u8; 8];
             file.read_exact(&mut key_len_buf)?;
             let key_len = u64::from_le_bytes(key_len_buf);
@@ -310,27 +377,38 @@ impl SegmentFile {
                 )));
             }
             total_bytes = total_bytes.saturating_add(data_len);
-            index.push(SegmentPartitionIndexEntry { key, bytes: part_bytes, updated_at_secs: upd_secs, start, len: data_len });
+            index.push(SegmentPartitionIndexEntry {
+                key,
+                bytes: part_bytes,
+                updated_at_secs: upd_secs,
+                start,
+                len: data_len,
+            });
             // Seek over the Arrow stream to the next PART header
             file.seek(io::SeekFrom::Current(data_len as i64))?;
         }
 
-        Ok(SegmentFileMetadata { created_at_secs, total_bytes, num_partitions: index.len() as u32, offsets, index })
+        Ok(SegmentFileMetadata {
+            created_at_secs,
+            total_bytes,
+            num_partitions: index.len() as u32,
+            offsets,
+            index,
+        })
     }
 }
-
 
 #[cfg(test)]
 mod tests_wal_writer {
     use super::*;
-    use arrow::array::{Int32Array};
+    use arrow::array::Int32Array;
     use arrow::record_batch::RecordBatch;
-    use arrow_schema::{Field, DataType, Schema};
-    use std::sync::Arc;
+    use arrow_schema::{DataType, Field, Schema};
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
-    use std::time::SystemTime;
     use std::fs;
+    use std::sync::Arc;
+    use std::time::SystemTime;
 
     fn temp_dir() -> PathBuf {
         let base = std::env::temp_dir().join(format!("skippr_test_{}", rand::random::<u64>()));
@@ -349,13 +427,19 @@ mod tests_wal_writer {
         let dir = temp_dir();
         let seg = SegmentFile::new(&dir, "t1").unwrap();
         let mut batches: HashMap<PartitionKey, Vec<RecordBatch>> = HashMap::new();
-        let key: PartitionKey = ("ns".to_string(), "".to_string(), Some(0), "shard".to_string());
+        let key: PartitionKey = (
+            "ns".to_string(),
+            "".to_string(),
+            Some(0),
+            "shard".to_string(),
+        );
         batches.insert(key.clone(), vec![make_batch()]);
         let mut parts_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let offsets: HashMap<crate::helpers::offsets::OffsetKey, u64> = HashMap::new();
 
-        let (_bytes, _rows, parts_count, sha) = seg.write_snapshot(&offsets, &batches, &parts_meta).unwrap();
+        let (_bytes, _rows, parts_count, sha) =
+            seg.write_snapshot(&offsets, &batches, &parts_meta).unwrap();
         assert_eq!(parts_count, 1);
 
         // Read footer and verify
@@ -364,23 +448,28 @@ mod tests_wal_writer {
         let footer_len = 4 + 4 + 32; // FOOT + parts(u32) + sha256
         assert!(file_len > footer_len);
         f.seek(io::SeekFrom::Start(file_len - footer_len)).unwrap();
-        let mut tag = [0u8;4]; f.read_exact(&mut tag).unwrap();
+        let mut tag = [0u8; 4];
+        f.read_exact(&mut tag).unwrap();
         assert_eq!(&tag, FOOT);
-        let mut pc = [0u8;4]; f.read_exact(&mut pc).unwrap();
+        let mut pc = [0u8; 4];
+        f.read_exact(&mut pc).unwrap();
         let got_parts = u32::from_le_bytes(pc);
         assert_eq!(got_parts, parts_count);
-        let mut got_sha = [0u8;32]; f.read_exact(&mut got_sha).unwrap();
+        let mut got_sha = [0u8; 32];
+        f.read_exact(&mut got_sha).unwrap();
         assert_eq!(&got_sha, &sha);
 
         // Recompute sha over content up to footer
         let mut f2 = File::open(&seg.path).unwrap();
         let mut hasher = Sha256::new();
         let mut remaining = (file_len - footer_len) as i64;
-        let mut buf = vec![0u8; 1<<16];
+        let mut buf = vec![0u8; 1 << 16];
         while remaining > 0 {
             let to_read = std::cmp::min(remaining as usize, buf.len());
             let n = f2.read(&mut buf[..to_read]).unwrap();
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             hasher.update(&buf[..n]);
             remaining -= n as i64;
         }

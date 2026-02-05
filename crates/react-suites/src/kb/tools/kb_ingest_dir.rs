@@ -9,7 +9,13 @@ use react_core::tools::Tool;
 pub struct KbIngestDirTool;
 
 fn is_text_file(path: &Path) -> bool {
-    match path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase().as_str() {
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
         "txt" | "md" | "markdown" | "rst" => true,
         _ => false,
     }
@@ -73,9 +79,18 @@ impl Tool for KbIngestDirTool {
             .and_then(|x| x.as_str())
             .unwrap_or("kb")
             .to_string();
-        let max_files = args.get("max_files").and_then(|x| x.as_u64()).unwrap_or(200) as usize;
-        let max_bytes = args.get("max_bytes").and_then(|x| x.as_u64()).unwrap_or(2_000_000) as usize;
-        let chunk_chars = args.get("chunk_chars").and_then(|x| x.as_u64()).unwrap_or(1200) as usize;
+        let max_files = args
+            .get("max_files")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(200) as usize;
+        let max_bytes = args
+            .get("max_bytes")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(2_000_000) as usize;
+        let chunk_chars = args
+            .get("chunk_chars")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(1200) as usize;
 
         let root = PathBuf::from(dir);
         if !root.exists() {
@@ -85,10 +100,17 @@ impl Tool for KbIngestDirTool {
             return Err(format!("not a directory: {}", dir));
         }
 
-        let vector = ctx.vector.as_ref().ok_or_else(|| "vector provider missing".to_string())?;
+        let vector = ctx
+            .vector
+            .as_ref()
+            .ok_or_else(|| "vector provider missing".to_string())?;
 
         let mut files: Vec<PathBuf> = Vec::new();
-        for entry in walkdir::WalkDir::new(&root).follow_links(false).into_iter().filter_map(|e| e.ok()) {
+        for entry in walkdir::WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             if files.len() >= max_files {
                 break;
             }
@@ -109,7 +131,9 @@ impl Tool for KbIngestDirTool {
         }
 
         if files.is_empty() {
-            return Ok(serde_json::json!({"ok": true, "dataset_id": dataset_id, "ingested_files": 0, "ingested_chunks": 0, "note": "no eligible files found"}));
+            return Ok(
+                serde_json::json!({"ok": true, "dataset_id": dataset_id, "ingested_files": 0, "ingested_chunks": 0, "note": "no eligible files found"}),
+            );
         }
 
         let epoch = chrono::Utc::now().timestamp() as u64;
@@ -140,7 +164,10 @@ impl Tool for KbIngestDirTool {
         while idx < chunks.len() {
             let end = (idx + batch).min(chunks.len());
             let texts: Vec<String> = chunks[idx..end].iter().map(|c| c.text.clone()).collect();
-            let vecs = ctx.llm.embed(&texts).map_err(|e| format!("embed failed: {}", e))?;
+            let vecs = ctx
+                .llm
+                .embed(&texts)
+                .map_err(|e| format!("embed failed: {}", e))?;
             for (k, v) in vecs.into_iter().enumerate() {
                 chunks[idx + k].vector = v;
             }
@@ -157,4 +184,3 @@ impl Tool for KbIngestDirTool {
         }))
     }
 }
-

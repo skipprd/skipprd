@@ -5,11 +5,11 @@ use std::path::Path;
 
 use react::adapters::storage::S3StorageAdapter;
 use react::llm;
-use react::providers::{AthenaQueryProvider, AthenaSettings};
-use react_suites::SuiteCtx;
-use react::providers::{DefaultKeyspace, EnvSecretsProvider, DbtProjectProvider, LanceVectorStore};
-use react::providers::dbt::DbtRunnerConfig;
 use react::providers::catalog::DefaultCatalogProvider;
+use react::providers::dbt::DbtRunnerConfig;
+use react::providers::{AthenaQueryProvider, AthenaSettings, PostgresProvider, PostgresSettings};
+use react::providers::{DbtProjectProvider, DefaultKeyspace, EnvSecretsProvider, LanceVectorStore};
+use react_suites::SuiteCtx;
 
 #[derive(Parser, Debug)]
 #[command(name = "react")]
@@ -63,7 +63,11 @@ fn init_logging(log: &Option<String>, verbose_debug: bool) {
     if log.is_none() {
         return;
     }
-    if std::env::var("RUST_LOG").ok().filter(|v| !v.trim().is_empty()).is_none() {
+    if std::env::var("RUST_LOG")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .is_none()
+    {
         if let Some(level) = log.as_ref() {
             // Keep `debug` useful by default: suppress very noisy AWS SDK (S3/STS/Athena/Glue)
             // and Smithy HTTP logs unless opted in.
@@ -111,7 +115,14 @@ async fn main() {
     init_logging(&cli.log, cli.verbose_debug);
 
     match cli.cmd {
-        Command::Serve { config, port, bucket, tenant, workspace, project_id } => {
+        Command::Serve {
+            config,
+            port,
+            bucket,
+            tenant,
+            workspace,
+            project_id,
+        } => {
             let file_cfg = match react::config::ReactConfigFile::load_yaml(Path::new(&config)) {
                 Ok(c) => c,
                 Err(e) => {
@@ -141,21 +152,33 @@ async fn main() {
             let secrets = Arc::new(EnvSecretsProvider::default());
             let llm = llm::create_llm(&llm::config_from_resolved(&cfg));
 
-            let mut suite_ctx = SuiteCtx::new(storage, secrets, llm, cfg.scope.clone(), keyspace.clone());
+            let mut suite_ctx =
+                SuiteCtx::new(storage, secrets, llm, cfg.scope.clone(), keyspace.clone());
             suite_ctx.resolved_config = Some(Arc::new(react_suites::ReactResolvedConfig {
-                server: react_suites::config::ServerResolved { port: cfg.server.port },
-                storage: react_suites::config::StorageResolved { bucket: cfg.storage.bucket.clone() },
+                server: react_suites::config::ServerResolved {
+                    port: cfg.server.port,
+                },
+                storage: react_suites::config::StorageResolved {
+                    bucket: cfg.storage.bucket.clone(),
+                },
                 scope: cfg.scope.clone(),
                 llm: react_suites::config::LlmResolved::default(),
                 providers: react_suites::config::ProvidersResolved {
-                    athena: react_suites::config::AthenaResolved {
-                        enabled: cfg.providers.athena.enabled,
-	                        workgroup: cfg.providers.athena.workgroup.clone().unwrap_or_default(),
-	                        region: cfg.providers.athena.region.clone().unwrap_or_default(),
-	                        result_s3: cfg.providers.athena.result_s3.clone().unwrap_or_default(),
-                        discovery_cache_ttl_secs: cfg.providers.athena.discovery_cache_ttl_secs,
-                        target_catalog: cfg.providers.athena.target_catalog.clone(),
-	                        source_schema: cfg.providers.athena.source_schema.clone().unwrap_or_default(),
+                    warehouse: react_suites::config::WarehouseResolved {
+                        kind: cfg.providers.warehouse.kind.clone(),
+                        container: cfg
+                            .providers
+                            .warehouse
+                            .container
+                            .clone()
+                            .unwrap_or_default(),
+                        namespace: cfg
+                            .providers
+                            .warehouse
+                            .namespace
+                            .clone()
+                            .unwrap_or_default(),
+                        extras: cfg.providers.warehouse.extras.clone(),
                     },
                     catalog: react_suites::config::CatalogResolved {
                         enabled: cfg.providers.catalog.enabled,
@@ -165,37 +188,102 @@ async fn main() {
                     dbt: react_suites::config::DbtResolved {
                         enabled: cfg.providers.dbt.enabled,
                         profiles_dir: cfg.providers.dbt.profiles_dir.clone(),
-	                        target: cfg.providers.dbt.target.clone().unwrap_or_default(),
+                        target: cfg.providers.dbt.target.clone().unwrap_or_default(),
                         naming: react_suites::config::DbtNamingResolved {
-	                            target_schema: cfg.providers.dbt.naming.target_schema.clone().unwrap_or_default(),
-	                            silver_suffix: cfg.providers.dbt.naming.silver_suffix.clone().unwrap_or_default(),
-	                            gold_suffix: cfg.providers.dbt.naming.gold_suffix.clone().unwrap_or_default(),
+                            target_schema: cfg
+                                .providers
+                                .dbt
+                                .naming
+                                .target_schema
+                                .clone()
+                                .unwrap_or_default(),
+                            silver_suffix: cfg
+                                .providers
+                                .dbt
+                                .naming
+                                .silver_suffix
+                                .clone()
+                                .unwrap_or_default(),
+                            gold_suffix: cfg
+                                .providers
+                                .dbt
+                                .naming
+                                .gold_suffix
+                                .clone()
+                                .unwrap_or_default(),
                         },
-	                        runner: cfg.providers.dbt.runner.clone(),
+                        runner: cfg.providers.dbt.runner.clone(),
                         docker_image: cfg.providers.dbt.docker_image.clone(),
                         docker_platform: cfg.providers.dbt.docker_platform.clone(),
                         docker_network: cfg.providers.dbt.docker_network.clone(),
                         docker_mount_aws_dir: cfg.providers.dbt.docker_mount_aws_dir,
                     },
-                    vector: react_suites::config::VectorResolved { enabled: cfg.providers.vector.enabled },
+                    vector: react_suites::config::VectorResolved {
+                        enabled: cfg.providers.vector.enabled,
+                    },
                 },
             }));
 
-            // Query + dataset discovery (Athena/Glue)
-            if cfg.providers.athena.enabled {
+            // Warehouse provider (single provider; dbt target)
+            let wh_kind = cfg.providers.warehouse.kind.trim().to_ascii_lowercase();
+            if wh_kind == "athena" {
+                let extras = &cfg.providers.warehouse.extras;
+                let workgroup = extras
+                    .get("workgroup")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let result_s3 = extras
+                    .get("result_s3")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let max_conc = extras
+                    .get("max_concurrency")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(15);
+                let ttl = extras
+                    .get("discovery_cache_ttl_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(120);
+                let catalog = cfg
+                    .providers
+                    .warehouse
+                    .container
+                    .clone()
+                    .unwrap_or_else(|| "AwsDataCatalog".to_string());
+                let schema = cfg.providers.warehouse.namespace.clone();
                 let athena = Arc::new(
                     AthenaQueryProvider::from_settings(AthenaSettings {
-                        workgroup: cfg.providers.athena.workgroup.clone(),
-                        result_output_location: cfg.providers.athena.result_s3.clone(),
-                        default_catalog: cfg.providers.athena.target_catalog.clone(),
-                        source_schema: cfg.providers.athena.source_schema.clone(),
-                        max_concurrency: cfg.providers.athena.max_concurrency,
-                        discovery_cache_ttl_secs: cfg.providers.athena.discovery_cache_ttl_secs,
+                        workgroup,
+                        result_output_location: result_s3,
+                        default_catalog: catalog,
+                        source_schema: schema,
+                        max_concurrency: max_conc,
+                        discovery_cache_ttl_secs: ttl,
                     })
                     .await,
                 );
+                suite_ctx.warehouse = athena.clone();
+                // Keep these set for now (some older call sites still use them), but suites should prefer `warehouse`.
                 suite_ctx.query = Some(athena.clone());
                 suite_ctx.datasets = Some(athena.clone());
+            } else if wh_kind == "postgres" {
+                let dbname = cfg.providers.warehouse.container.clone();
+                let default_schema = cfg.providers.warehouse.namespace.clone();
+                let pg = Arc::new(PostgresProvider::from_settings(PostgresSettings {
+                    dbname,
+                    default_schema,
+                    ..Default::default()
+                }));
+                suite_ctx.warehouse = pg.clone();
+                suite_ctx.query = Some(pg.clone());
+                suite_ctx.datasets = Some(pg.clone());
+            } else {
+                eprintln!(
+                    "ERROR: unsupported providers.warehouse.kind '{}'",
+                    cfg.providers.warehouse.kind
+                );
+                std::process::exit(1);
             }
 
             // Catalog provider (storage-backed), optional but strongly recommended for UX and speed.
@@ -212,7 +300,10 @@ async fn main() {
 
             // Vector store (LanceDB on S3), optional but enables dataset/artifact search.
             if cfg.providers.vector.enabled {
-                suite_ctx.vector = Some(Arc::new(LanceVectorStore::new(keyspace.clone(), cfg.scope.clone())));
+                suite_ctx.vector = Some(Arc::new(LanceVectorStore::new(
+                    keyspace.clone(),
+                    cfg.scope.clone(),
+                )));
             }
 
             // DBT provider (host/docker runner), required for dbt_validate/build/publish workflows.
@@ -238,4 +329,3 @@ async fn main() {
         }
     }
 }
-

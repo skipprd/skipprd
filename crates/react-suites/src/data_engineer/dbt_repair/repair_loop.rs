@@ -1,12 +1,14 @@
-use react_core::agent::AgentCtx;
 use super::remediate::active_provider_dialect;
 use super::remediate::list_sql_keys_for_scope;
 use super::remediate::remediate_dbt_failures_grounded_with_llm;
 use super::remediate::RemediationDiff;
-use react_core::providers::{CatalogProvider, DatasetCatalogProvider, DbtProvider, DbtValidateArgs, DbtValidateResult};
+use react_core::agent::AgentCtx;
+use react_core::providers::{
+    CatalogProvider, DatasetCatalogProvider, DbtProvider, DbtValidateArgs, DbtValidateResult,
+};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
+use std::sync::Arc;
 
 fn errors_look_like_missing_dbt_utils(errors: &[String]) -> bool {
     let s = errors.join("\n").to_lowercase();
@@ -20,7 +22,11 @@ fn errors_look_like_missing_dbt_utils(errors: &[String]) -> bool {
 
 async fn ensure_dbt_utils_package(ctx: &AgentCtx) -> Result<Option<RemediationDiff>, String> {
     // Returns Some(diff) if packages.yml was mutated.
-    let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+    let base = ctx
+        .keyspace
+        .dbt_prefix(&ctx.scope)
+        .trim_end_matches('/')
+        .to_string();
     let key = format!("{}/packages.yml", base);
     let existing_opt = ctx
         .storage
@@ -34,7 +40,8 @@ async fn ensure_dbt_utils_package(ctx: &AgentCtx) -> Result<Option<RemediationDi
     let mut root = if existing.trim().is_empty() {
         YamlMapping::new()
     } else {
-        let v: YamlValue = serde_yaml::from_str(&existing).map_err(|e| format!("packages.yml parse error: {}", e))?;
+        let v: YamlValue = serde_yaml::from_str(&existing)
+            .map_err(|e| format!("packages.yml parse error: {}", e))?;
         match v {
             YamlValue::Mapping(m) => m,
             _ => return Err("packages.yml must be a YAML mapping at top level".to_string()),
@@ -79,11 +86,19 @@ async fn ensure_dbt_utils_package(ctx: &AgentCtx) -> Result<Option<RemediationDi
         ]),
     );
     new_seq.push(YamlValue::Mapping(entry));
-    root.insert(YamlValue::String("packages".to_string()), YamlValue::Sequence(new_seq));
+    root.insert(
+        YamlValue::String("packages".to_string()),
+        YamlValue::Sequence(new_seq),
+    );
 
-    let new_content = serde_yaml::to_string(&YamlValue::Mapping(root)).map_err(|e| e.to_string())?;
-    let patch_text =
-        crate::data_engineer::project_fs::create_git_patch_text(&existing, &new_content, "packages.yml", existed)?;
+    let new_content =
+        serde_yaml::to_string(&YamlValue::Mapping(root)).map_err(|e| e.to_string())?;
+    let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
+        &existing,
+        &new_content,
+        "packages.yml",
+        existed,
+    )?;
     let outcome = crate::data_engineer::project_fs::apply_patch(
         ctx,
         None,
@@ -177,7 +192,11 @@ fn extract_sql_rel_paths_from_dbt_errors(errors: &[String]) -> Vec<String> {
 }
 
 fn storage_keys_for_rel_paths(ctx: &AgentCtx, rels: &[String]) -> Vec<String> {
-    let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+    let base = ctx
+        .keyspace
+        .dbt_prefix(&ctx.scope)
+        .trim_end_matches('/')
+        .to_string();
     let mut out: Vec<String> = Vec::new();
     for r in rels {
         let rel = r.trim_start_matches('/').to_string();
@@ -203,14 +222,19 @@ pub async fn run_repair_loop(
         .map(active_provider_dialect)
         .unwrap_or_else(|| "Unknown SQL dialect".to_string());
 
-    let mut report = RepairReport { dialect: dialect.clone(), max_iterations, ..Default::default() };
+    let mut report = RepairReport {
+        dialect: dialect.clone(),
+        max_iterations,
+        ..Default::default()
+    };
 
     let max_it = max_iterations.max(1).min(25);
     for i in 0..max_it {
         let res = dbt.validate_project(&ctx.scope, args).await?;
 
         report.iterations_run = i + 1;
-        let unresolved_columns = crate::data_engineer::dbt_error::extract_unresolved_columns(&res.errors);
+        let unresolved_columns =
+            crate::data_engineer::dbt_error::extract_unresolved_columns(&res.errors);
         let class = crate::data_engineer::dbt_error::classify(&res.errors);
         let _ = (datasets, catalog, dataset_ids); // reserved for future targeted catalog refresh
         let catalog_refreshed = false;
@@ -229,7 +253,11 @@ pub async fn run_repair_loop(
                 llm_changed_files: if mutated { 1 } else { 0 },
                 changed_keys: diffs.iter().map(|d| d.key.clone()).collect(),
                 change_diffs: diffs,
-                notes: if mutated { vec!["deterministic: added dbt-labs/dbt_utils to packages.yml".to_string()] } else { vec![] },
+                notes: if mutated {
+                    vec!["deterministic: added dbt-labs/dbt_utils to packages.yml".to_string()]
+                } else {
+                    vec![]
+                },
                 dbt_ok: res.ok,
                 compile_ok: res.compile_ok,
                 run_ok: res.run_ok,
@@ -250,7 +278,10 @@ pub async fn run_repair_loop(
         }
 
         // Missing sources are grounding failures; do NOT attempt SQL remediation.
-        if matches!(class, crate::data_engineer::dbt_error::DbtErrorClass::MissingSource) {
+        if matches!(
+            class,
+            crate::data_engineer::dbt_error::DbtErrorClass::MissingSource
+        ) {
             report.iterations.push(RepairIteration {
                 iteration: i + 1,
                 scanned_models: 0,
@@ -353,7 +384,10 @@ pub async fn run_repair_loop(
         }
 
         // Stop on non-remediable warehouse config errors.
-        if matches!(class, crate::data_engineer::dbt_error::DbtErrorClass::WarehouseConfig) {
+        if matches!(
+            class,
+            crate::data_engineer::dbt_error::DbtErrorClass::WarehouseConfig
+        ) {
             report.stopped_reason = Some("warehouse_config".to_string());
             return Ok((res, report));
         }
@@ -376,15 +410,15 @@ pub async fn run_repair_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use react_core::agent::DefaultPolicy;
     use react_core::keyspace::{DefaultKeyspace, Keyspace};
     use react_core::llm::{ChatMessage, LargeLanguageModel};
     use react_core::providers::{DbtValidateArgs, DbtValidateResult};
     use react_core::scope::RequestScope;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
-    use async_trait::async_trait;
-    use std::sync::Mutex;
     use sha2::Digest;
+    use std::sync::Mutex;
 
     fn sha256_hex(s: &str) -> String {
         let mut hasher = sha2::Sha256::new();
@@ -401,7 +435,13 @@ mod tests {
         async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
             Ok(())
         }
-        async fn write_model_sql(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _sql: &str) -> Result<String, String> {
+        async fn write_model_sql(
+            &self,
+            _scope: &RequestScope,
+            _dataset_id: &str,
+            _name: &str,
+            _sql: &str,
+        ) -> Result<String, String> {
             Ok("k".to_string())
         }
         async fn write_metricflow_yaml(
@@ -414,7 +454,11 @@ mod tests {
             Ok("k".to_string())
         }
 
-        async fn validate_project(&self, _scope: &RequestScope, _args: &DbtValidateArgs) -> Result<DbtValidateResult, String> {
+        async fn validate_project(
+            &self,
+            _scope: &RequestScope,
+            _args: &DbtValidateArgs,
+        ) -> Result<DbtValidateResult, String> {
             let mut c = self.calls.lock().unwrap();
             *c += 1;
             if *c == 1 {
@@ -425,7 +469,9 @@ mod tests {
                     compile_ok: false,
                     run_ok: None,
                     uploaded_target_files: 0,
-                    errors: vec!["Runtime Error: Column 'context.session.id' cannot be resolved".to_string()],
+                    errors: vec![
+                        "Runtime Error: Column 'context.session.id' cannot be resolved".to_string(),
+                    ],
                     warnings: vec![],
                     logs: serde_json::json!({}),
                 });
@@ -467,20 +513,27 @@ mod tests {
     fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {
         Arc::new(crate::config::ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { bucket: "b".to_string() },
-            scope: RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
+            storage: crate::config::StorageResolved {
+                bucket: "b".to_string(),
+            },
+            scope: RequestScope {
+                tenant: "t".to_string(),
+                workspace: "w".to_string(),
+                project_id: "p".to_string(),
+            },
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
-                athena: crate::config::AthenaResolved {
-                    enabled: true,
-                    workgroup: "wg".to_string(),
-                    region: "eu-west-1".to_string(),
-                    result_s3: "s3://x/".to_string(),
-                    target_catalog: "AwsDataCatalog".to_string(),
-                    source_schema: "src".to_string(),
-                    discovery_cache_ttl_secs: 120,
+                warehouse: crate::config::WarehouseResolved {
+                    kind: "athena".to_string(),
+                    container: "AwsDataCatalog".to_string(),
+                    namespace: "src".to_string(),
+                    extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
                 },
-                catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
+                catalog: crate::config::CatalogResolved {
+                    enabled: false,
+                    refresh_secs: 60,
+                    max_concurrency: 8,
+                },
                 dbt: crate::config::DbtResolved {
                     enabled: true,
                     profiles_dir: None,
@@ -511,7 +564,11 @@ mod tests {
             ]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
 
         let ctx = AgentCtx {
             top_k: 1,
@@ -528,6 +585,7 @@ mod tests {
             scope: scope.clone(),
             keyspace,
             query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -537,10 +595,32 @@ mod tests {
         struct AlwaysFailDbt;
         #[async_trait]
         impl DbtProvider for AlwaysFailDbt {
-            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> { Ok(()) }
-            async fn write_model_sql(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _sql: &str) -> Result<String, String> { Ok("k".to_string()) }
-            async fn write_metricflow_yaml(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _yaml_text: &str) -> Result<String, String> { Ok("k".to_string()) }
-            async fn validate_project(&self, _scope: &RequestScope, _args: &DbtValidateArgs) -> Result<DbtValidateResult, String> {
+            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
+                Ok(())
+            }
+            async fn write_model_sql(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _sql: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn write_metricflow_yaml(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _yaml_text: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn validate_project(
+                &self,
+                _scope: &RequestScope,
+                _args: &DbtValidateArgs,
+            ) -> Result<DbtValidateResult, String> {
                 Ok(DbtValidateResult {
                     ok: false,
                     deps_ok: true,
@@ -586,10 +666,16 @@ mod tests {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(MockLlm {
             // Grounded repair is now always attempted for SQL-ish failures; return no-op changes.
-            chat_responses: Mutex::new(vec![serde_json::json!({"changes": [], "notes": ["no-op"]}).to_string()]),
+            chat_responses: Mutex::new(vec![
+                serde_json::json!({"changes": [], "notes": ["no-op"]}).to_string(),
+            ]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
 
         let ctx = AgentCtx {
             top_k: 1,
@@ -606,6 +692,7 @@ mod tests {
             scope: scope.clone(),
             keyspace,
             query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -615,10 +702,32 @@ mod tests {
         struct CompileOkRunFailDbt;
         #[async_trait]
         impl DbtProvider for CompileOkRunFailDbt {
-            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> { Ok(()) }
-            async fn write_model_sql(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _sql: &str) -> Result<String, String> { Ok("k".to_string()) }
-            async fn write_metricflow_yaml(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _yaml_text: &str) -> Result<String, String> { Ok("k".to_string()) }
-            async fn validate_project(&self, _scope: &RequestScope, _args: &DbtValidateArgs) -> Result<DbtValidateResult, String> {
+            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
+                Ok(())
+            }
+            async fn write_model_sql(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _sql: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn write_metricflow_yaml(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _yaml_text: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn validate_project(
+                &self,
+                _scope: &RequestScope,
+                _args: &DbtValidateArgs,
+            ) -> Result<DbtValidateResult, String> {
                 Ok(DbtValidateResult {
                     ok: false,
                     deps_ok: true,
@@ -665,13 +774,15 @@ mod tests {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         // Seed a staging SQL file that uses struct dereference (will fail if the raw column is literal dotted).
         let base_key = "t/w/p/dbt/models/staging/stg_src_events.sql";
-        let old_sql = r#"select context.session.id as session_id from {{ source('src','events') }}"#;
+        let old_sql =
+            r#"select context.session.id as session_id from {{ source('src','events') }}"#;
         storage
             .put_bytes(base_key, old_sql.as_bytes(), "text/sql")
             .await
             .unwrap();
 
-        let fixed_sql = r#"select "context.session.id" as session_id from {{ source('src','events') }}"#;
+        let fixed_sql =
+            r#"select "context.session.id" as session_id from {{ source('src','events') }}"#;
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(MockLlm {
             chat_responses: Mutex::new(vec![
                 serde_json::json!({
@@ -684,7 +795,11 @@ mod tests {
             ]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
 
         let ctx = AgentCtx {
             top_k: 1,
@@ -701,13 +816,18 @@ mod tests {
             scope: scope.clone(),
             keyspace,
             query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
             runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
         // Attach a thread store so llm_call steps can be persisted.
-        let store = react_core::session::ThreadStore::new(storage.clone(), scope.clone(), Arc::new(DefaultKeyspace::new("b".to_string())));
+        let store = react_core::session::ThreadStore::new(
+            storage.clone(),
+            scope.clone(),
+            Arc::new(DefaultKeyspace::new("b".to_string())),
+        );
         let mut ctx = ctx;
         ctx.thread_id = Some("th1".to_string());
         ctx.thread_store = Some(store);
@@ -717,10 +837,32 @@ mod tests {
         }
         #[async_trait]
         impl DbtProvider for RunFailThenOkDbt {
-            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> { Ok(()) }
-            async fn write_model_sql(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _sql: &str) -> Result<String, String> { Ok("k".to_string()) }
-            async fn write_metricflow_yaml(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _yaml_text: &str) -> Result<String, String> { Ok("k".to_string()) }
-            async fn validate_project(&self, _scope: &RequestScope, _args: &DbtValidateArgs) -> Result<DbtValidateResult, String> {
+            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
+                Ok(())
+            }
+            async fn write_model_sql(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _sql: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn write_metricflow_yaml(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _yaml_text: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn validate_project(
+                &self,
+                _scope: &RequestScope,
+                _args: &DbtValidateArgs,
+            ) -> Result<DbtValidateResult, String> {
                 let mut c = self.calls.lock().unwrap();
                 *c += 1;
                 if *c == 1 {
@@ -750,7 +892,9 @@ mod tests {
             }
         }
 
-        let dbt: Arc<dyn DbtProvider> = Arc::new(RunFailThenOkDbt { calls: Mutex::new(0) });
+        let dbt: Arc<dyn DbtProvider> = Arc::new(RunFailThenOkDbt {
+            calls: Mutex::new(0),
+        });
         let (_res, rep) = run_repair_loop(
             &ctx,
             &dbt,
@@ -782,7 +926,9 @@ mod tests {
         let store = ctx.thread_store.as_ref().unwrap();
         let log = store.get("th1").await.unwrap();
         assert!(
-            log.steps.iter().any(|s| matches!(s, react_core::session::ThreadStep::LlmCall { .. })),
+            log.steps
+                .iter()
+                .any(|s| matches!(s, react_core::session::ThreadStep::LlmCall { .. })),
             "expected at least one llm_call step"
         );
     }
@@ -794,7 +940,10 @@ mod tests {
         // Seed a SQL file so remediation would have work if it were invoked.
         let ds_id = "AwsDataCatalog.picnic.events";
         let stg_key = format!("t/w/p/dbt/models/{}/stg_events.sql", ds_id);
-        storage.put_bytes(&stg_key, b"select 1\n", "text/sql").await.unwrap();
+        storage
+            .put_bytes(&stg_key, b"select 1\n", "text/sql")
+            .await
+            .unwrap();
 
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(MockLlm {
             chat_responses: Mutex::new(vec![
@@ -803,7 +952,11 @@ mod tests {
             ]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
 
         let ctx = AgentCtx {
             top_k: 1,
@@ -820,6 +973,7 @@ mod tests {
             scope: scope.clone(),
             keyspace,
             query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -829,10 +983,32 @@ mod tests {
         struct SqlFailureOnceDbt;
         #[async_trait]
         impl DbtProvider for SqlFailureOnceDbt {
-            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> { Ok(()) }
-            async fn write_model_sql(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _sql: &str) -> Result<String, String> { Ok("k".to_string()) }
-            async fn write_metricflow_yaml(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _yaml_text: &str) -> Result<String, String> { Ok("k".to_string()) }
-            async fn validate_project(&self, _scope: &RequestScope, _args: &DbtValidateArgs) -> Result<DbtValidateResult, String> {
+            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
+                Ok(())
+            }
+            async fn write_model_sql(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _sql: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn write_metricflow_yaml(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _yaml_text: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn validate_project(
+                &self,
+                _scope: &RequestScope,
+                _args: &DbtValidateArgs,
+            ) -> Result<DbtValidateResult, String> {
                 Ok(DbtValidateResult {
                     ok: false,
                     deps_ok: true,
@@ -879,7 +1055,10 @@ mod tests {
         // Seed a SQL file so remediation scans something.
         let ds_id = "AwsDataCatalog.picnic.events";
         let stg_key = format!("t/w/p/dbt/models/{}/stg_events.sql", ds_id);
-        storage.put_bytes(&stg_key, b"select 1\n", "text/sql").await.unwrap();
+        storage
+            .put_bytes(&stg_key, b"select 1\n", "text/sql")
+            .await
+            .unwrap();
 
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(MockLlm {
             chat_responses: Mutex::new(vec![
@@ -890,7 +1069,11 @@ mod tests {
             ]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
 
         let ctx = AgentCtx {
             top_k: 1,
@@ -907,6 +1090,7 @@ mod tests {
             scope: scope.clone(),
             keyspace,
             query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -916,10 +1100,32 @@ mod tests {
         struct SqlFailureOnceDbt;
         #[async_trait]
         impl DbtProvider for SqlFailureOnceDbt {
-            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> { Ok(()) }
-            async fn write_model_sql(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _sql: &str) -> Result<String, String> { Ok("k".to_string()) }
-            async fn write_metricflow_yaml(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _yaml_text: &str) -> Result<String, String> { Ok("k".to_string()) }
-            async fn validate_project(&self, _scope: &RequestScope, _args: &DbtValidateArgs) -> Result<DbtValidateResult, String> {
+            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
+                Ok(())
+            }
+            async fn write_model_sql(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _sql: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn write_metricflow_yaml(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _yaml_text: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn validate_project(
+                &self,
+                _scope: &RequestScope,
+                _args: &DbtValidateArgs,
+            ) -> Result<DbtValidateResult, String> {
                 Ok(DbtValidateResult {
                     ok: false,
                     deps_ok: true,
@@ -968,7 +1174,11 @@ mod tests {
             chat_responses: Mutex::new(vec![]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
 
         let ctx = AgentCtx {
             top_k: 1,
@@ -985,6 +1195,7 @@ mod tests {
             scope: scope.clone(),
             keyspace,
             query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -996,10 +1207,32 @@ mod tests {
         }
         #[async_trait]
         impl DbtProvider for MissingMacroThenOkDbt {
-            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> { Ok(()) }
-            async fn write_model_sql(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _sql: &str) -> Result<String, String> { Ok("k".to_string()) }
-            async fn write_metricflow_yaml(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _yaml_text: &str) -> Result<String, String> { Ok("k".to_string()) }
-            async fn validate_project(&self, _scope: &RequestScope, _args: &DbtValidateArgs) -> Result<DbtValidateResult, String> {
+            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
+                Ok(())
+            }
+            async fn write_model_sql(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _sql: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn write_metricflow_yaml(
+                &self,
+                _scope: &RequestScope,
+                _dataset_id: &str,
+                _name: &str,
+                _yaml_text: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn validate_project(
+                &self,
+                _scope: &RequestScope,
+                _args: &DbtValidateArgs,
+            ) -> Result<DbtValidateResult, String> {
                 let mut c = self.calls.lock().unwrap();
                 *c += 1;
                 if *c == 1 {
@@ -1029,7 +1262,9 @@ mod tests {
             }
         }
 
-        let dbt: Arc<dyn DbtProvider> = Arc::new(MissingMacroThenOkDbt { calls: Mutex::new(0) });
+        let dbt: Arc<dyn DbtProvider> = Arc::new(MissingMacroThenOkDbt {
+            calls: Mutex::new(0),
+        });
         let (_res, rep) = run_repair_loop(
             &ctx,
             &dbt,
@@ -1051,7 +1286,11 @@ mod tests {
         .unwrap();
 
         // packages.yml should now exist and include dbt_utils.
-        let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+        let base = ctx
+            .keyspace
+            .dbt_prefix(&ctx.scope)
+            .trim_end_matches('/')
+            .to_string();
         let key = format!("{}/packages.yml", base);
         let bytes = storage.get_bytes(&key).await.unwrap();
         let got = String::from_utf8_lossy(&bytes);

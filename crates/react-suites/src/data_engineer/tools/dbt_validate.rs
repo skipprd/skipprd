@@ -2,11 +2,11 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use react_core::agent::AgentCtx;
+use react_core::providers::{CatalogProvider, DatasetCatalogProvider};
 use react_core::tools::Tool;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use react_core::providers::{CatalogProvider, DatasetCatalogProvider};
 
 pub struct DbtValidateTool {
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
@@ -62,7 +62,9 @@ impl Tool for DbtValidateTool {
         let mut _tmp: Option<tempfile::TempDir> = None;
         if profiles_dir.is_none() {
             if let Some(cfg) = crate::config::resolved_config_from_ctx(ctx) {
-                let threads = ctx.query.as_ref().map(|q| q.max_concurrency());
+                let threads = Some(react_core::providers::QueryProvider::max_concurrency(
+                    ctx.warehouse.as_ref(),
+                ));
                 if let Ok(gen) = crate::dbt::profile::generate_profiles_yml(cfg, threads) {
                     let td = tempfile::tempdir().map_err(|e| e.to_string())?;
                     let mut p = PathBuf::from(td.path());
@@ -83,7 +85,7 @@ impl Tool for DbtValidateTool {
             profiles_dir = std::env::var("DBT_PROFILES_DIR").ok();
         }
         let target = target.ok_or_else(|| {
-            "dbt_validate requires a target derived from the configured warehouse provider. Enable/configure providers.athena (and providers.athena.result_s3) or pass args.target explicitly."
+            "dbt_validate requires a dbt target name (e.g. 'athena', 'postgres', 'snowflake', 'bigquery', 'sqlserver'). Configure providers.dbt.target or pass args.target explicitly."
                 .to_string()
         })?;
 
@@ -91,7 +93,7 @@ impl Tool for DbtValidateTool {
             .runtime
             .as_ref()
             .and_then(|_| crate::config::resolved_config_from_ctx(ctx))
-                .map(crate::data_engineer::dbt_repair::remediate::active_provider_dialect)
+            .map(crate::data_engineer::dbt_repair::remediate::active_provider_dialect)
             .unwrap_or_else(|| "Unknown SQL dialect".to_string());
 
         let max_iters: usize = std::env::var("DBT_REPAIR_MAX_ITERS")
@@ -120,11 +122,15 @@ impl Tool for DbtValidateTool {
         )
         .await?;
 
-        let mut v = serde_json::to_value(res)
-            .unwrap_or_else(|_| serde_json::json!({"ok": false, "error": "failed to serialize result"}));
+        let mut v = serde_json::to_value(res).unwrap_or_else(
+            |_| serde_json::json!({"ok": false, "error": "failed to serialize result"}),
+        );
         if let Some(obj) = v.as_object_mut() {
             obj.insert("dialect".to_string(), serde_json::json!(dialect));
-            obj.insert("repair_report".to_string(), serde_json::to_value(repair_report).unwrap_or(Value::Null));
+            obj.insert(
+                "repair_report".to_string(),
+                serde_json::to_value(repair_report).unwrap_or(Value::Null),
+            );
             // Structured runtime/test failures extracted from build/run stdout (if present).
             // This avoids relying on giant error blobs or tiny brief summaries.
             let rf = crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(
@@ -139,14 +145,14 @@ impl Tool for DbtValidateTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use react_core::agent::DefaultPolicy;
-    use react_core::providers::DbtProvider;
     use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::providers::DbtProvider;
     use react_core::scope::RequestScope;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
-    use async_trait::async_trait;
-    use std::sync::{Arc, Mutex};
     use sha2::Digest;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     struct MockLlm {
@@ -174,7 +180,13 @@ mod tests {
         async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
             Ok(())
         }
-        async fn write_model_sql(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _sql: &str) -> Result<String, String> {
+        async fn write_model_sql(
+            &self,
+            _scope: &RequestScope,
+            _dataset_id: &str,
+            _name: &str,
+            _sql: &str,
+        ) -> Result<String, String> {
             Ok("k".to_string())
         }
         async fn write_metricflow_yaml(
@@ -223,20 +235,27 @@ mod tests {
     fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {
         Arc::new(crate::config::ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { bucket: "b".to_string() },
-            scope: RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
+            storage: crate::config::StorageResolved {
+                bucket: "b".to_string(),
+            },
+            scope: RequestScope {
+                tenant: "t".to_string(),
+                workspace: "w".to_string(),
+                project_id: "p".to_string(),
+            },
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
-                athena: crate::config::AthenaResolved {
-                    enabled: true,
-                    workgroup: "wg".to_string(),
-                    region: "eu-west-1".to_string(),
-                    result_s3: "s3://x/".to_string(),
-                    target_catalog: "AwsDataCatalog".to_string(),
-                    source_schema: "src".to_string(),
-                    discovery_cache_ttl_secs: 120,
+                warehouse: crate::config::WarehouseResolved {
+                    kind: "athena".to_string(),
+                    container: "AwsDataCatalog".to_string(),
+                    namespace: "src".to_string(),
+                    extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
                 },
-                catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
+                catalog: crate::config::CatalogResolved {
+                    enabled: false,
+                    refresh_secs: 60,
+                    max_concurrency: 8,
+                },
                 dbt: crate::config::DbtResolved {
                     enabled: true,
                     profiles_dir: None,
@@ -290,8 +309,14 @@ mod tests {
             ]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let dbt: Arc<dyn DbtProvider> = Arc::new(MockDbtProvider { calls: Mutex::new(0) });
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let dbt: Arc<dyn DbtProvider> = Arc::new(MockDbtProvider {
+            calls: Mutex::new(0),
+        });
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
 
         let ctx = AgentCtx {
             top_k: 1,
@@ -308,15 +333,22 @@ mod tests {
             scope,
             keyspace,
             query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: Some(dbt),
             vector: None,
             thread_store: None,
             runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
 
-        let tool = DbtValidateTool { datasets: None, catalog: None };
+        let tool = DbtValidateTool {
+            datasets: None,
+            catalog: None,
+        };
         let obs = tool
-            .call(serde_json::json!({"project_name":"data_engineer","build":false}), &ctx)
+            .call(
+                serde_json::json!({"project_name":"data_engineer","build":false}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
@@ -326,4 +358,3 @@ mod tests {
             .and_then(|v| serde_json::from_value(v.clone()).ok());
     }
 }
-

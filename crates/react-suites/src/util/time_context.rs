@@ -8,4 +8,3 @@ pub fn with_time_context(system_prompt: String) -> String {
         system_prompt, now_utc, local_iso, local_offset
     )
 }
-

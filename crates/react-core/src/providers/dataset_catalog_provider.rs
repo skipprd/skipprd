@@ -23,20 +23,28 @@ impl DatasetId {
 #[async_trait]
 pub trait DatasetCatalogProvider: Send + Sync {
     async fn list_datasets(&self) -> Result<Vec<DatasetId>, String>;
-    async fn get_dataset_schema(&self, dataset: &DatasetId) -> Result<Vec<(String, String)>, String>;
+    async fn get_dataset_schema(
+        &self,
+        dataset: &DatasetId,
+    ) -> Result<Vec<(String, String)>, String>;
 
     /// Optional: Provider-computed stats for a dataset. Providers may return an error if unsupported.
     async fn get_dataset_stats(
         &self,
         dataset: &DatasetId,
         max_fields: usize,
-    ) -> Result<(crate::discover::stats::DatasetFieldStats, crate::providers::catalog::types::DatasetStats), String>;
+    ) -> Result<
+        (
+            crate::discover::stats::DatasetFieldStats,
+            crate::providers::catalog::types::DatasetStats,
+        ),
+        String,
+    >;
 
     /// Max in-flight queries the underlying provider is configured to allow.
     ///
     /// Suites should treat this as the canonical concurrency limit for query batching.
     fn max_concurrency(&self) -> usize {
-        crate::providers::limits::DEFAULT_ATHENA_MAX_CONCURRENCY
+        crate::providers::limits::DEFAULT_WAREHOUSE_MAX_CONCURRENCY
     }
 }
-

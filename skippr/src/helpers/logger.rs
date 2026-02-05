@@ -1,17 +1,17 @@
-use std::collections::btree_map::BTreeMap;
 use crate::helpers::configuration::Config;
 use serde_json::json;
+use std::collections::btree_map::BTreeMap;
 
-use std::hash::{Hash};
+use std::hash::Hash;
 
 use crate::helpers::s3;
+use crate::METRICS;
 use serde_derive::Serialize;
 use std::fmt;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::sync::{RwLock};
-use crate::METRICS;
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
 #[derive(Debug, Clone, Serialize, Hash, PartialEq, Eq)]
@@ -52,7 +52,7 @@ impl Logger {
         let log = Log {
             time: SystemTime::now(),
             level,
-            message
+            message,
         };
 
         self.logs.insert(log.clone().time, log.clone());
@@ -96,7 +96,7 @@ impl Logger {
         {
             _run_id = METRICS.read().run_id.clone();
         }
-        
+
         let data = json!({
             "logs": logs.iter().map(|(_time, log)| {
                 json!({
@@ -116,7 +116,10 @@ impl Logger {
 
         // Upload logs to S3
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let s3_key = format!("{}/{}/{}/logs/{}_{}.json", tenant, workspace, pipeline, timestamp, _run_id);
+        let s3_key = format!(
+            "{}/{}/{}/logs/{}_{}.json",
+            tenant, workspace, pipeline, timestamp, _run_id
+        );
 
         match s3::put_json(&s3_key, &data).await {
             Ok(_) => {
@@ -126,7 +129,7 @@ impl Logger {
                 error!("Failed to upload logs to S3: {:?}", err);
             }
         }
-        
+
         Ok(())
     }
 }

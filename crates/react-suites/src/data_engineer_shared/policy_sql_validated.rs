@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use react_core::agent::{AgentPolicy, FinalEnvelope, Interrupt, RunOutcome};
-use react_core::session::{Observation, ThreadCacheStore, ThreadResult, ThreadStep, ThreadStore, ToolObservation};
+use react_core::session::{
+    Observation, ThreadCacheStore, ThreadResult, ThreadStep, ThreadStore, ToolObservation,
+};
 use react_core::tools::ToolRegistry;
 
 use super::types::DatasetCandidate;
@@ -39,7 +41,9 @@ impl AgentPolicy for SqlValidatedPolicy {
         if let Some(cache) = ThreadCacheStore::get(thread_id) {
             if !cache.published_relations.is_empty() {
                 let mut lines: Vec<String> = Vec::new();
-                lines.push("PublishedRelations (prefer these over bronze/raw when possible):".to_string());
+                lines.push(
+                    "PublishedRelations (prefer these over bronze/raw when possible):".to_string(),
+                );
                 for r in cache.published_relations.iter().take(10) {
                     lines.push(format!("- {}", r));
                 }
@@ -57,7 +61,12 @@ impl AgentPolicy for SqlValidatedPolicy {
         out
     }
 
-    fn interrupt_for_action(&self, action_name: &str, args: &Value, obs: &Value) -> Option<Interrupt> {
+    fn interrupt_for_action(
+        &self,
+        action_name: &str,
+        args: &Value,
+        obs: &Value,
+    ) -> Option<Interrupt> {
         if action_name == self.user_tool {
             let prompt = args
                 .get("prompt")
@@ -77,7 +86,10 @@ impl AgentPolicy for SqlValidatedPolicy {
             return Some(Interrupt::AwaitApproval { prompt });
         }
         if action_name == "publish_dbt_to_provider" {
-            let awaiting = obs.get("await_approval").and_then(|x| x.as_bool()).unwrap_or(false);
+            let awaiting = obs
+                .get("await_approval")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
             if awaiting {
                 let prompt = obs
                     .get("prompt")
@@ -126,7 +138,9 @@ impl AgentPolicy for SqlValidatedPolicy {
                             has_artifacts = true;
                             break;
                         }
-                        ThreadStep::ToolEnd { name, .. } if name == "approve_and_save_artifact_batch" => {
+                        ThreadStep::ToolEnd { name, .. }
+                            if name == "approve_and_save_artifact_batch" =>
+                        {
                             has_artifacts = true;
                             break;
                         }
@@ -154,7 +168,9 @@ impl AgentPolicy for SqlValidatedPolicy {
                     };
 
                     let (ok, compile_ok, run_ok, build, run) = match v {
-                        ThreadStep::ToolEnd { args, observation, .. } => {
+                        ThreadStep::ToolEnd {
+                            args, observation, ..
+                        } => {
                             let ok = observation.ok;
                             let compile_ok = observation
                                 .extra
@@ -162,7 +178,8 @@ impl AgentPolicy for SqlValidatedPolicy {
                                 .and_then(|x| x.as_bool())
                                 .unwrap_or(false);
                             let run_ok = observation.extra.get("run_ok").and_then(|x| x.as_bool());
-                            let build = args.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
+                            let build =
+                                args.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
                             let run = args.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
                             (ok, compile_ok, run_ok, build, run)
                         }
@@ -231,7 +248,10 @@ impl AgentPolicy for SqlValidatedPolicy {
                     )
                     .await;
             }
-            return Ok(Some(RunOutcome::Final { thread_id: thread_id.to_string(), result }));
+            return Ok(Some(RunOutcome::Final {
+                thread_id: thread_id.to_string(),
+                result,
+            }));
         }
 
         // Ask mode: require and validate SQL+data before finalizing.
@@ -266,7 +286,10 @@ impl AgentPolicy for SqlValidatedPolicy {
                 return Ok(None);
             }
         };
-        let obs = match tools.call("run_sql", serde_json::json!({"sql": sql_for_run}), ctx).await {
+        let obs = match tools
+            .call("run_sql", serde_json::json!({"sql": sql_for_run}), ctx)
+            .await
+        {
             Ok(o) => o,
             Err(e) => serde_json::json!({"ok": false, "errors": [e]}),
         };
@@ -289,7 +312,11 @@ impl AgentPolicy for SqlValidatedPolicy {
                         name: "run_sql".to_string(),
                         clean_name: "Run SQL".to_string(),
                         args: serde_json::json!({"sql": sql_for_run}),
-                        status: if ok { "ok".to_string() } else { "failed".to_string() },
+                        status: if ok {
+                            "ok".to_string()
+                        } else {
+                            "failed".to_string()
+                        },
                         payload: None,
                         observation: ToolObservation::normalize(obs.clone()),
                         ts: chrono::Utc::now().to_rfc3339(),
@@ -331,11 +358,14 @@ impl AgentPolicy for SqlValidatedPolicy {
                         observation: Observation::ok(),
                         ts: chrono::Utc::now().to_rfc3339(),
                         agent,
-                    }
+                    },
                 )
                 .await;
         }
-        Ok(Some(RunOutcome::Final { thread_id: thread_id.to_string(), result }))
+        Ok(Some(RunOutcome::Final {
+            thread_id: thread_id.to_string(),
+            result,
+        }))
     }
 
     async fn fallback(
@@ -353,8 +383,12 @@ impl AgentPolicy for SqlValidatedPolicy {
                 let mut keys: Vec<String> = Vec::new();
                 for step in log.steps.iter().rev() {
                     match step {
-                        ThreadStep::ToolEnd { name, observation, .. } if name == "approve_and_save_artifact_batch" => {
-                            if let Some(arr) = observation.extra.get("keys").and_then(|x| x.as_array()) {
+                        ThreadStep::ToolEnd {
+                            name, observation, ..
+                        } if name == "approve_and_save_artifact_batch" => {
+                            if let Some(arr) =
+                                observation.extra.get("keys").and_then(|x| x.as_array())
+                            {
                                 for v in arr {
                                     if let Some(s) = v.as_str() {
                                         keys.push(s.to_string());
@@ -374,8 +408,17 @@ impl AgentPolicy for SqlValidatedPolicy {
                 }
                 if !keys.is_empty() {
                     let shown: Vec<String> = keys.iter().take(6).cloned().collect();
-                    let extra = if keys.len() > 6 { format!(" (+{} more)", keys.len() - 6) } else { String::new() };
-                    summary = format!("Saved {} artifact(s): {}{}", keys.len(), shown.join(", "), extra);
+                    let extra = if keys.len() > 6 {
+                        format!(" (+{} more)", keys.len() - 6)
+                    } else {
+                        String::new()
+                    };
+                    summary = format!(
+                        "Saved {} artifact(s): {}{}",
+                        keys.len(),
+                        shown.join(", "),
+                        extra
+                    );
                 }
             }
         }
@@ -393,16 +436,20 @@ impl AgentPolicy for SqlValidatedPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use react_core::storage::InMemoryStorageAdapter;
     use react_core::keyspace::DefaultKeyspace;
     use react_core::scope::RequestScope;
+    use react_core::storage::InMemoryStorageAdapter;
     use std::sync::Arc;
 
     #[tokio::test]
     async fn model_final_is_rejected_after_failed_dbt_validate() {
         let storage = Arc::new(InMemoryStorageAdapter::default());
         let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
         let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
         // Use a unique thread id to avoid cross-test cache collisions.
         let tid = format!(
@@ -428,7 +475,7 @@ mod tests {
                     observation: Observation::ok(),
                     ts: chrono::Utc::now().to_rfc3339(),
                     agent: "model".to_string(),
-                }
+                },
             )
             .await;
         let _ = store
@@ -457,10 +504,12 @@ mod tests {
                     args: serde_json::json!({"build": true}),
                     status: "failed".to_string(),
                     payload: None,
-                    observation: ToolObservation::normalize(serde_json::json!({"ok": false, "compile_ok": false, "errors": ["fail"]})),
+                    observation: ToolObservation::normalize(
+                        serde_json::json!({"ok": false, "compile_ok": false, "errors": ["fail"]}),
+                    ),
                     ts: chrono::Utc::now().to_rfc3339(),
                     agent: "model".to_string(),
-                }
+                },
             )
             .await;
 
@@ -479,6 +528,7 @@ mod tests {
             scope,
             keyspace,
             query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: Some(store.clone()),
@@ -495,7 +545,14 @@ mod tests {
         };
 
         let out = policy
-            .handle_final(&tools, &ctx, &mut transcript, Some(&store), tid.as_str(), &final_env)
+            .handle_final(
+                &tools,
+                &ctx,
+                &mut transcript,
+                Some(&store),
+                tid.as_str(),
+                &final_env,
+            )
             .await
             .unwrap();
         assert!(out.is_none());
@@ -505,4 +562,3 @@ mod tests {
         );
     }
 }
-

@@ -1,17 +1,17 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
-use std::cmp::Ordering;
 
+use crate::config::ReactResolvedConfig;
 use react_core::agent::AgentCtx;
+use react_core::providers::{CatalogProvider, DatasetCatalogProvider};
 use react_core::session::ThreadCacheStore;
 use react_core::tools::Tool;
 use std::sync::Arc;
-use react_core::providers::{CatalogProvider, DatasetCatalogProvider};
-use crate::config::ReactResolvedConfig;
 
 pub struct PublishDbtToProviderTool {
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
@@ -50,7 +50,10 @@ impl Tool for PublishDbtToProviderTool {
             .map(|s| s.to_string())
             .unwrap_or_else(|| gen.target.clone());
 
-        let confirm = args.get("confirm").and_then(|x| x.as_bool()).unwrap_or(false);
+        let confirm = args
+            .get("confirm")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
         let dataset_ids: Option<Vec<String>> = args
             .get("dataset_ids")
             .and_then(|v| v.as_array())
@@ -61,7 +64,10 @@ impl Tool for PublishDbtToProviderTool {
             })
             .filter(|v| !v.is_empty());
 
-        let dbt = ctx.dbt.as_ref().ok_or_else(|| "dbt provider missing".to_string())?;
+        let dbt = ctx
+            .dbt
+            .as_ref()
+            .ok_or_else(|| "dbt provider missing".to_string())?;
         let query = ctx.query.as_ref();
 
         // Write generated profiles.yml into a temp dir and run compile.
@@ -71,24 +77,25 @@ impl Tool for PublishDbtToProviderTool {
         fs::write(&p, gen.profiles_yml.as_bytes()).map_err(|e| e.to_string())?;
 
         // Eagerly repair/refresh + compile until the project compiles cleanly (bounded).
-        let (compile_res, compile_repair) = crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
-            ctx,
-            dbt,
-            &react_core::providers::DbtValidateArgs {
-                project_name: "data_engineer".to_string(),
-                profiles_dir: Some(td.path().to_string_lossy().to_string()),
-                target: provider_target.clone(),
-                run: false,
-                build: false,
-                select: None,
-                exclude: None,
-            },
-            max_iters,
-            self.datasets.as_ref(),
-            self.catalog.as_ref(),
-            dataset_ids.as_deref(),
-        )
-        .await?;
+        let (compile_res, compile_repair) =
+            crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
+                ctx,
+                dbt,
+                &react_core::providers::DbtValidateArgs {
+                    project_name: "data_engineer".to_string(),
+                    profiles_dir: Some(td.path().to_string_lossy().to_string()),
+                    target: provider_target.clone(),
+                    run: false,
+                    build: false,
+                    select: None,
+                    exclude: None,
+                },
+                max_iters,
+                self.datasets.as_ref(),
+                self.catalog.as_ref(),
+                dataset_ids.as_deref(),
+            )
+            .await?;
 
         if !compile_res.ok || !compile_res.compile_ok {
             emit_trace(ctx, "publish failed");
@@ -127,13 +134,20 @@ impl Tool for PublishDbtToProviderTool {
             if let Some(store) = ctx.thread_store.as_ref() {
                 if let Ok(log) = store.get(&tid).await {
                     for step in log.steps.iter().rev() {
-                        let react_core::session::ThreadStep::ToolEnd { name, observation, .. } = step else {
+                        let react_core::session::ThreadStep::ToolEnd {
+                            name, observation, ..
+                        } = step
+                        else {
                             continue;
                         };
                         if name != "publish_dbt_to_provider" {
                             continue;
                         }
-                        let stage = observation.extra.get("stage").and_then(|v| v.as_str()).unwrap_or("");
+                        let stage = observation
+                            .extra
+                            .get("stage")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         let d = observation
                             .extra
                             .get("manifest_sha256")
@@ -212,24 +226,25 @@ impl Tool for PublishDbtToProviderTool {
         }
 
         // Run dbt build to publish, with eager repair until success (bounded).
-        let (build_res, build_repair) = crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
-            ctx,
-            dbt,
-            &react_core::providers::DbtValidateArgs {
-                project_name: "data_engineer".to_string(),
-                profiles_dir: Some(td.path().to_string_lossy().to_string()),
-                target: provider_target.clone(),
-                run: false,
-                build: true,
-                select: None,
-                exclude: None,
-            },
-            max_iters,
-            self.datasets.as_ref(),
-            self.catalog.as_ref(),
-            dataset_ids.as_deref(),
-        )
-        .await?;
+        let (build_res, build_repair) =
+            crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
+                ctx,
+                dbt,
+                &react_core::providers::DbtValidateArgs {
+                    project_name: "data_engineer".to_string(),
+                    profiles_dir: Some(td.path().to_string_lossy().to_string()),
+                    target: provider_target.clone(),
+                    run: false,
+                    build: true,
+                    select: None,
+                    exclude: None,
+                },
+                max_iters,
+                self.datasets.as_ref(),
+                self.catalog.as_ref(),
+                dataset_ids.as_deref(),
+            )
+            .await?;
 
         if !build_res.ok || build_res.run_ok == Some(false) {
             emit_trace(ctx, "publish failed");
@@ -248,8 +263,15 @@ impl Tool for PublishDbtToProviderTool {
                 let fqns = relations
                     .iter()
                     .map(|r| {
-                        let db = if !r.schema.is_empty() { r.schema.clone() } else { r.database.clone() };
-                        format!("{}.{}.{}", cfg.providers.athena.target_catalog, db, r.identifier)
+                        let db = if !r.schema.is_empty() {
+                            r.schema.clone()
+                        } else {
+                            r.database.clone()
+                        };
+                        format!(
+                            "{}.{}.{}",
+                            cfg.providers.warehouse.container, db, r.identifier
+                        )
                     })
                     .collect::<Vec<_>>();
                 ThreadCacheStore::update_published(tid, &plan_sha256, fqns);
@@ -285,26 +307,26 @@ async fn check_existing_relations(
             } else {
                 r.database.clone()
             };
-            let fqn = format!("{}.{}.{}", cfg.providers.athena.target_catalog, db, r.identifier);
+            let fqn = format!(
+                "{}.{}.{}",
+                cfg.providers.warehouse.container, db, r.identifier
+            );
             out.insert(fqn, true);
         }
         return out;
     };
 
-    // Best-effort existence check via QueryProvider::schema (Athena uses Glue GetTable).
+    // Best-effort existence check via QueryProvider::schema.
     for r in relations {
-        // AthenaQueryProvider expects catalog.database.table.
-        //
-        // dbt-athena typically uses:
-        // - `database`: catalog name (often AwsDataCatalog)
-        // - `schema`: glue database
-        // So we treat `schema` as the database for existence checks.
         let db = if !r.schema.is_empty() {
             r.schema.clone()
         } else {
             r.database.clone()
         };
-        let fqn = format!("{}.{}.{}", cfg.providers.athena.target_catalog, db, r.identifier);
+        let fqn = format!(
+            "{}.{}.{}",
+            cfg.providers.warehouse.container, db, r.identifier
+        );
         let exists = q.schema(&fqn).await.is_ok();
         out.insert(fqn, exists);
     }
@@ -410,12 +432,12 @@ fn resolved_config(ctx: &AgentCtx) -> Result<&ReactResolvedConfig, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use react_core::agent::DefaultPolicy;
-    use react_core::providers::DbtProvider;
     use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::providers::DbtProvider;
     use react_core::scope::RequestScope;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
-    use async_trait::async_trait;
     use std::sync::Arc;
 
     #[test]
@@ -432,20 +454,27 @@ mod tests {
     async fn check_existing_relations_is_conservative_without_query_provider() {
         let cfg = crate::config::ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { bucket: "b".to_string() },
-            scope: RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
+            storage: crate::config::StorageResolved {
+                bucket: "b".to_string(),
+            },
+            scope: RequestScope {
+                tenant: "t".to_string(),
+                workspace: "w".to_string(),
+                project_id: "p".to_string(),
+            },
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
-                athena: crate::config::AthenaResolved {
-                    enabled: true,
-                    workgroup: "wg".to_string(),
-                    region: "eu-west-1".to_string(),
-                    result_s3: "s3://x/".to_string(),
-                    target_catalog: "AwsDataCatalog".to_string(),
-                    source_schema: "src".to_string(),
-                    discovery_cache_ttl_secs: 120,
+                warehouse: crate::config::WarehouseResolved {
+                    kind: "athena".to_string(),
+                    container: "AwsDataCatalog".to_string(),
+                    namespace: "src".to_string(),
+                    extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
                 },
-                catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
+                catalog: crate::config::CatalogResolved {
+                    enabled: false,
+                    refresh_secs: 60,
+                    max_concurrency: 8,
+                },
                 dbt: crate::config::DbtResolved {
                     enabled: false,
                     profiles_dir: None,
@@ -482,7 +511,13 @@ mod tests {
             Ok(())
         }
 
-        async fn write_model_sql(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _sql: &str) -> Result<String, String> {
+        async fn write_model_sql(
+            &self,
+            _scope: &RequestScope,
+            _dataset_id: &str,
+            _name: &str,
+            _sql: &str,
+        ) -> Result<String, String> {
             Ok("k".to_string())
         }
 
@@ -496,10 +531,19 @@ mod tests {
             Ok("k".to_string())
         }
 
-        async fn validate_project(&self, scope: &RequestScope, args: &react_core::providers::DbtValidateArgs) -> Result<react_core::providers::DbtValidateResult, String> {
+        async fn validate_project(
+            &self,
+            scope: &RequestScope,
+            args: &react_core::providers::DbtValidateArgs,
+        ) -> Result<react_core::providers::DbtValidateResult, String> {
             // When "compiling", simulate uploading a manifest.json where publish expects it.
             if !args.build {
-                let base = self.keyspace.dbt_prefix(scope).trim_end_matches('/').to_string() + "/";
+                let base = self
+                    .keyspace
+                    .dbt_prefix(scope)
+                    .trim_end_matches('/')
+                    .to_string()
+                    + "/";
                 let manifest_key = format!("{}target/manifest.json", base);
                 let manifest = serde_json::json!({
                     "nodes": {
@@ -507,7 +551,9 @@ mod tests {
                     }
                 });
                 let bytes = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
-                self.storage.put_bytes(&manifest_key, &bytes, "application/json").await?;
+                self.storage
+                    .put_bytes(&manifest_key, &bytes, "application/json")
+                    .await?;
             }
             Ok(react_core::providers::DbtValidateResult {
                 ok: true,
@@ -527,25 +573,35 @@ mod tests {
     async fn publish_always_requires_approval_before_build() {
         let storage = Arc::new(InMemoryStorageAdapter::default());
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
-        let dbt: Arc<dyn DbtProvider> = Arc::new(MockDbtProvider { storage: storage.clone(), keyspace: keyspace.clone() });
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
+        let dbt: Arc<dyn DbtProvider> = Arc::new(MockDbtProvider {
+            storage: storage.clone(),
+            keyspace: keyspace.clone(),
+        });
 
         let cfg = Arc::new(crate::config::ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { bucket: "b".to_string() },
+            storage: crate::config::StorageResolved {
+                bucket: "b".to_string(),
+            },
             scope: scope.clone(),
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
-                athena: crate::config::AthenaResolved {
-                    enabled: true,
-                    workgroup: "wg".to_string(),
-                    region: "eu-west-1".to_string(),
-                    result_s3: "s3://x/".to_string(),
-                    target_catalog: "AwsDataCatalog".to_string(),
-                    source_schema: "picnic".to_string(),
-                    discovery_cache_ttl_secs: 120,
+                warehouse: crate::config::WarehouseResolved {
+                    kind: "athena".to_string(),
+                    container: "AwsDataCatalog".to_string(),
+                    namespace: "picnic".to_string(),
+                    extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
                 },
-                catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
+                catalog: crate::config::CatalogResolved {
+                    enabled: false,
+                    refresh_secs: 60,
+                    max_concurrency: 8,
+                },
                 dbt: crate::config::DbtResolved {
                     enabled: true,
                     profiles_dir: None,
@@ -580,16 +636,25 @@ mod tests {
             scope,
             keyspace,
             query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: Some(dbt),
             vector: None,
             thread_store: None,
             runtime: Some(cfg.clone() as Arc<dyn std::any::Any + Send + Sync>),
         };
 
-        let tool = PublishDbtToProviderTool { datasets: None, catalog: None };
+        let tool = PublishDbtToProviderTool {
+            datasets: None,
+            catalog: None,
+        };
         let obs = tool.call(serde_json::json!({}), &ctx).await.unwrap();
-        assert_eq!(obs.get("stage").and_then(|v| v.as_str()), Some("await_approval"));
-        assert_eq!(obs.get("await_approval").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            obs.get("stage").and_then(|v| v.as_str()),
+            Some("await_approval")
+        );
+        assert_eq!(
+            obs.get("await_approval").and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 }
-

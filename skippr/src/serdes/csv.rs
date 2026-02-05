@@ -1,13 +1,15 @@
 extern crate csv;
 
-use std::string::ToString;
 use once_cell::sync::Lazy;
+use std::string::ToString;
 
-use serde_json::Value;
 use crate::helpers::timed_rwlock::TimedRwLock;
+use serde_json::Value;
 
-pub static CSV_HEADERS: Lazy<TimedRwLock<Vec<String>>> = Lazy::new(|| TimedRwLock::new("csv_headers".to_string(), Vec::new()));
-pub static CHOSEN_DELIM: Lazy<TimedRwLock<String>> = Lazy::new(|| TimedRwLock::new("chosen_delim".to_string(), "".to_string()));
+pub static CSV_HEADERS: Lazy<TimedRwLock<Vec<String>>> =
+    Lazy::new(|| TimedRwLock::new("csv_headers".to_string(), Vec::new()));
+pub static CHOSEN_DELIM: Lazy<TimedRwLock<String>> =
+    Lazy::new(|| TimedRwLock::new("chosen_delim".to_string(), "".to_string()));
 
 pub struct SerderCsv;
 
@@ -58,7 +60,8 @@ impl SerderCsv {
                     drop(header_guard);
                     is_header_row = record.iter().all(|item| item.parse::<i64>().is_err());
                     if is_header_row {
-                        let headers_vec: Vec<String> = record.iter().map(|s| s.to_string()).collect();
+                        let headers_vec: Vec<String> =
+                            record.iter().map(|s| s.to_string()).collect();
                         let mut write_guard = CSV_HEADERS.write();
                         write_guard.extend(headers_vec.clone());
                         headers_vec
@@ -92,7 +95,7 @@ impl SerderCsv {
 
     fn detect_delimiter(record: &str) -> String {
         let delimiters = vec![";", ",", "\t", "|"];
-        let mut chosen_delim = ";".to_string();  // Default to comma.
+        let mut chosen_delim = ";".to_string(); // Default to comma.
         let mut max_fields = 0;
 
         for delim in &delimiters {
@@ -103,7 +106,7 @@ impl SerderCsv {
 
             if
             // lines.iter().all(|line| line.split(*delim).count() == first_line_fields) &&
-                first_line_fields > max_fields {
+            first_line_fields > max_fields {
                 max_fields = first_line_fields;
                 chosen_delim = delim.to_string();
             }
@@ -111,10 +114,8 @@ impl SerderCsv {
 
         // println!("Delimiter: {} ({} fields)", chosen_delim, max_fields);
 
-
         chosen_delim
     }
-
 }
 
 #[cfg(test)]
@@ -211,4 +212,3 @@ mod tests_csv {
 
     // ... Add more tests as needed.
 }
-

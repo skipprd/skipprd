@@ -11,8 +11,7 @@ pub mod providers;
 pub mod ws;
 
 // Concrete implementations and utilities used by runtime wiring.
-pub mod vector;
+pub mod discover;
 pub mod embeddings;
 pub mod util;
-pub mod discover;
-
+pub mod vector;

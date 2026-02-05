@@ -16,4 +16,3 @@ where
 pub fn current_thread_id() -> Option<String> {
     LLM_THREAD_ID.try_with(|s| s.clone()).ok()
 }
-

@@ -23,7 +23,9 @@ fn react_must_not_depend_on_sqlrt() {
 
     let mut offenders: Vec<String> = Vec::new();
     for p in files {
-        let Ok(s) = fs::read_to_string(&p) else { continue };
+        let Ok(s) = fs::read_to_string(&p) else {
+            continue;
+        };
         if s.contains("crate::sqlrt::") || s.contains("::sqlrt::") {
             offenders.push(p.display().to_string());
         }
@@ -34,4 +36,3 @@ fn react_must_not_depend_on_sqlrt() {
         offenders.join("\n")
     );
 }
-

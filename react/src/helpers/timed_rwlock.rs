@@ -1,9 +1,8 @@
-
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::{Instant, Duration};
-use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Duration, Instant};
 
 lazy_static! {
     static ref PROFILE_PERFORMANCE: bool = true;
@@ -25,7 +24,11 @@ impl<T> TimedRwLock<T> {
     }
 
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
-        let start_time = if *PROFILE_PERFORMANCE { Some(Instant::now()) } else { None };
+        let start_time = if *PROFILE_PERFORMANCE {
+            Some(Instant::now())
+        } else {
+            None
+        };
         // Block until acquired
         let guard = self.lock.read().unwrap();
         if let Some(start) = start_time {
@@ -40,11 +43,17 @@ impl<T> TimedRwLock<T> {
                 let now = Instant::now();
                 let mut should_print = true;
                 if let Some(prev) = WAITING_ON.get(&self.name) {
-                    if now.duration_since(*prev.value()) < Duration::from_secs(1) { should_print = false; }
+                    if now.duration_since(*prev.value()) < Duration::from_secs(1) {
+                        should_print = false;
+                    }
                 }
                 if should_print {
                     WAITING_ON.insert(self.name.clone(), now);
-                    println!("waiting on a read lock {} (>{}ms)", self.name, threshold.as_millis());
+                    println!(
+                        "waiting on a read lock {} (>{}ms)",
+                        self.name,
+                        threshold.as_millis()
+                    );
                 }
             }
         }
@@ -52,7 +61,11 @@ impl<T> TimedRwLock<T> {
     }
 
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
-        let start_time = if *PROFILE_PERFORMANCE { Some(Instant::now()) } else { None };
+        let start_time = if *PROFILE_PERFORMANCE {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let guard = self.lock.write().unwrap();
         if let Some(start) = start_time {
             let elapsed = start.elapsed();
@@ -66,11 +79,17 @@ impl<T> TimedRwLock<T> {
                 let now = Instant::now();
                 let mut should_print = true;
                 if let Some(prev) = WAITING_ON.get(&self.name) {
-                    if now.duration_since(*prev.value()) < Duration::from_secs(1) { should_print = false; }
+                    if now.duration_since(*prev.value()) < Duration::from_secs(1) {
+                        should_print = false;
+                    }
                 }
                 if should_print {
                     WAITING_ON.insert(self.name.clone(), now);
-                    println!("waiting on a write lock {} (>{}ms)", self.name, threshold.as_millis());
+                    println!(
+                        "waiting on a write lock {} (>{}ms)",
+                        self.name,
+                        threshold.as_millis()
+                    );
                 }
             }
         }
@@ -91,7 +110,12 @@ impl<T> TimedRwLock<T> {
     pub fn get_total_wait_times() -> Vec<(String, Duration)> {
         let totals = TOTAL_WAIT_TIMES
             .iter()
-            .map(|entry| (entry.key().clone(), Duration::from_nanos(entry.value().load(Ordering::Relaxed))))
+            .map(|entry| {
+                (
+                    entry.key().clone(),
+                    Duration::from_nanos(entry.value().load(Ordering::Relaxed)),
+                )
+            })
             .collect();
         TOTAL_WAIT_TIMES.clear();
         totals

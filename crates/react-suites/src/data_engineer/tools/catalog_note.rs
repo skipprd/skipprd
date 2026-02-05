@@ -44,8 +44,16 @@ impl Tool for CatalogNoteTool {
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
         // Engine-agnostic: attach notes to one dataset ("<catalog>.<database>.<table>").
         let dataset_id = resolve_single_dataset_id(&args)?;
-        let field_opt = args.get("field").and_then(|x| x.as_str()).map(|s| s.to_string());
-        let text = args.get("text").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let field_opt = args
+            .get("field")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        let text = args
+            .get("text")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if text.is_empty() {
             return Err("text required".to_string());
         }
@@ -58,7 +66,10 @@ impl Tool for CatalogNoteTool {
                     .collect()
             })
             .unwrap_or_default();
-        let preview = args.get("preview").and_then(|x| x.as_bool()).unwrap_or(false);
+        let preview = args
+            .get("preview")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
         let thread_id = ctx.thread_id.clone().unwrap_or_default();
 
         // Resolve catalog key
@@ -114,8 +125,14 @@ impl Tool for CatalogNoteTool {
         // Track token expense (chars only)
         let chat_in_chars: usize = sys.len() + prompt.len();
         let messages = vec![
-            react_core::llm::ChatMessage { role: "system".to_string(), content: sys.to_string() },
-            react_core::llm::ChatMessage { role: "user".to_string(), content: prompt.clone() },
+            react_core::llm::ChatMessage {
+                role: "system".to_string(),
+                content: sys.to_string(),
+            },
+            react_core::llm::ChatMessage {
+                role: "user".to_string(),
+                content: prompt.clone(),
+            },
         ];
         let resp = llm.chat(&messages);
         let bullets_text = match resp.as_ref() {
@@ -124,14 +141,28 @@ impl Tool for CatalogNoteTool {
         };
         // LLM observability (stdout + persisted thread step).
         if llm_observability::llm_calls_enabled() {
-            if let (Some(thread_id), Some(store)) = (ctx.thread_id.as_deref(), ctx.thread_store.as_ref()) {
+            if let (Some(thread_id), Some(store)) =
+                (ctx.thread_id.as_deref(), ctx.thread_store.as_ref())
+            {
                 let call_id = llm_observability::next_call_id(thread_id);
                 let prompt_hash = llm_observability::prompt_hash_for_messages(&messages);
                 let parts = vec![
-                    PartInput { name: "system".to_string(), text: sys.to_string() },
-                    PartInput { name: "user.existing_facts".to_string(), text: existing_facts.join("\n") },
-                    PartInput { name: "user.new_contribution".to_string(), text: text.clone() },
-                    PartInput { name: "user.prompt".to_string(), text: prompt.clone() },
+                    PartInput {
+                        name: "system".to_string(),
+                        text: sys.to_string(),
+                    },
+                    PartInput {
+                        name: "user.existing_facts".to_string(),
+                        text: existing_facts.join("\n"),
+                    },
+                    PartInput {
+                        name: "user.new_contribution".to_string(),
+                        text: text.clone(),
+                    },
+                    PartInput {
+                        name: "user.prompt".to_string(),
+                        text: prompt.clone(),
+                    },
                 ];
                 let built = llm_observability::build_parts_for_thread(thread_id, &parts);
                 let response_raw = match resp.as_ref() {
@@ -159,10 +190,22 @@ impl Tool for CatalogNoteTool {
                     let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
                     let hash = p.get("hash").and_then(|v| v.as_str()).unwrap_or("-");
                     let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    tracing::debug!("LLM_PART thread_id={} call_id={} name={} hash={} text={}", thread_id, call_id, name, hash, text);
+                    tracing::debug!(
+                        "LLM_PART thread_id={} call_id={} name={} hash={} text={}",
+                        thread_id,
+                        call_id,
+                        name,
+                        hash,
+                        text
+                    );
                 }
                 if let Some(txt) = response_text.as_deref() {
-                    tracing::debug!("LLM_RESPONSE thread_id={} call_id={} text={}", thread_id, call_id, txt);
+                    tracing::debug!(
+                        "LLM_RESPONSE thread_id={} call_id={} text={}",
+                        thread_id,
+                        call_id,
+                        txt
+                    );
                 }
 
                 let _ = store
@@ -177,9 +220,16 @@ impl Tool for CatalogNoteTool {
                             part_hashes: built.part_hashes,
                             response_hash,
                             response_text,
-                            observation: if resp.is_ok() { Observation::ok() } else { Observation::fail(vec!["llm_call_failed".to_string()]) },
+                            observation: if resp.is_ok() {
+                                Observation::ok()
+                            } else {
+                                Observation::fail(vec!["llm_call_failed".to_string()])
+                            },
                             ts: chrono::Utc::now().to_rfc3339(),
-                            agent: ctx.agent_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                            agent: ctx
+                                .agent_name
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string()),
                         },
                     )
                     .await;
@@ -233,13 +283,17 @@ impl Tool for CatalogNoteTool {
             }
         }
 
-        let digest = curated
-            .get(0)
-            .cloned()
-            .unwrap_or_else(|| proposed.get(0).cloned().unwrap_or_else(|| text.chars().take(200).collect()));
+        let digest = curated.get(0).cloned().unwrap_or_else(|| {
+            proposed
+                .get(0)
+                .cloned()
+                .unwrap_or_else(|| text.chars().take(200).collect())
+        });
         if preview {
             let est_tokens = ((chat_in_chars + chat_out_chars) as f32 / 4.0).round() as i64;
-            return Ok(serde_json::json!({"ok": true, "preview": { "add": curated, "remove": [], "digest": digest }, "llm_expense": {"chat_chars_in": chat_in_chars, "chat_chars_out": chat_out_chars, "est_tokens": est_tokens}}));
+            return Ok(
+                serde_json::json!({"ok": true, "preview": { "add": curated, "remove": [], "digest": digest }, "llm_expense": {"chat_chars_in": chat_in_chars, "chat_chars_out": chat_out_chars, "est_tokens": est_tokens}}),
+            );
         }
 
         // Merge into catalog JSON
@@ -273,7 +327,10 @@ impl Tool for CatalogNoteTool {
             .map_err(|e| format!("put_json: {}", e))?;
 
         // Upsert curated digest into embeddings as a doc
-        let vector = ctx.vector.as_ref().ok_or_else(|| "vector provider missing".to_string())?;
+        let vector = ctx
+            .vector
+            .as_ref()
+            .ok_or_else(|| "vector provider missing".to_string())?;
         let epoch = chrono::Utc::now().timestamp() as u64;
         let mut vec1: Vec<f32> = Vec::new();
         if let Ok(vv) = llm.embed(&[digest.clone()]) {
@@ -300,7 +357,9 @@ impl Tool for CatalogNoteTool {
         }
 
         let est_tokens = ((chat_in_chars + chat_out_chars) as f32 / 4.0).round() as i64;
-        Ok(serde_json::json!({"ok": true, "curated": { "digest": digest, "facts": curated }, "key": catalog_key, "llm_expense": {"chat_chars_in": chat_in_chars, "chat_chars_out": chat_out_chars, "est_tokens": est_tokens}}))
+        Ok(
+            serde_json::json!({"ok": true, "curated": { "digest": digest, "facts": curated }, "key": catalog_key, "llm_expense": {"chat_chars_in": chat_in_chars, "chat_chars_out": chat_out_chars, "est_tokens": est_tokens}}),
+        )
     }
 }
 
@@ -349,7 +408,11 @@ fn cosine(a: &Vec<f32>, b: &Vec<f32>) -> f32 {
 fn merge_notes(obj: &mut Value, curated: &[String], digest: &str, provenance: &Value, now: &str) {
     let o = obj.as_object_mut().unwrap();
     // facts
-    let facts = o.entry("facts").or_insert(serde_json::json!([])).as_array_mut().unwrap();
+    let facts = o
+        .entry("facts")
+        .or_insert(serde_json::json!([]))
+        .as_array_mut()
+        .unwrap();
     for c in curated {
         if !facts.iter().any(|v| v.as_str() == Some(c.as_str())) {
             facts.push(Value::String(c.clone()));
@@ -367,4 +430,3 @@ fn merge_notes(obj: &mut Value, curated: &[String], digest: &str, provenance: &V
     // timestamp
     o.insert("last_updated".to_string(), Value::String(now.to_string()));
 }
-

@@ -23,4 +23,3 @@ impl Tool for AskUserTool {
         Ok(serde_json::json!({"ok": true, "prompt": prompt}))
     }
 }
-

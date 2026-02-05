@@ -1,5 +1,5 @@
-pub use react_core::providers::secrets::SecretsProvider;
 use async_trait::async_trait;
+pub use react_core::providers::secrets::SecretsProvider;
 
 /// Env-backed secrets provider.
 ///
@@ -14,4 +14,3 @@ impl SecretsProvider for EnvSecretsProvider {
         Ok(std::env::var(name).ok())
     }
 }
-

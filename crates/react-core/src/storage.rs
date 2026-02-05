@@ -96,9 +96,12 @@ impl StorageAdapter for InMemoryStorageAdapter {
             .inner
             .read()
             .map_err(|_| "storage lock poisoned".to_string())?;
-        let mut out: Vec<String> = g.keys().filter(|k| k.starts_with(prefix)).cloned().collect();
+        let mut out: Vec<String> = g
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect();
         out.sort();
         Ok(out)
     }
 }
-

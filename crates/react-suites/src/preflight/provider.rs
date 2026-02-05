@@ -33,13 +33,20 @@ impl PreflightProvider for CatalogPreflightProvider {
         agent_type: &str,
         sctx: &crate::suite::SuiteCtx,
     ) -> PreflightBundle {
-        let discovery = crate::preflight::discovery::run_discovery(question, &self.discovery_limits, sctx).await;
+        let discovery =
+            crate::preflight::discovery::run_discovery(question, &self.discovery_limits, sctx)
+                .await;
         let preflight = if self.run_preflight_on_bundle {
-            Some(crate::preflight::catalog_preflight::run_preflight_on_bundle(thread_id, agent_type).await)
+            Some(
+                crate::preflight::catalog_preflight::run_preflight_on_bundle(thread_id, agent_type)
+                    .await,
+            )
         } else {
             None
         };
-        PreflightBundle { discovery, preflight }
+        PreflightBundle {
+            discovery,
+            preflight,
+        }
     }
 }
-

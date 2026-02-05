@@ -3,8 +3,8 @@ const FILTER_FLAG_ALLOW_THOUSAND: bool = false;
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Value;
     use crate::discover::get_type;
+    use serde_json::Value;
 
     #[test]
     fn test_get_type_int() {
@@ -75,7 +75,10 @@ mod tests {
         let expected_type = "double".to_string();
 
         let subject = 2.0;
-        assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
+        assert_eq!(
+            get_type(&mut String::from(subject.to_string())),
+            expected_type
+        );
     }
 
     #[test]
@@ -136,16 +139,16 @@ pub fn parse_float(value: &mut String) -> Option<f64> {
 
     let mut num = String::new();
     let _p = 0;
-    
+
     // Handle sign
     if str < end && (value.chars().nth(str) == Some('+') || value.chars().nth(str) == Some('-')) {
         num.push(value.chars().nth(str).unwrap());
         str += 1;
     }
-    
+
     _first = 1;
     let mut _n = 0;
-    
+
     // Process digits before decimal point
     while str < end {
         let thischar = value.chars().nth(str);
@@ -164,47 +167,54 @@ pub fn parse_float(value: &mut String) -> Option<f64> {
     if _first == end {
         return None;
     }
-    
+
     // Process decimal point and decimal digits
     if str < end && value.chars().nth(str) == Some('.') {
         num.push('.');
         str += 1;
-        while str < end && value.chars().nth(str) >= Some('0') && value.chars().nth(str) <= Some('9') {
+        while str < end
+            && value.chars().nth(str) >= Some('0')
+            && value.chars().nth(str) <= Some('9')
+        {
             num.push(value.chars().nth(str).unwrap());
             str += 1;
         }
     }
-    
+
     // Process exponent
     if str < end && (value.chars().nth(str) == Some('e') || value.chars().nth(str) == Some('E')) {
         num.push(value.chars().nth(str).unwrap());
         str += 1;
-        
+
         // Handle exponent sign
-        if str < end && (value.chars().nth(str) == Some('+') || value.chars().nth(str) == Some('-')) {
+        if str < end && (value.chars().nth(str) == Some('+') || value.chars().nth(str) == Some('-'))
+        {
             num.push(value.chars().nth(str).unwrap());
             str += 1;
         }
-        
+
         // Process exponent digits
         let mut has_exp_digits = false;
-        while str < end && value.chars().nth(str) >= Some('0') && value.chars().nth(str) <= Some('9') {
+        while str < end
+            && value.chars().nth(str) >= Some('0')
+            && value.chars().nth(str) <= Some('9')
+        {
             num.push(value.chars().nth(str).unwrap());
             has_exp_digits = true;
             str += 1;
         }
-        
+
         // Exponent must have at least one digit
         if !has_exp_digits {
             return None;
         }
     }
-    
+
     // Make sure we consumed all input, otherwise it's not a valid float
     if str == end {
         return Some(cast_to_float(num));
     }
-    
+
     None
 }
 

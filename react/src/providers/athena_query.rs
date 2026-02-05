@@ -11,7 +11,13 @@ use tokio::sync::Semaphore;
 
 use crate::providers::dataset_catalog_provider::{DatasetCatalogProvider, DatasetId};
 use crate::providers::{QueryProvider, QueryResult};
-use react_core::providers::{DEFAULT_ATHENA_MAX_CONCURRENCY, clamp_athena_concurrency};
+use react_core::providers::warehouse::WarehouseNaming;
+
+const DEFAULT_ATHENA_MAX_CONCURRENCY: usize = 15;
+const ATHENA_MAX_CONCURRENCY_CAP: usize = 20;
+fn clamp_athena_concurrency(n: usize) -> usize {
+    n.max(1).min(ATHENA_MAX_CONCURRENCY_CAP)
+}
 
 #[derive(Clone)]
 pub struct AthenaQueryProvider {
@@ -94,16 +100,17 @@ impl AthenaQueryProvider {
     pub async fn from_env() -> Self {
         let workgroup = getenv_nonempty("ATHENA_WORKGROUP")
             .or_else(|| getenv_nonempty("DATA_OUTPUT_ATHENA_WORKGROUP_NAME"));
-        let source_schema = getenv_nonempty("ATHENA_SOURCE_SCHEMA").or_else(|| getenv_nonempty("ATHENA_SOURCE_DATABASE"));
-        let default_catalog = getenv_nonempty("ATHENA_TARGET_CATALOG").unwrap_or_else(|| getenv("ATHENA_CATALOG", "AwsDataCatalog"));
+        let source_schema = getenv_nonempty("ATHENA_SOURCE_SCHEMA")
+            .or_else(|| getenv_nonempty("ATHENA_SOURCE_DATABASE"));
+        let default_catalog = getenv_nonempty("ATHENA_TARGET_CATALOG")
+            .unwrap_or_else(|| getenv("ATHENA_CATALOG", "AwsDataCatalog"));
 
         // Prefer a single s3://... output location if provided; else leave None and rely on WG config.
-        let result_output_location = getenv_nonempty("ATHENA_RESULT_S3")
-            .or_else(|| {
-                // Legacy: only bucket provided; user can still set ATHENA_RESULT_S3 for full control
-                let b = getenv_nonempty("DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET")?;
-                Some(format!("s3://{}/", b.trim_end_matches('/')))
-            });
+        let result_output_location = getenv_nonempty("ATHENA_RESULT_S3").or_else(|| {
+            // Legacy: only bucket provided; user can still set ATHENA_RESULT_S3 for full control
+            let b = getenv_nonempty("DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET")?;
+            Some(format!("s3://{}/", b.trim_end_matches('/')))
+        });
 
         let ttl_secs: u64 = getenv("ATHENA_DISCOVERY_CACHE_TTL_SECS", "120")
             .parse::<u64>()
@@ -134,15 +141,26 @@ impl AthenaQueryProvider {
         let cleaned = raw.trim_matches('"').trim_matches('`');
         let parts: Vec<&str> = cleaned.split('.').collect();
         match parts.len() {
-            3 => Ok(DatasetId { catalog: parts[0].to_string(), database: parts[1].to_string(), table: parts[2].to_string() }),
-            2 => Ok(DatasetId { catalog: self.inner.default_catalog.clone(), database: parts[0].to_string(), table: parts[1].to_string() }),
+            3 => Ok(DatasetId {
+                catalog: parts[0].to_string(),
+                database: parts[1].to_string(),
+                table: parts[2].to_string(),
+            }),
+            2 => Ok(DatasetId {
+                catalog: self.inner.default_catalog.clone(),
+                database: parts[0].to_string(),
+                table: parts[1].to_string(),
+            }),
             1 => {
-                let db = self
-                    .inner
-                    .source_schema
-                    .clone()
-                    .ok_or_else(|| "dataset id missing database; set ATHENA_SOURCE_SCHEMA or use <db>.<table>".to_string())?;
-                Ok(DatasetId { catalog: self.inner.default_catalog.clone(), database: db, table: parts[0].to_string() })
+                let db = self.inner.source_schema.clone().ok_or_else(|| {
+                    "dataset id missing database; set ATHENA_SOURCE_SCHEMA or use <db>.<table>"
+                        .to_string()
+                })?;
+                Ok(DatasetId {
+                    catalog: self.inner.default_catalog.clone(),
+                    database: db,
+                    table: parts[0].to_string(),
+                })
             }
             _ => Err("dataset id must be <catalog>.<db>.<table> (or <db>.<table>)".to_string()),
         }
@@ -158,7 +176,11 @@ impl AthenaQueryProvider {
     }
 
     async fn start_query(&self, sql: &str, database: Option<&str>) -> Result<String, String> {
-        let mut req = self.inner.athena.start_query_execution().query_string(sql.to_string());
+        let mut req = self
+            .inner
+            .athena
+            .start_query_execution()
+            .query_string(sql.to_string());
         if let Some(wg) = self.inner.workgroup.as_ref() {
             req = req.work_group(wg);
         }
@@ -172,11 +194,8 @@ impl AthenaQueryProvider {
         }
         // If output location specified, set it; otherwise rely on workgroup.
         if let Some(loc) = self.inner.result_output_location.as_ref() {
-            req = req.result_configuration(
-                ResultConfiguration::builder()
-                    .output_location(loc)
-                    .build(),
-            );
+            req = req
+                .result_configuration(ResultConfiguration::builder().output_location(loc).build());
         }
         let out = req.send().await.map_err(|e| e.to_string())?;
         out.query_execution_id()
@@ -196,8 +215,12 @@ impl AthenaQueryProvider {
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
-            let qe = out.query_execution().ok_or_else(|| "missing query_execution".to_string())?;
-            let status = qe.status().ok_or_else(|| "missing query_execution.status".to_string())?;
+            let qe = out
+                .query_execution()
+                .ok_or_else(|| "missing query_execution".to_string())?;
+            let status = qe
+                .status()
+                .ok_or_else(|| "missing query_execution.status".to_string())?;
             match status.state() {
                 Some(QueryExecutionState::Succeeded) => {
                     let bytes = qe.statistics().and_then(|s| s.data_scanned_in_bytes());
@@ -216,14 +239,21 @@ impl AthenaQueryProvider {
         }
     }
 
-    async fn fetch_all_rows(&self, qid: &str) -> Result<(Vec<String>, Vec<Vec<String>>, usize), String> {
+    async fn fetch_all_rows(
+        &self,
+        qid: &str,
+    ) -> Result<(Vec<String>, Vec<Vec<String>>, usize), String> {
         let mut next_token: Option<String> = None;
         let mut header: Vec<String> = Vec::new();
         let mut rows: Vec<Vec<String>> = Vec::new();
         let mut is_first_page = true;
         let mut pages: usize = 0;
         loop {
-            let mut req = self.inner.athena.get_query_results().query_execution_id(qid);
+            let mut req = self
+                .inner
+                .athena
+                .get_query_results()
+                .query_execution_id(qid);
             if let Some(tok) = next_token.as_ref() {
                 req = req.next_token(tok);
             }
@@ -261,7 +291,12 @@ impl AthenaQueryProvider {
 
     async fn cached_databases(&self) -> Result<Vec<String>, String> {
         // If configured with a single source database, scope discovery to it.
-        if let Some(db) = self.inner.source_schema.as_ref().filter(|s| !s.trim().is_empty()) {
+        if let Some(db) = self
+            .inner
+            .source_schema
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+        {
             return Ok(vec![db.trim().to_string()]);
         }
         {
@@ -328,7 +363,9 @@ impl AthenaQueryProvider {
         out.sort();
         out.dedup();
         let mut cache = self.inner.cache.write().await;
-        cache.tables_by_db.insert(database.to_string(), (Instant::now(), out.clone()));
+        cache
+            .tables_by_db
+            .insert(database.to_string(), (Instant::now(), out.clone()));
         Ok(out)
     }
 
@@ -351,7 +388,9 @@ impl AthenaQueryProvider {
             .send()
             .await
             .map_err(|e| e.to_string())?;
-        let table = resp.table().ok_or_else(|| "Glue GetTable returned no table".to_string())?;
+        let table = resp
+            .table()
+            .ok_or_else(|| "Glue GetTable returned no table".to_string())?;
         let sd = table
             .storage_descriptor()
             .ok_or_else(|| "Glue table missing storage_descriptor".to_string())?;
@@ -373,8 +412,56 @@ impl AthenaQueryProvider {
             }
         }
         let mut cache = self.inner.cache.write().await;
-        cache.schema_by_fqn.insert(fqn, (Instant::now(), cols.clone()));
+        cache
+            .schema_by_fqn
+            .insert(fqn, (Instant::now(), cols.clone()));
         Ok(cols)
+    }
+}
+
+impl WarehouseNaming for AthenaQueryProvider {
+    fn kind(&self) -> &'static str {
+        "athena"
+    }
+
+    fn parse_dataset_fqn(&self, dataset_fqn: &str) -> Result<DatasetId, String> {
+        let raw = dataset_fqn.trim().trim_matches('"').trim_matches('`');
+        if raw.is_empty() {
+            return Err("dataset id is empty".to_string());
+        }
+        let parts: Vec<&str> = raw.split('.').collect();
+        match parts.len() {
+            3 => Ok(DatasetId {
+                catalog: parts[0].to_string(),
+                database: parts[1].to_string(),
+                table: parts[2].to_string(),
+            }),
+            2 => Ok(DatasetId {
+                catalog: self.inner.default_catalog.clone(),
+                database: parts[0].to_string(),
+                table: parts[1].to_string(),
+            }),
+            1 => {
+                let db = self
+                    .inner
+                    .source_schema
+                    .clone()
+                    .ok_or_else(|| "athena dataset id must be <catalog>.<database>.<table> (or configure source_schema)".to_string())?;
+                Ok(DatasetId {
+                    catalog: self.inner.default_catalog.clone(),
+                    database: db,
+                    table: parts[0].to_string(),
+                })
+            }
+            _ => Err(
+                "athena dataset id must be <catalog>.<database>.<table> (or <database>.<table>)"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn quote_ident(&self, ident: &str) -> String {
+        format!("\"{}\"", ident.replace('"', "\"\""))
     }
 }
 
@@ -419,7 +506,11 @@ impl QueryProvider for AthenaQueryProvider {
             "bytes_scanned": bytes_scanned,
             "pages": pages
         });
-        Ok(QueryResult { header, rows, meta: Some(meta) })
+        Ok(QueryResult {
+            header,
+            rows,
+            meta: Some(meta),
+        })
     }
 
     async fn schema(&self, dataset_fqn: &str) -> Result<Vec<(String, String)>, String> {
@@ -430,7 +521,11 @@ impl QueryProvider for AthenaQueryProvider {
     async fn sample(&self, dataset_fqn: &str, limit: usize) -> Result<Vec<Vec<String>>, String> {
         let ds = self.parse_dataset_id(dataset_fqn)?;
         let lim = limit.max(1).min(5000);
-        let sql = format!("SELECT * FROM {} LIMIT {}", Self::quote_table(&ds.database, &ds.table), lim);
+        let sql = format!(
+            "SELECT * FROM {} LIMIT {}",
+            Self::quote_table(&ds.database, &ds.table),
+            lim
+        );
         let qr = self.query(&sql).await?;
         Ok(qr.rows)
     }
@@ -458,7 +553,10 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
         Ok(out)
     }
 
-    async fn get_dataset_schema(&self, dataset: &DatasetId) -> Result<Vec<(String, String)>, String> {
+    async fn get_dataset_schema(
+        &self,
+        dataset: &DatasetId,
+    ) -> Result<Vec<(String, String)>, String> {
         self.cached_schema(dataset).await
     }
 
@@ -466,7 +564,13 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
         &self,
         dataset: &DatasetId,
         max_fields: usize,
-    ) -> Result<(crate::discover::stats::DatasetFieldStats, crate::providers::catalog::types::DatasetStats), String> {
+    ) -> Result<
+        (
+            crate::discover::stats::DatasetFieldStats,
+            crate::providers::catalog::types::DatasetStats,
+        ),
+        String,
+    > {
         // Minimal baseline: row count + per-field nulls/distinct/min/max where feasible.
         // This is intentionally conservative; callers can choose to skip stats for very wide tables.
         let cols = self.cached_schema(dataset).await?;
@@ -507,7 +611,11 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
                 let expr = if let Some(e) = lf.expr.as_ref() {
                     // If it's a nested deref (a.b.c), quote only the root.
                     if let Some((root, rest)) = e.split_once('.') {
-                        Some(format!("{}{}", Self::quote_ident(root), format!(".{}", rest)))
+                        Some(format!(
+                            "{}{}",
+                            Self::quote_ident(root),
+                            format!(".{}", rest)
+                        ))
                     } else {
                         Some(Self::quote_ident(e))
                     }
@@ -597,7 +705,13 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
             let qr = match self.query(&sql).await {
                 Ok(qr) => qr,
                 Err(e) => {
-                    tracing::warn!("athena stats: dataset='{}' field='{}' type='{}' failed: {}", dataset.fqn(), path, ty, e);
+                    tracing::warn!(
+                        "athena stats: dataset='{}' field='{}' type='{}' failed: {}",
+                        dataset.fqn(),
+                        path,
+                        ty,
+                        e
+                    );
                     executed += 1;
                     failed += 1;
                     let mut fs = crate::discover::stats::FieldStats::default();
@@ -643,10 +757,14 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
 }
 
 fn getenv(key: &str, default: &str) -> String {
-    std::env::var(key).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 fn getenv_nonempty(key: &str) -> Option<String> {
-    std::env::var(key).ok().and_then(|v| if v.trim().is_empty() { None } else { Some(v) })
+    std::env::var(key)
+        .ok()
+        .and_then(|v| if v.trim().is_empty() { None } else { Some(v) })
 }
-

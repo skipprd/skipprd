@@ -1,19 +1,19 @@
+use libc::sleep;
 use sled;
 use Result;
-use libc::{sleep};
 
 use crate::helpers::configuration::Config;
+use crate::helpers::offsets::OffsetsError::VacuumError;
+use crate::helpers::Helpers;
+use crate::METRICS;
 use serde_derive::{Deserialize, Serialize};
 use sled::{IVec, Mode};
 use thiserror::Error;
+use tracing::{error, info};
 use {
     byteorder::{BigEndian, LittleEndian},
     zerocopy::{byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned, U16},
 };
-use crate::helpers::Helpers;
-use crate::helpers::offsets::OffsetsError::VacuumError;
-use crate::METRICS;
-use tracing::{error, info};
 
 pub const SLED_NAME: &str = "db";
 
@@ -81,7 +81,6 @@ pub enum OffsetsError {
 
 impl Offsets {
     pub fn init() -> Result<Offsets, OffsetsError> {
-
         // match Self::vacuum() { // requires a full scan of table which is expensive on EFS since we're opting to keep all offsets to support replays
         //     Ok(size) => {}
         //     Err(err) => {
@@ -91,8 +90,9 @@ impl Offsets {
         // }
 
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
-        let db = match sled::open(&db_path) { // open in high-throughput mode
-            Ok(db) => {db}
+        let db = match sled::open(&db_path) {
+            // open in high-throughput mode
+            Ok(db) => db,
             Err(_err) => {
                 return Err(OffsetsError::AlreadyOpenError(db_path));
             }
@@ -103,12 +103,15 @@ impl Offsets {
             error!("Failed getting size of offsets DB, Error: {:?}", err);
             0
         });
-        
-        info!("Offset DB size: {}", Helpers::human_readable_size(total_size_bytes));
-        
+
+        info!(
+            "Offset DB size: {}",
+            Helpers::human_readable_size(total_size_bytes)
+        );
+
         let mut metrics_lock = METRICS.write();
         metrics_lock.offset_db_size = total_size_bytes;
-        
+
         // let names: Vec<String> = db
         //     .tree_names()
         //     .iter()
@@ -165,9 +168,8 @@ impl Offsets {
     // periodically to save space.
     #[allow(dead_code)]
     fn vacuum() -> Result<u64, OffsetsError> {
-
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
-        // // Ensure database isn't already open before we start operating 
+        // // Ensure database isn't already open before we start operating
         // let db = match sled::Config::default()
         //     .path(&db_path)
         //     .mode(Mode::LowSpace)// open in low space mode to encourage GC
@@ -191,15 +193,15 @@ impl Offsets {
         // }
 
         // drop(db);
-        
+
         // Rename database file to a temporary file
         // let temp_db_path = format!("{}/{}.tmp", Config::get_data_dir(), SLED_NAME);
-        // 
+        //
         // if std::fs::metadata(&db_path).is_err() {
         //     return Ok(0);
         // }
         // std::fs::rename(&db_path, &temp_db_path).unwrap();
-        // 
+        //
         // // open old db
         // let old_db = match sled::Config::default()
         //     .path(&temp_db_path)
@@ -211,40 +213,49 @@ impl Offsets {
         //     }
         // };
         // let old_tree = old_db.open_tree("offsets").expect("Could not open offset tree");
-        // 
+        //
         // println!("Vacuuming offsets database of size: {}", Helpers::human_readable_size(old_db.size_on_disk().unwrap()));
 
         // write all keys with values to a new database
         let db = match sled::Config::default()
             .path(&db_path)
-            .mode(Mode::LowSpace)// open in low space mode to encourage GC
-            .open() {
-            Ok(db) => {db}
+            .mode(Mode::LowSpace) // open in low space mode to encourage GC
+            .open()
+        {
+            Ok(db) => db,
             Err(_) => {
                 return Err(OffsetsError::AlreadyOpenError(db_path));
             }
         };
         let tree = db.open_tree("offsets").expect("Could not open offset tree");
 
-        println!("Vacuuming offsets database of size: {}", Helpers::human_readable_size(db.size_on_disk().unwrap()));
+        println!(
+            "Vacuuming offsets database of size: {}",
+            Helpers::human_readable_size(db.size_on_disk().unwrap())
+        );
         let key_count = db.len();
 
         let mut i = 0;
         let mut count = 0;
-        
+
         let pause_modus = key_count / 60; // 60 sec total pause for sled gc (plus insert time)
         let pause_modus = pause_modus.max(1000);
-        
+
         for kv in db.iter() {
             let key = kv.unwrap().0;
             let op = match db.get(&key) {
                 Ok(val) => match val {
-                    Some(val) => 
-                        // Ok(Some(val)),
+                    Some(val) =>
+                    // Ok(Some(val)),
+                    {
                         match tree.insert(&key, &val) {
                             Ok(val) => Ok(val),
-                            Err(err) => Err(sled::Error::ReportableBug(format!("Failed inserting key into new tree, Error: {:?}", err)))
-                        },
+                            Err(err) => Err(sled::Error::ReportableBug(format!(
+                                "Failed inserting key into new tree, Error: {:?}",
+                                err
+                            ))),
+                        }
+                    }
                     None => {
                         // println!("Removing key: {:?}", key);
                         tree.remove(&key).unwrap_or_default();
@@ -252,28 +263,37 @@ impl Offsets {
                         Ok(None)
                     }
                 },
-                Err(err) => {
-                    Err(sled::Error::ReportableBug(format!("Failed getting key from old tree, Error: {:?}", err)))
-                }
+                Err(err) => Err(sled::Error::ReportableBug(format!(
+                    "Failed getting key from old tree, Error: {:?}",
+                    err
+                ))),
             };
 
             i += 1;
-           
+
             if i % pause_modus == 0 {
                 tree.flush().unwrap();
                 // after experimentation, sled does better job of GC with smaller writes. So we'll do it more often with shorter sleep
-                unsafe { sleep(1); }
+                unsafe {
+                    sleep(1);
+                }
 
                 let new_size = db.size_on_disk().unwrap_or_else(|err| {
                     println!("Failed getting size of new offsets DB, Error: {:?}", err);
                     0
                 });
 
-                println!("Vacuumed {} offsets from db, evaluated {}/{} keys, size {}", count, i, key_count, Helpers::human_readable_size(new_size));
+                println!(
+                    "Vacuumed {} offsets from db, evaluated {}/{} keys, size {}",
+                    count,
+                    i,
+                    key_count,
+                    Helpers::human_readable_size(new_size)
+                );
 
                 count = 0;
             }
-            
+
             if let Err(err) = op {
                 // rollback
                 drop(tree);
@@ -283,18 +303,23 @@ impl Offsets {
                 // std::fs::remove_dir_all(&db_path).unwrap();
                 // std::fs::rename(&temp_db_path, &db_path).unwrap();
 
-                return Err(VacuumError( err));
+                return Err(VacuumError(err));
             }
         }
 
-        unsafe { sleep(5); }
+        unsafe {
+            sleep(5);
+        }
 
         let new_size = db.size_on_disk().unwrap_or_else(|err| {
             println!("Failed getting size of new offsets DB, Error: {:?}", err);
             0
         });
 
-        println!("Vacuumed offsets database, size: {}", Helpers::human_readable_size(new_size));
+        println!(
+            "Vacuumed offsets database, size: {}",
+            Helpers::human_readable_size(new_size)
+        );
 
         // delete old file
         drop(tree);
@@ -309,26 +334,27 @@ impl Offsets {
 
     #[allow(dead_code)]
     fn rollback_vacuum() -> Result<bool, OffsetsError> {
-
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
         let temp_db_path = format!("{}/{}.tmp", Config::get_data_dir(), SLED_NAME);
 
         if std::fs::metadata(&temp_db_path).is_ok() {
             match std::fs::remove_dir_all(&db_path) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(_) => {}
             }
             match std::fs::rename(&temp_db_path, &db_path) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(err) => {
-                    return Err(VacuumError(sled::Error::ReportableBug(format!("Failed renaming offsets db, Error: {:?}", err))));
+                    return Err(VacuumError(sled::Error::ReportableBug(format!(
+                        "Failed renaming offsets db, Error: {:?}",
+                        err
+                    ))));
                 }
             }
             return Ok(true);
         }
-        
+
         Ok(false)
-       
     }
 
     #[allow(dead_code)]
@@ -377,7 +403,7 @@ impl Offsets {
             Err(err) => {
                 println!("Failed flushing offsets, Error: {:?}", err);
                 None
-            },
+            }
         }
     }
     pub fn set(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
@@ -386,19 +412,18 @@ impl Offsets {
             Err(err) => {
                 println!("Failed setting offset, Error: {:?}", err);
                 None
-            },
+            }
         }
     }
 
     fn increment(&self, old: U64<LittleEndian>, new: U64<LittleEndian>) -> U64<LittleEndian> {
-        
         if new.get() > old.get() {
             new
         } else {
             old
         }
     }
-    
+
     pub fn insert(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
         let key = self.build_key(key);
         let bytes: &[u8] = key.as_bytes();
@@ -406,59 +431,57 @@ impl Offsets {
 
         let new_val = match offset_type {
             // @todo - deprecated, we never implement Filesize
-            OffsetTypes::Filesize => {
-                 sled::IVec::from(
-                    OffsetValue {
-                        filesize: U64::new(offset),
-                        line: U64::new(0),
-                        closed: U64::new(0),
-                    }.as_bytes(),
-                )
-            }
-            
+            OffsetTypes::Filesize => sled::IVec::from(
+                OffsetValue {
+                    filesize: U64::new(offset),
+                    line: U64::new(0),
+                    closed: U64::new(0),
+                }
+                .as_bytes(),
+            ),
+
             // @todo - compare and swap, we should only insert offsets that are greater than value in db
             OffsetTypes::Position => {
-
                 let value_opt = self.tree.get(bytes).unwrap();
                 // self.tree.f(bytes, |value_opt| {
-                    if let Some(existing) = value_opt {
-                        let mut backing_bytes = sled::IVec::from(existing);
+                if let Some(existing) = value_opt {
+                    let mut backing_bytes = sled::IVec::from(existing);
 
-                        let layout: LayoutVerified<&mut [u8], OffsetValue> =
-                            LayoutVerified::new_unaligned(&mut *backing_bytes)
-                                .expect("bytes do not fit schema");
+                    let layout: LayoutVerified<&mut [u8], OffsetValue> =
+                        LayoutVerified::new_unaligned(&mut *backing_bytes)
+                            .expect("bytes do not fit schema");
 
-                        let old_value: &mut OffsetValue = layout.into_mut();
+                    let old_value: &mut OffsetValue = layout.into_mut();
 
-                        let new_value = self.increment(old_value.line, offset.into());
+                    let new_value = self.increment(old_value.line, offset.into());
 
-                        sled::IVec::from(
-                            OffsetValue {
-                                filesize: U64::new(0),
-                                line: new_value,
-                                closed: U64::new(0),
-                            }.as_bytes()
-                        )
-                    } else {
-                        sled::IVec::from(
-                            OffsetValue {
-                                filesize: U64::new(0),
-                                line: U64::new(offset),
-                                closed: U64::new(0),
-                            }.as_bytes()
-                        )
-                    }
-                
+                    sled::IVec::from(
+                        OffsetValue {
+                            filesize: U64::new(0),
+                            line: new_value,
+                            closed: U64::new(0),
+                        }
+                        .as_bytes(),
+                    )
+                } else {
+                    sled::IVec::from(
+                        OffsetValue {
+                            filesize: U64::new(0),
+                            line: U64::new(offset),
+                            closed: U64::new(0),
+                        }
+                        .as_bytes(),
+                    )
+                }
             }
-            OffsetTypes::Closed => {
-                sled::IVec::from(
-                    OffsetValue {
-                        filesize: U64::new(0),
-                        line: U64::new(0),
-                        closed: U64::new(offset),
-                    }.as_bytes(),
-                )
-            }
+            OffsetTypes::Closed => sled::IVec::from(
+                OffsetValue {
+                    filesize: U64::new(0),
+                    line: U64::new(0),
+                    closed: U64::new(offset),
+                }
+                .as_bytes(),
+            ),
         };
 
         let old_val = self.tree.insert(bytes, &new_val).unwrap();
@@ -510,7 +533,7 @@ impl Offsets {
             Err(err) => {
                 println!("Failed getting latest offset, Error: {:?}", err);
                 None
-            },
+            }
         }
     }
 
@@ -521,9 +544,10 @@ impl Offsets {
         match self.tree.remove(bytes) {
             Ok(val) => Ok(val),
             // @todo - enumerate the possible sled::Error errors that can occur
-            Err(err) => {
-                Err(sled::Error::ReportableBug(format!("Failed removing offset for key {:?}, Error: {:?}", key, err)))
-            },
+            Err(err) => Err(sled::Error::ReportableBug(format!(
+                "Failed removing offset for key {:?}, Error: {:?}",
+                key, err
+            ))),
         }
     }
 
@@ -678,7 +702,7 @@ impl Offsets {
 #[cfg(test)]
 mod tests {
 
-    use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets, OffsetValue};
+    use crate::helpers::offsets::{OffsetKey, OffsetTypes, OffsetValue, Offsets};
 
     use serial_test::serial;
     use zerocopy::{AsBytes, U64};
@@ -695,7 +719,7 @@ mod tests {
         };
 
         db.tree.clear().unwrap();
-        
+
         let key = &OffsetKey {
             namespace: "foo".to_string(),
             partition: "bar".to_string(),
@@ -711,7 +735,7 @@ mod tests {
                 line: U64::new(1),
                 closed: U64::new(0),
             }
-                .as_bytes(),
+            .as_bytes(),
         );
         assert_eq!(db.insert(key, OffsetTypes::Position, 2), Some(return_val));
         assert_eq!(db.validate(key, OffsetTypes::Position, 1), Some(false));
@@ -724,7 +748,7 @@ mod tests {
                 line: U64::new(2),
                 closed: U64::new(0),
             }
-                .as_bytes(),
+            .as_bytes(),
         );
         assert_eq!(db.insert(key, OffsetTypes::Position, 3), Some(return_val));
         assert_eq!(db.validate(key, OffsetTypes::Position, 1), Some(false));
@@ -738,7 +762,7 @@ mod tests {
                 line: U64::new(3),
                 closed: U64::new(0),
             }
-                .as_bytes(),
+            .as_bytes(),
         );
         assert_eq!(db.insert(key, OffsetTypes::Position, 3), Some(return_val));
 
@@ -748,11 +772,11 @@ mod tests {
                 line: U64::new(3),
                 closed: U64::new(0),
             }
-                .as_bytes(),
+            .as_bytes(),
         );
         assert_eq!(db.insert(key, OffsetTypes::Position, 2), Some(return_val));
     }
-    
+
     #[test]
     #[serial]
     fn test_validate() {
@@ -763,7 +787,7 @@ mod tests {
                 return;
             }
         };
-        
+
         db.tree.clear().unwrap();
 
         // assert_eq!(db.validate(key, 1, 1), Some(true));

@@ -15,5 +15,3 @@ pub async fn apply_evolutions() -> Result<(), String> {
 pub async fn propose_and_wait(_sql: &str) -> Result<(), String> {
     Ok(())
 }
-
-

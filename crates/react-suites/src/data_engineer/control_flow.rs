@@ -3,16 +3,16 @@ use serde_json::Value;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::warn;
- 
+
 use react_core::agent::AgentCtx;
 use react_core::providers::DbtValidateArgs;
 use react_core::session::{Observation, ThreadLog, ThreadStep, ThreadStore, ToolObservation};
 use react_core::tools::Tool;
- 
+
 use crate::config;
-use crate::dbt;
 use crate::data_engineer::tools::dbt_files::DbtFilesTool;
- 
+use crate::dbt;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -30,7 +30,7 @@ pub enum Phase {
     PostPublishReview,
     Done,
 }
- 
+
 impl Phase {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -49,7 +49,7 @@ impl Phase {
             Phase::Done => "done",
         }
     }
- 
+
     pub fn from_str(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
             "preflight" => Some(Phase::Preflight),
@@ -69,9 +69,11 @@ impl Phase {
         }
     }
 }
- 
+
 pub fn phase_from_log(log: Option<&ThreadLog>) -> Phase {
-    let Some(log) = log else { return Phase::Preflight };
+    let Some(log) = log else {
+        return Phase::Preflight;
+    };
     for step in log.steps.iter().rev() {
         if let ThreadStep::Phase { phase, .. } = step {
             if let Some(p) = Phase::from_str(phase) {
@@ -81,7 +83,7 @@ pub fn phase_from_log(log: Option<&ThreadLog>) -> Phase {
     }
     Phase::Preflight
 }
- 
+
 pub async fn append_phase(
     store: &ThreadStore,
     thread_id: &str,
@@ -139,7 +141,7 @@ pub async fn append_phase_with_reason(
         )
         .await
 }
- 
+
 #[derive(Clone, Debug, Default)]
 pub struct DerivedGuardState {
     pub last_validate_failed: bool,
@@ -154,7 +156,7 @@ pub struct DerivedGuardState {
     pub probe_required: bool,
     pub probe_satisfied: bool,
 }
- 
+
 fn is_mutation_step(step: &ThreadStep) -> bool {
     match step {
         ThreadStep::ToolEnd { name, args, .. } => match name.as_str() {
@@ -165,7 +167,10 @@ fn is_mutation_step(step: &ThreadStep) -> bool {
             "dbt_files" => {
                 // preview_diff is explicitly non-mutating (no write occurs), so it should not
                 // be treated as a mutation attempt for any guard logic.
-                let preview = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+                let preview = args
+                    .get("preview_diff")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
                 if preview {
                     return false;
                 }
@@ -179,14 +184,19 @@ fn is_mutation_step(step: &ThreadStep) -> bool {
         _ => false,
     }
 }
- 
+
 fn is_effective_mutation_step(step: &ThreadStep) -> bool {
     if !is_mutation_step(step) {
         return false;
     }
 
     let (name, args, observation) = match step {
-        ThreadStep::ToolEnd { name, args, observation, .. } => (name.as_str(), args, observation),
+        ThreadStep::ToolEnd {
+            name,
+            args,
+            observation,
+            ..
+        } => (name.as_str(), args, observation),
         _ => return false,
     };
     match name {
@@ -201,7 +211,10 @@ fn is_effective_mutation_step(step: &ThreadStep) -> bool {
             .unwrap_or(false),
         "dbt_files" => {
             // preview_diff means no write occurred; do not treat as a mutation.
-            let preview = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+            let preview = args
+                .get("preview_diff")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
             if preview {
                 return false;
             }
@@ -222,7 +235,10 @@ fn is_effective_mutation_step(step: &ThreadStep) -> bool {
                         return true;
                     }
                     let added = it.get("lines_added").and_then(|x| x.as_u64()).unwrap_or(0);
-                    let removed = it.get("lines_removed").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let removed = it
+                        .get("lines_removed")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0);
                     if (added + removed) > 0 {
                         return true;
                     }
@@ -247,8 +263,16 @@ fn is_effective_mutation_step(step: &ThreadStep) -> bool {
             if !base.is_empty() && !newv.is_empty() {
                 return base != newv;
             }
-            let added = observation.extra.get("lines_added").and_then(|x| x.as_u64()).unwrap_or(0);
-            let removed = observation.extra.get("lines_removed").and_then(|x| x.as_u64()).unwrap_or(0);
+            let added = observation
+                .extra
+                .get("lines_added")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
+            let removed = observation
+                .extra
+                .get("lines_removed")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
             (added + removed) > 0
         }
         _ => false,
@@ -271,11 +295,11 @@ fn looks_like_data_probe_sql(sql: &str) -> bool {
     }
     toks.iter().any(|t| *t == "from")
 }
- 
+
 pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
     let mut out = DerivedGuardState::default();
     let Some(log) = log else { return out };
- 
+
     // Find most recent dbt_validate.
     let mut last_validate_idx: Option<usize> = None;
     for (i, step) in log.steps.iter().enumerate().rev() {
@@ -284,27 +308,38 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
             break;
         }
     }
-    let Some(vidx) = last_validate_idx else { return out };
+    let Some(vidx) = last_validate_idx else {
+        return out;
+    };
     let vstep = &log.steps[vidx];
- 
+
     let (vargs, vobs) = match vstep {
-        ThreadStep::ToolEnd { args, observation, .. } => (args, observation),
+        ThreadStep::ToolEnd {
+            args, observation, ..
+        } => (args, observation),
         _ => return out,
     };
     let ok = vobs.ok;
-    let compile_ok = vobs.extra.get("compile_ok").and_then(|x| x.as_bool()).unwrap_or(false);
+    let compile_ok = vobs
+        .extra
+        .get("compile_ok")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     let run_ok = vobs.extra.get("run_ok").and_then(|x| x.as_bool());
-    let build = vargs.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
+    let build = vargs
+        .get("build")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     let run = vargs.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
     let runtime_validate = build || run;
- 
+
     let ok_for_clear = if runtime_validate {
         ok && compile_ok && run_ok == Some(true)
     } else {
         ok && compile_ok
     };
     out.last_validate_failed = !ok_for_clear;
- 
+
     // If dbt_validate ran its internal repair loop and mutated files, treat that as a mutation
     // associated with the failing validation attempt. Without this, the suite can deadlock on
     // the "mutate after failure" guard even though dbt_validate already applied repairs.
@@ -313,7 +348,10 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
             let mut any_changed = false;
             if let Some(iters) = rr.get("iterations").and_then(|v| v.as_array()) {
                 for it in iters {
-                    let n = it.get("llm_changed_files").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let n = it
+                        .get("llm_changed_files")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     if n > 0 {
                         any_changed = true;
                         break;
@@ -338,7 +376,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
             out.probe_required = true;
         }
     }
- 
+
     // Scan forward from validate for mutations / probes.
     for step in log.steps.iter().skip(vidx + 1) {
         if is_mutation_step(step) {
@@ -348,9 +386,18 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
             };
             if ok {
                 // Successful dbt_files patch counts as "patch applied", even if no-op.
-                if let ThreadStep::ToolEnd { name, args, observation, .. } = step {
+                if let ThreadStep::ToolEnd {
+                    name,
+                    args,
+                    observation,
+                    ..
+                } = step
+                {
                     if name == "dbt_files" && observation.ok {
-                        let preview = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+                        let preview = args
+                            .get("preview_diff")
+                            .and_then(|x| x.as_bool())
+                            .unwrap_or(false);
                         let is_patch = args
                             .get("op")
                             .and_then(|v| v.as_str())
@@ -372,7 +419,13 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
             }
         }
         if out.probe_required {
-            if let ThreadStep::ToolEnd { name, args, observation, .. } = step {
+            if let ThreadStep::ToolEnd {
+                name,
+                args,
+                observation,
+                ..
+            } = step
+            {
                 if observation.ok && name == "run_sql" {
                     let sql = args.get("sql").and_then(|x| x.as_str()).unwrap_or("");
                     if looks_like_data_probe_sql(sql) {
@@ -382,7 +435,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
             }
         }
     }
- 
+
     // If probe has been satisfied, clear requirement (for gating).
     if out.probe_satisfied {
         out.probe_required = false;
@@ -402,11 +455,22 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
     // Find the most recent successful dbt_files patch (non-preview).
     let mut patched_paths: Vec<String> = Vec::new();
     for step in log.steps.iter().rev() {
-        let ThreadStep::ToolEnd { name, args, observation, .. } = step else { continue };
+        let ThreadStep::ToolEnd {
+            name,
+            args,
+            observation,
+            ..
+        } = step
+        else {
+            continue;
+        };
         if name != "dbt_files" || !observation.ok {
             continue;
         }
-        let preview = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+        let preview = args
+            .get("preview_diff")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
         if preview {
             continue;
         }
@@ -449,10 +513,7 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
     // Global-impact files: skip targeted checks (selection isn't reliable / can be too broad).
     for p in patched_paths.iter() {
         let pl = p.to_ascii_lowercase();
-        if pl == "packages.yml"
-            || pl == "dbt_project.yml"
-            || pl.starts_with("macros/")
-        {
+        if pl == "packages.yml" || pl == "dbt_project.yml" || pl.starts_with("macros/") {
             return Vec::new();
         }
     }
@@ -470,7 +531,8 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
     }
 
     // Attempt manifest mapping (best-effort).
-    let mut path_to_model_name: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut path_to_model_name: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     {
         let base = ctx.keyspace.dbt_prefix(&ctx.scope);
         let base = base.trim_end_matches('/').to_string() + "/";
@@ -499,7 +561,11 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
                         if !model_paths.iter().any(|p| p == &fp) {
                             continue;
                         }
-                        let name = node.get("name").and_then(|x| x.as_str()).unwrap_or("").trim();
+                        let name = node
+                            .get("name")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .trim();
                         if !name.is_empty() {
                             path_to_model_name.insert(fp, name.to_string());
                         }
@@ -551,7 +617,9 @@ fn phase_start_idx(log: &ThreadLog, phase: Phase) -> Option<usize> {
 fn unresolved_mutation_failures_in_phase(log: &ThreadLog, phase: Phase) -> Vec<String> {
     // Collect failures since the last successful mutation in the current phase.
     // If a successful mutation occurs, it "clears" prior failures.
-    let Some(start) = phase_start_idx(log, phase) else { return Vec::new() };
+    let Some(start) = phase_start_idx(log, phase) else {
+        return Vec::new();
+    };
 
     let mut failures: Vec<String> = Vec::new();
     for step in log.steps.iter().skip(start + 1) {
@@ -559,7 +627,9 @@ fn unresolved_mutation_failures_in_phase(log: &ThreadLog, phase: Phase) -> Vec<S
             continue;
         }
         let (name, obs) = match step {
-            ThreadStep::ToolEnd { name, observation, .. } => (name.as_str(), observation),
+            ThreadStep::ToolEnd {
+                name, observation, ..
+            } => (name.as_str(), observation),
             _ => continue,
         };
         let ok = obs.ok;
@@ -570,7 +640,11 @@ fn unresolved_mutation_failures_in_phase(log: &ThreadLog, phase: Phase) -> Vec<S
             // ok-but-ineffective is not a failure; it just doesn't clear prior failures.
             continue;
         }
-        let err = obs.errors.first().map(|s| s.as_str()).unwrap_or("unknown error");
+        let err = obs
+            .errors
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("unknown error");
         failures.push(format!("{}: {}", name, err));
         if failures.len() >= 10 {
             break;
@@ -612,7 +686,9 @@ pub fn gate_authoring_to_validate(log: Option<&ThreadLog>) -> AuthoringGate {
 /// in the current authoring phase. This prevents the suite from moving forward after a failing
 /// mutation (e.g., staging_model/tool timeouts), even if the agent produced a Final response.
 pub fn gate_authoring_completion(log: Option<&ThreadLog>, phase: Phase) -> AuthoringGate {
-    let Some(log) = log else { return AuthoringGate::Allow };
+    let Some(log) = log else {
+        return AuthoringGate::Allow;
+    };
     match phase {
         Phase::CleanseAuthor | Phase::ModelAuthor => {}
         _ => return AuthoringGate::Allow,
@@ -629,11 +705,13 @@ pub fn gate_authoring_completion(log: Option<&ThreadLog>, phase: Phase) -> Autho
         msg.push_str(f);
         msg.push('\n');
     }
-    AuthoringGate::Block { reason: msg.trim().to_string() }
+    AuthoringGate::Block {
+        reason: msg.trim().to_string(),
+    }
 }
- 
+
 pub struct DeterministicDbtValidateOnce;
- 
+
 impl DeterministicDbtValidateOnce {
     pub async fn run(
         ctx: &AgentCtx,
@@ -641,9 +719,15 @@ impl DeterministicDbtValidateOnce {
         run: bool,
         dataset_ids: Option<&[String]>,
     ) -> Result<Value, String> {
-        let dbt = ctx.dbt.as_ref().ok_or_else(|| "dbt provider missing".to_string())?;
+        let dbt = ctx
+            .dbt
+            .as_ref()
+            .ok_or_else(|| "dbt provider missing".to_string())?;
         let Some(cfg) = config::resolved_config_from_ctx(ctx) else {
-            return Err("resolved_config missing (needed to generate profiles.yml deterministically)".to_string());
+            return Err(
+                "resolved_config missing (needed to generate profiles.yml deterministically)"
+                    .to_string(),
+            );
         };
         let threads = ctx.query.as_ref().map(|q| q.max_concurrency());
         let gen = dbt::profile::generate_profiles_yml(cfg, threads)?;
@@ -651,7 +735,7 @@ impl DeterministicDbtValidateOnce {
         let profiles_dir = td.path().to_string_lossy().to_string();
         let profiles_path = td.path().join("profiles.yml");
         std::fs::write(&profiles_path, gen.profiles_yml.as_bytes()).map_err(|e| e.to_string())?;
- 
+
         let res = dbt
             .validate_project(
                 &ctx.scope,
@@ -666,13 +750,16 @@ impl DeterministicDbtValidateOnce {
                 },
             )
             .await?;
- 
-        let mut v = serde_json::to_value(res)
-            .unwrap_or_else(|_| serde_json::json!({"ok": false, "error": "failed to serialize result"}));
+
+        let mut v = serde_json::to_value(res).unwrap_or_else(
+            |_| serde_json::json!({"ok": false, "error": "failed to serialize result"}),
+        );
         if let Some(obj) = v.as_object_mut() {
             obj.insert(
                 "dialect".to_string(),
-                serde_json::json!(crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg)),
+                serde_json::json!(
+                    crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg)
+                ),
             );
             // Keep parity with dbt_validate tool output, but do NOT mutate/repair here.
             let rf = crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(
@@ -699,9 +786,15 @@ impl DeterministicDbtValidateTargetedOnce {
         build: bool,
         run: bool,
     ) -> Result<Value, String> {
-        let dbt = ctx.dbt.as_ref().ok_or_else(|| "dbt provider missing".to_string())?;
+        let dbt = ctx
+            .dbt
+            .as_ref()
+            .ok_or_else(|| "dbt provider missing".to_string())?;
         let Some(cfg) = config::resolved_config_from_ctx(ctx) else {
-            return Err("resolved_config missing (needed to generate profiles.yml deterministically)".to_string());
+            return Err(
+                "resolved_config missing (needed to generate profiles.yml deterministically)"
+                    .to_string(),
+            );
         };
         let threads = ctx.query.as_ref().map(|q| q.max_concurrency());
         let gen = dbt::profile::generate_profiles_yml(cfg, threads)?;
@@ -725,12 +818,15 @@ impl DeterministicDbtValidateTargetedOnce {
             )
             .await?;
 
-        let mut v = serde_json::to_value(res)
-            .unwrap_or_else(|_| serde_json::json!({"ok": false, "error": "failed to serialize result"}));
+        let mut v = serde_json::to_value(res).unwrap_or_else(
+            |_| serde_json::json!({"ok": false, "error": "failed to serialize result"}),
+        );
         if let Some(obj) = v.as_object_mut() {
             obj.insert(
                 "dialect".to_string(),
-                serde_json::json!(crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg)),
+                serde_json::json!(
+                    crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg)
+                ),
             );
             // Keep parity with dbt_validate tool output, but do NOT mutate/repair here.
             let rf = crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(
@@ -742,7 +838,7 @@ impl DeterministicDbtValidateTargetedOnce {
         Ok(v)
     }
 }
- 
+
 pub async fn call_and_record_tool(
     store: &ThreadStore,
     thread_id: &str,
@@ -758,42 +854,92 @@ pub async fn call_and_record_tool(
                 let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
                 match op {
                     "get" => {
-                        let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
-                        if !p.is_empty() { return format!("Read {p}"); }
+                        let p = args
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim();
+                        if !p.is_empty() {
+                            return format!("Read {p}");
+                        }
                         "Read file".to_string()
                     }
                     "list" => {
-                        let p = args.get("prefix").and_then(|v| v.as_str()).unwrap_or("").trim();
-                        if !p.is_empty() { return format!("List {p}"); }
+                        let p = args
+                            .get("prefix")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim();
+                        if !p.is_empty() {
+                            return format!("List {p}");
+                        }
                         "List files".to_string()
                     }
                     "get_json" => {
-                        let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
-                        if !p.is_empty() { return format!("Read JSON {p}"); }
+                        let p = args
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim();
+                        if !p.is_empty() {
+                            return format!("Read JSON {p}");
+                        }
                         "Read JSON".to_string()
                     }
                     "patch" => {
-                        let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
-                        if !p.is_empty() { return format!("Patch {p}"); }
+                        let p = args
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim();
+                        if !p.is_empty() {
+                            return format!("Patch {p}");
+                        }
                         "Patch file".to_string()
                     }
                     _ => {
-                        if !op.is_empty() { return format!("dbt_files {op}"); }
+                        if !op.is_empty() {
+                            return format!("dbt_files {op}");
+                        }
                         "dbt_files".to_string()
                     }
                 }
             }
             "sql_schema" => {
-                let t = args.get("table").and_then(|v| v.as_str()).unwrap_or("").trim();
-                if !t.is_empty() { format!("Describe {t}") } else { "List tables".to_string() }
+                let t = args
+                    .get("table")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if !t.is_empty() {
+                    format!("Describe {t}")
+                } else {
+                    "List tables".to_string()
+                }
             }
             "sql_stats" => {
-                let t = args.get("table").and_then(|v| v.as_str()).unwrap_or("").trim();
-                if !t.is_empty() { format!("Stats {t}") } else { "Stats".to_string() }
+                let t = args
+                    .get("table")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if !t.is_empty() {
+                    format!("Stats {t}")
+                } else {
+                    "Stats".to_string()
+                }
             }
             "sql_sample" => {
-                let t = args.get("table").and_then(|v| v.as_str()).unwrap_or("").trim();
-                if !t.is_empty() { format!("Sample {t}") } else { "Sample".to_string() }
+                let t = args
+                    .get("table")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if !t.is_empty() {
+                    format!("Sample {t}")
+                } else {
+                    "Sample".to_string()
+                }
             }
             "run_sql" => "Run SQL".to_string(),
             other => other.replace('_', " "),
@@ -830,7 +976,11 @@ pub async fn call_and_record_tool(
         Err(_) => serde_json::json!({"ok": false, "errors": ["tool timeout"]}),
     };
     let obs = ToolObservation::normalize(raw.clone());
-    let status = if obs.ok { "ok".to_string() } else { "failed".to_string() };
+    let status = if obs.ok {
+        "ok".to_string()
+    } else {
+        "failed".to_string()
+    };
     let payload = obs
         .extra
         .get("payload")
@@ -849,27 +999,36 @@ pub async fn call_and_record_tool(
                 observation: obs,
                 ts: chrono::Utc::now().to_rfc3339(),
                 agent,
-            }
+            },
         )
         .await;
     raw
 }
- 
+
 /// Deterministic authoring invariant: ensure there is at least one model SQL file in `models/`.
 pub async fn invariant_has_any_models(ctx: &AgentCtx) -> Result<bool, String> {
     let tool = DbtFilesTool { datasets: None };
     let obs = tool
-        .call(serde_json::json!({"op":"list","prefix":"models/","limit":500}), ctx)
+        .call(
+            serde_json::json!({"op":"list","prefix":"models/","limit":500}),
+            ctx,
+        )
         .await
         .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e}));
     if obs.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         warn!("dbt_files list failed: {:?}", obs.get("error"));
         return Ok(false);
     }
-    let items = obs.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let items = obs
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut n_sql = 0usize;
     for it in items {
-        let Some(p) = it.get("path").and_then(|v| v.as_str()) else { continue };
+        let Some(p) = it.get("path").and_then(|v| v.as_str()) else {
+            continue;
+        };
         if p.starts_with("models/") && p.ends_with(".sql") && !p.contains("/_versions/") {
             n_sql += 1;
         }
@@ -881,7 +1040,10 @@ pub async fn invariant_has_any_models(ctx: &AgentCtx) -> Result<bool, String> {
 pub async fn invariant_has_dbt_project(ctx: &AgentCtx) -> Result<bool, String> {
     let tool = DbtFilesTool { datasets: None };
     let obs = tool
-        .call(serde_json::json!({"op":"get","path":"dbt_project.yml","max_chars":2000}), ctx)
+        .call(
+            serde_json::json!({"op":"get","path":"dbt_project.yml","max_chars":2000}),
+            ctx,
+        )
         .await
         .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e}));
     Ok(obs.get("ok").and_then(|v| v.as_bool()) == Some(true))
@@ -900,8 +1062,14 @@ mod tests {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                from_phase: args.get("from_phase").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                reason_code: args.get("reason_code").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                from_phase: args
+                    .get("from_phase")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                reason_code: args
+                    .get("reason_code")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 reason_detail: args.get("reason_detail").cloned(),
                 observation: Observation::ok(),
                 ts,
@@ -914,7 +1082,11 @@ mod tests {
                     name: action.to_string(),
                     clean_name: action.to_string(),
                     args,
-                    status: if obs.ok { "ok".to_string() } else { "failed".to_string() },
+                    status: if obs.ok {
+                        "ok".to_string()
+                    } else {
+                        "failed".to_string()
+                    },
                     payload: None,
                     observation: obs,
                     ts,
@@ -928,8 +1100,16 @@ mod tests {
     fn phase_is_derived_from_last_phase_step() {
         let log = ThreadLog {
             steps: vec![
-                step("phase", serde_json::json!({"phase":"preflight"}), serde_json::json!({"ok":true})),
-                step("phase", serde_json::json!({"phase":"model_author"}), serde_json::json!({"ok":true})),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"preflight"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_author"}),
+                    serde_json::json!({"ok":true}),
+                ),
             ],
             ..Default::default()
         };
@@ -1030,32 +1210,33 @@ mod tests {
     #[test]
     fn guard_treats_dbt_validate_repairs_as_mutation_even_when_validate_failed() {
         let log = ThreadLog {
-            steps: vec![
-                step(
-                    "dbt_validate",
-                    serde_json::json!({"build": true}),
-                    serde_json::json!({
-                        "ok": false,
-                        "compile_ok": true,
-                        "run_ok": false,
-                        "errors": ["Runtime Error: x"],
-                        "repair_report": {
-                            "dialect": "Amazon Athena (engine v3 / Trino SQL)",
-                            "max_iterations": 8,
-                            "iterations_run": 1,
-                            "iterations": [
-                                {"iteration": 1, "llm_changed_files": 1}
-                            ],
-                            "stopped_reason": "llm_no_progress"
-                        }
-                    }),
-                ),
-            ],
+            steps: vec![step(
+                "dbt_validate",
+                serde_json::json!({"build": true}),
+                serde_json::json!({
+                    "ok": false,
+                    "compile_ok": true,
+                    "run_ok": false,
+                    "errors": ["Runtime Error: x"],
+                    "repair_report": {
+                        "dialect": "Amazon Athena (engine v3 / Trino SQL)",
+                        "max_iterations": 8,
+                        "iterations_run": 1,
+                        "iterations": [
+                            {"iteration": 1, "llm_changed_files": 1}
+                        ],
+                        "stopped_reason": "llm_no_progress"
+                    }
+                }),
+            )],
             ..Default::default()
         };
         let g = derive_guard_state(Some(&log));
         assert!(g.last_validate_failed);
-        assert!(g.mutated_since_fail, "dbt_validate repairs should count as mutation to avoid deadlock");
+        assert!(
+            g.mutated_since_fail,
+            "dbt_validate repairs should count as mutation to avoid deadlock"
+        );
     }
 
     #[test]
@@ -1097,7 +1278,11 @@ mod tests {
     fn gate_authoring_completion_allows_when_no_unresolved_mutation_failures() {
         let log = ThreadLog {
             steps: vec![
-                step("phase", serde_json::json!({"phase":"cleanse_author"}), serde_json::json!({"ok":true})),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"cleanse_author"}),
+                    serde_json::json!({"ok":true}),
+                ),
                 step(
                     "staging_model",
                     serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
@@ -1116,7 +1301,11 @@ mod tests {
     fn gate_authoring_completion_blocks_when_last_mutation_failed_in_phase() {
         let log = ThreadLog {
             steps: vec![
-                step("phase", serde_json::json!({"phase":"model_author"}), serde_json::json!({"ok":true})),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_author"}),
+                    serde_json::json!({"ok":true}),
+                ),
                 step(
                     "staging_model",
                     serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
@@ -1138,7 +1327,11 @@ mod tests {
     fn gate_authoring_completion_clears_failures_after_successful_mutation() {
         let log = ThreadLog {
             steps: vec![
-                step("phase", serde_json::json!({"phase":"model_author"}), serde_json::json!({"ok":true})),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_author"}),
+                    serde_json::json!({"ok":true}),
+                ),
                 step(
                     "staging_model",
                     serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
@@ -1162,7 +1355,11 @@ mod tests {
     fn preview_patch_failure_does_not_block_authoring_completion() {
         let log = ThreadLog {
             steps: vec![
-                step("phase", serde_json::json!({"phase":"cleanse_author"}), serde_json::json!({"ok":true})),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"cleanse_author"}),
+                    serde_json::json!({"ok":true}),
+                ),
                 step(
                     "dbt_files",
                     serde_json::json!({"op":"patch","preview_diff": true, "replace_file": {"path":"models/x.sql","new_text":"select 1\n"}}),
@@ -1201,7 +1398,10 @@ mod tests {
             ..Default::default()
         };
         let g = derive_guard_state(Some(&log));
-        assert!(!g.probe_required, "probe_required should be cleared once satisfied");
+        assert!(
+            !g.probe_required,
+            "probe_required should be cleared once satisfied"
+        );
         assert!(g.probe_satisfied);
     }
 
@@ -1213,7 +1413,11 @@ mod tests {
         use std::sync::Arc;
 
         let storage = Arc::new(InMemoryStorageAdapter::default());
-        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
         let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
         let store = ThreadStore::new(storage, scope, keyspace);
 
@@ -1230,7 +1434,14 @@ mod tests {
 
         let log = store.get("tid").await.expect("thread log should exist");
         let last = log.steps.last().expect("last step exists");
-        let ThreadStep::Phase { phase, from_phase, reason_code, reason_detail, .. } = last else {
+        let ThreadStep::Phase {
+            phase,
+            from_phase,
+            reason_code,
+            reason_detail,
+            ..
+        } = last
+        else {
             panic!("expected Phase step");
         };
         assert_eq!(phase.as_str(), "cleanse_author");
@@ -1239,7 +1450,9 @@ mod tests {
         let rd = reason_detail.as_ref().expect("reason_detail should exist");
         assert_eq!(rd.get("x").and_then(|v| v.as_i64()), Some(1));
         assert_eq!(
-            rd.get("nested").and_then(|v| v.get("y")).and_then(|v| v.as_str()),
+            rd.get("nested")
+                .and_then(|v| v.get("y"))
+                .and_then(|v| v.as_str()),
             Some("z")
         );
     }
@@ -1252,14 +1465,34 @@ mod tests {
         use std::sync::Arc;
 
         let storage = Arc::new(InMemoryStorageAdapter::default());
-        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
         let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
         let store = ThreadStore::new(storage, scope, keyspace);
 
-        append_phase_with_reason(&store, "tid2", Some("agent".to_string()), None, Phase::CleanseAuthor, None, None).await;
+        append_phase_with_reason(
+            &store,
+            "tid2",
+            Some("agent".to_string()),
+            None,
+            Phase::CleanseAuthor,
+            None,
+            None,
+        )
+        .await;
         let log = store.get("tid2").await.expect("thread log should exist");
         let last = log.steps.last().expect("last step exists");
-        let ThreadStep::Phase { phase, from_phase, reason_code, reason_detail, .. } = last else {
+        let ThreadStep::Phase {
+            phase,
+            from_phase,
+            reason_code,
+            reason_detail,
+            ..
+        } = last
+        else {
             panic!("expected Phase step");
         };
         assert_eq!(phase.as_str(), "cleanse_author");
@@ -1268,15 +1501,22 @@ mod tests {
         assert!(reason_detail.is_none());
     }
 
-    fn make_minimal_ctx(storage: std::sync::Arc<dyn react_core::storage::StorageAdapter>) -> AgentCtx {
+    fn make_minimal_ctx(
+        storage: std::sync::Arc<dyn react_core::storage::StorageAdapter>,
+    ) -> AgentCtx {
         use react_core::agent::DefaultPolicy;
         use react_core::keyspace::DefaultKeyspace;
+        use react_core::keyspace::Keyspace;
         use react_core::llm::NullModel;
         use react_core::scope::RequestScope;
-        use react_core::keyspace::Keyspace;
 
-        let keyspace: std::sync::Arc<dyn Keyspace> = std::sync::Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let keyspace: std::sync::Arc<dyn Keyspace> =
+            std::sync::Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
         AgentCtx {
             top_k: 1,
             per_step_timeout_secs: 1,
@@ -1292,6 +1532,7 @@ mod tests {
             scope,
             keyspace,
             query: None,
+            warehouse: std::sync::Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -1327,7 +1568,12 @@ mod tests {
         let ctx = make_minimal_ctx(storage.clone());
 
         // Seed manifest.json under the standard dbt target key.
-        let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/";
+        let base = ctx
+            .keyspace
+            .dbt_prefix(&ctx.scope)
+            .trim_end_matches('/')
+            .to_string()
+            + "/";
         let manifest_key = format!("{}target/manifest.json", base);
         let manifest = serde_json::json!({
             "nodes": {
@@ -1339,7 +1585,11 @@ mod tests {
             }
         });
         ctx.storage
-            .put_bytes(&manifest_key, manifest.to_string().as_bytes(), "application/json")
+            .put_bytes(
+                &manifest_key,
+                manifest.to_string().as_bytes(),
+                "application/json",
+            )
             .await
             .unwrap();
 
@@ -1374,4 +1624,3 @@ mod tests {
         assert!(sel.is_empty());
     }
 }
- 

@@ -69,7 +69,11 @@ impl StorageAdapter for S3StorageAdapter {
         let mut token: Option<String> = None;
         let mut out: Vec<String> = Vec::new();
         loop {
-            let mut req = client.list_objects_v2().bucket(&bucket).prefix(prefix).max_keys(1000);
+            let mut req = client
+                .list_objects_v2()
+                .bucket(&bucket)
+                .prefix(prefix)
+                .max_keys(1000);
             if let Some(t) = token.as_ref() {
                 req = req.continuation_token(t);
             }
@@ -127,14 +131,20 @@ impl StorageAdapter for InMemoryStorageAdapter {
     }
 
     async fn get_bytes(&self, key: &str) -> Result<Vec<u8>, String> {
-        let g = self.inner.read().map_err(|_| "storage lock poisoned".to_string())?;
+        let g = self
+            .inner
+            .read()
+            .map_err(|_| "storage lock poisoned".to_string())?;
         g.get(key)
             .map(|o| o.bytes.clone())
             .ok_or_else(|| "not found".to_string())
     }
 
     async fn put_bytes(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), String> {
-        let mut g = self.inner.write().map_err(|_| "storage lock poisoned".to_string())?;
+        let mut g = self
+            .inner
+            .write()
+            .map_err(|_| "storage lock poisoned".to_string())?;
         g.insert(
             key.to_string(),
             StoredObject {
@@ -147,21 +157,33 @@ impl StorageAdapter for InMemoryStorageAdapter {
     }
 
     async fn delete_object(&self, key: &str) -> Result<(), String> {
-        let mut g = self.inner.write().map_err(|_| "storage lock poisoned".to_string())?;
+        let mut g = self
+            .inner
+            .write()
+            .map_err(|_| "storage lock poisoned".to_string())?;
         g.remove(key);
         Ok(())
     }
 
     async fn head_etag(&self, key: &str) -> Result<Option<String>, String> {
-        let g = self.inner.read().map_err(|_| "storage lock poisoned".to_string())?;
+        let g = self
+            .inner
+            .read()
+            .map_err(|_| "storage lock poisoned".to_string())?;
         Ok(g.get(key).map(|o| o.etag.clone()))
     }
 
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, String> {
-        let g = self.inner.read().map_err(|_| "storage lock poisoned".to_string())?;
-        let mut out: Vec<String> = g.keys().filter(|k| k.starts_with(prefix)).cloned().collect();
+        let g = self
+            .inner
+            .read()
+            .map_err(|_| "storage lock poisoned".to_string())?;
+        let mut out: Vec<String> = g
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect();
         out.sort();
         Ok(out)
     }
 }
-

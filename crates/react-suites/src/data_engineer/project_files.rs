@@ -13,4 +13,3 @@ pub const MODELS_SCHEMA_YML: &str = "models/schema.yml";
 
 /// Core dbt project context files that are allowed/expected to be edited as part of repairs.
 pub const CORE_PROJECT_CONTEXT_FILES: &[&str] = &[DBT_PROJECT_YML, PACKAGES_YML, MODELS_SCHEMA_YML];
-

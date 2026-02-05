@@ -17,8 +17,16 @@ pub struct DbtProjectProvider {
 }
 
 impl DbtProjectProvider {
-    pub fn new(storage: Arc<dyn StorageAdapter>, keyspace: Arc<dyn Keyspace>, runner: DbtRunnerConfig) -> Self {
-        Self { storage, keyspace, runner }
+    pub fn new(
+        storage: Arc<dyn StorageAdapter>,
+        keyspace: Arc<dyn Keyspace>,
+        runner: DbtRunnerConfig,
+    ) -> Self {
+        Self {
+            storage,
+            keyspace,
+            runner,
+        }
     }
 }
 
@@ -88,7 +96,10 @@ fn redact_docker_args_for_log(args: &[String]) -> String {
         // Also redact inline KEY=VALUE tokens for common AWS secrets if present.
         if let Some((k, _v)) = a.split_once('=') {
             let k_uc = k.to_ascii_uppercase();
-            if k_uc.contains("AWS_SECRET_ACCESS_KEY") || k_uc.contains("AWS_SESSION_TOKEN") || k_uc.contains("AWS_ACCESS_KEY_ID") {
+            if k_uc.contains("AWS_SECRET_ACCESS_KEY")
+                || k_uc.contains("AWS_SESSION_TOKEN")
+                || k_uc.contains("AWS_ACCESS_KEY_ID")
+            {
                 out.push(format!("{}=***", k));
                 continue;
             }
@@ -98,7 +109,13 @@ fn redact_docker_args_for_log(args: &[String]) -> String {
     out.join(" ")
 }
 
-fn run_cmd_labeled(cmd: &str, args: &[&str], cwd: &Path, envs: &[(&str, String)], label: &str) -> CmdOut {
+fn run_cmd_labeled(
+    cmd: &str,
+    args: &[&str],
+    cwd: &Path,
+    envs: &[(&str, String)],
+    label: &str,
+) -> CmdOut {
     let started = std::time::Instant::now();
     tracing::info!(
         target: "dbt",
@@ -120,7 +137,12 @@ fn run_cmd_labeled(cmd: &str, args: &[&str], cwd: &Path, envs: &[(&str, String)]
     let mut child = match c.spawn() {
         Ok(ch) => ch,
         Err(e) => {
-            return CmdOut { status_ok: false, code: -1, stdout: String::new(), stderr: format!("spawn error: {}", e) };
+            return CmdOut {
+                status_ok: false,
+                code: -1,
+                stdout: String::new(),
+                stderr: format!("spawn error: {}", e),
+            };
         }
     };
 
@@ -165,7 +187,12 @@ fn run_cmd_labeled(cmd: &str, args: &[&str], cwd: &Path, envs: &[(&str, String)]
     let status = match child.wait() {
         Ok(s) => s,
         Err(e) => {
-            return CmdOut { status_ok: false, code: -1, stdout: out_buf, stderr: format!("wait error: {}", e) };
+            return CmdOut {
+                status_ok: false,
+                code: -1,
+                stdout: out_buf,
+                stderr: format!("wait error: {}", e),
+            };
         }
     };
     let code = status.code().unwrap_or(-1);
@@ -179,7 +206,12 @@ fn run_cmd_labeled(cmd: &str, args: &[&str], cwd: &Path, envs: &[(&str, String)]
         duration_ms = started.elapsed().as_millis() as u64,
         "finished"
     );
-    CmdOut { status_ok: ok, code, stdout: out_buf, stderr: err_buf }
+    CmdOut {
+        status_ok: ok,
+        code,
+        stdout: out_buf,
+        stderr: err_buf,
+    }
 }
 
 fn build_docker_run_args(
@@ -194,19 +226,31 @@ fn build_docker_run_args(
         .as_ref()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| "dbt runner is docker but providers.dbt.docker_image is not set".to_string())?;
+        .ok_or_else(|| {
+            "dbt runner is docker but providers.dbt.docker_image is not set".to_string()
+        })?;
 
-    let proj = project_dir.canonicalize().unwrap_or_else(|_| project_dir.to_path_buf());
+    let proj = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
     let proj_s = proj.to_string_lossy().to_string();
 
     let mut args: Vec<String> = Vec::new();
     args.push("run".to_string());
     args.push("--rm".to_string());
-    if let Some(p) = runner.docker_platform.as_ref().filter(|s| !s.trim().is_empty()) {
+    if let Some(p) = runner
+        .docker_platform
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+    {
         args.push("--platform".to_string());
         args.push(p.trim().to_string());
     }
-    if let Some(n) = runner.docker_network.as_ref().filter(|s| !s.trim().is_empty()) {
+    if let Some(n) = runner
+        .docker_network
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+    {
         args.push("--network".to_string());
         args.push(n.trim().to_string());
     }
@@ -293,7 +337,12 @@ fn run_cmd_docker_labeled(
     let args = match build_docker_run_args(runner, project_dir, profiles_dir, dbt_args, envs) {
         Ok(v) => v,
         Err(e) => {
-            return CmdOut { status_ok: false, code: -1, stdout: String::new(), stderr: e };
+            return CmdOut {
+                status_ok: false,
+                code: -1,
+                stdout: String::new(),
+                stderr: e,
+            };
         }
     };
 
@@ -315,7 +364,12 @@ fn run_cmd_docker_labeled(
     let mut child = match c.spawn() {
         Ok(ch) => ch,
         Err(e) => {
-            return CmdOut { status_ok: false, code: -1, stdout: String::new(), stderr: format!("spawn error: {}", e) };
+            return CmdOut {
+                status_ok: false,
+                code: -1,
+                stdout: String::new(),
+                stderr: format!("spawn error: {}", e),
+            };
         }
     };
 
@@ -360,7 +414,12 @@ fn run_cmd_docker_labeled(
     let status = match child.wait() {
         Ok(s) => s,
         Err(e) => {
-            return CmdOut { status_ok: false, code: -1, stdout: out_buf, stderr: format!("wait error: {}", e) };
+            return CmdOut {
+                status_ok: false,
+                code: -1,
+                stdout: out_buf,
+                stderr: format!("wait error: {}", e),
+            };
         }
     };
     let code = status.code().unwrap_or(-1);
@@ -374,18 +433,31 @@ fn run_cmd_docker_labeled(
         duration_ms = started.elapsed().as_millis() as u64,
         "finished"
     );
-    CmdOut { status_ok: ok, code, stdout: out_buf, stderr: err_buf }
+    CmdOut {
+        status_ok: ok,
+        code,
+        stdout: out_buf,
+        stderr: err_buf,
+    }
 }
 
 fn combine_errors(a: &CmdOut, b: &CmdOut) -> Vec<String> {
     let mut v = Vec::new();
     if !a.status_ok {
-        if !a.stderr.trim().is_empty() { v.push(a.stderr.trim().to_string()); }
-        if !a.stdout.trim().is_empty() { v.push(a.stdout.trim().to_string()); }
+        if !a.stderr.trim().is_empty() {
+            v.push(a.stderr.trim().to_string());
+        }
+        if !a.stdout.trim().is_empty() {
+            v.push(a.stdout.trim().to_string());
+        }
     }
     if !b.status_ok {
-        if !b.stderr.trim().is_empty() { v.push(b.stderr.trim().to_string()); }
-        if !b.stdout.trim().is_empty() { v.push(b.stdout.trim().to_string()); }
+        if !b.stderr.trim().is_empty() {
+            v.push(b.stderr.trim().to_string());
+        }
+        if !b.stdout.trim().is_empty() {
+            v.push(b.stdout.trim().to_string());
+        }
     }
     v
 }
@@ -410,7 +482,13 @@ impl DbtProjectProvider {
                 let rel_s = rel.to_string_lossy().replace('\\', "/");
                 key.push_str(&rel_s);
                 let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                let content_type = match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase().as_str() {
+                let content_type = match path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .as_str()
+                {
                     "sql" => "text/sql",
                     "json" => "application/json",
                     "yml" | "yaml" => "text/yaml",
@@ -457,7 +535,9 @@ impl DbtProvider for DbtProjectProvider {
             name = name,
             project_id = scope.project_id
         );
-        self.storage.put_bytes(&project_key, y.as_bytes(), "text/yaml").await?;
+        self.storage
+            .put_bytes(&project_key, y.as_bytes(), "text/yaml")
+            .await?;
         Ok(())
     }
 
@@ -469,8 +549,15 @@ impl DbtProvider for DbtProjectProvider {
         sql: &str,
     ) -> Result<String, String> {
         let dir = encode_key_component(dataset_id);
-        let key = format!("{}models/{}/{}.sql", self.keyspace.dbt_prefix(scope), dir, name);
-        self.storage.put_bytes(&key, sql.as_bytes(), "text/sql").await?;
+        let key = format!(
+            "{}models/{}/{}.sql",
+            self.keyspace.dbt_prefix(scope),
+            dir,
+            name
+        );
+        self.storage
+            .put_bytes(&key, sql.as_bytes(), "text/sql")
+            .await?;
         Ok(key)
     }
 
@@ -482,8 +569,15 @@ impl DbtProvider for DbtProjectProvider {
         yaml_text: &str,
     ) -> Result<String, String> {
         let dir = encode_key_component(dataset_id);
-        let key = format!("{}metrics/{}/{}.yaml", self.keyspace.dbt_prefix(scope), dir, name);
-        self.storage.put_bytes(&key, yaml_text.as_bytes(), "text/yaml").await?;
+        let key = format!(
+            "{}metrics/{}/{}.yaml",
+            self.keyspace.dbt_prefix(scope),
+            dir,
+            name
+        );
+        self.storage
+            .put_bytes(&key, yaml_text.as_bytes(), "text/yaml")
+            .await?;
         Ok(key)
     }
 
@@ -492,10 +586,18 @@ impl DbtProvider for DbtProjectProvider {
         scope: &RequestScope,
         args: &DbtValidateArgs,
     ) -> Result<DbtValidateResult, String> {
-        let project_name = if args.project_name.is_empty() { "data_engineer".to_string() } else { args.project_name.clone() };
+        let project_name = if args.project_name.is_empty() {
+            "data_engineer".to_string()
+        } else {
+            args.project_name.clone()
+        };
         let s3_prefix_base = {
             let pref = self.keyspace.dbt_prefix(scope);
-            if pref.ends_with('/') { pref } else { format!("{}/", pref) }
+            if pref.ends_with('/') {
+                pref
+            } else {
+                format!("{}/", pref)
+            }
         };
 
         let profiles_dir = args
@@ -521,10 +623,14 @@ impl DbtProvider for DbtProjectProvider {
         let keys = self.storage.list_prefix(&s3_prefix_base).await?;
         let mut file_count = 0usize;
         for key in keys {
-            if key.ends_with('/') { continue; }
+            if key.ends_with('/') {
+                continue;
+            }
             let rel = key.strip_prefix(&s3_prefix_base).unwrap_or(&key);
             let dest = root.join(rel);
-            if let Some(parent) = dest.parent() { let _ = std::fs::create_dir_all(parent); }
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             let bytes = self.storage.get_bytes(&key).await?;
             write_file(&dest, &bytes)?;
             file_count += 1;
@@ -587,7 +693,9 @@ impl DbtProvider for DbtProjectProvider {
         }
 
         let mut envs: Vec<(&str, String)> = Vec::new();
-        if let Some(pd) = profiles_dir.as_ref() { envs.push(("DBT_PROFILES_DIR", pd.clone())); }
+        if let Some(pd) = profiles_dir.as_ref() {
+            envs.push(("DBT_PROFILES_DIR", pd.clone()));
+        }
 
         let use_docker = self.runner.mode.to_lowercase() == "docker";
         let profiles_path = profiles_dir.as_ref().map(|s| Path::new(s));
@@ -595,7 +703,14 @@ impl DbtProvider for DbtProjectProvider {
         // Hard fail if dbt CLI itself is broken on this runner (do NOT attempt to repair).
         // This catches host-level Python/env issues early (e.g. import errors) before we try deps/parse/compile.
         let version_res = if use_docker {
-            run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["--version"], &envs, "version")
+            run_cmd_docker_labeled(
+                &self.runner,
+                &root,
+                profiles_path,
+                &["--version"],
+                &envs,
+                "version",
+            )
         } else {
             run_cmd_labeled("dbt", &["--version"], &root, &envs, "version")
         };
@@ -613,12 +728,23 @@ impl DbtProvider for DbtProjectProvider {
             run_cmd_labeled("dbt", &["deps"], &root, &envs, "deps")
         };
         let parse_res = if use_docker {
-            run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["parse"], &envs, "parse")
+            run_cmd_docker_labeled(
+                &self.runner,
+                &root,
+                profiles_path,
+                &["parse"],
+                &envs,
+                "parse",
+            )
         } else {
             run_cmd_labeled("dbt", &["parse"], &root, &envs, "parse")
         };
         let compile_res = {
-            let mut argv: Vec<String> = vec!["compile".to_string(), "--target".to_string(), target.clone()];
+            let mut argv: Vec<String> = vec![
+                "compile".to_string(),
+                "--target".to_string(),
+                target.clone(),
+            ];
             if let Some(sel) = select_terms {
                 for t in sel.iter() {
                     argv.push("--select".to_string());
@@ -633,14 +759,22 @@ impl DbtProvider for DbtProjectProvider {
             }
             let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
             if use_docker {
-                run_cmd_docker_labeled(&self.runner, &root, profiles_path, &argv_refs, &envs, "compile")
+                run_cmd_docker_labeled(
+                    &self.runner,
+                    &root,
+                    profiles_path,
+                    &argv_refs,
+                    &envs,
+                    "compile",
+                )
             } else {
                 run_cmd_labeled("dbt", &argv_refs, &root, &envs, "compile")
             }
         };
         let run_or_build_res = if build {
             Some({
-                let mut argv: Vec<String> = vec!["build".to_string(), "--target".to_string(), target.clone()];
+                let mut argv: Vec<String> =
+                    vec!["build".to_string(), "--target".to_string(), target.clone()];
                 if let Some(sel) = select_terms {
                     for t in sel.iter() {
                         argv.push("--select".to_string());
@@ -655,14 +789,22 @@ impl DbtProvider for DbtProjectProvider {
                 }
                 let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
                 if use_docker {
-                    run_cmd_docker_labeled(&self.runner, &root, profiles_path, &argv_refs, &envs, "build")
+                    run_cmd_docker_labeled(
+                        &self.runner,
+                        &root,
+                        profiles_path,
+                        &argv_refs,
+                        &envs,
+                        "build",
+                    )
                 } else {
                     run_cmd_labeled("dbt", &argv_refs, &root, &envs, "build")
                 }
             })
         } else if run {
             Some({
-                let mut argv: Vec<String> = vec!["run".to_string(), "--target".to_string(), target.clone()];
+                let mut argv: Vec<String> =
+                    vec!["run".to_string(), "--target".to_string(), target.clone()];
                 if let Some(sel) = select_terms {
                     for t in sel.iter() {
                         argv.push("--select".to_string());
@@ -677,7 +819,14 @@ impl DbtProvider for DbtProjectProvider {
                 }
                 let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
                 if use_docker {
-                    run_cmd_docker_labeled(&self.runner, &root, profiles_path, &argv_refs, &envs, "run")
+                    run_cmd_docker_labeled(
+                        &self.runner,
+                        &root,
+                        profiles_path,
+                        &argv_refs,
+                        &envs,
+                        "run",
+                    )
                 } else {
                     run_cmd_labeled("dbt", &argv_refs, &root, &envs, "run")
                 }
@@ -689,21 +838,41 @@ impl DbtProvider for DbtProjectProvider {
         let ok = deps_res.status_ok
             && parse_res.status_ok
             && compile_res.status_ok
-            && run_or_build_res.as_ref().map(|o| o.status_ok).unwrap_or(true);
+            && run_or_build_res
+                .as_ref()
+                .map(|o| o.status_ok)
+                .unwrap_or(true);
 
         let mut uploaded_files: usize = 0;
-        if compile_res.status_ok || run_or_build_res.as_ref().map(|r| r.status_ok).unwrap_or(false) {
+        if compile_res.status_ok
+            || run_or_build_res
+                .as_ref()
+                .map(|r| r.status_ok)
+                .unwrap_or(false)
+        {
             let local_target = root.join("target");
             if local_target.exists() {
                 let target_prefix = format!("{}target/", s3_prefix_base);
-                uploaded_files = self.upload_dir_to_storage(&local_target, &target_prefix).await.unwrap_or(0);
+                uploaded_files = self
+                    .upload_dir_to_storage(&local_target, &target_prefix)
+                    .await
+                    .unwrap_or(0);
             }
         }
 
         let mut errs_vec: Vec<String> = Vec::new();
-        for e in combine_errors(&deps_res, &parse_res) { errs_vec.push(e); }
-        let empty = CmdOut { status_ok: true, code: 0, stdout: String::new(), stderr: String::new() };
-        for e in combine_errors(&compile_res, run_or_build_res.as_ref().unwrap_or(&empty)) { errs_vec.push(e); }
+        for e in combine_errors(&deps_res, &parse_res) {
+            errs_vec.push(e);
+        }
+        let empty = CmdOut {
+            status_ok: true,
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        for e in combine_errors(&compile_res, run_or_build_res.as_ref().unwrap_or(&empty)) {
+            errs_vec.push(e);
+        }
 
         Ok(DbtValidateResult {
             ok,
@@ -731,7 +900,11 @@ mod tests {
 
     #[test]
     fn docker_args_require_image() {
-        let runner = DbtRunnerConfig { mode: "docker".to_string(), docker_image: None, ..Default::default() };
+        let runner = DbtRunnerConfig {
+            mode: "docker".to_string(),
+            docker_image: None,
+            ..Default::default()
+        };
         let tmp = tempfile::tempdir().unwrap();
         let err = build_docker_run_args(&runner, tmp.path(), None, &["deps"], &[]).unwrap_err();
         assert!(err.to_lowercase().contains("docker_image"));
@@ -757,4 +930,3 @@ mod tests {
         assert!(joined.contains("ghcr.io/dbt-labs/dbt-athena:1.8.3"));
     }
 }
-

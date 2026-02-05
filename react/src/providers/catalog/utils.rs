@@ -17,4 +17,3 @@ pub fn to_stats_lite(s: &FieldStats) -> FieldStatsLite {
         last_updated_epoch_ms: s.last_updated_epoch_ms,
     }
 }
-

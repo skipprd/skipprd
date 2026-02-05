@@ -1,4 +1,8 @@
-use crate::discover::date_formats::DateFormats::{Asctime, Atom, AtomZ, Cookie, DateOnly, Iso8601, Iso8601_2, Iso8601_3, Iso8601_4, Iso8601_5, Iso8601SpaceOffset, Iso8601SpaceZ, Mysql, Rfc1036, Rfc1123, Rfc2822, Rfc3339, Rfc3339_2, Rfc7231, Rfc822, Rfc850, Rss, W3c};
+use crate::discover::date_formats::DateFormats::{
+    Asctime, Atom, AtomZ, Cookie, DateOnly, Iso8601, Iso8601SpaceOffset, Iso8601SpaceZ, Iso8601_2,
+    Iso8601_3, Iso8601_4, Iso8601_5, Mysql, Rfc1036, Rfc1123, Rfc2822, Rfc3339, Rfc3339_2, Rfc7231,
+    Rfc822, Rfc850, Rss, W3c,
+};
 use std::slice::Iter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,8 +35,29 @@ pub enum DateFormats {
 impl DateFormats {
     pub fn iterator() -> Iter<'static, DateFormats> {
         static FORMATS: [DateFormats; 23] = [
-            Iso8601, Iso8601_2, Iso8601_3, Iso8601_4, Iso8601_5, Iso8601SpaceZ, Iso8601SpaceOffset, Rfc2822, Rfc3339, Rfc3339_2, Atom, AtomZ, Asctime, Cookie, Rfc822,
-            Rfc850, Rfc1036, Rfc1123, Rfc7231, Rss, W3c, Mysql, DateOnly,
+            Iso8601,
+            Iso8601_2,
+            Iso8601_3,
+            Iso8601_4,
+            Iso8601_5,
+            Iso8601SpaceZ,
+            Iso8601SpaceOffset,
+            Rfc2822,
+            Rfc3339,
+            Rfc3339_2,
+            Atom,
+            AtomZ,
+            Asctime,
+            Cookie,
+            Rfc822,
+            Rfc850,
+            Rfc1036,
+            Rfc1123,
+            Rfc7231,
+            Rss,
+            W3c,
+            Mysql,
+            DateOnly,
         ];
         FORMATS.iter()
     }
@@ -135,8 +160,13 @@ mod tests {
     // Helper function to parse and assert dates
     fn assert_date_parse(format: DateFormats, date_str: &str, expected_utc: &str) {
         let format_str = format.as_str();
-        println!("Testing format: {} with string: {} using pattern: {}", format.name(), date_str, format_str);
-        
+        println!(
+            "Testing format: {} with string: {} using pattern: {}",
+            format.name(),
+            date_str,
+            format_str
+        );
+
         // For ISO8601 formats, use RFC3339 parsing which is more reliable
         let parsed_date = if format == DateFormats::Iso8601 || format == DateFormats::Iso8601_2 {
             match DateTime::parse_from_rfc3339(date_str) {
@@ -148,12 +178,18 @@ mod tests {
                         Ok(dt) => dt.with_timezone(&Utc),
                         Err(e) => {
                             println!("Parse error with format string: {:?}", e);
-                            panic!("Failed to parse date {} with format {}", date_str, format_str);
+                            panic!(
+                                "Failed to parse date {} with format {}",
+                                date_str, format_str
+                            );
                         }
                     }
                 }
             }
-        } else if format == DateFormats::Mysql || format == DateFormats::DateOnly || format == DateFormats::Atom {
+        } else if format == DateFormats::Mysql
+            || format == DateFormats::DateOnly
+            || format == DateFormats::Atom
+        {
             // For formats without timezone information, parse as NaiveDateTime then convert to DateTime<Utc>
             let naive_dt = match NaiveDateTime::parse_from_str(date_str, format_str) {
                 Ok(dt) => dt,
@@ -163,12 +199,18 @@ mod tests {
                         let naive_date = chrono::NaiveDate::parse_from_str(date_str, format_str)
                             .unwrap_or_else(|e| {
                                 println!("Parse error for date-only: {:?}", e);
-                                panic!("Failed to parse date {} with format {}", date_str, format_str);
+                                panic!(
+                                    "Failed to parse date {} with format {}",
+                                    date_str, format_str
+                                );
                             });
                         naive_date.and_hms_opt(0, 0, 0).unwrap_or_default() // Set time to midnight
                     } else {
                         println!("Parse error: {:?}", e);
-                        panic!("Failed to parse date {} with format {}", date_str, format_str);
+                        panic!(
+                            "Failed to parse date {} with format {}",
+                            date_str, format_str
+                        );
                     }
                 }
             };
@@ -179,11 +221,14 @@ mod tests {
                 Ok(dt) => dt.with_timezone(&Utc),
                 Err(e) => {
                     println!("Parse error: {:?}", e);
-                    panic!("Failed to parse date {} with format {}", date_str, format_str);
+                    panic!(
+                        "Failed to parse date {} with format {}",
+                        date_str, format_str
+                    );
                 }
             }
         };
-        
+
         // Parse the expected date
         let expected_date = match DateTime::parse_from_rfc3339(expected_utc) {
             Ok(dt) => dt.with_timezone(&Utc),
@@ -198,29 +243,45 @@ mod tests {
                 }
             }
         };
-        
+
         assert_eq!(parsed_date.timestamp(), expected_date.timestamp());
     }
 
     #[test]
     fn test_iso8601() {
-        assert_date_parse(DateFormats::Iso8601, "2023-03-03T15:00:00.000Z", "2023-03-03T15:00:00.000Z");
+        assert_date_parse(
+            DateFormats::Iso8601,
+            "2023-03-03T15:00:00.000Z",
+            "2023-03-03T15:00:00.000Z",
+        );
     }
 
     #[test]
     fn test_iso8601_2() {
-        assert_date_parse(DateFormats::Iso8601_2, "2023-03-03T15:00:00Z", "2023-03-03T15:00:00Z");
+        assert_date_parse(
+            DateFormats::Iso8601_2,
+            "2023-03-03T15:00:00Z",
+            "2023-03-03T15:00:00Z",
+        );
     }
 
     #[test]
     fn test_rfc2822() {
-        assert_date_parse(DateFormats::Rfc2822, "Fri, 03 Mar 2023 15:00:00 +0000", "2023-03-03T15:00:00Z");
+        assert_date_parse(
+            DateFormats::Rfc2822,
+            "Fri, 03 Mar 2023 15:00:00 +0000",
+            "2023-03-03T15:00:00Z",
+        );
     }
 
     #[test]
     fn test_mysql() {
         // MySQL format doesn't have timezone information, assume UTC
-        assert_date_parse(DateFormats::Mysql, "2023-03-03 15:00:00", "2023-03-03T15:00:00Z");
+        assert_date_parse(
+            DateFormats::Mysql,
+            "2023-03-03 15:00:00",
+            "2023-03-03T15:00:00Z",
+        );
     }
 
     #[test]

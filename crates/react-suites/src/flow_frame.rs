@@ -23,4 +23,3 @@ pub enum FlowFrame {
     /// Agent requires explicit approval (artifact diffs, etc).
     AwaitApproval { prompt: String },
 }
-

@@ -4,4 +4,3 @@ pub struct RequestScope {
     pub workspace: String,
     pub project_id: String,
 }
-

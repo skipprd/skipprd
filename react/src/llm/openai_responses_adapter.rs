@@ -3,12 +3,23 @@ use crate::llm::types::*;
 use serde::{Deserialize, Serialize};
 
 pub struct OpenAIResponsesAdapter;
-impl OpenAIResponsesAdapter { pub fn new() -> Self { Self {} } }
+impl OpenAIResponsesAdapter {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
 
 #[derive(Serialize)]
-struct RespPart { #[serde(rename="type")] r#type: String, text: String }
+struct RespPart {
+    #[serde(rename = "type")]
+    r#type: String,
+    text: String,
+}
 #[derive(Serialize)]
-struct RespMsg { role: String, content: Vec<RespPart> }
+struct RespMsg {
+    role: String,
+    content: Vec<RespPart>,
+}
 #[derive(Serialize)]
 struct RespReq {
     model: String,
@@ -26,7 +37,7 @@ struct RespText {
     /// - `{ "type": "text" }`
     /// - `{ "type": "json_object" }`
     /// - `{ "type": "json_schema", "name": "...", "schema": {...}, "strict": true }`
-    format: serde_json::Value
+    format: serde_json::Value,
 }
 #[derive(Deserialize)]
 struct RespResp {
@@ -37,11 +48,18 @@ struct RespResp {
 }
 
 #[derive(Serialize)]
-struct OaiEmbReq { model: String, input: Vec<String> }
+struct OaiEmbReq {
+    model: String,
+    input: Vec<String>,
+}
 #[derive(Deserialize)]
-struct OaiEmbData { embedding: Vec<f32> }
+struct OaiEmbData {
+    embedding: Vec<f32>,
+}
 #[derive(Deserialize)]
-struct OaiEmbResp { data: Vec<OaiEmbData> }
+struct OaiEmbResp {
+    data: Vec<OaiEmbData>,
+}
 
 impl Adapter for OpenAIResponsesAdapter {
     fn capabilities(&self, _model: &str) -> Capabilities {
@@ -56,12 +74,30 @@ impl Adapter for OpenAIResponsesAdapter {
     fn build_chat_http(&self, req: &ChatRequest) -> Result<ProviderHttpRequest, String> {
         let mut msgs: Vec<RespMsg> = Vec::new();
         for m in req.messages.iter() {
-            let role = if m.role.eq_ignore_ascii_case("system") { "system" } else if m.role.eq_ignore_ascii_case("assistant") { "assistant" } else { "user" };
-            let part = RespPart { r#type: "input_text".to_string(), text: m.content.clone() };
-            msgs.push(RespMsg { role: role.to_string(), content: vec![part] });
+            let role = if m.role.eq_ignore_ascii_case("system") {
+                "system"
+            } else if m.role.eq_ignore_ascii_case("assistant") {
+                "assistant"
+            } else {
+                "user"
+            };
+            let part = RespPart {
+                r#type: "input_text".to_string(),
+                text: m.content.clone(),
+            };
+            msgs.push(RespMsg {
+                role: role.to_string(),
+                content: vec![part],
+            });
         }
         if msgs.is_empty() {
-            msgs.push(RespMsg { role: "user".to_string(), content: vec![RespPart { r#type: "input_text".to_string(), text: String::new() }] });
+            msgs.push(RespMsg {
+                role: "user".to_string(),
+                content: vec![RespPart {
+                    r#type: "input_text".to_string(),
+                    text: String::new(),
+                }],
+            });
         }
 
         // Default to plain text, but allow callers to request structured output via `response_format`.
@@ -88,20 +124,32 @@ impl Adapter for OpenAIResponsesAdapter {
     fn parse_chat_http(&self, resp: &ProviderHttpResponse) -> Result<ChatResponse, String> {
         let obj: RespResp = serde_json::from_str(&resp.body_text).map_err(|e| e.to_string())?;
         if let Some(t) = obj.output_text {
-            return Ok(ChatResponse { text: t, raw: serde_json::from_str(&resp.body_text).ok() });
+            return Ok(ChatResponse {
+                text: t,
+                raw: serde_json::from_str(&resp.body_text).ok(),
+            });
         }
-        if let Some(t) = obj.output.get(0)
+        if let Some(t) = obj
+            .output
+            .get(0)
             .and_then(|v| v.get("content"))
             .and_then(|c| c.get(0))
             .and_then(|p| p.get("text"))
-            .and_then(|x| x.as_str()) {
-            return Ok(ChatResponse { text: t.to_string(), raw: serde_json::from_str(&resp.body_text).ok() });
+            .and_then(|x| x.as_str())
+        {
+            return Ok(ChatResponse {
+                text: t.to_string(),
+                raw: serde_json::from_str(&resp.body_text).ok(),
+            });
         }
         Err("empty response".to_string())
     }
 
     fn build_embed_http(&self, req: &EmbedRequest) -> Result<ProviderHttpRequest, String> {
-        let body = OaiEmbReq { model: req.model.clone(), input: req.inputs.clone() };
+        let body = OaiEmbReq {
+            model: req.model.clone(),
+            input: req.inputs.clone(),
+        };
         Ok(ProviderHttpRequest {
             method: "POST".to_string(),
             url: "/v1/embeddings".to_string(),
@@ -127,7 +175,10 @@ mod tests {
         let ad = OpenAIResponsesAdapter::new();
         let req = ChatRequest {
             model: "gpt-4.1-mini".to_string(),
-            messages: vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }],
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            }],
             max_output_tokens: None,
             temperature: None,
             top_p: None,
@@ -138,7 +189,8 @@ mod tests {
         assert_eq!(http.url, "/v1/responses");
         let fmt = http
             .body
-            .get("text").and_then(|t| t.get("format"))
+            .get("text")
+            .and_then(|t| t.get("format"))
             .and_then(|f| f.get("type"))
             .and_then(|x| x.as_str())
             .unwrap_or("");
@@ -150,7 +202,10 @@ mod tests {
         let ad = OpenAIResponsesAdapter::new();
         let req = ChatRequest {
             model: "gpt-4.1-mini".to_string(),
-            messages: vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }],
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            }],
             max_output_tokens: None,
             temperature: None,
             top_p: None,
@@ -160,12 +215,11 @@ mod tests {
         let http = ad.build_chat_http(&req).expect("build");
         let fmt = http
             .body
-            .get("text").and_then(|t| t.get("format"))
+            .get("text")
+            .and_then(|t| t.get("format"))
             .and_then(|f| f.get("type"))
             .and_then(|x| x.as_str())
             .unwrap_or("");
         assert_eq!(fmt, "text");
     }
 }
-
-

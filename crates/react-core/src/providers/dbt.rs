@@ -58,4 +58,3 @@ pub trait DbtProvider: Send + Sync {
         args: &DbtValidateArgs,
     ) -> Result<DbtValidateResult, String>;
 }
-

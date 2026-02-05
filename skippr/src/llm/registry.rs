@@ -24,10 +24,16 @@ fn provider_from_env() -> ProviderKind {
 
 pub fn pick_adapter_from_config() -> Arc<dyn Adapter> {
     match provider_from_env() {
-        ProviderKind::OpenAIResponses => Arc::new(crate::llm::openai_responses_adapter::OpenAIResponsesAdapter::new()),
+        ProviderKind::OpenAIResponses => {
+            Arc::new(crate::llm::openai_responses_adapter::OpenAIResponsesAdapter::new())
+        }
         ProviderKind::LlamaCpp => Arc::new(crate::llm::llama_cpp_adapter::LlamaCppAdapter::new()),
-        ProviderKind::OpenAIChat => Arc::new(crate::llm::openai_chat_adapter::OpenAIChatAdapter::new()),
-        ProviderKind::OpenAIGeneric => Arc::new(crate::llm::openai_chat_adapter::OpenAIChatAdapter::new()),
+        ProviderKind::OpenAIChat => {
+            Arc::new(crate::llm::openai_chat_adapter::OpenAIChatAdapter::new())
+        }
+        ProviderKind::OpenAIGeneric => {
+            Arc::new(crate::llm::openai_chat_adapter::OpenAIChatAdapter::new())
+        }
     }
 }
 
@@ -40,5 +46,3 @@ pub fn pick_openai_adapter_for_model(model: &str) -> Arc<dyn Adapter> {
         Arc::new(crate::llm::openai_chat_adapter::OpenAIChatAdapter::new())
     }
 }
-
-

@@ -106,7 +106,9 @@ fn extract_runtime_failures_from_stdout(stdout: &str) -> Vec<serde_json::Value> 
         }
         // Typical pattern:
         // `7 of 18 FAIL 2 not_null_stg_customers_customer_created_at ...`
-        let Some(idx) = l.find(" FAIL ") else { continue };
+        let Some(idx) = l.find(" FAIL ") else {
+            continue;
+        };
         let rest = l[idx + " FAIL ".len()..].trim();
         let mut it = rest.split_whitespace();
         let failures_s = it.next().unwrap_or("");
@@ -198,13 +200,26 @@ fn extract_failed_models_from_stdout(stdout: &str) -> Vec<serde_json::Value> {
                 // Prefer keeping the version that includes a file path.
                 match by_name.get(v.get("name").and_then(|x| x.as_str()).unwrap_or("")) {
                     None => {
-                        by_name.insert(v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(), v);
+                        by_name.insert(
+                            v.get("name")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            v,
+                        );
                     }
                     Some(existing) => {
-                        let existing_has_file = existing.get("file").and_then(|x| x.as_str()).is_some();
+                        let existing_has_file =
+                            existing.get("file").and_then(|x| x.as_str()).is_some();
                         let new_has_file = v.get("file").and_then(|x| x.as_str()).is_some();
                         if new_has_file && !existing_has_file {
-                            by_name.insert(v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(), v);
+                            by_name.insert(
+                                v.get("name")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                v,
+                            );
                         }
                     }
                 }
@@ -244,7 +259,10 @@ fn parse_test_name_hints(test_name: &str) -> (Option<String>, Option<String>) {
     // Heuristics for common dbt test naming patterns.
     // Example: not_null_stg_customers_customer_created_at
     //          unique_stg_orders_order_id
-    if let Some(rest) = test_name.strip_prefix("not_null_").or_else(|| test_name.strip_prefix("unique_")) {
+    if let Some(rest) = test_name
+        .strip_prefix("not_null_")
+        .or_else(|| test_name.strip_prefix("unique_"))
+    {
         let parts: Vec<&str> = rest.split('_').filter(|s| !s.is_empty()).collect();
         if parts.len() >= 3 {
             // Special-case common prefixes like stg_* / dim_* / fct_*.
@@ -370,10 +388,19 @@ mod tests {
         let logs = serde_json::json!({ "run_or_build": { "stdout": stdout } });
         let rf = extract_runtime_failures_from_logs(&logs);
         assert_eq!(rf.len(), 1);
-        assert_eq!(rf[0].get("name").and_then(|v| v.as_str()).unwrap(), "not_null_stg_customers_customer_created_at");
+        assert_eq!(
+            rf[0].get("name").and_then(|v| v.as_str()).unwrap(),
+            "not_null_stg_customers_customer_created_at"
+        );
         assert_eq!(rf[0].get("failures").and_then(|v| v.as_u64()).unwrap(), 2);
-        assert_eq!(rf[0].get("model_hint").and_then(|v| v.as_str()).unwrap(), "stg_customers");
-        assert_eq!(rf[0].get("column_hint").and_then(|v| v.as_str()).unwrap(), "customer_created_at");
+        assert_eq!(
+            rf[0].get("model_hint").and_then(|v| v.as_str()).unwrap(),
+            "stg_customers"
+        );
+        assert_eq!(
+            rf[0].get("column_hint").and_then(|v| v.as_str()).unwrap(),
+            "customer_created_at"
+        );
     }
 
     #[test]
@@ -386,7 +413,11 @@ mod tests {
         let failed = extract_failed_models_from_logs(&logs);
         let names: Vec<String> = failed
             .iter()
-            .filter_map(|v| v.get("name").and_then(|x| x.as_str()).map(|s| s.to_string()))
+            .filter_map(|v| {
+                v.get("name")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         assert!(names.contains(&"stg_raw_orders".to_string()));
         assert!(names.contains(&"stg_raw_customers".to_string()));
@@ -401,4 +432,3 @@ mod tests {
         );
     }
 }
-

@@ -58,5 +58,3 @@ pub struct ProviderHttpResponse {
     pub status: u16,
     pub body_text: String,
 }
-
-

@@ -9,7 +9,7 @@ use react_core::agent::AgentCtx;
 use react_core::tools::Tool;
 
 use crate::data_engineer::dbt_repair::remediate::active_provider_dialect;
-use crate::data_engineer::{naming, patch_protocol};
+use crate::data_engineer::{naming, patch_protocol, plan};
 
 fn emit_trace(ctx: &AgentCtx, line: impl Into<String>) {
     if let Some(tx) = ctx.trace_tx.as_ref() {
@@ -101,6 +101,7 @@ fn build_gold_sys_prompt(provider: &str, dialect: &str, max_items: usize) -> Str
          - You MUST write a SELECT-based dbt model.\n\
          - Gold models MUST ONLY read from silver/staging models using ref('stg_*').\n\
          - Gold models MUST NOT call source() anywhere.\n\
+         - IMPORTANT: The user payload may include plan invariants/notes; invariants are hard requirements.\n\
          - Prefer minimal, stable columns for business use; do not invent fields.\n\
          - CRITICAL: Do NOT select or reference any column not present in inputs[].schema_columns for that input.\n\
            If you need a field that does not exist in silver, put it in notes and do NOT guess.\n\
@@ -117,6 +118,52 @@ fn build_gold_sys_prompt(provider: &str, dialect: &str, max_items: usize) -> Str
          - The patch MUST modify ONLY the provided model_path.\n\
          \n"
     )
+}
+
+fn render_plan_driven_instructions(invariants: &[String], notes: &[String]) -> String {
+    let mut out = String::new();
+    if !invariants.is_empty() {
+        out.push_str("Plan invariants (MUST satisfy):\n");
+        for inv in invariants.iter() {
+            let t = inv.trim();
+            if t.is_empty() {
+                continue;
+            }
+            out.push_str("- ");
+            out.push_str(t);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    if !notes.is_empty() {
+        out.push_str("Plan notes (implementation guidance):\n");
+        for n in notes.iter() {
+            let t = n.trim();
+            if t.is_empty() {
+                continue;
+            }
+            out.push_str("- ");
+            out.push_str(t);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.trim().to_string()
+}
+
+fn combine_instructions(user_instructions: &str, plan_instructions: &str) -> String {
+    let ui = user_instructions.trim();
+    let pi = plan_instructions.trim();
+    if ui.is_empty() && pi.is_empty() {
+        return String::new();
+    }
+    if ui.is_empty() {
+        return pi.to_string();
+    }
+    if pi.is_empty() {
+        return ui.to_string();
+    }
+    format!("User instructions:\n{}\n\n{}", ui, pi)
 }
 
 #[derive(Clone)]
@@ -146,15 +193,23 @@ impl Tool for GoldModelTool {
             .map(active_provider_dialect)
             .unwrap_or_else(|| "Unknown SQL dialect".to_string());
         let provider_name = crate::config::resolved_config_from_ctx(ctx)
-            .map(|cfg| if cfg.providers.athena.enabled { "athena" } else { "unknown" })
+            .map(|cfg| cfg.providers.warehouse.kind.as_str())
             .unwrap_or("unknown");
         let sys = build_gold_sys_prompt(provider_name, &dialect, max_items);
 
-        let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
-        let query = ctx.query.clone();
-        let (target_catalog, silver_db) = crate::config::resolved_config_from_ctx(ctx)
+        // Plan-first authoring: if there is an active model plan, use task invariants/notes as the
+        // default authoring instructions (and merge with any explicit item.instructions overrides).
+        let plan_opt = plan::load_model_plan(ctx).await;
+
+        let base = ctx
+            .keyspace
+            .dbt_prefix(&ctx.scope)
+            .trim_end_matches('/')
+            .to_string();
+        let query = ctx.warehouse.clone();
+        let (target_container, silver_ns) = crate::config::resolved_config_from_ctx(ctx)
             .map(|cfg| {
-                let cat = cfg.providers.athena.target_catalog.clone();
+                let container = cfg.providers.warehouse.container.clone();
                 let base_schema = cfg.providers.dbt.naming.target_schema.clone();
                 let silver_suffix = cfg.providers.dbt.naming.silver_suffix.clone();
                 let db = if base_schema.trim().is_empty() {
@@ -163,7 +218,7 @@ impl Tool for GoldModelTool {
                 } else {
                     format!("{}_{}", base_schema.trim(), silver_suffix.trim())
                 };
-                (cat, db)
+                (container, db)
             })
             .unwrap_or_else(|| ("".to_string(), "".to_string()));
 
@@ -190,11 +245,13 @@ impl Tool for GoldModelTool {
             let max_fetch_concurrency = 3usize;
             let storage = ctx.storage.clone();
             let query2 = query.clone();
-            let target_catalog2 = target_catalog.clone();
-            let silver_db2 = silver_db.clone();
-            let mut set: JoinSet<(usize, String, String, String, String, Vec<(String, String)>)> = JoinSet::new();
+            let target_container2 = target_container.clone();
+            let silver_ns2 = silver_ns.clone();
+            let mut set: JoinSet<(usize, String, String, String, String, Vec<(String, String)>)> =
+                JoinSet::new();
             // (idx, input, rel_path, content, derived_relation_fqn, schema_cols)
-            let mut fetched: Vec<(usize, String, String, String, String, Vec<(String, String)>)> = Vec::new();
+            let mut fetched: Vec<(usize, String, String, String, String, Vec<(String, String)>)> =
+                Vec::new();
             for (idx, inp) in it.inputs.iter().cloned().enumerate() {
                 while set.len() >= max_fetch_concurrency {
                     if let Some(res) = set.join_next().await {
@@ -208,8 +265,8 @@ impl Tool for GoldModelTool {
                 let key = format!("{}/{}", base, rel);
                 let rel2 = rel.clone();
                 let query3 = query2.clone();
-                let target_catalog3 = target_catalog2.clone();
-                let silver_db3 = silver_db2.clone();
+                let target_container3 = target_container2.clone();
+                let silver_ns3 = silver_ns2.clone();
                 set.spawn(async move {
                     let content = storage2
                         .get_bytes(&key)
@@ -224,13 +281,16 @@ impl Tool for GoldModelTool {
                         .unwrap_or("")
                         .trim_end_matches(".sql")
                         .to_string();
-                    let derived_fqn = if !target_catalog3.trim().is_empty() && !silver_db3.trim().is_empty() && !alias.trim().is_empty() {
-                        format!("{}.{}.{}", target_catalog3, silver_db3, alias)
+                    let derived_fqn = if !target_container3.trim().is_empty()
+                        && !silver_ns3.trim().is_empty()
+                        && !alias.trim().is_empty()
+                    {
+                        format!("{}.{}.{}", target_container3, silver_ns3, alias)
                     } else {
                         "".to_string()
                     };
-                    let schema_cols = if let (Some(q), true) = (query3.as_ref(), !derived_fqn.is_empty()) {
-                        q.schema(&derived_fqn).await.unwrap_or_default()
+                    let schema_cols = if !derived_fqn.is_empty() {
+                        query3.schema(&derived_fqn).await.unwrap_or_default()
                     } else {
                         vec![]
                     };
@@ -282,11 +342,28 @@ impl Tool for GoldModelTool {
                 continue;
             }
 
+            let (plan_invariants, plan_notes, plan_expected_model_path) = plan_opt
+                .as_ref()
+                .and_then(|p| p.tasks.iter().find(|t| t.name.trim() == name))
+                .map(|t| {
+                    (
+                        t.invariants.clone(),
+                        t.notes.clone(),
+                        t.expected_model_path.clone().unwrap_or_default(),
+                    )
+                })
+                .unwrap_or_else(|| (vec![], vec![], String::new()));
+            let plan_instr = render_plan_driven_instructions(&plan_invariants, &plan_notes);
+            let effective_instructions = combine_instructions(&it.instructions, &plan_instr);
+
             let user = serde_json::json!({
                 "model_name": name,
                 "model_path": rel_path,
                 "goal": goal,
-                "instructions": it.instructions,
+                "instructions": effective_instructions,
+                "plan_invariants": plan_invariants,
+                "plan_notes": plan_notes,
+                "plan_expected_model_path": plan_expected_model_path,
                 "inputs": input_blocks,
                 "existing_model_sql": ctx
                     .storage
@@ -327,8 +404,12 @@ impl Tool for GoldModelTool {
                 ));
                 continue;
             }
-            if let Some(msg) = contains_unsupported_sql_for_provider(provider_name, &outcome.content) {
-                errors.push(format!("{name}: unsupported SQL for provider '{provider_name}': {msg}"));
+            if let Some(msg) =
+                contains_unsupported_sql_for_provider(provider_name, &outcome.content)
+            {
+                errors.push(format!(
+                    "{name}: unsupported SQL for provider '{provider_name}': {msg}"
+                ));
                 continue;
             }
             if let Err(e) = ctx
@@ -390,7 +471,7 @@ mod tests {
     use react_core::llm::LargeLanguageModel;
     use react_core::scope::RequestScope;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     struct MockLlm {
@@ -409,20 +490,27 @@ mod tests {
     fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {
         Arc::new(crate::config::ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { bucket: "b".to_string() },
-            scope: RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
+            storage: crate::config::StorageResolved {
+                bucket: "b".to_string(),
+            },
+            scope: RequestScope {
+                tenant: "t".to_string(),
+                workspace: "w".to_string(),
+                project_id: "p".to_string(),
+            },
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
-                athena: crate::config::AthenaResolved {
-                    enabled: true,
-                    workgroup: "wg".to_string(),
-                    region: "eu-west-1".to_string(),
-                    result_s3: "s3://x/".to_string(),
-                    target_catalog: "AwsDataCatalog".to_string(),
-                    source_schema: "test_raw".to_string(),
-                    discovery_cache_ttl_secs: 120,
+                warehouse: crate::config::WarehouseResolved {
+                    kind: "athena".to_string(),
+                    container: "AwsDataCatalog".to_string(),
+                    namespace: "test_raw".to_string(),
+                    extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
                 },
-                catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
+                catalog: crate::config::CatalogResolved {
+                    enabled: false,
+                    refresh_secs: 60,
+                    max_concurrency: 8,
+                },
                 dbt: crate::config::DbtResolved {
                     enabled: true,
                     profiles_dir: None,
@@ -445,7 +533,11 @@ mod tests {
 
     fn make_ctx(storage: Arc<dyn StorageAdapter>, llm: Arc<dyn LargeLanguageModel>) -> AgentCtx {
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
         AgentCtx {
             top_k: 1,
             per_step_timeout_secs: 1,
@@ -461,6 +553,7 @@ mod tests {
             scope: scope.clone(),
             keyspace,
             query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -518,9 +611,12 @@ mod tests {
         let key = written[0].as_str().unwrap_or("").to_string();
         let bytes = storage.get_bytes(&key).await.expect("written file exists");
         let content = String::from_utf8_lossy(&bytes).to_string();
-        assert!(content.contains("config(schema=\"warehouse\""));
+        // Hard-cutover portability: do not inject `schema=` into model configs (dbt_project.yml governs schema).
+        assert!(!content.contains("config(schema="));
         assert!(content.contains("alias=\"fct_orders\""));
-        assert!(content.to_ascii_lowercase().contains("ref('stg_test_raw_raw_orders')"));
+        assert!(content
+            .to_ascii_lowercase()
+            .contains("ref('stg_test_raw_raw_orders')"));
     }
 
     #[tokio::test]
@@ -579,7 +675,11 @@ mod tests {
         let stg_orders_key = format!("{}/models/staging/stg_test_raw_raw_orders.sql", base);
         let stg_users_key = format!("{}/models/staging/stg_test_raw_raw_users.sql", base);
         storage
-            .put_bytes(&stg_orders_key, "select 1 as order_id".as_bytes(), "text/sql")
+            .put_bytes(
+                &stg_orders_key,
+                "select 1 as order_id".as_bytes(),
+                "text/sql",
+            )
             .await
             .expect("seed orders staging");
         storage
@@ -624,5 +724,109 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(written.len(), 1);
     }
-}
 
+    #[tokio::test]
+    async fn gold_model_uses_model_plan_invariants_and_notes_as_default_instructions() {
+        #[derive(Clone)]
+        struct CapturingLlm {
+            resp: String,
+            captured_instructions: Arc<Mutex<Option<String>>>,
+        }
+        impl LargeLanguageModel for CapturingLlm {
+            fn chat(&self, messages: &[ChatMessage]) -> Result<String, String> {
+                let user = messages
+                    .iter()
+                    .find(|m| m.role == "user")
+                    .map(|m| m.content.clone())
+                    .unwrap_or_default();
+                if let Ok(v) = serde_json::from_str::<Value>(&user) {
+                    let instr = v
+                        .get("input")
+                        .and_then(|x| x.get("instructions"))
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string());
+                    if let Ok(mut g) = self.captured_instructions.lock() {
+                        *g = instr;
+                    }
+                }
+                Ok(self.resp.clone())
+            }
+            fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+                Ok(vec![])
+            }
+        }
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let base = "t/w/p/dbt";
+        // Seed an input staging model so the tool can ground the prompt.
+        let stg_key = format!("{}/models/staging/stg_test_raw_raw_orders.sql", base);
+        storage
+            .put_bytes(&stg_key, "select 1 as order_id".as_bytes(), "text/sql")
+            .await
+            .expect("seed staging");
+
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let llm = Arc::new(CapturingLlm {
+            resp: serde_json::json!({
+                "replace_file": { "path": "models/marts/fct_orders.sql", "new_text": "select * from {{ ref('stg_test_raw_raw_orders') }}" },
+                "notes": []
+            })
+            .to_string(),
+            captured_instructions: captured.clone(),
+        });
+
+        let mut ctx = make_ctx(storage.clone(), llm);
+        ctx.thread_id = Some("t1".to_string());
+
+        // Seed an approved model plan with invariants/notes for this model.
+        let plan_key = crate::data_engineer::plan::new_model_plan_key(&ctx);
+        let plan = crate::data_engineer::plan::ModelPlan {
+            plan_key: plan_key.clone(),
+            status: crate::data_engineer::plan::PlanStatus::Approved,
+            project_snapshot: serde_json::Value::Null,
+            tasks: vec![crate::data_engineer::plan::ModelTask {
+                name: "fct_orders".to_string(),
+                folder: "marts".to_string(),
+                goal: "Orders fact at order grain.".to_string(),
+                inputs: vec!["stg_test_raw_raw_orders".to_string()],
+                expected_model_path: Some("models/marts/fct_orders.sql".to_string()),
+                invariants: vec!["Grain: exactly 1 row per order_pk.".to_string()],
+                status: crate::data_engineer::plan::TaskStatus::Pending,
+                notes: vec!["Filter out invalid orders based on silver validity flags.".to_string()],
+            }],
+            batches: vec![vec!["fct_orders".to_string()]],
+            progress: crate::data_engineer::plan::PlanProgress::default(),
+        };
+        crate::data_engineer::plan::save_model_plan(&ctx, &plan)
+            .await
+            .unwrap();
+
+        let tool = GoldModelTool;
+        let out = tool
+            .call(
+                serde_json::json!({
+                    "items": [{
+                        "name": "fct_orders",
+                        "folder": "marts",
+                        "goal": "Orders fact at order grain.",
+                        "inputs": ["stg_test_raw_raw_orders"]
+                    }]
+                }),
+                &ctx,
+            )
+            .await
+            .expect("tool call");
+
+        assert!(out.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        let got = captured
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_default();
+        assert!(got.contains("Plan invariants"));
+        assert!(got.contains("exactly 1 row"));
+        assert!(got.contains("Plan notes"));
+        assert!(got.contains("validity flags"));
+        assert!(!plan_key.trim().is_empty());
+    }
+}

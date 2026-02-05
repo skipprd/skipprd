@@ -3,12 +3,12 @@
 // use async_trait::async_trait;
 // use crate::helpers::offsets::Offsets;
 
-use std::sync::Arc;
-use async_trait::async_trait;
-use datafusion::execution::SendableRecordBatchStream;
 use crate::helpers::offsets::Offsets;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
+use async_trait::async_trait;
+use datafusion::execution::SendableRecordBatchStream;
+use std::sync::Arc;
 
 pub mod athena;
 // pub mod stdin_input;
@@ -38,8 +38,8 @@ pub mod file_output;
 // ) -> Box<dyn DataSourcePlugin> {
 //     match plugin_name {
 //         "stdin" => stdin_input::DataSourceStdinPlugin::new(),
-        // "s3" => Box::new(s3_input::DataSourceS3Plugin::new()),
-        // "s3_inventory" => Box::new(s3_inventory::DataSourceS3InventoryPlugin::new()),
+// "s3" => Box::new(s3_input::DataSourceS3Plugin::new()),
+// "s3_inventory" => Box::new(s3_inventory::DataSourceS3InventoryPlugin::new()),
 //         "file" => Box::new(file_input::DataSourceLocalFilePlugin::new()),
 //         _ => panic!("Unknown input plugin: {}", plugin_name),
 //     }
@@ -48,10 +48,18 @@ pub mod file_output;
 #[async_trait]
 #[allow(dead_code)]
 pub(crate) trait DataInputPlugin {
-    async fn sync(&mut self, offsets: Arc<Offsets>, shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>);
+    async fn sync(
+        &mut self,
+        offsets: Arc<Offsets>,
+        shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>,
+    );
 }
 
 #[async_trait]
 pub trait DataOutputPlugin: Send + Sync {
-    async fn sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error>;
+    async fn sync(
+        &self,
+        stream: SendableRecordBatchStream,
+        filename: String,
+    ) -> Result<(), std::io::Error>;
 }

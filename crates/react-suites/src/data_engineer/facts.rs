@@ -248,23 +248,53 @@ async fn schema_columns_for_fqn(ctx: &AgentCtx, fqn: &str) -> Option<RelationFac
 /// Build a minimal manifest index mapping model name -> (fqn, original_file_path).
 pub async fn load_manifest_index(ctx: &AgentCtx) -> BTreeMap<String, (String, String)> {
     let mut out: BTreeMap<String, (String, String)> = BTreeMap::new();
-    let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/";
+    let base = ctx
+        .keyspace
+        .dbt_prefix(&ctx.scope)
+        .trim_end_matches('/')
+        .to_string()
+        + "/";
     let key = format!("{}target/manifest.json", base);
-    let Ok(bytes) = ctx.storage.get_bytes(&key).await else { return out };
-    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else { return out };
-    let Some(nodes) = v.get("nodes").and_then(|n| n.as_object()) else { return out };
+    let Ok(bytes) = ctx.storage.get_bytes(&key).await else {
+        return out;
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+        return out;
+    };
+    let Some(nodes) = v.get("nodes").and_then(|n| n.as_object()) else {
+        return out;
+    };
     for (_uid, node) in nodes.iter() {
-        let rt = node.get("resource_type").and_then(|x| x.as_str()).unwrap_or("");
+        let rt = node
+            .get("resource_type")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
         if rt != "model" {
             continue;
         }
-        let name = node.get("name").and_then(|x| x.as_str()).unwrap_or("").trim();
+        let name = node
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
         if name.is_empty() {
             continue;
         }
-        let database = node.get("database").and_then(|x| x.as_str()).unwrap_or("").trim();
-        let schema = node.get("schema").and_then(|x| x.as_str()).unwrap_or("").trim();
-        let alias = node.get("alias").and_then(|x| x.as_str()).unwrap_or("").trim();
+        let database = node
+            .get("database")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
+        let schema = node
+            .get("schema")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
+        let alias = node
+            .get("alias")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
         let file_path = node
             .get("original_file_path")
             .and_then(|x| x.as_str())
@@ -283,17 +313,48 @@ pub async fn load_manifest_index(ctx: &AgentCtx) -> BTreeMap<String, (String, St
 /// Build a minimal manifest index mapping (source_name, table_name) -> fqn.
 pub async fn load_manifest_source_index(ctx: &AgentCtx) -> BTreeMap<(String, String), String> {
     let mut out: BTreeMap<(String, String), String> = BTreeMap::new();
-    let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/";
+    let base = ctx
+        .keyspace
+        .dbt_prefix(&ctx.scope)
+        .trim_end_matches('/')
+        .to_string()
+        + "/";
     let key = format!("{}target/manifest.json", base);
-    let Ok(bytes) = ctx.storage.get_bytes(&key).await else { return out };
-    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else { return out };
-    let Some(sources) = v.get("sources").and_then(|n| n.as_object()) else { return out };
+    let Ok(bytes) = ctx.storage.get_bytes(&key).await else {
+        return out;
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+        return out;
+    };
+    let Some(sources) = v.get("sources").and_then(|n| n.as_object()) else {
+        return out;
+    };
     for (_uid, node) in sources.iter() {
-        let source_name = node.get("source_name").and_then(|x| x.as_str()).unwrap_or("").trim();
-        let table_name = node.get("name").and_then(|x| x.as_str()).unwrap_or("").trim();
-        let database = node.get("database").and_then(|x| x.as_str()).unwrap_or("").trim();
-        let schema = node.get("schema").and_then(|x| x.as_str()).unwrap_or("").trim();
-        let identifier = node.get("identifier").and_then(|x| x.as_str()).unwrap_or("").trim();
+        let source_name = node
+            .get("source_name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
+        let table_name = node
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
+        let database = node
+            .get("database")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
+        let schema = node
+            .get("schema")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
+        let identifier = node
+            .get("identifier")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
         if source_name.is_empty()
             || table_name.is_empty()
             || database.is_empty()
@@ -310,7 +371,9 @@ pub async fn load_manifest_source_index(ctx: &AgentCtx) -> BTreeMap<(String, Str
 
 async fn read_dbt_file_text(ctx: &AgentCtx, rel_path: &str, max_bytes: usize) -> Option<String> {
     let key = dbt_storage_key(ctx, rel_path);
-    let Ok(bytes) = ctx.storage.get_bytes(&key).await else { return None };
+    let Ok(bytes) = ctx.storage.get_bytes(&key).await else {
+        return None;
+    };
     let s = String::from_utf8_lossy(&bytes).to_string();
     if max_bytes > 0 && s.len() > max_bytes {
         Some(s[..max_bytes].to_string())
@@ -344,8 +407,12 @@ pub async fn build_validate_fail_facts(
     let mut want_ref_names: BTreeSet<String> = BTreeSet::new();
     let mut want_sources: BTreeSet<(String, String)> = BTreeSet::new();
     for fm in failing_models.iter() {
-        let Some(file) = fm.get("file").and_then(|v| v.as_str()) else { continue };
-        let Some(sql) = read_dbt_file_text(ctx, file, 200_000).await else { continue };
+        let Some(file) = fm.get("file").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(sql) = read_dbt_file_text(ctx, file, 200_000).await else {
+            continue;
+        };
         for r in crate::data_engineer::naming::extract_ref_calls(&sql) {
             want_ref_names.insert(r);
         }
@@ -394,7 +461,9 @@ pub async fn build_facts_bundle_from_relations(
     let mut rels: Vec<RelationFacts> = Vec::new();
     for fqn in relation_fqns.iter().take(limits.max_relations.max(1)) {
         if let Some(mut r) = schema_columns_for_fqn(ctx, fqn).await {
-            if limits.max_columns_per_relation > 0 && r.columns.len() > limits.max_columns_per_relation {
+            if limits.max_columns_per_relation > 0
+                && r.columns.len() > limits.max_columns_per_relation
+            {
                 r.columns.truncate(limits.max_columns_per_relation);
             }
             rels.push(r);
@@ -461,20 +530,27 @@ mod tests {
     fn minimal_cfg() -> Arc<config::ReactResolvedConfig> {
         Arc::new(config::ReactResolvedConfig {
             server: config::ServerResolved { port: 1 },
-            storage: config::StorageResolved { bucket: "b".to_string() },
-            scope: RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
+            storage: config::StorageResolved {
+                bucket: "b".to_string(),
+            },
+            scope: RequestScope {
+                tenant: "t".to_string(),
+                workspace: "w".to_string(),
+                project_id: "p".to_string(),
+            },
             llm: config::LlmResolved::default(),
             providers: config::ProvidersResolved {
-                athena: config::AthenaResolved {
-                    enabled: true,
-                    workgroup: "wg".to_string(),
-                    region: "eu-west-1".to_string(),
-                    result_s3: "s3://x/".to_string(),
-                    target_catalog: "AwsDataCatalog".to_string(),
-                    source_schema: "test_raw".to_string(),
-                    discovery_cache_ttl_secs: 120,
+                warehouse: config::WarehouseResolved {
+                    kind: "athena".to_string(),
+                    container: "AwsDataCatalog".to_string(),
+                    namespace: "test_raw".to_string(),
+                    extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
                 },
-                catalog: config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
+                catalog: config::CatalogResolved {
+                    enabled: false,
+                    refresh_secs: 60,
+                    max_concurrency: 8,
+                },
                 dbt: config::DbtResolved {
                     enabled: true,
                     profiles_dir: None,
@@ -513,23 +589,51 @@ mod tests {
         async fn sample(&self, _table: &str, _k: usize) -> Result<Vec<Vec<String>>, String> {
             Err("not implemented".to_string())
         }
-        fn max_concurrency(&self) -> usize { 1 }
+        fn max_concurrency(&self) -> usize {
+            1
+        }
     }
 
     struct NoopDbtProvider;
     #[async_trait]
     impl DbtProvider for NoopDbtProvider {
-        async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> { Ok(()) }
-        async fn write_model_sql(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _sql: &str) -> Result<String, String> { Ok("k".to_string()) }
-        async fn write_metricflow_yaml(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _yaml_text: &str) -> Result<String, String> { Ok("k".to_string()) }
-        async fn validate_project(&self, _scope: &RequestScope, _args: &react_core::providers::DbtValidateArgs) -> Result<react_core::providers::DbtValidateResult, String> {
+        async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
+            Ok(())
+        }
+        async fn write_model_sql(
+            &self,
+            _scope: &RequestScope,
+            _dataset_id: &str,
+            _name: &str,
+            _sql: &str,
+        ) -> Result<String, String> {
+            Ok("k".to_string())
+        }
+        async fn write_metricflow_yaml(
+            &self,
+            _scope: &RequestScope,
+            _dataset_id: &str,
+            _name: &str,
+            _yaml_text: &str,
+        ) -> Result<String, String> {
+            Ok("k".to_string())
+        }
+        async fn validate_project(
+            &self,
+            _scope: &RequestScope,
+            _args: &react_core::providers::DbtValidateArgs,
+        ) -> Result<react_core::providers::DbtValidateResult, String> {
             Ok(react_core::providers::DbtValidateResult::default())
         }
     }
 
     fn make_ctx(storage: Arc<dyn StorageAdapter>, query: Arc<dyn QueryProvider>) -> AgentCtx {
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
         AgentCtx {
             top_k: 1,
             per_step_timeout_secs: 1,
@@ -545,6 +649,7 @@ mod tests {
             scope,
             keyspace,
             query: Some(query),
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: Some(Arc::new(NoopDbtProvider)),
             vector: None,
             thread_store: None,
@@ -572,7 +677,12 @@ mod tests {
         let ctx = make_ctx(storage.clone(), query);
 
         // Seed manifest.json that maps ref('stg_dep') to a concrete relation.
-        let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/";
+        let base = ctx
+            .keyspace
+            .dbt_prefix(&ctx.scope)
+            .trim_end_matches('/')
+            .to_string()
+            + "/";
         let manifest_key = format!("{}target/manifest.json", base);
         let manifest = serde_json::json!({
             "nodes": {
@@ -587,7 +697,11 @@ mod tests {
             }
         });
         storage
-            .put_bytes(&manifest_key, manifest.to_string().as_bytes(), "application/json")
+            .put_bytes(
+                &manifest_key,
+                manifest.to_string().as_bytes(),
+                "application/json",
+            )
             .await
             .unwrap();
 
@@ -620,15 +734,26 @@ mod tests {
         )
         .await;
 
-        assert!(facts.targets.missing_columns.iter().any(|c| c == "session_id_from_event"));
-        assert!(facts.relations.iter().any(|r| r.fqn == "AwsDataCatalog.test_silver.stg_dep"));
+        assert!(facts
+            .targets
+            .missing_columns
+            .iter()
+            .any(|c| c == "session_id_from_event"));
+        assert!(facts
+            .relations
+            .iter()
+            .any(|r| r.fqn == "AwsDataCatalog.test_silver.stg_dep"));
         let cols = facts
             .relations
             .iter()
             .find(|r| r.fqn == "AwsDataCatalog.test_silver.stg_dep")
-            .map(|r| r.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>())
+            .map(|r| {
+                r.columns
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         assert!(cols.contains(&"session_id"));
     }
 }
-

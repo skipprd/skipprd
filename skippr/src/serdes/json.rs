@@ -39,10 +39,10 @@ impl SerdeJson {
         let enable_sq = Self::is_single_quote_parsing_enabled();
         let enable_unicode = Self::is_unicode_parsing_enabled();
         let parser = OptimizedJsonParser::new(enable_sq, enable_unicode);
-        
+
         // Fast path: Try using the optimized parser first
         let line = parser.parse(record);
-        
+
         for item in line {
             if item.is_string() {
                 // Only handle string items that need further parsing
@@ -67,17 +67,17 @@ impl SerdeJson {
         // Pre-allocate with a reasonable capacity
         let estimated_size = records.len() * 2;
         let mut messages: Vec<Value> = Vec::with_capacity(estimated_size);
-        
+
         // Reuse parser for better performance
         let enable_sq = Self::is_single_quote_parsing_enabled();
         let enable_unicode = Self::is_unicode_parsing_enabled();
         let parser = OptimizedJsonParser::new(enable_sq, enable_unicode);
-        
+
         for record in records {
             let line = parser.parse(record);
             messages.extend(line);
         }
-        
+
         messages
     }
 
@@ -105,8 +105,8 @@ impl SerdeJson {
     // Returns an Iterator to the Reader of the lines of the file.
     #[allow(dead_code)]
     pub fn read_lines<P>(filename: P) -> Result<Lines<BufReader<File>>>
-        where
-            P: AsRef<Path>,
+    where
+        P: AsRef<Path>,
     {
         let file = File::open(filename)?;
         Ok(BufReader::new(file).lines())
@@ -127,23 +127,27 @@ impl SerdeJson {
         let enable_sq = Self::is_single_quote_parsing_enabled();
         let enable_unicode = Self::is_unicode_parsing_enabled();
         let parser = OptimizedJsonParser::new(enable_sq, enable_unicode);
-        
+
         // Use the optimized parser
         parser.parse(string)
     }
 }
 
-
-
 #[cfg(test)]
 mod json_serde_tests {
     use super::*;
     use std::env;
-    
+
     // Helper function to set up environment for tests
     fn setup_test_env(single_quotes: bool, unicode: bool) {
-        env::set_var("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING", if single_quotes { "true" } else { "false" });
-        env::set_var("SKIPPR_ENABLE_UNICODE_PARSING", if unicode { "true" } else { "false" });
+        env::set_var(
+            "SKIPPR_ENABLE_SINGLE_QUOTE_PARSING",
+            if single_quotes { "true" } else { "false" },
+        );
+        env::set_var(
+            "SKIPPR_ENABLE_UNICODE_PARSING",
+            if unicode { "true" } else { "false" },
+        );
     }
 
     #[test]
@@ -206,11 +210,11 @@ mod json_serde_tests {
     fn test_single_quote_strings_json() {
         // Enable single quote parsing for this test
         setup_test_env(true, false);
-        
+
         let record: String = r#"{'status': '200'}"#.to_string();
         let msg = SerdeJson::deserialize(&record);
         assert_eq!(msg.first().unwrap()["status"], "200");
-        
+
         // Reset to default
         setup_test_env(false, false);
     }
@@ -235,11 +239,11 @@ mod json_serde_tests {
     fn test_unicode_string_json() {
         // Enable both unicode parsing and single quote parsing for this test
         setup_test_env(true, true);
-        
+
         let record: String = r#"{u'status': u'200'}"#.to_string();
         let msg = SerdeJson::deserialize(&record);
         assert_eq!(msg.first().unwrap()["status"], "200");
-        
+
         // Reset to default
         setup_test_env(false, false);
     }

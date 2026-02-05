@@ -17,7 +17,9 @@ pub struct ChatMessage {
 pub struct NullModel {}
 
 impl NullModel {
-    pub fn new() -> Self { Self {} }
+    pub fn new() -> Self {
+        Self {}
+    }
 }
 
 impl LargeLanguageModel for NullModel {
@@ -30,4 +32,3 @@ impl LargeLanguageModel for NullModel {
 }
 
 pub type DynLlm = Arc<dyn LargeLanguageModel>;
-

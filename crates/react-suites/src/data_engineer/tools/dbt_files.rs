@@ -32,9 +32,11 @@ fn parse_one_or_many<T: DeserializeOwned>(args: &Value, key: &str) -> Result<Vec
         return Ok(Vec::new());
     }
     if v.is_array() {
-        serde_json::from_value::<Vec<T>>(v.clone()).map_err(|e| format!("{} parse error: {}", key, e))
+        serde_json::from_value::<Vec<T>>(v.clone())
+            .map_err(|e| format!("{} parse error: {}", key, e))
     } else {
-        let one = serde_json::from_value::<T>(v.clone()).map_err(|e| format!("{} parse error: {}", key, e))?;
+        let one = serde_json::from_value::<T>(v.clone())
+            .map_err(|e| format!("{} parse error: {}", key, e))?;
         Ok(vec![one])
     }
 }
@@ -76,7 +78,9 @@ fn validate_patch_args_shape(args: &Value) -> Result<(), String> {
             }
         }
         if v.is_string() {
-            return Err(patch_contract_error("replace_file must be an object or array (got string)"));
+            return Err(patch_contract_error(
+                "replace_file must be an object or array (got string)",
+            ));
         }
     }
     if let Some(v) = args.get("replace_range") {
@@ -95,7 +99,9 @@ fn validate_patch_args_shape(args: &Value) -> Result<(), String> {
             }
         }
         if v.is_string() {
-            return Err(patch_contract_error("replace_range must be an object or array (got string)"));
+            return Err(patch_contract_error(
+                "replace_range must be an object or array (got string)",
+            ));
         }
     }
     if let Some(v) = args.get("replace_list") {
@@ -114,7 +120,9 @@ fn validate_patch_args_shape(args: &Value) -> Result<(), String> {
             }
         }
         if v.is_string() {
-            return Err(patch_contract_error("replace_list must be an object or array (got string)"));
+            return Err(patch_contract_error(
+                "replace_list must be an object or array (got string)",
+            ));
         }
     }
     Ok(())
@@ -164,30 +172,55 @@ impl Tool for DbtFilesTool {
         let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
         match op {
             "list" => {
-                let prefix = args.get("prefix").and_then(|x| x.as_str()).unwrap_or("").trim();
-                let limit = args.get("limit").and_then(|x| x.as_u64()).unwrap_or(200).min(2000) as usize;
+                let prefix = args
+                    .get("prefix")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim();
+                let limit = args
+                    .get("limit")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(200)
+                    .min(2000) as usize;
                 project_fs::list_files(ctx, prefix, limit).await
             }
             "get" => {
-                let path = args.get("path").and_then(|x| x.as_str()).ok_or_else(|| "path required".to_string())?;
-                let max_chars = args.get("max_chars").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                let path = args
+                    .get("path")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| "path required".to_string())?;
+                let max_chars =
+                    args.get("max_chars").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
                 project_fs::get_file(ctx, path, max_chars).await
             }
             "get_json" => {
-                let path = args.get("path").and_then(|x| x.as_str()).ok_or_else(|| "path required".to_string())?;
+                let path = args
+                    .get("path")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| "path required".to_string())?;
                 let pointer = args.get("pointer").and_then(|x| x.as_str());
                 project_fs::get_json(ctx, path, pointer).await
             }
             "manifest_find" => {
-                let path = args.get("path").and_then(|x| x.as_str()).unwrap_or("target/manifest.json");
+                let path = args
+                    .get("path")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("target/manifest.json");
                 let unique_id = args.get("unique_id").and_then(|x| x.as_str());
                 let name = args.get("name").and_then(|x| x.as_str());
                 let resource_type = args.get("resource_type").and_then(|x| x.as_str());
-                let limit = args.get("limit").and_then(|x| x.as_u64()).unwrap_or(20).min(200) as usize;
+                let limit = args
+                    .get("limit")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(20)
+                    .min(200) as usize;
                 project_fs::manifest_find(ctx, path, unique_id, name, resource_type, limit).await
             }
             "patch" => {
-                let preview = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+                let preview = args
+                    .get("preview_diff")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
                 validate_patch_args_shape(&args)?;
 
                 // Optional single-file guard: if provided, ensure the patch bundle targets exactly this rel path.
@@ -204,9 +237,12 @@ impl Tool for DbtFilesTool {
                             .to_string(),
                     );
                 }
-                let replace_file_ops: Vec<ReplaceFileArgs> = parse_one_or_many(&args, "replace_file")?;
-                let replace_range_ops: Vec<ReplaceRangeArgs> = parse_one_or_many(&args, "replace_range")?;
-                let replace_list_ops: Vec<ReplaceListArgs> = parse_one_or_many(&args, "replace_list")?;
+                let replace_file_ops: Vec<ReplaceFileArgs> =
+                    parse_one_or_many(&args, "replace_file")?;
+                let replace_range_ops: Vec<ReplaceRangeArgs> =
+                    parse_one_or_many(&args, "replace_range")?;
+                let replace_list_ops: Vec<ReplaceListArgs> =
+                    parse_one_or_many(&args, "replace_list")?;
 
                 let mut provided = 0usize;
                 if !replace_file_ops.is_empty() {
@@ -284,7 +320,12 @@ impl Tool for DbtFilesTool {
                                 ));
                             }
                         }
-                        let new_text = project_fs::apply_replace_range(&existing, rr.start_line, rr.end_line, &rr.new_text)?;
+                        let new_text = project_fs::apply_replace_range(
+                            &existing,
+                            rr.start_line,
+                            rr.end_line,
+                            &rr.new_text,
+                        )?;
                         let out = project_fs::apply_patch(
                             ctx,
                             self.datasets.as_ref(),
@@ -401,7 +442,10 @@ impl Tool for DbtFilesTool {
                     "results": results
                 }))
             }
-            _ => Err("unsupported op; use 'list', 'get', 'get_json', 'manifest_find', or 'patch'".to_string()),
+            _ => Err(
+                "unsupported op; use 'list', 'get', 'get_json', 'manifest_find', or 'patch'"
+                    .to_string(),
+            ),
         }
     }
 }
@@ -419,20 +463,27 @@ mod tests {
     fn minimal_cfg() -> Arc<config::ReactResolvedConfig> {
         Arc::new(config::ReactResolvedConfig {
             server: config::ServerResolved { port: 1 },
-            storage: config::StorageResolved { bucket: "b".to_string() },
-            scope: RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
+            storage: config::StorageResolved {
+                bucket: "b".to_string(),
+            },
+            scope: RequestScope {
+                tenant: "t".to_string(),
+                workspace: "w".to_string(),
+                project_id: "p".to_string(),
+            },
             llm: config::LlmResolved::default(),
             providers: config::ProvidersResolved {
-                athena: config::AthenaResolved {
-                    enabled: true,
-                    workgroup: "wg".to_string(),
-                    region: "eu-west-1".to_string(),
-                    result_s3: "s3://x/".to_string(),
-                    target_catalog: "AwsDataCatalog".to_string(),
-                    source_schema: "test_raw".to_string(),
-                    discovery_cache_ttl_secs: 120,
+                warehouse: config::WarehouseResolved {
+                    kind: "athena".to_string(),
+                    container: "AwsDataCatalog".to_string(),
+                    namespace: "test_raw".to_string(),
+                    extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
                 },
-                catalog: config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
+                catalog: config::CatalogResolved {
+                    enabled: false,
+                    refresh_secs: 60,
+                    max_concurrency: 8,
+                },
                 dbt: config::DbtResolved {
                     enabled: true,
                     profiles_dir: None,
@@ -475,6 +526,7 @@ mod tests {
             scope,
             keyspace,
             query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -542,15 +594,23 @@ mod tests {
             .expect("patch ok");
 
         assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
-        let applied = obs.get("applied_patch_text").and_then(|v| v.as_str()).unwrap_or("");
+        let applied = obs
+            .get("applied_patch_text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(applied.contains("diff --git a/models/x.sql b/models/x.sql"));
 
-        let written = obs.get("written_keys").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let written = obs
+            .get("written_keys")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(written.len(), 1);
         let key = written[0].as_str().unwrap_or("");
         let bytes = storage.get_bytes(key).await.expect("written");
         let content = String::from_utf8_lossy(&bytes).to_string();
-        assert!(content.contains("config(schema=\"warehouse\""));
+        // Hard-cutover portability: do not inject `schema=` into model configs (dbt_project.yml governs schema).
+        assert!(!content.contains("config(schema="));
         assert!(content.contains("alias=\"x\""));
         assert!(content.to_ascii_lowercase().contains("select 1"));
     }

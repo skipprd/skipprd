@@ -1,21 +1,19 @@
-use std::sync::Arc;
-use once_cell::sync::OnceCell;
 use dashmap::DashMap;
-use std::time::{Duration, Instant};
+use once_cell::sync::OnceCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::helpers::configuration::Config;
 use tracing::debug;
 
 use super::adapter::Adapter;
 use super::registry::{pick_adapter_from_config, pick_openai_adapter_for_model};
-use super::types::{
-    ChatRequest, ChatResponse, EmbedRequest, EmbedResponse, ProviderHttpResponse,
-};
+use super::types::{ChatRequest, ChatResponse, EmbedRequest, EmbedResponse, ProviderHttpResponse};
 use crate::llm::LargeLanguageModel;
-use react_core::llm_observability::{self, PartInput};
 use react_core::llm::ChatMessage as CoreChatMessage;
+use react_core::llm_observability::{self, PartInput};
 
 fn pretty_json(text: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(text) {
@@ -28,7 +26,10 @@ fn router_parts_for_messages(req: &ChatRequest) -> (Vec<CoreChatMessage>, Vec<Pa
     let mut core_msgs: Vec<CoreChatMessage> = Vec::new();
     let mut parts: Vec<PartInput> = Vec::new();
     for (i, m) in req.messages.iter().enumerate() {
-        core_msgs.push(CoreChatMessage { role: m.role.clone(), content: m.content.clone() });
+        core_msgs.push(CoreChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        });
         parts.push(PartInput {
             name: format!("msg.{:02}.{}", i, m.role.trim().to_lowercase()),
             text: m.content.clone(),
@@ -50,13 +51,17 @@ struct MemoEntry {
     resp: ChatResponse,
 }
 static CHAT_MEMO: OnceCell<DashMap<String, MemoEntry>> = OnceCell::new();
-fn chat_memo() -> &'static DashMap<String, MemoEntry> { CHAT_MEMO.get_or_init(|| DashMap::new()) }
+fn chat_memo() -> &'static DashMap<String, MemoEntry> {
+    CHAT_MEMO.get_or_init(|| DashMap::new())
+}
 
 impl LlmRouter {
     pub fn new() -> Self {
         let adapter = pick_adapter_from_config();
         // Default timeout bumped to accommodate /v1/responses latency; still overridable via env/config.
-        let timeout_secs: u64 = Config::getenv("LLM_HTTP_TIMEOUT_SECS", "120").parse().unwrap_or(120);
+        let timeout_secs: u64 = Config::getenv("LLM_HTTP_TIMEOUT_SECS", "120")
+            .parse()
+            .unwrap_or(120);
         let http = ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build();
@@ -100,12 +105,21 @@ impl LlmRouter {
         if http_req.url.starts_with("local://chat") {
             let cfg = crate::llm::config_from_env();
             let model = crate::llm::llama_cpp::LlamaCppModel::new(cfg);
-            let msgs: Vec<crate::llm::ChatMessage> = req.messages.iter().map(|m| crate::llm::ChatMessage { role: m.role.clone(), content: m.content.clone() }).collect();
+            let msgs: Vec<crate::llm::ChatMessage> = req
+                .messages
+                .iter()
+                .map(|m| crate::llm::ChatMessage {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                })
+                .collect();
             let text = model.chat(&msgs)?;
             return Ok(ChatResponse { text, raw: None });
         }
         // Log request (pretty JSON and readable message text)
-        let body_json_len = serde_json::to_string(&http_req.body).map(|s| s.len()).unwrap_or(0);
+        let body_json_len = serde_json::to_string(&http_req.body)
+            .map(|s| s.len())
+            .unwrap_or(0);
         debug!(
             "LLM(router) request chat {} {} messages={} body_json_bytes={}",
             http_req.method,
@@ -123,17 +137,22 @@ impl LlmRouter {
         // Execute
         let full_url = format!("{}{}", self.base_prefix(), http_req.url);
         let payload = serde_json::to_value(&http_req.body).map_err(|e| e.to_string())?;
-        let max_retries: usize = Config::getenv("LLM_HTTP_MAX_RETRIES", "3").parse().unwrap_or(3).max(1).min(10);
+        let max_retries: usize = Config::getenv("LLM_HTTP_MAX_RETRIES", "3")
+            .parse()
+            .unwrap_or(3)
+            .max(1)
+            .min(10);
 
         // LLM observability (parts): best-effort, thread-scoped when req.thread_id is provided.
         let obs_thread_id = req.thread_id.clone().filter(|s| !s.trim().is_empty());
-        let (call_id_opt, prompt_hash_opt, built_parts_opt) = if llm_observability::llm_calls_enabled() {
-            if let Some(tid) = obs_thread_id.as_deref() {
-                let call_id = llm_observability::next_call_id(tid);
-                let (core_msgs, parts) = router_parts_for_messages(req);
-                let prompt_hash = llm_observability::prompt_hash_for_messages(&core_msgs);
-                let built = llm_observability::build_parts_for_thread(tid, &parts);
-                debug!(
+        let (call_id_opt, prompt_hash_opt, built_parts_opt) =
+            if llm_observability::llm_calls_enabled() {
+                if let Some(tid) = obs_thread_id.as_deref() {
+                    let call_id = llm_observability::next_call_id(tid);
+                    let (core_msgs, parts) = router_parts_for_messages(req);
+                    let prompt_hash = llm_observability::prompt_hash_for_messages(&core_msgs);
+                    let built = llm_observability::build_parts_for_thread(tid, &parts);
+                    debug!(
                     "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_hash={} response_pending=1",
                     tid,
                     call_id,
@@ -142,28 +161,36 @@ impl LlmRouter {
                     req.model,
                     prompt_hash
                 );
-                for p in built.parts.iter() {
-                    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
-                    let hash = p.get("hash").and_then(|v| v.as_str()).unwrap_or("-");
-                    let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    debug!("LLM_PART thread_id={} call_id={} name={} hash={} text={}", tid, call_id, name, hash, text);
+                    for p in built.parts.iter() {
+                        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+                        let hash = p.get("hash").and_then(|v| v.as_str()).unwrap_or("-");
+                        let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        debug!(
+                            "LLM_PART thread_id={} call_id={} name={} hash={} text={}",
+                            tid, call_id, name, hash, text
+                        );
+                    }
+                    (Some(call_id), Some(prompt_hash), Some(built))
+                } else {
+                    (None, None, None)
                 }
-                (Some(call_id), Some(prompt_hash), Some(built))
             } else {
                 (None, None, None)
-            }
-        } else {
-            (None, None, None)
-        };
+            };
 
         let mut attempt = 0usize;
         let (status, body_text) = loop {
             attempt += 1;
-            let mut r = self.http
+            let mut r = self
+                .http
                 .request(&http_req.method, &full_url)
                 .set("Content-Type", "application/json");
-            if let Some(k) = self.api_key.as_ref() { r = r.set("Authorization", &format!("Bearer {}", k)); }
-            for (h, v) in http_req.headers.iter() { r = r.set(h, v); }
+            if let Some(k) = self.api_key.as_ref() {
+                r = r.set("Authorization", &format!("Bearer {}", k));
+            }
+            for (h, v) in http_req.headers.iter() {
+                r = r.set(h, v);
+            }
 
             let resp = r.send_json(payload.clone());
             match resp {
@@ -171,15 +198,20 @@ impl LlmRouter {
                 Err(ureq::Error::Status(s, rr)) => {
                     // Retry 429 with backoff
                     if s == 429 && attempt < max_retries {
-                        let retry_after = rr.header("retry-after").and_then(|v| v.parse::<u64>().ok());
+                        let retry_after =
+                            rr.header("retry-after").and_then(|v| v.parse::<u64>().ok());
                         let backoff_ms = retry_after
                             .map(|secs| secs.saturating_mul(1000))
-                            .unwrap_or_else(|| 500u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(5_000));
+                            .unwrap_or_else(|| {
+                                500u64
+                                    .saturating_mul(1u64 << (attempt as u32 - 1))
+                                    .min(5_000)
+                            });
                         let jitter = rand::random::<u64>() % 250;
                         std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
                         continue;
                     }
-                    break (s, rr.into_string().unwrap_or_default())
+                    break (s, rr.into_string().unwrap_or_default());
                 }
                 Err(e) => {
                     let es = e.to_string().to_lowercase();
@@ -189,7 +221,9 @@ impl LlmRouter {
                         || es.contains("connection")
                         || es.contains("temporarily");
                     if transient && attempt < max_retries {
-                        let backoff_ms = 250u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(2_000);
+                        let backoff_ms = 250u64
+                            .saturating_mul(1u64 << (attempt as u32 - 1))
+                            .min(2_000);
                         std::thread::sleep(Duration::from_millis(backoff_ms));
                         continue;
                     }
@@ -197,7 +231,10 @@ impl LlmRouter {
                 }
             }
         };
-        let ph = ProviderHttpResponse { status: status as u16, body_text };
+        let ph = ProviderHttpResponse {
+            status: status as u16,
+            body_text,
+        };
         // Log response (pretty)
         debug!(
             "LLM(router) response chat status={} body_bytes={}",
@@ -205,17 +242,30 @@ impl LlmRouter {
             ph.body_text.len()
         );
         if Config::getenv("LLM_LOG_RESPONSE_BODIES", "0") == "1" {
-            debug!("LLM(router) response chat body:\n{}", pretty_json(&ph.body_text));
+            debug!(
+                "LLM(router) response chat body:\n{}",
+                pretty_json(&ph.body_text)
+            );
         }
         if !(200..300).contains(&(ph.status as i32)) {
-            let snippet = if ph.body_text.len() > 500 { &ph.body_text[..500] } else { &ph.body_text };
-            return Err(format!("LLM request failed: {}: http {}: {}", full_url, ph.status, snippet));
+            let snippet = if ph.body_text.len() > 500 {
+                &ph.body_text[..500]
+            } else {
+                &ph.body_text
+            };
+            return Err(format!(
+                "LLM request failed: {}: http {}: {}",
+                full_url, ph.status, snippet
+            ));
         }
         let parsed = adapter.parse_chat_http(&ph)?;
         // Observability response logging (no truncation). If not enabled, do not print parsed text at all by default.
-        if let (Some(tid), Some(call_id), Some(prompt_hash), Some(built)) =
-            (obs_thread_id.as_deref(), call_id_opt, prompt_hash_opt, built_parts_opt)
-        {
+        if let (Some(tid), Some(call_id), Some(prompt_hash), Some(built)) = (
+            obs_thread_id.as_deref(),
+            call_id_opt,
+            prompt_hash_opt,
+            built_parts_opt,
+        ) {
             let response_hash = llm_observability::sha256_hex_str(&parsed.text);
             let response_text = if llm_observability::llm_response_text_enabled() {
                 Some(llm_observability::redact_common_secrets(&parsed.text))
@@ -245,7 +295,13 @@ impl LlmRouter {
             );
         }
         // store in memo
-        chat_memo().insert(key, MemoEntry { at: Instant::now(), resp: parsed.clone() });
+        chat_memo().insert(
+            key,
+            MemoEntry {
+                at: Instant::now(),
+                resp: parsed.clone(),
+            },
+        );
         Ok(parsed)
     }
 
@@ -265,7 +321,9 @@ impl LlmRouter {
             return Ok(EmbedResponse { vectors: vecs, dim });
         }
         // Log request
-        let body_json_len = serde_json::to_string(&http_req.body).map(|s| s.len()).unwrap_or(0);
+        let body_json_len = serde_json::to_string(&http_req.body)
+            .map(|s| s.len())
+            .unwrap_or(0);
         debug!(
             "LLM(router) request embed {} {} inputs={} body_json_bytes={}",
             http_req.method,
@@ -282,31 +340,45 @@ impl LlmRouter {
         // Execute
         let full_url = format!("{}{}", self.base_prefix(), http_req.url);
         let payload = serde_json::to_value(&http_req.body).map_err(|e| e.to_string())?;
-        let max_retries: usize = Config::getenv("LLM_HTTP_MAX_RETRIES", "3").parse().unwrap_or(3).max(1).min(10);
+        let max_retries: usize = Config::getenv("LLM_HTTP_MAX_RETRIES", "3")
+            .parse()
+            .unwrap_or(3)
+            .max(1)
+            .min(10);
 
         let mut attempt = 0usize;
         let (status, body_text) = loop {
             attempt += 1;
-            let mut r = self.http
+            let mut r = self
+                .http
                 .request(&http_req.method, &full_url)
                 .set("Content-Type", "application/json");
-            if let Some(k) = self.api_key.as_ref() { r = r.set("Authorization", &format!("Bearer {}", k)); }
-            for (h, v) in http_req.headers.iter() { r = r.set(h, v); }
+            if let Some(k) = self.api_key.as_ref() {
+                r = r.set("Authorization", &format!("Bearer {}", k));
+            }
+            for (h, v) in http_req.headers.iter() {
+                r = r.set(h, v);
+            }
 
             let resp = r.send_json(payload.clone());
             match resp {
                 Ok(resp_ok) => break (resp_ok.status(), resp_ok.into_string().unwrap_or_default()),
                 Err(ureq::Error::Status(s, rr)) => {
                     if s == 429 && attempt < max_retries {
-                        let retry_after = rr.header("retry-after").and_then(|v| v.parse::<u64>().ok());
+                        let retry_after =
+                            rr.header("retry-after").and_then(|v| v.parse::<u64>().ok());
                         let backoff_ms = retry_after
                             .map(|secs| secs.saturating_mul(1000))
-                            .unwrap_or_else(|| 500u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(5_000));
+                            .unwrap_or_else(|| {
+                                500u64
+                                    .saturating_mul(1u64 << (attempt as u32 - 1))
+                                    .min(5_000)
+                            });
                         let jitter = rand::random::<u64>() % 250;
                         std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
                         continue;
                     }
-                    break (s, rr.into_string().unwrap_or_default())
+                    break (s, rr.into_string().unwrap_or_default());
                 }
                 Err(e) => {
                     let es = e.to_string().to_lowercase();
@@ -316,7 +388,9 @@ impl LlmRouter {
                         || es.contains("connection")
                         || es.contains("temporarily");
                     if transient && attempt < max_retries {
-                        let backoff_ms = 250u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(2_000);
+                        let backoff_ms = 250u64
+                            .saturating_mul(1u64 << (attempt as u32 - 1))
+                            .min(2_000);
                         std::thread::sleep(Duration::from_millis(backoff_ms));
                         continue;
                     }
@@ -324,7 +398,10 @@ impl LlmRouter {
                 }
             }
         };
-        let ph = ProviderHttpResponse { status: status as u16, body_text };
+        let ph = ProviderHttpResponse {
+            status: status as u16,
+            body_text,
+        };
         // Log response (pretty; avoid printing large vectors)
         debug!(
             "LLM(router) response embed status={} body_bytes={}",
@@ -332,18 +409,29 @@ impl LlmRouter {
             ph.body_text.len()
         );
         if Config::getenv("LLM_LOG_RESPONSE_BODIES", "0") == "1" {
-            debug!("LLM(router) response embed body:\n{}", pretty_json(&ph.body_text));
+            debug!(
+                "LLM(router) response embed body:\n{}",
+                pretty_json(&ph.body_text)
+            );
         }
         if !(200..300).contains(&(ph.status as i32)) {
-            let snippet = if ph.body_text.len() > 500 { &ph.body_text[..500] } else { &ph.body_text };
-            return Err(format!("LLM request failed: {}: http {}: {}", full_url, ph.status, snippet));
+            let snippet = if ph.body_text.len() > 500 {
+                &ph.body_text[..500]
+            } else {
+                &ph.body_text
+            };
+            return Err(format!(
+                "LLM request failed: {}: http {}: {}",
+                full_url, ph.status, snippet
+            ));
         }
         adapter.parse_embed_http(&ph)
     }
 
     fn base_prefix(&self) -> String {
-        self.base_url.as_ref().map(|s| s.trim_end_matches('/').to_string()).unwrap_or_default()
+        self.base_url
+            .as_ref()
+            .map(|s| s.trim_end_matches('/').to_string())
+            .unwrap_or_default()
     }
 }
-
-

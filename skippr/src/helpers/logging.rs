@@ -4,7 +4,9 @@ static mut CLI_LOGS_ENABLED: bool = false;
 
 pub fn init_logging(level_opt: Option<String>) {
     let enabled = level_opt.is_some();
-    unsafe { CLI_LOGS_ENABLED = enabled; }
+    unsafe {
+        CLI_LOGS_ENABLED = enabled;
+    }
     if !enabled {
         // Do not install a subscriber; tracing macros become no-ops
         return;
@@ -29,18 +31,19 @@ aws_sig_auth=warn,\
 hyper=warn,reqwest=warn,rustls=warn,h2=warn";
 
     // Determine our crate log level
-    let lvl = level_opt.unwrap_or_else(|| "info".to_string()).to_lowercase();
+    let lvl = level_opt
+        .unwrap_or_else(|| "info".to_string())
+        .to_lowercase();
     let crate_level = match lvl.as_str() {
         "trace" => "trace",
         "debug" => "debug",
-        "warn"  => "warn",
+        "warn" => "warn",
         "error" => "error",
         _ => "info",
     };
     let composed = format!("skippr={},{}", crate_level, base_filter);
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(composed));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(composed));
 
     // let filter = EnvFilter::new(default_filter);
 
@@ -53,5 +56,3 @@ hyper=warn,reqwest=warn,rustls=warn,h2=warn";
 pub fn cli_logs_enabled() -> bool {
     unsafe { CLI_LOGS_ENABLED }
 }
-
-

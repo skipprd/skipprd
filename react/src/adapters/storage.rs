@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use serde_json::Value;
 pub use react_core::storage::StorageAdapter;
+use serde_json::Value;
 
 /// S3 storage adapter (used by ReAct WS deployments).
 #[derive(Clone)]
@@ -125,4 +125,3 @@ impl StorageAdapter for S3StorageAdapter {
         Ok(out)
     }
 }
-

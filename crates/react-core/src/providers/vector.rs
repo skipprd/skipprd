@@ -33,7 +33,10 @@ pub trait VectorStore: Send + Sync {
         k: usize,
         scope_filter: Option<&str>,
     ) -> Result<Vec<ScoredVectorChunk>, String>;
-    async fn delete_thread_embeddings(&self, scope: &RequestScope, thread_id: &str) -> Result<(), String>;
+    async fn delete_thread_embeddings(
+        &self,
+        scope: &RequestScope,
+        thread_id: &str,
+    ) -> Result<(), String>;
     async fn delete_project_embeddings(&self, scope: &RequestScope) -> Result<(), String>;
 }
-

@@ -36,11 +36,19 @@ impl KbSuite {
         Ok(registry)
     }
 
-    async fn run_kb(thread_id: &str, question: &str, sctx: &SuiteCtx) -> Result<Vec<FlowFrame>, String> {
+    async fn run_kb(
+        thread_id: &str,
+        question: &str,
+        sctx: &SuiteCtx,
+    ) -> Result<Vec<FlowFrame>, String> {
         let sys = prompts::system_prompt();
         let tools_card = prompts::tool_card();
         let registry = Self::build_tools(sctx)?;
-        let thread_store = ThreadStore::new(sctx.storage.clone(), sctx.scope.clone(), sctx.keyspace.clone());
+        let thread_store = ThreadStore::new(
+            sctx.storage.clone(),
+            sctx.scope.clone(),
+            sctx.keyspace.clone(),
+        );
 
         let actx = AgentCtx {
             top_k: 20,
@@ -57,6 +65,7 @@ impl KbSuite {
             scope: sctx.scope.clone(),
             keyspace: sctx.keyspace.clone(),
             query: None,
+            warehouse: sctx.warehouse.clone(),
             dbt: None,
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
@@ -64,13 +73,22 @@ impl KbSuite {
         };
 
         match Agent::run_until_block(&registry, &actx, sys, tools_card, question).await {
-            Ok(RunOutcome::Final { thread_id: _tid, result }) => Ok(vec![FlowFrame::Final {
+            Ok(RunOutcome::Final {
+                thread_id: _tid,
+                result,
+            }) => Ok(vec![FlowFrame::Final {
                 kind: result.kind,
                 payload: result.payload,
                 display: result.display,
             }]),
-            Ok(RunOutcome::AwaitUser { thread_id: _tid, prompt }) => Ok(vec![FlowFrame::AwaitUser { prompt }]),
-            Ok(RunOutcome::AwaitApproval { thread_id: _tid, prompt }) => Ok(vec![FlowFrame::AwaitApproval { prompt }]),
+            Ok(RunOutcome::AwaitUser {
+                thread_id: _tid,
+                prompt,
+            }) => Ok(vec![FlowFrame::AwaitUser { prompt }]),
+            Ok(RunOutcome::AwaitApproval {
+                thread_id: _tid,
+                prompt,
+            }) => Ok(vec![FlowFrame::AwaitApproval { prompt }]),
             Err(e) => Err(e),
         }
     }
@@ -120,4 +138,3 @@ impl Suite for KbSuite {
         Self::run_kb(thread_id, text, ctx).await
     }
 }
-

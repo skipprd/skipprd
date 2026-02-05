@@ -4,7 +4,11 @@ use std::process::Command;
 
 #[test]
 fn semantic_and_catalog_tables_register_and_query() {
-    if std::env::var("SKIPPR_SEMANTIC_CATALOG_TEST").ok().as_deref() != Some("1") {
+    if std::env::var("SKIPPR_SEMANTIC_CATALOG_TEST")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
         return;
     }
     use std::process::Command;
@@ -28,7 +32,14 @@ fields:
     std::fs::write(format!("{}/{}_catalog.yaml", cache, "bike_hire5"), cat_y).unwrap();
 
     let out = Command::new("cargo")
-        .args(["run","--quiet","query","--plain","--sql","SHOW SEMANTIC FOR bike_hire5.bike_hire5"]) 
+        .args([
+            "run",
+            "--quiet",
+            "query",
+            "--plain",
+            "--sql",
+            "SHOW SEMANTIC FOR bike_hire5.bike_hire5",
+        ])
         .output()
         .expect("failed to run query");
     assert!(out.status.success());
@@ -36,12 +47,17 @@ fields:
     assert!(stdout.contains("ride_id") && stdout.contains("event_date"));
 
     let out2 = Command::new("cargo")
-        .args(["run","--quiet","query","--plain","--sql","SHOW CATALOG FOR bike_hire5.bike_hire5"]) 
+        .args([
+            "run",
+            "--quiet",
+            "query",
+            "--plain",
+            "--sql",
+            "SHOW CATALOG FOR bike_hire5.bike_hire5",
+        ])
         .output()
         .expect("failed to run query");
     assert!(out2.status.success());
     let stdout2 = String::from_utf8_lossy(&out2.stdout);
     assert!(stdout2.contains("ride_id") && stdout2.contains("event_date"));
 }
-
-

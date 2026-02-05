@@ -1,5 +1,5 @@
-use crate::sqlrt::docs::{SqlStatementDoc, get_sql_docs};
-use crate::sqlrt::parser::{SParser, Statement, PipelineToggle};
+use crate::sqlrt::docs::{get_sql_docs, SqlStatementDoc};
+use crate::sqlrt::parser::{PipelineToggle, SParser, Statement};
 
 /// SQL documentation parser
 /// This parser analyzes SQL statements and returns documentation about them
@@ -31,7 +31,7 @@ impl SqlDocParser {
     /// Gets documentation for a statement
     fn get_doc_for_statement(statement: Statement) -> SqlStatementDoc {
         let docs = get_sql_docs();
-        
+
         match statement {
             Statement::SchemaDump(_) => docs.get("SCHEMA DUMP").unwrap().clone(),
             Statement::DatabaseDrop(_) => docs.get("DROP DATABASE").unwrap().clone(),
@@ -74,7 +74,7 @@ impl SqlDocParser {
     fn identify_statement_type(sql: &str) -> Option<SqlStatementDoc> {
         let sql_lower = sql.to_lowercase();
         let docs = get_sql_docs();
-        
+
         if sql_lower.starts_with("select") {
             return Some(docs.get("SELECT").unwrap().clone());
         } else if sql_lower.contains("datediff") {
@@ -82,7 +82,7 @@ impl SqlDocParser {
         } else if sql_lower == "show docs" {
             return Some(docs.get("SHOW DOCS").unwrap().clone());
         }
-        
+
         None
     }
 
@@ -90,7 +90,7 @@ impl SqlDocParser {
     pub fn list_all_statements() -> Vec<SqlStatementDoc> {
         get_sql_docs().into_values().collect()
     }
-    
+
     /// Validates if a SQL statement is supported
     #[allow(dead_code)]
     pub fn is_supported(sql: &str) -> bool {
@@ -99,23 +99,23 @@ impl SqlDocParser {
             _ => false,
         }
     }
-    
+
     /// Returns documentation in Markdown format for all supported SQL statements
     #[allow(dead_code)]
     pub fn generate_markdown_docs() -> String {
         crate::sqlrt::docs::get_sql_docs_formatted()
     }
-    
+
     /// Exports the documentation to a file
     #[allow(dead_code)]
     pub fn export_docs_to_file(file_path: &str) -> Result<(), std::io::Error> {
         use std::fs::File;
         use std::io::Write;
-        
+
         let docs = SqlDocParser::generate_markdown_docs();
         let mut file = File::create(file_path)?;
         file.write_all(docs.as_bytes())?;
-        
+
         Ok(())
     }
-} 
+}

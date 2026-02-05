@@ -6,4 +6,3 @@ pub async fn run_preflight_on_bundle(_thread_id: &str, _agent_type: &str) -> Pre
     // We'll reintroduce that here once suites start depending on preflight decisions again.
     PreflightOutcome {}
 }
-

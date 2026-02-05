@@ -10,7 +10,13 @@ pub async fn infer_and_write_semantic(
     scope: &crate::providers::RequestScope,
     namespace: &str,
 ) -> Result<SemanticModel, String> {
-    let semantic = super::infer::infer_semantic_model_async(storage.clone(), keyspace.clone(), scope, namespace).await;
+    let semantic = super::infer::infer_semantic_model_async(
+        storage.clone(),
+        keyspace.clone(),
+        scope,
+        namespace,
+    )
+    .await;
     write_semantic(storage, keyspace, scope, namespace, &semantic).await?;
     Ok(semantic)
 }
@@ -29,4 +35,3 @@ pub async fn write_semantic(
     storage.put_json(&key, &json_equiv).await?;
     Ok(())
 }
-

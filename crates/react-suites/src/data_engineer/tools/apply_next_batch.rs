@@ -7,10 +7,10 @@ use react_core::agent::AgentCtx;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
+use crate::data_engineer::dataset_truth;
 use crate::data_engineer::plan;
 use crate::data_engineer::plan::{CleansePlan, ModelPlan, TaskStatus};
 use crate::data_engineer::tools;
-use crate::data_engineer::dataset_truth;
 
 pub(crate) const MAX_CONSECUTIVE_BATCH_FAILURES: usize = 3;
 
@@ -75,7 +75,9 @@ pub struct ApplyNextCleanseBatchTool {
 
 #[async_trait]
 impl Tool for ApplyNextCleanseBatchTool {
-    fn name(&self) -> &'static str { "apply_next_cleanse_batch" }
+    fn name(&self) -> &'static str {
+        "apply_next_cleanse_batch"
+    }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
         let mut plan = plan::load_cleanse_plan(ctx)
@@ -114,11 +116,18 @@ impl Tool for ApplyNextCleanseBatchTool {
             let mut gating_errors: Vec<String> = Vec::new();
             for ds in batch.iter() {
                 if let Err(e) = q.schema(ds).await {
-                    gating_errors.push(format!("{}: schema lookup failed (treating as fact): {}", ds, e));
+                    gating_errors.push(format!(
+                        "{}: schema lookup failed (treating as fact): {}",
+                        ds, e
+                    ));
                 }
             }
             if !gating_errors.is_empty() {
-                mark_needs_update_cleanse(&mut plan, &batch, "dataset schema lookup failed; dataset not usable");
+                mark_needs_update_cleanse(
+                    &mut plan,
+                    &batch,
+                    "dataset schema lookup failed; dataset not usable",
+                );
                 update_failure_counters(&mut plan.progress, false);
                 let _ = plan::save_cleanse_plan(ctx, &plan).await;
                 return Ok(serde_json::json!({
@@ -144,13 +153,19 @@ impl Tool for ApplyNextCleanseBatchTool {
             inner_args["instructions"] = Value::String(i);
         }
 
-        let inner = tools::staging_model::StagingModelTool { datasets: self.datasets.clone() };
+        let inner = tools::staging_model::StagingModelTool {
+            datasets: self.datasets.clone(),
+        };
         let res = match inner.call(inner_args, ctx).await {
             Ok(v) => v,
             Err(e) => {
                 // Tool error: mark whole batch as needs_update and return a structured failure (not an Err),
                 // so callers can render it and retry deterministically.
-                mark_needs_update_cleanse(&mut plan, &batch, &format!("apply_next_cleanse_batch failed: {}", e.trim()));
+                mark_needs_update_cleanse(
+                    &mut plan,
+                    &batch,
+                    &format!("apply_next_cleanse_batch failed: {}", e.trim()),
+                );
                 update_failure_counters(&mut plan.progress, false);
                 let _ = plan::save_cleanse_plan(ctx, &plan).await;
                 return Ok(serde_json::json!({
@@ -168,7 +183,11 @@ impl Tool for ApplyNextCleanseBatchTool {
         let succeeded: Vec<String> = res
             .get("succeeded_dataset_ids")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
         let attempted: Vec<String> = batch.clone();
 
@@ -207,7 +226,10 @@ impl Tool for ApplyNextCleanseBatchTool {
             }));
         }
 
-        let top_errors = res.get("errors").cloned().unwrap_or_else(|| serde_json::json!([]));
+        let top_errors = res
+            .get("errors")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
         Ok(serde_json::json!({
             "ok": ok && failed.is_empty(),
             "attempted_dataset_ids": attempted,
@@ -224,7 +246,9 @@ pub struct ApplyNextModelBatchTool;
 
 #[async_trait]
 impl Tool for ApplyNextModelBatchTool {
-    fn name(&self) -> &'static str { "apply_next_model_batch" }
+    fn name(&self) -> &'static str {
+        "apply_next_model_batch"
+    }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
         let mut plan = plan::load_model_plan(ctx)
@@ -269,7 +293,9 @@ impl Tool for ApplyNextModelBatchTool {
                         continue;
                     }
                     if !dataset_truth::is_ref_only_gold_input(it) {
-                        gating_errors.push(format!("{n}: invalid gold input '{it}' (gold must read from stg_* only)"));
+                        gating_errors.push(format!(
+                            "{n}: invalid gold input '{it}' (gold must read from stg_* only)"
+                        ));
                         continue;
                     }
                     if !stg.allowed_models.contains(it) {
@@ -279,7 +305,11 @@ impl Tool for ApplyNextModelBatchTool {
             }
         }
         if !gating_errors.is_empty() {
-            mark_needs_update_model(&mut plan, &batch_names, "gold inputs are not grounded in existing staging models");
+            mark_needs_update_model(
+                &mut plan,
+                &batch_names,
+                "gold inputs are not grounded in existing staging models",
+            );
             update_failure_counters(&mut plan.progress, false);
             let _ = plan::save_model_plan(ctx, &plan).await;
             return Ok(serde_json::json!({
@@ -321,7 +351,11 @@ impl Tool for ApplyNextModelBatchTool {
         let res = match inner.call(serde_json::json!({ "items": items }), ctx).await {
             Ok(v) => v,
             Err(e) => {
-                mark_needs_update_model(&mut plan, &batch_names, &format!("apply_next_model_batch failed: {}", e.trim()));
+                mark_needs_update_model(
+                    &mut plan,
+                    &batch_names,
+                    &format!("apply_next_model_batch failed: {}", e.trim()),
+                );
                 update_failure_counters(&mut plan.progress, false);
                 let _ = plan::save_model_plan(ctx, &plan).await;
                 return Ok(serde_json::json!({
@@ -338,7 +372,11 @@ impl Tool for ApplyNextModelBatchTool {
         let succeeded: Vec<String> = res
             .get("succeeded_item_names")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
         let succ_set: HashSet<String> = succeeded.iter().cloned().collect();
         let failed: Vec<String> = batch_names
@@ -357,7 +395,11 @@ impl Tool for ApplyNextModelBatchTool {
                 .and_then(|a| a.first())
                 .and_then(|v| v.as_str())
                 .unwrap_or("batch failed");
-            mark_needs_update_model(&mut plan, &failed, &format!("apply_next_model_batch failed: {}", err));
+            mark_needs_update_model(
+                &mut plan,
+                &failed,
+                &format!("apply_next_model_batch failed: {}", err),
+            );
         }
 
         update_failure_counters(&mut plan.progress, ok && failed.is_empty());
@@ -373,7 +415,10 @@ impl Tool for ApplyNextModelBatchTool {
             }));
         }
 
-        let top_errors = res.get("errors").cloned().unwrap_or_else(|| serde_json::json!([]));
+        let top_errors = res
+            .get("errors")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
         Ok(serde_json::json!({
             "ok": ok && failed.is_empty(),
             "attempted_item_names": batch_names,
@@ -384,4 +429,3 @@ impl Tool for ApplyNextModelBatchTool {
         }))
     }
 }
-

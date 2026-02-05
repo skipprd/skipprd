@@ -8,4 +8,3 @@ pub trait StateStore: Send + Sync {
     async fn put_json(&self, key: &str, value: &Value) -> Result<(), String>;
     async fn delete(&self, key: &str) -> Result<(), String>;
 }
-

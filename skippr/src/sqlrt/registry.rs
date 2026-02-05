@@ -24,7 +24,8 @@ pub struct Registry {
     pub last_updated_epoch: u64,
 }
 
-static REGISTRY_CACHE: Lazy<Arc<RwLock<Option<Registry>>>> = Lazy::new(|| Arc::new(RwLock::new(None)));
+static REGISTRY_CACHE: Lazy<Arc<RwLock<Option<Registry>>>> =
+    Lazy::new(|| Arc::new(RwLock::new(None)));
 
 fn central_registry_key() -> String {
     let tenant = Config::get_tenant();
@@ -38,7 +39,9 @@ async fn load_registry() -> Option<Registry> {
         Ok(val) => serde_json::from_value::<Registry>(val).ok(),
         Err(e) => {
             if let aws_sdk_s3::error::SdkError::ServiceError(se) = &e {
-                if se.err().is_no_such_key() { return None; }
+                if se.err().is_no_such_key() {
+                    return None;
+                }
             }
             warn!("load_registry: failed to fetch '{}': {:?}", key, e);
             None
@@ -49,14 +52,16 @@ async fn load_registry() -> Option<Registry> {
 async fn save_registry(reg: &Registry) -> Result<(), String> {
     let key = central_registry_key();
     let json_val = serde_json::to_value(reg).map_err(|e| e.to_string())?;
-    crate::helpers::s3::put_json(&key, &json_val).await.map_err(|e| format!("failed to save registry to S3: {:?}", e))?;
+    crate::helpers::s3::put_json(&key, &json_val)
+        .await
+        .map_err(|e| format!("failed to save registry to S3: {:?}", e))?;
     {
-            let mut guard = REGISTRY_CACHE.write().await;
+        let mut guard = REGISTRY_CACHE.write().await;
         *guard = Some(reg.clone());
-            }
+    }
     info!("Updated central registry in S3: {}", key);
-            Ok(())
-        }
+    Ok(())
+}
 
 pub async fn read_registry() -> Option<Registry> {
     if let Some(r) = REGISTRY_CACHE.read().await.as_ref() {
@@ -71,17 +76,23 @@ pub async fn read_registry() -> Option<Registry> {
 }
 
 pub async fn write_registry(mut reg: Registry) -> Result<(), String> {
-    reg.last_updated_epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    reg.last_updated_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     save_registry(&reg).await
 }
 
 pub async fn list_pipelines() -> Vec<String> {
-    read_registry().await.map(|r| {
-        let mut v = r.pipelines.clone();
-        v.sort();
-        v.dedup();
-        v
-    }).unwrap_or_default()
+    read_registry()
+        .await
+        .map(|r| {
+            let mut v = r.pipelines.clone();
+            v.sort();
+            v.dedup();
+            v
+        })
+        .unwrap_or_default()
 }
 
 pub async fn list_namespaces(pipeline: &str) -> Vec<String> {
@@ -96,18 +107,32 @@ pub async fn list_namespaces(pipeline: &str) -> Vec<String> {
 }
 
 pub async fn find_entry(pipeline: &str, namespace: &str) -> Option<NamespaceEntry> {
-    read_registry().await.and_then(|r| r.namespaces_by_pipeline.get(pipeline).and_then(|m| m.get(namespace).cloned()))
+    read_registry().await.and_then(|r| {
+        r.namespaces_by_pipeline
+            .get(pipeline)
+            .and_then(|m| m.get(namespace).cloned())
+    })
 }
 
-pub async fn ensure_ns_entry(pipeline: &str, namespace: &str, mut updater: impl FnMut(Option<NamespaceEntry>) -> NamespaceEntry) -> Result<(), String> {
+pub async fn ensure_ns_entry(
+    pipeline: &str,
+    namespace: &str,
+    mut updater: impl FnMut(Option<NamespaceEntry>) -> NamespaceEntry,
+) -> Result<(), String> {
     let mut reg = read_registry().await.unwrap_or_default();
     if !reg.pipelines.iter().any(|p| p == pipeline) {
         reg.pipelines.push(pipeline.to_string());
     }
-    let nsmap = reg.namespaces_by_pipeline.entry(pipeline.to_string()).or_insert_with(HashMap::new);
+    let nsmap = reg
+        .namespaces_by_pipeline
+        .entry(pipeline.to_string())
+        .or_insert_with(HashMap::new);
     let current = nsmap.get(namespace).cloned();
-        let mut new_entry = updater(current);
-    new_entry.last_updated_epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let mut new_entry = updater(current);
+    new_entry.last_updated_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     nsmap.insert(namespace.to_string(), new_entry);
     write_registry(reg).await
 }
@@ -117,7 +142,8 @@ pub async fn set_embeddings_uri(pipeline: &str, uri: &str) -> Result<(), String>
     if !reg.pipelines.iter().any(|p| p == pipeline) {
         reg.pipelines.push(pipeline.to_string());
     }
-    reg.embeddings_uri_by_pipeline.insert(pipeline.to_string(), uri.to_string());
+    reg.embeddings_uri_by_pipeline
+        .insert(pipeline.to_string(), uri.to_string());
     write_registry(reg).await
 }
 
@@ -126,7 +152,8 @@ pub fn manifest_key_for(pipeline: &str, namespace: &str) -> String {
     let tenant = Config::get_tenant();
     let workspace = Config::get_workspace_name();
     let filename = format!("{}.json", namespace);
-    format!("{}/{}/{}/manifest/{}", tenant, workspace, pipeline, filename)
+    format!(
+        "{}/{}/{}/manifest/{}",
+        tenant, workspace, pipeline, filename
+    )
 }
-
-

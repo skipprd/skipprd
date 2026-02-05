@@ -3,25 +3,20 @@ use std::sync::Arc;
 
 use react_core::discover::Metadata;
 use react_core::helpers::progress::ProgressUi;
+use react_core::keyspace::{DefaultKeyspace, Keyspace};
 use react_core::llm::{DynLlm, NullModel};
 use react_core::providers::{
-    CatalogProvider,
-    DatasetCatalogProvider,
-    SecretsProvider,
-    StateStore,
-    VectorStore,
-    DbtProvider,
-    QueryProvider,
-    NullSecretsProvider,
+    CatalogProvider, DatasetCatalogProvider, DbtProvider, NullSecretsProvider,
+    NullWarehouseProvider, QueryProvider, SecretsProvider, StateStore, VectorStore,
+    WarehouseProvider,
 };
 use react_core::scope::RequestScope;
-use react_core::keyspace::{DefaultKeyspace, Keyspace};
 use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
 
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::flow_frame::FlowFrame;
 use crate::config::ReactResolvedConfig;
+use crate::flow_frame::FlowFrame;
 
 /// Context passed to suites.
 ///
@@ -41,6 +36,8 @@ pub struct SuiteCtx {
 
     pub query: Option<Arc<dyn QueryProvider>>,
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
+    /// Warehouse provider (dbt target). Suites should use this as the single source of truth.
+    pub warehouse: Arc<dyn WarehouseProvider>,
     pub catalog: Option<Arc<dyn CatalogProvider>>,
     pub vector: Option<Arc<dyn VectorStore>>,
     pub dbt: Option<Arc<dyn DbtProvider>>,
@@ -69,6 +66,7 @@ impl SuiteCtx {
             trace_tx: None,
             query: None,
             datasets: None,
+            warehouse: Arc::new(NullWarehouseProvider::default()),
             catalog: None,
             vector: None,
             dbt: None,
@@ -83,7 +81,11 @@ impl Default for SuiteCtx {
     fn default() -> Self {
         Self {
             storage: Arc::new(InMemoryStorageAdapter::default()),
-            scope: RequestScope { tenant: "default".to_string(), workspace: "default".to_string(), project_id: "default".to_string() },
+            scope: RequestScope {
+                tenant: "default".to_string(),
+                workspace: "default".to_string(),
+                project_id: "default".to_string(),
+            },
             keyspace: Arc::new(DefaultKeyspace::new("unset".to_string())),
             secrets: Arc::new(NullSecretsProvider::default()),
             llm: Arc::new(NullModel::new()),
@@ -91,6 +93,7 @@ impl Default for SuiteCtx {
             trace_tx: None,
             query: None,
             datasets: None,
+            warehouse: Arc::new(NullWarehouseProvider::default()),
             catalog: None,
             vector: None,
             dbt: None,
@@ -143,4 +146,3 @@ pub trait Suite: Send + Sync {
 }
 
 pub type DynSuite = Arc<dyn Suite>;
-

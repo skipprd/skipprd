@@ -20,4 +20,3 @@ impl SecretsProvider for NullSecretsProvider {
         Ok(None)
     }
 }
-

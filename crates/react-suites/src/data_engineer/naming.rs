@@ -117,7 +117,11 @@ pub fn contains_ref_call(sql: &str) -> bool {
     sql.to_ascii_lowercase().contains("ref(")
 }
 
-pub fn contains_expected_source_call(sql: &str, expected_schema: &str, expected_table: &str) -> bool {
+pub fn contains_expected_source_call(
+    sql: &str,
+    expected_schema: &str,
+    expected_table: &str,
+) -> bool {
     let es = expected_schema.trim().to_ascii_lowercase();
     let et = expected_table.trim().to_ascii_lowercase();
     extract_source_calls(sql)
@@ -180,7 +184,10 @@ join {{  ref( 'stg_users' ) }} u on 1=1
 where 1=1 and '{{ ref("stg_orders") }}' != ''
 "#;
         let refs = extract_ref_calls(sql);
-        assert_eq!(refs, vec!["stg_orders".to_string(), "stg_users".to_string()]);
+        assert_eq!(
+            refs,
+            vec!["stg_orders".to_string(), "stg_users".to_string()]
+        );
     }
 
     #[test]

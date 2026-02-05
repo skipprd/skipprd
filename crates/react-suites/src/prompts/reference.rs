@@ -1,5 +1,5 @@
 pub fn dbt_model_example() -> &'static str {
-	r#"{{ config(
+    r#"{{ config(
     materialized='table',
     tags=['analytics', 'daily']
 ) }}
@@ -27,7 +27,7 @@ order by activity_date
 }
 
 pub fn metricflow_example() -> &'static str {
-	r#"version: 1
+    r#"version: 1
 
 entities:
   - name: user
@@ -56,5 +56,3 @@ metrics:
       - activity_date
 "#
 }
-
-

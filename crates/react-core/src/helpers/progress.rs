@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 /// Spinner frames (Unicode)
-const FRAMES: &[&str] = &["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TaskState {
@@ -54,7 +54,9 @@ impl ProgressUi {
                 loop {
                     {
                         let mut st = state.lock().unwrap();
-                        if !st.running { break; }
+                        if !st.running {
+                            break;
+                        }
                         st.frame_idx = (st.frame_idx + 1) % FRAMES.len();
                     }
                     Self::render(&state);
@@ -77,15 +79,22 @@ impl ProgressUi {
 
     pub fn add_tasks(&self, tasks: &[&str]) {
         let mut st = self.state.lock().unwrap();
-        if !st.enabled { return; }
+        if !st.enabled {
+            return;
+        }
         for &t in tasks {
-            st.tasks.push(Task { name: t.to_string(), state: TaskState::Pending });
+            st.tasks.push(Task {
+                name: t.to_string(),
+                state: TaskState::Pending,
+            });
         }
     }
 
     pub fn start(&self, name: &str) {
         let mut st = self.state.lock().unwrap();
-        if !st.enabled { return; }
+        if !st.enabled {
+            return;
+        }
         for t in st.tasks.iter_mut() {
             if t.name == name {
                 t.state = TaskState::Active;
@@ -96,7 +105,9 @@ impl ProgressUi {
 
     pub fn complete(&self, name: &str) {
         let mut st = self.state.lock().unwrap();
-        if !st.enabled { return; }
+        if !st.enabled {
+            return;
+        }
         for t in st.tasks.iter_mut() {
             if t.name == name {
                 t.state = TaskState::Completed;
@@ -107,7 +118,9 @@ impl ProgressUi {
 
     pub fn finish(&self) {
         let mut st = self.state.lock().unwrap();
-        if !st.enabled { return; }
+        if !st.enabled {
+            return;
+        }
         st.running = false;
         drop(st);
         if let Some(handle) = self.ticker.lock().unwrap().take() {
@@ -117,7 +130,9 @@ impl ProgressUi {
 
     fn render(state: &Arc<Mutex<UiState>>) {
         let mut st = state.lock().unwrap();
-        if !st.enabled { return; }
+        if !st.enabled {
+            return;
+        }
         // Move cursor to the start of block
         if st.last_lines > 0 {
             print!("\x1b[{}F", st.last_lines); // move to beginning of N lines up
@@ -144,4 +159,3 @@ impl ProgressUi {
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 }
-

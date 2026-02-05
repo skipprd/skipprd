@@ -1,18 +1,20 @@
 use serde_json::Value;
-use tracing::{info, warn};
-use std::sync::Arc;
 use std::any::Any;
+use std::sync::Arc;
+use tracing::{info, warn};
 
-use crate::tools::ToolRegistry;
-use crate::llm::ChatMessage;
-use crate::session::{Observation, ThreadStore, ThreadStep, ThreadResult, ToolObservation};
-use crate::llm_observability::{PartInput};
 use crate::keyspace::Keyspace;
-use crate::providers::{QueryProvider, DbtProvider, VectorStore};
-use crate::storage::StorageAdapter;
+use crate::llm::ChatMessage;
+use crate::llm_observability::PartInput;
+use crate::providers::{
+    DbtProvider, NullWarehouseProvider, QueryProvider, VectorStore, WarehouseProvider,
+};
 use crate::scope::RequestScope;
-use uuid::Uuid;
+use crate::session::{Observation, ThreadResult, ThreadStep, ThreadStore, ToolObservation};
+use crate::storage::StorageAdapter;
+use crate::tools::ToolRegistry;
 use async_trait::async_trait;
+use uuid::Uuid;
 
 #[derive(serde::Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +49,8 @@ pub struct AgentCtx {
     pub keyspace: Arc<dyn Keyspace>,
     /// Optional query provider (suite-provided). Used for existence checks and data access.
     pub query: Option<Arc<dyn QueryProvider>>,
+    /// Warehouse provider (dbt target). Suites should use this as the single source of truth.
+    pub warehouse: Arc<dyn WarehouseProvider>,
     /// Optional DBT provider (suite-provided).
     pub dbt: Option<Arc<dyn DbtProvider>>,
     /// Optional vector store provider (suite-provided).
@@ -87,43 +91,93 @@ fn clean_tool_name(name: &str, args: &Value) -> String {
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
             match op {
                 "get" => {
-                    let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
-                    if !p.is_empty() { return format!("Read {p}"); }
+                    let p = args
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if !p.is_empty() {
+                        return format!("Read {p}");
+                    }
                     "Read file".to_string()
                 }
                 "list" => {
-                    let p = args.get("prefix").and_then(|v| v.as_str()).unwrap_or("").trim();
-                    if !p.is_empty() { return format!("List {p}"); }
+                    let p = args
+                        .get("prefix")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if !p.is_empty() {
+                        return format!("List {p}");
+                    }
                     "List files".to_string()
                 }
                 "get_json" => {
-                    let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
-                    if !p.is_empty() { return format!("Read JSON {p}"); }
+                    let p = args
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if !p.is_empty() {
+                        return format!("Read JSON {p}");
+                    }
                     "Read JSON".to_string()
                 }
                 "patch" => {
-                    let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
-                    if !p.is_empty() { return format!("Patch {p}"); }
+                    let p = args
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if !p.is_empty() {
+                        return format!("Patch {p}");
+                    }
                     "Patch file".to_string()
                 }
                 _ => {
-                    if !op.is_empty() { return format!("dbt_files {op}"); }
+                    if !op.is_empty() {
+                        return format!("dbt_files {op}");
+                    }
                     "dbt_files".to_string()
                 }
             }
         }
         "run_sql" => "Run SQL".to_string(),
         "sql_schema" => {
-            let t = args.get("table").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if !t.is_empty() { format!("Describe {t}") } else { "List tables".to_string() }
+            let t = args
+                .get("table")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if !t.is_empty() {
+                format!("Describe {t}")
+            } else {
+                "List tables".to_string()
+            }
         }
         "sql_stats" => {
-            let t = args.get("table").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if !t.is_empty() { format!("Stats {t}") } else { "Stats".to_string() }
+            let t = args
+                .get("table")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if !t.is_empty() {
+                format!("Stats {t}")
+            } else {
+                "Stats".to_string()
+            }
         }
         "sql_sample" => {
-            let t = args.get("table").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if !t.is_empty() { format!("Sample {t}") } else { "Sample".to_string() }
+            let t = args
+                .get("table")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if !t.is_empty() {
+                format!("Sample {t}")
+            } else {
+                "Sample".to_string()
+            }
         }
         "vect_query" => "Vector search".to_string(),
         other => title_case_words(&other.replace('_', " ")),
@@ -131,9 +185,18 @@ fn clean_tool_name(name: &str, args: &Value) -> String {
 }
 
 pub enum RunOutcome {
-    Final { thread_id: String, result: ThreadResult },
-    AwaitUser { thread_id: String, prompt: String },
-    AwaitApproval { thread_id: String, prompt: String },
+    Final {
+        thread_id: String,
+        result: ThreadResult,
+    },
+    AwaitUser {
+        thread_id: String,
+        prompt: String,
+    },
+    AwaitApproval {
+        thread_id: String,
+        prompt: String,
+    },
 }
 
 pub enum Interrupt {
@@ -144,13 +207,23 @@ pub enum Interrupt {
 #[async_trait]
 pub trait AgentPolicy: Send + Sync {
     /// Extra transcript lines to inject after system/tool-card and before the user question.
-    fn prelude_lines(&self, _ctx: &AgentCtx, _store: Option<&ThreadStore>, _thread_id: &str) -> Vec<String> {
+    fn prelude_lines(
+        &self,
+        _ctx: &AgentCtx,
+        _store: Option<&ThreadStore>,
+        _thread_id: &str,
+    ) -> Vec<String> {
         Vec::new()
     }
 
     /// Optional interrupt hook: after a tool action executes, policy may convert it into a control
     /// flow interrupt (await user / await approval). This keeps the core loop tool-name agnostic.
-    fn interrupt_for_action(&self, _action_name: &str, _args: &Value, _obs: &Value) -> Option<Interrupt> {
+    fn interrupt_for_action(
+        &self,
+        _action_name: &str,
+        _args: &Value,
+        _obs: &Value,
+    ) -> Option<Interrupt> {
         None
     }
 
@@ -187,7 +260,8 @@ pub trait AgentPolicy: Send + Sync {
     ) -> Result<RunOutcome, String> {
         Ok(RunOutcome::AwaitUser {
             thread_id: thread_id.to_string(),
-            prompt: "Agent reached step limit without producing a valid final. Please retry.".to_string(),
+            prompt: "Agent reached step limit without producing a valid final. Please retry."
+                .to_string(),
         })
     }
 }
@@ -227,16 +301,21 @@ impl AgentPolicy for DefaultPolicy {
                         observation: Observation::ok(),
                         ts,
                         agent,
-                    }
+                    },
                 )
                 .await;
         }
-        Ok(Some(RunOutcome::Final { thread_id: thread_id.to_string(), result }))
+        Ok(Some(RunOutcome::Final {
+            thread_id: thread_id.to_string(),
+            result,
+        }))
     }
 }
 
 impl Agent {
-    fn gen_uuid() -> String { Uuid::new_v4().to_string() }
+    fn gen_uuid() -> String {
+        Uuid::new_v4().to_string()
+    }
 
     /// Some model backends emit "JSON-like" text with literal control characters (e.g. raw newlines)
     /// inside string values. That is invalid JSON and `serde_json` will reject it.
@@ -314,7 +393,10 @@ impl Agent {
             .unwrap_or_else(|| "unknown".to_string());
         let ts = chrono::Utc::now().to_rfc3339();
 
-        let messages = vec![ChatMessage { role: "user".into(), content: prompt.clone() }];
+        let messages = vec![ChatMessage {
+            role: "user".into(),
+            content: prompt.clone(),
+        }];
 
         // LLM call observability (stdout + persisted thread step).
         let obs_enabled = crate::llm_observability::llm_calls_enabled() && thread_id_opt.is_some();
@@ -324,30 +406,34 @@ impl Agent {
             let prompt_hash = crate::llm_observability::prompt_hash_for_messages(&messages);
 
             // Best-effort: derive phase from persisted thread log.
-            let phase = if let (Some(store), Some(tid)) = (store_opt.as_ref(), thread_id_opt.as_ref()) {
-                match store.get(tid).await {
-                    Ok(log) => {
-                        let mut found = "react_loop".to_string();
-                        for step in log.steps.iter().rev() {
-                            if let ThreadStep::Phase { phase, .. } = step {
-                                let t = phase.trim();
-                                if !t.is_empty() {
-                                    found = t.to_string();
-                                    break;
+            let phase =
+                if let (Some(store), Some(tid)) = (store_opt.as_ref(), thread_id_opt.as_ref()) {
+                    match store.get(tid).await {
+                        Ok(log) => {
+                            let mut found = "react_loop".to_string();
+                            for step in log.steps.iter().rev() {
+                                if let ThreadStep::Phase { phase, .. } = step {
+                                    let t = phase.trim();
+                                    if !t.is_empty() {
+                                        found = t.to_string();
+                                        break;
+                                    }
                                 }
                             }
+                            found
                         }
-                        found
+                        Err(_) => "react_loop".to_string(),
                     }
-                    Err(_) => "react_loop".to_string(),
-                }
-            } else {
-                "react_loop".to_string()
-            };
+                } else {
+                    "react_loop".to_string()
+                };
 
             let built = crate::llm_observability::build_parts_for_thread(
                 thread_id,
-                &[PartInput { name: "user".to_string(), text: prompt.clone() }],
+                &[PartInput {
+                    name: "user".to_string(),
+                    text: prompt.clone(),
+                }],
             );
 
             // Stdout debug logs: print each part in full if changed, else "unchanged".
@@ -364,7 +450,14 @@ impl Agent {
                 let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
                 let hash = p.get("hash").and_then(|v| v.as_str()).unwrap_or("-");
                 let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                tracing::debug!("LLM_PART thread_id={} call_id={} name={} hash={} text={}", thread_id, call_id, name, hash, text);
+                tracing::debug!(
+                    "LLM_PART thread_id={} call_id={} name={} hash={} text={}",
+                    thread_id,
+                    call_id,
+                    name,
+                    hash,
+                    text
+                );
             }
 
             (Some(call_id), phase, prompt_hash, Some(built))
@@ -373,9 +466,11 @@ impl Agent {
         };
 
         // Emit llm_start as soon as we have a call id.
-        if let (Some(call_id), Some(thread_id), Some(store)) =
-            (call_id_opt, thread_id_opt.as_ref().cloned(), store_opt.as_ref().cloned())
-        {
+        if let (Some(call_id), Some(thread_id), Some(store)) = (
+            call_id_opt,
+            thread_id_opt.as_ref().cloned(),
+            store_opt.as_ref().cloned(),
+        ) {
             let _ = store
                 .append_step(
                     &thread_id,
@@ -396,9 +491,12 @@ impl Agent {
             .map_err(|e| format!("LLM request failed: {}", e));
 
         // Persist `llm_call` step after the response (success or failure), if enabled.
-        if let (Some(call_id), Some(thread_id), Some(store), Some(built)) =
-            (call_id_opt, thread_id_opt.as_ref().cloned(), store_opt.as_ref().cloned(), parts_built)
-        {
+        if let (Some(call_id), Some(thread_id), Some(store), Some(built)) = (
+            call_id_opt,
+            thread_id_opt.as_ref().cloned(),
+            store_opt.as_ref().cloned(),
+            parts_built,
+        ) {
             let (ok, response_raw) = match res.as_ref() {
                 Ok(txt) => (true, txt.as_str()),
                 Err(e) => (false, e.as_str()),
@@ -412,8 +510,16 @@ impl Agent {
                         call_id,
                         model: Some("unknown".to_string()),
                         phase: phase.clone(),
-                        status: if ok { "ok".to_string() } else { "failed".to_string() },
-                        error: if ok { None } else { Some(response_raw.to_string()) },
+                        status: if ok {
+                            "ok".to_string()
+                        } else {
+                            "failed".to_string()
+                        },
+                        error: if ok {
+                            None
+                        } else {
+                            Some(response_raw.to_string())
+                        },
                         ts: chrono::Utc::now().to_rfc3339(),
                         agent: agent.clone(),
                     },
@@ -422,7 +528,9 @@ impl Agent {
 
             let response_hash = crate::llm_observability::sha256_hex_str(response_raw);
             let response_text = if crate::llm_observability::llm_response_text_enabled() {
-                Some(crate::llm_observability::redact_common_secrets(response_raw))
+                Some(crate::llm_observability::redact_common_secrets(
+                    response_raw,
+                ))
             } else {
                 None
             };
@@ -456,7 +564,11 @@ impl Agent {
                         part_hashes: built.part_hashes,
                         response_hash,
                         response_text,
-                        observation: if ok { Observation::ok() } else { Observation::fail(vec!["llm_call_failed".to_string()]) },
+                        observation: if ok {
+                            Observation::ok()
+                        } else {
+                            Observation::fail(vec!["llm_call_failed".to_string()])
+                        },
                         ts,
                         agent,
                     },
@@ -509,7 +621,9 @@ impl Agent {
                         }
                     }
                 }
-                Ok(best_action.or(best_final).unwrap_or_else(|| parsed.last().cloned().unwrap()))
+                Ok(best_action
+                    .or(best_final)
+                    .unwrap_or_else(|| parsed.last().cloned().unwrap()))
             }
         }
     }
@@ -530,7 +644,9 @@ impl Agent {
                 return serde_json::json!({ "action": "run_sql", "args": v });
             }
             // vect_query tool: args include scope + query_text.
-            if obj.get("scope").and_then(|x| x.as_str()).is_some() && obj.get("query_text").and_then(|x| x.as_str()).is_some() {
+            if obj.get("scope").and_then(|x| x.as_str()).is_some()
+                && obj.get("query_text").and_then(|x| x.as_str()).is_some()
+            {
                 return serde_json::json!({ "action": "vect_query", "args": v });
             }
         }
@@ -607,7 +723,11 @@ impl Agent {
         out
     }
 
-    fn transcript_add(transcript: &mut Vec<String>, line: String, tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>) {
+    fn transcript_add(
+        transcript: &mut Vec<String>,
+        line: String,
+        tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) {
         if let Some(t) = tx.as_ref() {
             let _ = t.send(line.clone());
         }
@@ -626,15 +746,27 @@ impl Agent {
 
         // Transcript is plain-text lines the model sees.
         let mut transcript: Vec<String> = Vec::new();
-        Self::transcript_add(&mut transcript, format!("System: {}", system_prompt), &ctx.trace_tx);
-        Self::transcript_add(&mut transcript, format!("Tools: {}", tools_card), &ctx.trace_tx);
+        Self::transcript_add(
+            &mut transcript,
+            format!("System: {}", system_prompt),
+            &ctx.trace_tx,
+        );
+        Self::transcript_add(
+            &mut transcript,
+            format!("Tools: {}", tools_card),
+            &ctx.trace_tx,
+        );
 
         // Suite/policy may inject extra context.
         for l in ctx.policy.prelude_lines(ctx, store, &tid) {
             Self::transcript_add(&mut transcript, l, &ctx.trace_tx);
         }
 
-        Self::transcript_add(&mut transcript, format!("User: {}", question), &ctx.trace_tx);
+        Self::transcript_add(
+            &mut transcript,
+            format!("User: {}", question),
+            &ctx.trace_tx,
+        );
 
         for step_idx in 0..ctx.max_steps {
             if let Some(tx) = ctx.progress_tx.as_ref() {
@@ -682,10 +814,17 @@ impl Agent {
 
             let Some(action_name) = action.get("action").and_then(|x| x.as_str()) else {
                 warn!("model output missing action/final");
-                Self::transcript_add(&mut transcript, "Observation: {\"ok\":false,\"errors\":[\"missing action\"]}".to_string(), &ctx.trace_tx);
+                Self::transcript_add(
+                    &mut transcript,
+                    "Observation: {\"ok\":false,\"errors\":[\"missing action\"]}".to_string(),
+                    &ctx.trace_tx,
+                );
                 continue;
             };
-            let args = action.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let args = action
+                .get("args")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
 
             info!("agent action: {}", action_name);
             let timeout_secs = ctx
@@ -733,7 +872,11 @@ impl Agent {
 
             // Persist tool_end if store exists.
             if let Some(store) = store {
-                let status = if obs_env.ok { "ok".to_string() } else { "failed".to_string() };
+                let status = if obs_env.ok {
+                    "ok".to_string()
+                } else {
+                    "failed".to_string()
+                };
                 let payload = obs_env
                     .extra
                     .get("payload")
@@ -752,41 +895,70 @@ impl Agent {
                             observation: obs_env,
                             ts: chrono::Utc::now().to_rfc3339(),
                             agent: agent.clone(),
-                        }
+                        },
                     )
                     .await;
             }
 
             // Policy may turn this tool into an interrupt.
-            if let Some(int) = ctx.policy.interrupt_for_action(action_name, &args, &raw_obs) {
+            if let Some(int) = ctx
+                .policy
+                .interrupt_for_action(action_name, &args, &raw_obs)
+            {
                 match int {
-                    Interrupt::AwaitUser { prompt } => return Ok(RunOutcome::AwaitUser { thread_id: tid, prompt }),
-                    Interrupt::AwaitApproval { prompt } => return Ok(RunOutcome::AwaitApproval { thread_id: tid, prompt }),
+                    Interrupt::AwaitUser { prompt } => {
+                        return Ok(RunOutcome::AwaitUser {
+                            thread_id: tid,
+                            prompt,
+                        })
+                    }
+                    Interrupt::AwaitApproval { prompt } => {
+                        return Ok(RunOutcome::AwaitApproval {
+                            thread_id: tid,
+                            prompt,
+                        })
+                    }
                 }
             }
 
-            Self::transcript_add(&mut transcript, format!("Assistant: {}", raw), &ctx.trace_tx);
+            Self::transcript_add(
+                &mut transcript,
+                format!("Assistant: {}", raw),
+                &ctx.trace_tx,
+            );
 
             // Always preserve full tool output in the persisted thread log (ToolObservation).
             // For the model-facing transcript, include the full error output when it fits the prompt budget;
             // otherwise include a deterministic excerpt so we don't miss the critical lines while staying in-bounds.
             if obs_env_for_transcript.ok {
-                Self::transcript_add(&mut transcript, format!("Observation: {}", raw_obs), &ctx.trace_tx);
+                Self::transcript_add(
+                    &mut transcript,
+                    format!("Observation: {}", raw_obs),
+                    &ctx.trace_tx,
+                );
             } else {
                 let max_prompt_chars = crate::error_context::estimate_max_prompt_chars(ctx);
                 // Best-effort remaining budget: current transcript size + the new line overhead.
                 let used_chars: usize = transcript.iter().map(|l| l.chars().count() + 1).sum();
                 let remaining = max_prompt_chars.saturating_sub(used_chars).max(256);
-                let rendered = crate::error_context::render_failure_context(&obs_env_for_transcript, remaining);
+                let rendered = crate::error_context::render_failure_context(
+                    &obs_env_for_transcript,
+                    remaining,
+                );
                 Self::transcript_add(
                     &mut transcript,
-                    format!("Observation: {}", serde_json::json!({ "ok": false, "error_context": rendered })),
+                    format!(
+                        "Observation: {}",
+                        serde_json::json!({ "ok": false, "error_context": rendered })
+                    ),
                     &ctx.trace_tx,
                 );
             }
         }
 
-        ctx.policy.fallback(tools, ctx, &mut transcript, store, &tid).await
+        ctx.policy
+            .fallback(tools, ctx, &mut transcript, store, &tid)
+            .await
     }
 }
 
@@ -807,7 +979,10 @@ mod tests {
 
     impl crate::llm::LargeLanguageModel for ScriptedModel {
         fn chat(&self, _messages: &[crate::llm::ChatMessage]) -> Result<String, String> {
-            let mut g = self.replies.lock().map_err(|_| "mutex poisoned".to_string())?;
+            let mut g = self
+                .replies
+                .lock()
+                .map_err(|_| "mutex poisoned".to_string())?;
             if g.is_empty() {
                 return Err("no more replies".to_string());
             }
@@ -869,7 +1044,11 @@ mod tests {
         });
         let storage = Arc::new(InMemoryStorageAdapter::default());
         let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
-        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
 
         let mut reg = ToolRegistry::new();
         reg.register(SlowTool);
@@ -883,12 +1062,16 @@ mod tests {
             pre_step_tx: None,
             trace_tx: None,
             agent_name: Some("test".to_string()),
-            policy: Arc::new(TimeoutPolicy { inner: DefaultPolicy, secs: 3 }),
+            policy: Arc::new(TimeoutPolicy {
+                inner: DefaultPolicy,
+                secs: 3,
+            }),
             llm,
             storage,
             scope,
             keyspace,
             query: None,
+            warehouse: Arc::new(NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -901,7 +1084,10 @@ mod tests {
         match out {
             RunOutcome::Final { result, .. } => {
                 assert_eq!(result.kind, "generic");
-                assert_eq!(result.payload.get("text").and_then(|x| x.as_str()), Some("ok"));
+                assert_eq!(
+                    result.payload.get("text").and_then(|x| x.as_str()),
+                    Some("ok")
+                );
             }
             _ => panic!("expected final outcome"),
         }
@@ -916,7 +1102,11 @@ mod tests {
         });
         let storage = Arc::new(InMemoryStorageAdapter::default());
         let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
-        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
 
         let reg = ToolRegistry::new();
         let ctx = AgentCtx {
@@ -934,6 +1124,7 @@ mod tests {
             scope,
             keyspace,
             query: None,
+            warehouse: Arc::new(NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -968,4 +1159,3 @@ mod tests {
         );
     }
 }
-

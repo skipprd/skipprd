@@ -1,14 +1,14 @@
+use dashmap::DashMap;
+use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use once_cell::sync::OnceCell;
-use dashmap::DashMap;
-use std::time::Instant;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
-use crate::storage::StorageAdapter;
 use crate::keyspace::Keyspace;
 use crate::scope::RequestScope;
+use crate::storage::StorageAdapter;
 
 pub const THREAD_SCHEMA_VERSION: u32 = 3;
 pub const THREAD_STATE_SCHEMA_VERSION: u32 = 1;
@@ -109,11 +109,19 @@ pub struct Observation {
 
 impl Observation {
     pub fn ok() -> Self {
-        Self { ok: true, errors: Vec::new(), warnings: Vec::new() }
+        Self {
+            ok: true,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        }
     }
 
     pub fn fail(errors: Vec<String>) -> Self {
-        Self { ok: false, errors, warnings: Vec::new() }
+        Self {
+            ok: false,
+            errors,
+            warnings: Vec::new(),
+        }
     }
 }
 
@@ -130,11 +138,21 @@ pub struct ToolObservation {
 
 impl ToolObservation {
     pub fn ok(extra: BTreeMap<String, Value>) -> Self {
-        Self { ok: true, errors: Vec::new(), warnings: Vec::new(), extra }
+        Self {
+            ok: true,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            extra,
+        }
     }
 
     pub fn fail(errors: Vec<String>, extra: BTreeMap<String, Value>) -> Self {
-        Self { ok: false, errors, warnings: Vec::new(), extra }
+        Self {
+            ok: false,
+            errors,
+            warnings: Vec::new(),
+            extra,
+        }
     }
 
     /// Convert any legacy tool output `Value` into the canonical envelope:
@@ -150,10 +168,7 @@ impl ToolObservation {
             }
         };
 
-        let ok = extra
-            .get("ok")
-            .and_then(|x| x.as_bool())
-            .unwrap_or(false);
+        let ok = extra.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
 
         let errors = if let Some(Value::Array(arr)) = extra.get("errors") {
             arr.iter()
@@ -162,7 +177,11 @@ impl ToolObservation {
                 .collect::<Vec<_>>()
         } else if let Some(err) = extra.get("error").and_then(|x| x.as_str()) {
             let s = err.trim().to_string();
-            if s.is_empty() { Vec::new() } else { vec![s] }
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                vec![s]
+            }
         } else {
             Vec::new()
         };
@@ -188,7 +207,12 @@ impl ToolObservation {
             errors.push("unknown error".to_string());
         }
 
-        Self { ok, errors, warnings, extra }
+        Self {
+            ok,
+            errors,
+            warnings,
+            extra,
+        }
     }
 }
 
@@ -423,9 +447,14 @@ pub struct ThreadStore {
 }
 
 #[derive(Clone)]
-struct CacheEntry { log: ThreadLog, ts: Instant }
+struct CacheEntry {
+    log: ThreadLog,
+    ts: Instant,
+}
 static THREAD_CACHE: OnceCell<DashMap<String, CacheEntry>> = OnceCell::new();
-fn cache() -> &'static DashMap<String, CacheEntry> { THREAD_CACHE.get_or_init(|| DashMap::new()) }
+fn cache() -> &'static DashMap<String, CacheEntry> {
+    THREAD_CACHE.get_or_init(|| DashMap::new())
+}
 
 // Per-thread, in-memory context cache (not persisted)
 #[derive(Clone, Debug, Default)]
@@ -441,7 +470,9 @@ pub struct ThreadCache {
 }
 
 static THREAD_CTX_CACHE: OnceCell<DashMap<String, ThreadCache>> = OnceCell::new();
-fn ctx_cache() -> &'static DashMap<String, ThreadCache> { THREAD_CTX_CACHE.get_or_init(|| DashMap::new()) }
+fn ctx_cache() -> &'static DashMap<String, ThreadCache> {
+    THREAD_CTX_CACHE.get_or_init(|| DashMap::new())
+}
 
 impl ThreadCache {
     pub fn ttl_fresh(&self, secs: u64) -> bool {
@@ -462,26 +493,38 @@ impl ThreadCacheStore {
         ctx_cache().insert(thread_id.to_string(), cache);
     }
     pub fn update_candidates(thread_id: &str, cands: Vec<(String, String, f32)>) {
-        let mut entry = ctx_cache().get(thread_id).map(|e| e.clone()).unwrap_or_default();
+        let mut entry = ctx_cache()
+            .get(thread_id)
+            .map(|e| e.clone())
+            .unwrap_or_default();
         entry.candidates = cands;
         entry.updated_at = Some(Instant::now());
         ctx_cache().insert(thread_id.to_string(), entry);
     }
     pub fn update_schema(thread_id: &str, dataset_fqn: &str, cols: Vec<(String, String)>) {
-        let mut entry = ctx_cache().get(thread_id).map(|e| e.clone()).unwrap_or_default();
+        let mut entry = ctx_cache()
+            .get(thread_id)
+            .map(|e| e.clone())
+            .unwrap_or_default();
         entry.schemas.insert(dataset_fqn.to_string(), cols);
         entry.updated_at = Some(Instant::now());
         ctx_cache().insert(thread_id.to_string(), entry);
     }
     pub fn update_samples(thread_id: &str, dataset_fqn: &str, rows: Vec<Vec<String>>) {
-        let mut entry = ctx_cache().get(thread_id).map(|e| e.clone()).unwrap_or_default();
+        let mut entry = ctx_cache()
+            .get(thread_id)
+            .map(|e| e.clone())
+            .unwrap_or_default();
         entry.samples.insert(dataset_fqn.to_string(), rows);
         entry.updated_at = Some(Instant::now());
         ctx_cache().insert(thread_id.to_string(), entry);
     }
 
     pub fn update_published(thread_id: &str, manifest_sha256: &str, relations: Vec<String>) {
-        let mut entry = ctx_cache().get(thread_id).map(|e| e.clone()).unwrap_or_default();
+        let mut entry = ctx_cache()
+            .get(thread_id)
+            .map(|e| e.clone())
+            .unwrap_or_default();
         entry.published_relations = relations;
         entry.published_manifest_sha256 = Some(manifest_sha256.to_string());
         entry.updated_at = Some(Instant::now());
@@ -490,8 +533,16 @@ impl ThreadCacheStore {
 }
 
 impl ThreadStore {
-    pub fn new(storage: Arc<dyn StorageAdapter>, scope: RequestScope, keyspace: Arc<dyn Keyspace>) -> Self {
-        Self { storage, scope, keyspace }
+    pub fn new(
+        storage: Arc<dyn StorageAdapter>,
+        scope: RequestScope,
+        keyspace: Arc<dyn Keyspace>,
+    ) -> Self {
+        Self {
+            storage,
+            scope,
+            keyspace,
+        }
     }
 
     fn key(&self, thread_id: &str) -> String {
@@ -507,7 +558,12 @@ impl ThreadStore {
     }
 
     fn list_prefix(&self) -> String {
-        format!("{}/", self.keyspace.threads_prefix(&self.scope).trim_end_matches('/'))
+        format!(
+            "{}/",
+            self.keyspace
+                .threads_prefix(&self.scope)
+                .trim_end_matches('/')
+        )
     }
 
     pub async fn append_step(&self, thread_id: &str, step: ThreadStep) -> Result<(), String> {
@@ -532,7 +588,13 @@ impl ThreadStore {
         let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
         self.storage.put_json(&key, &val).await?;
         // Update cache
-        cache().insert(thread_id.to_string(), CacheEntry { log, ts: Instant::now() });
+        cache().insert(
+            thread_id.to_string(),
+            CacheEntry {
+                log,
+                ts: Instant::now(),
+            },
+        );
 
         // Best-effort: keep thread_state strongly consistent with the persisted step sequence.
         // This is a separate object today (S3 best-effort); later a transactional store can make this atomic.
@@ -554,13 +616,21 @@ impl ThreadStore {
         Ok(build_thread_state_from_log(thread_id, &log))
     }
 
-    pub async fn put_thread_state(&self, thread_id: &str, state: &ThreadState) -> Result<(), String> {
+    pub async fn put_thread_state(
+        &self,
+        thread_id: &str,
+        state: &ThreadState,
+    ) -> Result<(), String> {
         let key = self.state_key(thread_id);
         let v = serde_json::to_value(state).map_err(|e| e.to_string())?;
         self.storage.put_json(&key, &v).await
     }
 
-    async fn materialize_thread_state(&self, thread_id: &str, want_step_count: usize) -> Result<(), String> {
+    async fn materialize_thread_state(
+        &self,
+        thread_id: &str,
+        want_step_count: usize,
+    ) -> Result<(), String> {
         let log = self.get(thread_id).await?;
         let mut state = self
             .get_thread_state(thread_id)
@@ -582,15 +652,26 @@ impl ThreadStore {
                 return Ok(entry.log.clone());
             }
         }
-        let v = self.storage.get_json(&key).await.map_err(|e| e.to_string())?;
-        let log = serde_json::from_value::<ThreadLog>(v).map_err(|e| format!("failed to parse thread log: {e}"))?;
+        let v = self
+            .storage
+            .get_json(&key)
+            .await
+            .map_err(|e| e.to_string())?;
+        let log = serde_json::from_value::<ThreadLog>(v)
+            .map_err(|e| format!("failed to parse thread log: {e}"))?;
         if log.schema_version != THREAD_SCHEMA_VERSION {
             return Err(format!(
                 "thread schema_version mismatch: expected {}, got {}",
                 THREAD_SCHEMA_VERSION, log.schema_version
             ));
         }
-        cache().insert(thread_id.to_string(), CacheEntry { log: log.clone(), ts: Instant::now() });
+        cache().insert(
+            thread_id.to_string(),
+            CacheEntry {
+                log: log.clone(),
+                ts: Instant::now(),
+            },
+        );
         Ok(log)
     }
 
@@ -604,7 +685,10 @@ impl ThreadStore {
                 if k.ends_with(".state.json") {
                     continue;
                 }
-                if let Some(name) = k.strip_prefix(&prefix).and_then(|s| s.strip_suffix(".json")) {
+                if let Some(name) = k
+                    .strip_prefix(&prefix)
+                    .and_then(|s| s.strip_suffix(".json"))
+                {
                     out.push(name.to_string());
                 }
             }
@@ -624,8 +708,13 @@ impl ThreadStore {
         let mut log = match cache().get(thread_id) {
             Some(e) => e.log.clone(),
             None => {
-                let v = self.storage.get_json(&key).await.map_err(|e| e.to_string())?;
-                serde_json::from_value::<ThreadLog>(v).map_err(|e| format!("failed to parse thread log: {e}"))?
+                let v = self
+                    .storage
+                    .get_json(&key)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                serde_json::from_value::<ThreadLog>(v)
+                    .map_err(|e| format!("failed to parse thread log: {e}"))?
             }
         };
         if log.schema_version != THREAD_SCHEMA_VERSION {
@@ -638,7 +727,13 @@ impl ThreadStore {
             log.title = Some(title.to_string());
             let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
             self.storage.put_json(&key, &val).await?;
-            cache().insert(thread_id.to_string(), CacheEntry { log, ts: Instant::now() });
+            cache().insert(
+                thread_id.to_string(),
+                CacheEntry {
+                    log,
+                    ts: Instant::now(),
+                },
+            );
         }
         Ok(())
     }
@@ -648,8 +743,13 @@ impl ThreadStore {
         let mut log = match cache().get(thread_id) {
             Some(e) => e.log.clone(),
             None => {
-                let v = self.storage.get_json(&key).await.map_err(|e| e.to_string())?;
-                serde_json::from_value::<ThreadLog>(v).map_err(|e| format!("failed to parse thread log: {e}"))?
+                let v = self
+                    .storage
+                    .get_json(&key)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                serde_json::from_value::<ThreadLog>(v)
+                    .map_err(|e| format!("failed to parse thread log: {e}"))?
             }
         };
         if log.schema_version != THREAD_SCHEMA_VERSION {
@@ -663,7 +763,13 @@ impl ThreadStore {
             log.title_finalized = true;
             let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
             self.storage.put_json(&key, &val).await?;
-            cache().insert(thread_id.to_string(), CacheEntry { log, ts: Instant::now() });
+            cache().insert(
+                thread_id.to_string(),
+                CacheEntry {
+                    log,
+                    ts: Instant::now(),
+                },
+            );
         }
         Ok(())
     }
@@ -722,11 +828,18 @@ fn duration_ms(start_ts: &str, end_ts: &str) -> Option<u64> {
     let end = chrono::DateTime::parse_from_rfc3339(end_ts).ok()?;
     let delta = end.signed_duration_since(start);
     let ms = delta.num_milliseconds();
-    if ms <= 0 { return Some(0); }
+    if ms <= 0 {
+        return Some(0);
+    }
     Some(ms as u64)
 }
 
-fn apply_step_to_state(st: &mut ThreadState, step_idx: usize, step: &ThreadStep, paired_tool_ids: &HashSet<String>) {
+fn apply_step_to_state(
+    st: &mut ThreadState,
+    step_idx: usize,
+    step: &ThreadStep,
+    paired_tool_ids: &HashSet<String>,
+) {
     fn push_event(st: &mut ThreadState, ev: ThreadEvent) {
         const MAX_EVENTS: usize = 200;
         st.events.push(ev);
@@ -758,7 +871,11 @@ fn apply_step_to_state(st: &mut ThreadState, step_idx: usize, step: &ThreadStep,
                 return;
             }
 
-            if let Some(prev) = from_phase.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if let Some(prev) = from_phase
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
                 let key = format!("phase:{}", prev);
                 let ent = st.items.entry(key).or_insert_with(|| ThreadItemState {
                     kind: "phase".to_string(),
@@ -773,7 +890,9 @@ fn apply_step_to_state(st: &mut ThreadState, step_idx: usize, step: &ThreadStep,
                 ent.status = "ok".to_string();
                 ent.finished_at.get_or_insert_with(|| ts.clone());
                 if ent.runtime_ms.is_none() {
-                    if let (Some(ref started), Some(ref finished)) = (&ent.started_at, &ent.finished_at) {
+                    if let (Some(ref started), Some(ref finished)) =
+                        (&ent.started_at, &ent.finished_at)
+                    {
                         ent.runtime_ms = duration_ms(started, finished);
                     }
                 }
@@ -794,7 +913,16 @@ fn apply_step_to_state(st: &mut ThreadState, step_idx: usize, step: &ThreadStep,
             ent.started_at.get_or_insert_with(|| ts.clone());
             st.current_phase = Some(ph);
         }
-        ThreadStep::ToolStart { tool_id, name, clean_name, args: _, status, payload, ts, .. } => {
+        ThreadStep::ToolStart {
+            tool_id,
+            name,
+            clean_name,
+            args: _,
+            status,
+            payload,
+            ts,
+            ..
+        } => {
             let key = format!("tool:{}", tool_id);
             let ent = st.items.entry(key).or_insert_with(|| ThreadItemState {
                 kind: "tool".to_string(),
@@ -837,7 +965,17 @@ fn apply_step_to_state(st: &mut ThreadState, step_idx: usize, step: &ThreadStep,
                 );
             }
         }
-        ThreadStep::ToolEnd { tool_id, name, clean_name, args: _, status, payload, observation, ts, .. } => {
+        ThreadStep::ToolEnd {
+            tool_id,
+            name,
+            clean_name,
+            args: _,
+            status,
+            payload,
+            observation,
+            ts,
+            ..
+        } => {
             let key = format!("tool:{}", tool_id);
             let (runtime_ms, payload_out, err_out) = {
                 let ent = st.items.entry(key).or_insert_with(|| ThreadItemState {
@@ -854,7 +992,9 @@ fn apply_step_to_state(st: &mut ThreadState, step_idx: usize, step: &ThreadStep,
                 ent.started_at.get_or_insert_with(|| ts.clone());
                 ent.finished_at = Some(ts.clone());
                 if ent.runtime_ms.is_none() {
-                    if let (Some(ref started), Some(ref finished)) = (&ent.started_at, &ent.finished_at) {
+                    if let (Some(ref started), Some(ref finished)) =
+                        (&ent.started_at, &ent.finished_at)
+                    {
                         ent.runtime_ms = duration_ms(started, finished);
                     }
                 }
@@ -864,7 +1004,12 @@ fn apply_step_to_state(st: &mut ThreadState, step_idx: usize, step: &ThreadStep,
                     ent.outputs = Some(p);
                 } else {
                     let mut outputs = serde_json::Map::new();
-                    for k in ["written_keys", "key", "uploaded_target_files", "runtime_failures"] {
+                    for k in [
+                        "written_keys",
+                        "key",
+                        "uploaded_target_files",
+                        "runtime_failures",
+                    ] {
                         if let Some(v) = observation.extra.get(k) {
                             outputs.insert(k.to_string(), v.clone());
                         }
@@ -887,7 +1032,11 @@ fn apply_step_to_state(st: &mut ThreadState, step_idx: usize, step: &ThreadStep,
                     });
                 }
 
-                let err_out = if observation.ok { None } else { observation.errors.first().cloned() };
+                let err_out = if observation.ok {
+                    None
+                } else {
+                    observation.errors.first().cloned()
+                };
                 (ent.runtime_ms, ent.outputs.clone(), err_out)
             };
 
@@ -916,7 +1065,13 @@ fn apply_step_to_state(st: &mut ThreadState, step_idx: usize, step: &ThreadStep,
                 );
             }
         }
-        ThreadStep::LlmStart { call_id, model, phase, ts, .. } => {
+        ThreadStep::LlmStart {
+            call_id,
+            model,
+            phase,
+            ts,
+            ..
+        } => {
             push_event(
                 st,
                 ThreadEvent {
@@ -936,7 +1091,15 @@ fn apply_step_to_state(st: &mut ThreadState, step_idx: usize, step: &ThreadStep,
                 },
             );
         }
-        ThreadStep::LlmEnd { call_id, model, phase, status, error, ts, .. } => {
+        ThreadStep::LlmEnd {
+            call_id,
+            model,
+            phase,
+            status,
+            error,
+            ts,
+            ..
+        } => {
             push_event(
                 st,
                 ThreadEvent {
@@ -970,7 +1133,9 @@ fn apply_step_to_state(st: &mut ThreadState, step_idx: usize, step: &ThreadStep,
 }
 
 fn block_current_phase(st: &mut ThreadState, msg: &str, ts: &str) {
-    let Some(ph) = st.current_phase.clone() else { return };
+    let Some(ph) = st.current_phase.clone() else {
+        return;
+    };
     let key = format!("phase:{}", ph);
     let ent = st.items.entry(key).or_insert_with(|| ThreadItemState {
         kind: "phase".to_string(),
@@ -1059,7 +1224,10 @@ mod tests {
             title_finalized: false,
         };
         let st = build_thread_state_from_log("tid", &log);
-        assert!(st.events.is_empty(), "orphan tool_end should not appear in timeline events");
+        assert!(
+            st.events.is_empty(),
+            "orphan tool_end should not appear in timeline events"
+        );
     }
 
     #[test]
@@ -1081,7 +1249,10 @@ mod tests {
             title_finalized: false,
         };
         let st = build_thread_state_from_log("tid", &log);
-        assert!(st.events.is_empty(), "orphan tool_start should not appear in timeline events");
+        assert!(
+            st.events.is_empty(),
+            "orphan tool_start should not appear in timeline events"
+        );
     }
 
     #[test]
@@ -1110,7 +1281,12 @@ mod tests {
         assert_eq!(parsed.schema_version, THREAD_SCHEMA_VERSION);
         assert_eq!(parsed.steps.len(), 1);
         match &parsed.steps[0] {
-            ThreadStep::LlmCall { call_id, phase, response_text, .. } => {
+            ThreadStep::LlmCall {
+                call_id,
+                phase,
+                response_text,
+                ..
+            } => {
                 assert_eq!(*call_id, 1);
                 assert_eq!(phase, "test");
                 assert_eq!(response_text.as_deref(), Some("ok"));
@@ -1145,7 +1321,13 @@ mod tests {
         let parsed: ThreadLog = serde_json::from_value(v).unwrap();
         assert_eq!(parsed.steps.len(), 1);
         match &parsed.steps[0] {
-            ThreadStep::LlmCall { call_id, model, phase, response_text, .. } => {
+            ThreadStep::LlmCall {
+                call_id,
+                model,
+                phase,
+                response_text,
+                ..
+            } => {
                 assert_eq!(*call_id, 1);
                 assert_eq!(model, "m");
                 assert_eq!(phase, "p");
@@ -1159,13 +1341,23 @@ mod tests {
     async fn thread_state_is_materialized_from_appended_steps() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
         let store = ThreadStore::new(storage, scope, keyspace);
 
         let tid = "tid";
-        let t0 = chrono::DateTime::parse_from_rfc3339("2026-01-26T00:00:00Z").unwrap().to_rfc3339();
-        let t1 = chrono::DateTime::parse_from_rfc3339("2026-01-26T00:00:05Z").unwrap().to_rfc3339();
-        let t2 = chrono::DateTime::parse_from_rfc3339("2026-01-26T00:00:06Z").unwrap().to_rfc3339();
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-01-26T00:00:00Z")
+            .unwrap()
+            .to_rfc3339();
+        let t1 = chrono::DateTime::parse_from_rfc3339("2026-01-26T00:00:05Z")
+            .unwrap()
+            .to_rfc3339();
+        let t2 = chrono::DateTime::parse_from_rfc3339("2026-01-26T00:00:06Z")
+            .unwrap()
+            .to_rfc3339();
 
         store
             .append_step(
@@ -1237,7 +1429,10 @@ mod tests {
         assert_eq!(st.thread_state_schema_version, THREAD_STATE_SCHEMA_VERSION);
         assert_eq!(st.thread_id, tid);
         assert_eq!(st.current_phase.as_deref(), Some("model_author"));
-        let ph = st.items.get("phase:model_plan").expect("phase:model_plan present");
+        let ph = st
+            .items
+            .get("phase:model_plan")
+            .expect("phase:model_plan present");
         assert_eq!(ph.runtime_ms, Some(5_000));
         assert!(st.total_runtime_ms >= 5_000);
         // tool step should be materialized as failed
@@ -1250,7 +1445,11 @@ mod tests {
     async fn list_returns_only_thread_logs_not_thread_state_snapshots() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
         let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
 
         // Write a real thread log.
@@ -1275,7 +1474,10 @@ mod tests {
             thread_id: tid.to_string(),
             ..Default::default()
         };
-        storage.put_json(&state_key, &serde_json::to_value(&st).unwrap()).await.unwrap();
+        storage
+            .put_json(&state_key, &serde_json::to_value(&st).unwrap())
+            .await
+            .unwrap();
 
         let ids = store.list().await;
         assert_eq!(ids, vec![tid.to_string()]);

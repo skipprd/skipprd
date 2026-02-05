@@ -18,19 +18,27 @@ impl Config {
     }
 
     pub fn llm_base_url() -> Option<String> {
-        std::env::var("LLM_BASE_URL").ok().filter(|v| !v.trim().is_empty())
+        std::env::var("LLM_BASE_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
     }
 
     pub fn llm_api_key() -> Option<String> {
-        std::env::var("LLM_API_KEY").ok().filter(|v| !v.trim().is_empty())
+        std::env::var("LLM_API_KEY")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
     }
 
     pub fn llm_chat_model() -> Option<String> {
-        std::env::var("LLM_CHAT_MODEL").ok().filter(|v| !v.trim().is_empty())
+        std::env::var("LLM_CHAT_MODEL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
     }
 
     pub fn llm_embed_model() -> Option<String> {
-        std::env::var("LLM_EMBED_MODEL").ok().filter(|v| !v.trim().is_empty())
+        std::env::var("LLM_EMBED_MODEL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
     }
 
     pub fn llm_gpu_layers() -> Option<usize> {
@@ -56,4 +64,3 @@ impl Config {
             == "true"
     }
 }
-

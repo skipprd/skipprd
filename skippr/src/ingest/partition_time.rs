@@ -1,7 +1,7 @@
-use chrono::{Datelike, DateTime, FixedOffset, Timelike};
-use std::io;
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
+use chrono::{DateTime, Datelike, FixedOffset, Timelike};
+use std::io;
 
 const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
 
@@ -11,14 +11,19 @@ pub struct TimePartitioner {
 
 impl TimePartitioner {
     pub fn new(filename: &String) -> Self {
-        TimePartitioner { filename: filename.clone() }
+        TimePartitioner {
+            filename: filename.clone(),
+        }
     }
 
     pub fn process(&self) -> Result<String, io::Error> {
         let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&self.filename);
 
         if time_partition_str.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::Other, "Time partition string is empty"));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Time partition string is empty",
+            ));
         }
 
         let granularity_target = Config::get_transform_batch_time_unit();
@@ -47,30 +52,37 @@ impl TimePartitioner {
                     time_str,
                     err.to_string()
                 );
-                Err(io::Error::new(io::ErrorKind::Other, "Failed to parse time partition string"))
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Failed to parse time partition string",
+                ))
             }
         }
     }
 
-    pub fn get_date_component(date: DateTime<FixedOffset>, granularity: &str) -> Result<u32, io::Error> {
+    pub fn get_date_component(
+        date: DateTime<FixedOffset>,
+        granularity: &str,
+    ) -> Result<u32, io::Error> {
         match granularity {
             "year" => Ok(date.year() as u32),
             "month" => Ok(date.month()),
             "day" => Ok(date.day()),
             "hour" => Ok(date.hour()),
             "minute" => Ok(date.minute()),
-            _ => Err(io::Error::new(io::ErrorKind::Other, format!("Did not recognise date granularity of {}", granularity))),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Did not recognise date granularity of {}", granularity),
+            )),
         }
     }
 
     pub fn get_granularity_names() -> Vec<String> {
-
         let granularity_target = Config::get_transform_batch_time_unit();
 
         let mut names: Vec<String> = Vec::new();
 
         for granularity in GRANULARITIES.iter() {
-            
             let granularity_name = TimePartitioner::get_granularity_name(granularity);
 
             names.push(granularity_name.clone());
@@ -78,17 +90,19 @@ impl TimePartitioner {
             if granularity == &granularity_target {
                 break;
             }
-
-        };
+        }
 
         names
     }
-    
+
     pub fn get_granularity_values(&self) -> Result<Vec<u32>, io::Error> {
         let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&self.filename);
 
         if time_partition_str.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::Other, "Time partition string is empty"));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Time partition string is empty",
+            ));
         }
 
         let date = self.parse_datetime(&time_partition_str)?;

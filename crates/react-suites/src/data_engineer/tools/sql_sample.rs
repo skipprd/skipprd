@@ -12,7 +12,9 @@ pub struct SqlSampleTool {
 
 #[async_trait]
 impl Tool for SqlSampleTool {
-    fn name(&self) -> &'static str { "sql_sample" }
+    fn name(&self) -> &'static str {
+        "sql_sample"
+    }
     async fn call(&self, args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
         let table = args.get("table").and_then(|x| x.as_str()).unwrap_or("");
         let field = args.get("field").and_then(|x| x.as_str()).unwrap_or("");

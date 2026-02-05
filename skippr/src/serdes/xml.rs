@@ -42,19 +42,26 @@ impl SerdeXml {
             serde_value::Value::Unit => serde_json::Value::Null,
             serde_value::Value::Bool(b) => serde_json::Value::Bool(*b),
             serde_value::Value::I64(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-            serde_value::Value::F64(n) => serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap()),
+            serde_value::Value::F64(n) => {
+                serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap())
+            }
             serde_value::Value::String(s) => serde_json::Value::String(s.clone()),
             serde_value::Value::Seq(seq) => {
                 serde_json::Value::Array(seq.iter().map(|v| SerdeXml::convert_to_json(v)).collect())
             }
-            serde_value::Value::Map(map) => {
-                serde_json::Value::Object(
-                    map.iter()
-                        .map(|(k, v)| (SerdeXml::convert_to_json(k).to_string(), SerdeXml::convert_to_json(v)))
-                        .collect(),
-                )
+            serde_value::Value::Map(map) => serde_json::Value::Object(
+                map.iter()
+                    .map(|(k, v)| {
+                        (
+                            SerdeXml::convert_to_json(k).to_string(),
+                            SerdeXml::convert_to_json(v),
+                        )
+                    })
+                    .collect(),
+            ),
+            serde_value::Value::Bytes(bytes) => {
+                serde_json::Value::String(String::from_utf8_lossy(bytes).to_string())
             }
-            serde_value::Value::Bytes(bytes) => serde_json::Value::String(String::from_utf8_lossy(bytes).to_string()),
             serde_value::Value::Char(c) => serde_json::Value::String(c.to_string()),
             serde_value::Value::Option(opt) => match opt {
                 Some(v) => SerdeXml::convert_to_json(v),
@@ -68,8 +75,9 @@ impl SerdeXml {
             serde_value::Value::I8(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
             serde_value::Value::I16(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
             serde_value::Value::I32(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-            serde_value::Value::F32(n) => serde_json::Value::Number(serde_json::Number::from_f64(*n as f64).unwrap()),
-
+            serde_value::Value::F32(n) => {
+                serde_json::Value::Number(serde_json::Number::from_f64(*n as f64).unwrap())
+            }
         }
     }
 
@@ -119,8 +127,8 @@ impl SerdeXml {
     // Returns an Iterator to the Reader of the lines of the file.
     #[allow(dead_code)]
     pub fn read_lines<P>(filename: P) -> Result<Lines<BufReader<File>>>
-        where
-            P: AsRef<Path>,
+    where
+        P: AsRef<Path>,
     {
         let file = File::open(filename)?;
         Ok(BufReader::new(file).lines())
@@ -204,12 +212,12 @@ impl SerdeXml {
 fn test_xml_serde() {
     // #[test]
     // fn test_basic_valid_xml() {
-        let record: String = r#"<note><to>Tove</to><from>Jani</from><heading>Reminder</heading><body>Don't forget me this weekend!</body></note>"#.to_string();
-        println!("{:?}", record);
-        let _msg = SerdeXml::deserialize(record.as_bytes());
-        // println!("{:?}", msg);
-        // assert_eq!(msg.first().unwrap()., "Tove");
-        // assert_eq!(msg["body".to_string()], &Value::String("jj".to_string()));
+    let record: String = r#"<note><to>Tove</to><from>Jani</from><heading>Reminder</heading><body>Don't forget me this weekend!</body></note>"#.to_string();
+    println!("{:?}", record);
+    let _msg = SerdeXml::deserialize(record.as_bytes());
+    // println!("{:?}", msg);
+    // assert_eq!(msg.first().unwrap()., "Tove");
+    // assert_eq!(msg["body".to_string()], &Value::String("jj".to_string()));
     // }
 }
 
@@ -217,7 +225,7 @@ fn test_xml_serde() {
 fn test_xml_repeate_fields_serde() {
     // #[test]
     // fn test_basic_valid_xml() {
-        let record: String = r#"<items>
+    let record: String = r#"<items>
    <item id="0001" type="donut">
       <name>Cake</name>
       <ppu>0.55</ppu>
@@ -233,11 +241,12 @@ fn test_xml_repeate_fields_serde() {
       <topping id="5003">Chocolate</topping>
       <topping id="5004">Maple</topping>
    </item>
-</items>"#.to_string();
-        println!("{:?}", record);
-        let _msg = SerdeXml::deserialize(record.as_bytes());
-        // println!("{:?}", msg);
-        // assert_eq!(msg.first().unwrap()., "Tove");
-        // assert_eq!(msg["body".to_string()], &Value::String("jj".to_string()));
+</items>"#
+        .to_string();
+    println!("{:?}", record);
+    let _msg = SerdeXml::deserialize(record.as_bytes());
+    // println!("{:?}", msg);
+    // assert_eq!(msg.first().unwrap()., "Tove");
+    // assert_eq!(msg["body".to_string()], &Value::String("jj".to_string()));
     // }
 }

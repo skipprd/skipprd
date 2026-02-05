@@ -1,11 +1,11 @@
 #[allow(unused_imports)]
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc, FixedOffset, TimeZone};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use memory_stats::memory_stats;
 use regex::Regex;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::{env, fs};
-use std::cell::RefCell;
 
 use std::str;
 
@@ -19,24 +19,25 @@ pub mod configuration;
 pub mod logger;
 pub mod logging;
 pub mod offsets;
+pub mod progress;
 pub mod s3;
 pub mod timed_rwlock;
-pub mod progress;
 
 // let CLEAN_FIELD_CACHE = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
 
 use crate::discover::date_formats::DateFormats;
-use crate::discover::{Metadata};
+use crate::discover::Metadata;
 use crate::helpers::configuration::Config;
+use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use std::sync::{Arc};
-use dashmap::{DashMap};
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 // static CLEAN_FIELD_CACHE: Lazy<Mutex<i64>> = Lazy::new(|| Mutex::new(1));
 // static CLEAN_FIELD_CACHE: Lazy<TimedRwLock<DashMap<String, String>>> =
 //     Lazy::new(|| TimedRwLock::new("clean_field_cache".to_string(), DashMap::new()));
-static CLEAN_FIELD_CACHE: Lazy<Arc<DashMap<String, String>>> = Lazy::new(|| Arc::new(DashMap::new()));
+static CLEAN_FIELD_CACHE: Lazy<Arc<DashMap<String, String>>> =
+    Lazy::new(|| Arc::new(DashMap::new()));
 
 pub struct Helpers {}
 
@@ -88,7 +89,6 @@ impl Helpers {
 
         let mut clean = field.clone();
         if field.parse::<i32>().is_ok() {
-            
             if Config::get_transform_flatten_events() {
                 clean = "".to_string() + &field;
             } else {
@@ -98,9 +98,8 @@ impl Helpers {
 
         clean = clean.to_lowercase();
 
-        let re =
-            Regex::new(r"[^_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]")
-                .unwrap();
+        let re = Regex::new(r"[^_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]")
+            .unwrap();
         clean = re.replace_all(&clean, "_").to_string();
         clean = regex::Regex::new(r"_+")
             .unwrap()
@@ -122,7 +121,9 @@ impl Helpers {
         // clean = trim(clean, '_');
 
         {
-            let mut cache = CLEAN_FIELD_CACHE.entry(field.clone()).or_insert_with(|| "no".to_string());
+            let mut cache = CLEAN_FIELD_CACHE
+                .entry(field.clone())
+                .or_insert_with(|| "no".to_string());
             if clean != field {
                 *cache = clean.clone();
             }
@@ -169,7 +170,10 @@ impl Helpers {
         pass
     }
 
-    pub fn flatten(json: &Value, metadata: &HashMap<String, Metadata>) -> Result<Value, Box<dyn Error>> {
+    pub fn flatten(
+        json: &Value,
+        metadata: &HashMap<String, Metadata>,
+    ) -> Result<Value, Box<dyn Error>> {
         let mut result = Map::new();
         Self::flatten_internal(json, metadata, &mut result, "".to_string())?;
         Ok(Value::Object(result))
@@ -204,7 +208,8 @@ impl Helpers {
                     let cache_key = format!("{}:{}", field_path, key);
 
                     // Look up the field metadata
-                    let field_metadata = Self::lookup_metadata_with_caching(metadata, key, &cache_key);
+                    let field_metadata =
+                        Self::lookup_metadata_with_caching(metadata, key, &cache_key);
 
                     // Get the output field name for this field
                     let output_field_name = match &field_metadata {
@@ -216,7 +221,7 @@ impl Helpers {
                                 // For nested fields, combine the path with the output field name
                                 format!("{}_{}", field_path, meta.out_field_name)
                             }
-                        },
+                        }
                         None => {
                             // No metadata found, use the original path
                             path.clone()
@@ -227,24 +232,28 @@ impl Helpers {
                         Some((_, meta)) => {
                             // Handle scalar values directly (optimization)
                             if Self::is_scalar_value(value) {
-                                result.insert(
-                                    output_field_name,
-                                    value.clone(),
-                                );
+                                result.insert(output_field_name, value.clone());
                             } else {
                                 // Recursively flatten complex types
-                                Self::flatten_internal(value, &meta.fields, result, output_field_name)?;
+                                Self::flatten_internal(
+                                    value,
+                                    &meta.fields,
+                                    result,
+                                    output_field_name,
+                                )?;
                             }
                         }
                         None => {
                             // Field not found in metadata - still include it
                             if Self::is_scalar_value(value) {
-                                result.insert(
-                                    output_field_name,
-                                    value.clone(),
-                                );
+                                result.insert(output_field_name, value.clone());
                             } else {
-                                Self::flatten_internal(value, &HashMap::new(), result, output_field_name)?;
+                                Self::flatten_internal(
+                                    value,
+                                    &HashMap::new(),
+                                    result,
+                                    output_field_name,
+                                )?;
                             }
                         }
                     }
@@ -284,9 +293,7 @@ impl Helpers {
         }
 
         // Check if we have a cached lookup for this field
-        let cached_result = FIELD_CACHE.with(|cache| {
-            cache.borrow().get(cache_key).cloned()
-        });
+        let cached_result = FIELD_CACHE.with(|cache| cache.borrow().get(cache_key).cloned());
 
         if let Some((metadata_key, _)) = cached_result {
             // Try direct lookup with cached metadata key
@@ -307,7 +314,7 @@ impl Helpers {
 
         // Fallback: try to find by output field name (Strategy 3)
         let result = Metadata::get_metadata_by_out_field_name(metadata, key);
-            
+
         // If we found a match, cache it for future lookups
         if let Some((found_key, found_meta)) = &result {
             let owned_key = found_key.to_string();
@@ -352,12 +359,10 @@ impl Helpers {
         if !Config::get_transform_batch_partition_fields().is_empty() {
             let mut partitions = vec![];
 
-            for entity_field_dot in
-                Config::get_transform_batch_partition_fields().split(',')
-            {
+            for entity_field_dot in Config::get_transform_batch_partition_fields().split(',') {
                 // strip whitespace
                 let entity_field_dot = entity_field_dot.trim();
-                
+
                 // Skip empty field names
                 if entity_field_dot.is_empty() {
                     continue;
@@ -381,10 +386,10 @@ impl Helpers {
                     };
 
                 // only partition by allowed values, is set
-                if 
+                if
                 // clean_entity_value != "" && // explicitly allow empty values to pass through
-                    clean_allowed_values.len() > 0 &&
-                    !clean_allowed_values.contains(&clean_entity_value)
+                clean_allowed_values.len() > 0
+                    && !clean_allowed_values.contains(&clean_entity_value)
                 {
                     clean_entity_value = "".to_string();
                 }
@@ -422,8 +427,7 @@ impl Helpers {
             if !Config::get_transform_namespace_fields().is_empty() {
                 let mut namespaces = vec!["".to_string()];
 
-                for entity_field_dot in Config::get_transform_namespace_fields().split(',')
-                {
+                for entity_field_dot in Config::get_transform_namespace_fields().split(',') {
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                         Some(entity_value) => {
                             namespaces.push(entity_value.as_str().unwrap().to_string());
@@ -470,27 +474,29 @@ impl Helpers {
                         if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
                             return Some(dt.timestamp());
                         }
-                        
+
                         // Try parsing as millisecond timestamp string
                         if let Ok(numeric) = s.parse::<i64>() {
                             // Determine if seconds or milliseconds by magnitude
                             if Helpers::is_millisecond_timestamp(numeric) {
                                 if numeric <= 999999999999999 && numeric >= -999999999999999 {
                                     return Some(numeric / 1000);
-                                } else { continue; }
+                                } else {
+                                    continue;
+                                }
                             } else {
                                 return Some(numeric);
                             }
                         }
-                        
+
                         // Try various date formats using parse_date_from_string
                         for format in DateFormats::iterator() {
                             if let Ok(dt) = Helpers::parse_date_from_string(s, format.as_str()) {
                                 return Some(dt.timestamp());
                             }
                         }
-                    },
-                    
+                    }
+
                     // Handle numeric timestamps
                     Value::Number(n) => {
                         if let Some(ts) = n.as_i64() {
@@ -504,7 +510,7 @@ impl Helpers {
                             }
                             return Some(ts);
                         }
-                    },
+                    }
                     _ => continue,
                 }
             }
@@ -529,42 +535,65 @@ impl Helpers {
             }
         }
         // RFC3339/ISO8601 attempt on normalized input (covers Z and offsets with/without space)
-        if normalized.contains('Z') || normalized.rfind('+').map(|i| i > 10).unwrap_or(false) || normalized.rfind('-').map(|i| i > 10).unwrap_or(false) {
-            if let Some(date) = Self::slow_parse_rfc3339_utc(&normalized) { return Ok(date); }
+        if normalized.contains('Z')
+            || normalized.rfind('+').map(|i| i > 10).unwrap_or(false)
+            || normalized.rfind('-').map(|i| i > 10).unwrap_or(false)
+        {
+            if let Some(date) = Self::slow_parse_rfc3339_utc(&normalized) {
+                return Ok(date);
+            }
         }
         // Fast paths for common Z formats without fractional seconds
         // %Y-%m-%dT%H:%M:%SZ and %Y-%m-%d %H:%M:%SZ
         if (format == "%Y-%m-%dT%H:%M:%SZ" || format == "%Y-%m-%d %H:%M:%SZ")
             && (date_str.len() == 20)
         {
-            if let Some(dt) = Self::fast_parse_z_no_millis(date_str, format.as_bytes()[10] as char) {
+            if let Some(dt) = Self::fast_parse_z_no_millis(date_str, format.as_bytes()[10] as char)
+            {
                 return Ok(dt);
             }
         }
         // First try RFC3339 parsing if this looks like an ISO8601 format (original string)
         if date_str.contains('T') && (date_str.contains('Z') || date_str.contains('+')) {
-            if let Some(date) = Self::slow_parse_rfc3339_utc(date_str) { return Ok(date); }
+            if let Some(date) = Self::slow_parse_rfc3339_utc(date_str) {
+                return Ok(date);
+            }
         }
-        
+
         // Try direct DateTime parsing with timezone
-        if let Some(date) = Self::slow_parse_format_utc(date_str, format) { return Ok(date); }
+        if let Some(date) = Self::slow_parse_format_utc(date_str, format) {
+            return Ok(date);
+        }
         // Try as NaiveDateTime (for formats without timezone)
         if let Some(date) = Self::slow_parse_naive_dt(date_str, format) {
             return Ok(DateTime::<Utc>::from_naive_utc_and_offset(date, Utc));
         }
         // Try as NaiveDate (for date-only formats)
-        if format.contains("%Y") && format.contains("%m") && format.contains("%d") && !format.contains("%H") {
+        if format.contains("%Y")
+            && format.contains("%m")
+            && format.contains("%d")
+            && !format.contains("%H")
+        {
             if let Some(date) = Self::slow_parse_naive_date(date_str, format) {
-                return Ok(DateTime::<Utc>::from_naive_utc_and_offset(date.and_hms_opt(0, 0, 0).unwrap_or_default(), Utc));
+                return Ok(DateTime::<Utc>::from_naive_utc_and_offset(
+                    date.and_hms_opt(0, 0, 0).unwrap_or_default(),
+                    Utc,
+                ));
             }
         }
 
         // If all parsing attempts fail
-        Err(format!("Could not parse date {} with format {}", date_str, format))
+        Err(format!(
+            "Could not parse date {} with format {}",
+            date_str, format
+        ))
     }
 
     #[inline(always)]
-    pub fn parse_date_from_string_with_tz(date_str: &str, format: &str) -> Result<chrono::DateTime<FixedOffset>, String> {
+    pub fn parse_date_from_string_with_tz(
+        date_str: &str,
+        format: &str,
+    ) -> Result<chrono::DateTime<FixedOffset>, String> {
         // Data-driven normalization and parsing that does not rely on the provided format
         let normalized = Self::normalize_datetime_input(date_str);
         // Fast path for Z without fractional seconds; promote to +00:00
@@ -577,50 +606,83 @@ impl Helpers {
             }
         }
         // Prefer RFC3339 on normalized input (covers offsets and Z)
-        if normalized.contains('Z') || normalized.rfind('+').map(|i| i > 10).unwrap_or(false) || normalized.rfind('-').map(|i| i > 10).unwrap_or(false) {
-            if let Some(date) = Self::slow_parse_rfc3339_fixed(&normalized) { return Ok(date); }
+        if normalized.contains('Z')
+            || normalized.rfind('+').map(|i| i > 10).unwrap_or(false)
+            || normalized.rfind('-').map(|i| i > 10).unwrap_or(false)
+        {
+            if let Some(date) = Self::slow_parse_rfc3339_fixed(&normalized) {
+                return Ok(date);
+            }
         }
         // Fast paths for common offset-bearing formats without fractional seconds
         // %Y-%m-%dT%H:%M:%S%z and %Y-%m-%d %H:%M:%S%z where %z is like +HH:MM
         if (format == "%Y-%m-%dT%H:%M:%S%z" || format == "%Y-%m-%d %H:%M:%S%z")
             && (date_str.len() == 25)
         {
-            if let Some(dt) = Self::fast_parse_offset_no_millis(date_str, format.as_bytes()[10] as char) {
+            if let Some(dt) =
+                Self::fast_parse_offset_no_millis(date_str, format.as_bytes()[10] as char)
+            {
                 return Ok(dt);
             }
         }
         // Also support Z variant fast-path here by promoting to +00:00
-        if (format == "%Y-%m-%dT%H:%M:%SZ" || format == "%Y-%m-%d %H:%M:%SZ") && date_str.len() == 20 {
-            if let Some(dt) = Self::fast_parse_z_no_millis(date_str, format.as_bytes()[10] as char) {
+        if (format == "%Y-%m-%dT%H:%M:%SZ" || format == "%Y-%m-%d %H:%M:%SZ")
+            && date_str.len() == 20
+        {
+            if let Some(dt) = Self::fast_parse_z_no_millis(date_str, format.as_bytes()[10] as char)
+            {
                 return Ok(dt.with_timezone(&FixedOffset::east_opt(0).unwrap()));
             }
         }
         // Prefer RFC3339 if string indicates ISO style with offset/Z
-        if date_str.contains('T') && (date_str.contains('Z') || date_str.contains('+') || date_str.rfind('-').map(|i| i > 10).unwrap_or(false)) {
-            if let Some(date) = Self::slow_parse_rfc3339_fixed(date_str) { return Ok(date); }
+        if date_str.contains('T')
+            && (date_str.contains('Z')
+                || date_str.contains('+')
+                || date_str.rfind('-').map(|i| i > 10).unwrap_or(false))
+        {
+            if let Some(date) = Self::slow_parse_rfc3339_fixed(date_str) {
+                return Ok(date);
+            }
         }
 
         // Try direct parse with explicit timezone in format
-        if let Some(date) = Self::slow_parse_from_format_fixed(date_str, format) { return Ok(date); }
+        if let Some(date) = Self::slow_parse_from_format_fixed(date_str, format) {
+            return Ok(date);
+        }
 
         // Fallback: parse naive and assume UTC offset
         if let Some(naive) = Self::slow_parse_naive_dt(date_str, format) {
-            let offset = FixedOffset::east_opt(0).ok_or_else(|| "Invalid zero offset".to_string())?;
-            let fixed = offset.from_local_datetime(&naive).single().ok_or_else(|| "Ambiguous or nonexistent local time".to_string())?;
+            let offset =
+                FixedOffset::east_opt(0).ok_or_else(|| "Invalid zero offset".to_string())?;
+            let fixed = offset
+                .from_local_datetime(&naive)
+                .single()
+                .ok_or_else(|| "Ambiguous or nonexistent local time".to_string())?;
             return Ok(fixed);
         }
 
         // Date-only
-        if format.contains("%Y") && format.contains("%m") && format.contains("%d") && !format.contains("%H") {
+        if format.contains("%Y")
+            && format.contains("%m")
+            && format.contains("%d")
+            && !format.contains("%H")
+        {
             if let Some(date) = Self::slow_parse_naive_date(date_str, format) {
                 let naive = date.and_hms_opt(0, 0, 0).unwrap_or_default();
-                let offset = FixedOffset::east_opt(0).ok_or_else(|| "Invalid zero offset".to_string())?;
-                let fixed = offset.from_local_datetime(&naive).single().ok_or_else(|| "Ambiguous or nonexistent local time".to_string())?;
+                let offset =
+                    FixedOffset::east_opt(0).ok_or_else(|| "Invalid zero offset".to_string())?;
+                let fixed = offset
+                    .from_local_datetime(&naive)
+                    .single()
+                    .ok_or_else(|| "Ambiguous or nonexistent local time".to_string())?;
                 return Ok(fixed);
             }
         }
 
-        Err(format!("Could not parse date {} with format {}", date_str, format))
+        Err(format!(
+            "Could not parse date {} with format {}",
+            date_str, format
+        ))
     }
 
     #[inline(always)]
@@ -628,8 +690,11 @@ impl Helpers {
         // Trim whitespace
         let mut s = input.trim().to_string();
         // Strip wrapping quotes/backticks if present
-        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('`') && s.ends_with('`')) {
-            s = s[1..s.len()-1].to_string();
+        if (s.starts_with('"') && s.ends_with('"'))
+            || (s.starts_with('\'') && s.ends_with('\''))
+            || (s.starts_with('`') && s.ends_with('`'))
+        {
+            s = s[1..s.len() - 1].to_string();
         }
         // Remove BOM and zero-width space
         s = s.replace('\u{FEFF}', "").replace('\u{200B}', "");
@@ -641,7 +706,9 @@ impl Helpers {
             let mut last_space = false;
             for ch in s.chars() {
                 if ch.is_whitespace() {
-                    if !last_space { collapsed.push(' '); }
+                    if !last_space {
+                        collapsed.push(' ');
+                    }
                     last_space = true;
                 } else {
                     collapsed.push(ch);
@@ -657,9 +724,14 @@ impl Helpers {
             s.push('Z');
         }
         // Normalize lowercase trailing 'z' to 'Z'
-        if s.ends_with('z') { s.pop(); s.push('Z'); }
+        if s.ends_with('z') {
+            s.pop();
+            s.push('Z');
+        }
         // Replace comma fractional separator with dot
-        if s.contains(',') { s = s.replace(',', "."); }
+        if s.contains(',') {
+            s = s.replace(',', ".");
+        }
         // If space separator between date and time, use 'T' to satisfy RFC3339
         if s.len() > 10 {
             let bytes = s.as_bytes();
@@ -673,19 +745,35 @@ impl Helpers {
         // Find last '+' or '-' after position 10 (to avoid date hyphens)
         let mut last_sign_idx: Option<usize> = None;
         for (i, ch) in s.char_indices() {
-            if i > 10 && (ch == '+' || ch == '-') { last_sign_idx = Some(i); }
+            if i > 10 && (ch == '+' || ch == '-') {
+                last_sign_idx = Some(i);
+            }
         }
         if let Some(idx) = last_sign_idx {
             if !s.ends_with('Z') {
                 let (head, tail) = s.split_at(idx + 1);
-                let mut digits: String = tail.chars().take_while(|c| c.is_ascii_digit() || *c == ':').collect();
+                let mut digits: String = tail
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == ':')
+                    .collect();
                 if digits.chars().all(|c| c.is_ascii_digit()) {
                     if digits.len() == 2 {
                         // +HH -> +HH:00
-                        s = format!("{}{}:00{}", &s[..idx+1], digits, &s[idx+1+digits.len()..]);
+                        s = format!(
+                            "{}{}:00{}",
+                            &s[..idx + 1],
+                            digits,
+                            &s[idx + 1 + digits.len()..]
+                        );
                     } else if digits.len() == 4 {
                         // +HHMM -> +HH:MM
-                        s = format!("{}{}:{}{}", &s[..idx+1], &digits[0..2], &digits[2..4], &s[idx+1+digits.len()..]);
+                        s = format!(
+                            "{}{}:{}{}",
+                            &s[..idx + 1],
+                            &digits[0..2],
+                            &digits[2..4],
+                            &s[idx + 1 + digits.len()..]
+                        );
                     }
                 }
             }
@@ -699,15 +787,19 @@ impl Helpers {
                 let mut end = abs_dot + 1;
                 while end < s.len() {
                     let ch = s.as_bytes()[end] as char;
-                    if ch.is_ascii_digit() { end += 1; } else { break; }
+                    if ch.is_ascii_digit() {
+                        end += 1;
+                    } else {
+                        break;
+                    }
                 }
                 let frac_len = end - (abs_dot + 1);
                 if frac_len > 9 {
                     // Truncate to 6 to keep parsing fast and sufficient precision
                     let keep = 6usize;
                     let mut new_s = String::with_capacity(s.len());
-                    new_s.push_str(&s[..abs_dot+1]);
-                    new_s.push_str(&s[abs_dot+1..abs_dot+1+keep]);
+                    new_s.push_str(&s[..abs_dot + 1]);
+                    new_s.push_str(&s[abs_dot + 1..abs_dot + 1 + keep]);
                     new_s.push_str(&s[end..]);
                     s = new_s;
                 }
@@ -716,16 +808,29 @@ impl Helpers {
         s
     }
 
-    pub fn apply_timezone_to_naive(datetime: NaiveDateTime, timezone: &str) -> Result<DateTime<Utc>, String> {
+    pub fn apply_timezone_to_naive(
+        datetime: NaiveDateTime,
+        timezone: &str,
+    ) -> Result<DateTime<Utc>, String> {
         // Try fixed offset like +01:00 or -0500
         if let Some(offset) = Helpers::parse_fixed_offset(timezone) {
-            let dt = offset.from_local_datetime(&datetime).single().ok_or_else(|| "Ambiguous or nonexistent local time".to_string())?;
+            let dt = offset
+                .from_local_datetime(&datetime)
+                .single()
+                .ok_or_else(|| "Ambiguous or nonexistent local time".to_string())?;
             return Ok(dt.with_timezone(&Utc));
         }
         // Try named timezone via chrono-tz
         match timezone.parse::<Tz>() {
-            Ok(tz) => Ok(tz.from_local_datetime(&datetime).single()
-                .ok_or_else(|| format!("Ambiguous or nonexistent local time for timezone {}", timezone))?
+            Ok(tz) => Ok(tz
+                .from_local_datetime(&datetime)
+                .single()
+                .ok_or_else(|| {
+                    format!(
+                        "Ambiguous or nonexistent local time for timezone {}",
+                        timezone
+                    )
+                })?
                 .with_timezone(&Utc)),
             Err(_e) => Err(format!("Unknown timezone: {}", timezone)),
         }
@@ -751,20 +856,28 @@ impl Helpers {
 
     #[inline(always)]
     fn parse_2digits(bytes: &[u8]) -> Option<u32> {
-        if bytes.len() != 2 { return None; }
+        if bytes.len() != 2 {
+            return None;
+        }
         let d0 = bytes[0].wrapping_sub(b'0');
         let d1 = bytes[1].wrapping_sub(b'0');
-        if d0 > 9 || d1 > 9 { return None; }
+        if d0 > 9 || d1 > 9 {
+            return None;
+        }
         Some((d0 as u32) * 10 + (d1 as u32))
     }
 
     #[inline(always)]
     fn parse_4digits(bytes: &[u8]) -> Option<i32> {
-        if bytes.len() != 4 { return None; }
+        if bytes.len() != 4 {
+            return None;
+        }
         let mut v: i32 = 0;
         for &b in bytes {
             let d = b.wrapping_sub(b'0');
-            if d > 9 { return None; }
+            if d > 9 {
+                return None;
+            }
             v = v * 10 + (d as i32);
         }
         Some(v)
@@ -774,11 +887,21 @@ impl Helpers {
     #[inline(always)]
     pub(crate) fn fast_parse_z_no_millis(s: &str, sep: char) -> Option<DateTime<Utc>> {
         let b = s.as_bytes();
-        if b.len() != 20 { return None; }
-        if b[4] != b'-' || b[7] != b'-' { return None; }
-        if b[10] != sep as u8 { return None; }
-        if b[13] != b':' || b[16] != b':' { return None; }
-        if b[19] != b'Z' { return None; }
+        if b.len() != 20 {
+            return None;
+        }
+        if b[4] != b'-' || b[7] != b'-' {
+            return None;
+        }
+        if b[10] != sep as u8 {
+            return None;
+        }
+        if b[13] != b':' || b[16] != b':' {
+            return None;
+        }
+        if b[19] != b'Z' {
+            return None;
+        }
         let year = Self::parse_4digits(&b[0..4])?;
         let month = Self::parse_2digits(&b[5..7])? as u32;
         let day = Self::parse_2digits(&b[8..10])? as u32;
@@ -792,14 +915,31 @@ impl Helpers {
 
     // Fast parse for YYYY-MM-DD{sep}HH:MM:SS±HH:MM (no millis)
     #[inline(always)]
-    pub(crate) fn fast_parse_offset_no_millis(s: &str, sep: char) -> Option<chrono::DateTime<FixedOffset>> {
+    pub(crate) fn fast_parse_offset_no_millis(
+        s: &str,
+        sep: char,
+    ) -> Option<chrono::DateTime<FixedOffset>> {
         let b = s.as_bytes();
-        if b.len() != 25 { return None; }
-        if b[4] != b'-' || b[7] != b'-' { return None; }
-        if b[10] != sep as u8 { return None; }
-        if b[13] != b':' || b[16] != b':' { return None; }
-        let sign = match b[19] { b'+' => 1i32, b'-' => -1i32, _ => return None };
-        if b[22] != b':' { return None; }
+        if b.len() != 25 {
+            return None;
+        }
+        if b[4] != b'-' || b[7] != b'-' {
+            return None;
+        }
+        if b[10] != sep as u8 {
+            return None;
+        }
+        if b[13] != b':' || b[16] != b':' {
+            return None;
+        }
+        let sign = match b[19] {
+            b'+' => 1i32,
+            b'-' => -1i32,
+            _ => return None,
+        };
+        if b[22] != b':' {
+            return None;
+        }
         let year = Self::parse_4digits(&b[0..4])?;
         let month = Self::parse_2digits(&b[5..7])? as u32;
         let day = Self::parse_2digits(&b[8..10])? as u32;
@@ -818,7 +958,9 @@ impl Helpers {
 
     #[cold]
     pub(crate) fn slow_parse_rfc3339_utc(s: &str) -> Option<DateTime<Utc>> {
-        DateTime::parse_from_rfc3339(s).ok().map(|d| DateTime::<Utc>::from(d))
+        DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| DateTime::<Utc>::from(d))
     }
 
     #[cold]
@@ -828,11 +970,16 @@ impl Helpers {
 
     #[cold]
     pub(crate) fn slow_parse_format_utc(s: &str, fmt: &str) -> Option<DateTime<Utc>> {
-        DateTime::parse_from_str(s, fmt).ok().map(|d| DateTime::<Utc>::from(d))
+        DateTime::parse_from_str(s, fmt)
+            .ok()
+            .map(|d| DateTime::<Utc>::from(d))
     }
 
     #[cold]
-    pub(crate) fn slow_parse_from_format_fixed(s: &str, fmt: &str) -> Option<chrono::DateTime<FixedOffset>> {
+    pub(crate) fn slow_parse_from_format_fixed(
+        s: &str,
+        fmt: &str,
+    ) -> Option<chrono::DateTime<FixedOffset>> {
         chrono::DateTime::parse_from_str(s, fmt).ok()
     }
 
@@ -875,27 +1022,30 @@ impl Helpers {
     }
 
     pub fn process_values(values: &Vec<Value>, field_str: &str) -> Option<Vec<Value>> {
-        values.iter().map(|value| {
-            let current_value = Helpers::get_nested_value_from_dot_notation(value, field_str);
-            match current_value {
-                // Some(Value::Array(_)) => current_value.clone(),
-                // Some(Value::Object(_)) => current_value.clone(),
-                _ => current_value.clone(),
-            }
-        }).collect()
+        values
+            .iter()
+            .map(|value| {
+                let current_value = Helpers::get_nested_value_from_dot_notation(value, field_str);
+                match current_value {
+                    // Some(Value::Array(_)) => current_value.clone(),
+                    // Some(Value::Object(_)) => current_value.clone(),
+                    _ => current_value.clone(),
+                }
+            })
+            .collect()
     }
 
     // Adding dead_code attribute to silence warnings for unused function
     #[allow(dead_code)]
-    fn list_dir_recursively_with_size(start_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    fn list_dir_recursively_with_size(
+        start_dir: &PathBuf,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Use a HashMap to keep track of directory sizes
-        let mut dir_sizes: std::collections::HashMap<PathBuf, u64> = std::collections::HashMap::new();
+        let mut dir_sizes: std::collections::HashMap<PathBuf, u64> =
+            std::collections::HashMap::new();
 
         // Walk through the directory recursively
-        for entry in WalkDir::new(start_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
+        for entry in WalkDir::new(start_dir).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.is_file() {
                 // Get file metadata
@@ -914,7 +1064,11 @@ impl Helpers {
 
         // Print sizes in a human-readable format
         for (dir, size) in sorted_dirs {
-            println!("{}:\t{}", dir.display(), Helpers::human_readable_size(*size));
+            println!(
+                "{}:\t{}",
+                dir.display(),
+                Helpers::human_readable_size(*size)
+            );
         }
 
         Ok(())
@@ -932,25 +1086,28 @@ impl Helpers {
 
         format!("{:.1} {}", size, units[unit])
     }
-
 }
 
 #[cfg(test)]
 mod date_timezones {
-    #[allow(unused_imports)]
-    use chrono::{DateTime, Utc, TimeZone};
     use super::*;
+    #[allow(unused_imports)]
+    use chrono::{DateTime, TimeZone, Utc};
 
     #[test]
     fn it_parses_datetime_with_positive_offset_to_utc() {
-        let parsed = Helpers::parse_date_from_string("2022-02-22T22:22:22+01:00", "%Y-%m-%dT%H:%M:%S%z").unwrap();
+        let parsed =
+            Helpers::parse_date_from_string("2022-02-22T22:22:22+01:00", "%Y-%m-%dT%H:%M:%S%z")
+                .unwrap();
         let expected = Utc.with_ymd_and_hms(2022, 2, 22, 21, 22, 22).unwrap(); // Adjusted to UTC
         assert_eq!(parsed, expected);
     }
 
     #[test]
     fn it_parses_datetime_with_negative_offset_to_utc() {
-        let parsed = Helpers::parse_date_from_string("2022-02-22T22:22:22-01:00", "%Y-%m-%dT%H:%M:%S%z").unwrap();
+        let parsed =
+            Helpers::parse_date_from_string("2022-02-22T22:22:22-01:00", "%Y-%m-%dT%H:%M:%S%z")
+                .unwrap();
         let expected = Utc.with_ymd_and_hms(2022, 2, 22, 23, 22, 22).unwrap(); // Adjusted to UTC
         assert_eq!(parsed, expected);
     }
@@ -963,7 +1120,8 @@ mod date_timezones {
 
     #[test]
     fn it_parses_naive_datetime_to_utc() {
-        let parsed = Helpers::parse_date_from_string("2022-02-22T22:22:22", "%Y-%m-%dT%H:%M:%S").unwrap();
+        let parsed =
+            Helpers::parse_date_from_string("2022-02-22T22:22:22", "%Y-%m-%dT%H:%M:%S").unwrap();
         let expected = Utc.with_ymd_and_hms(2022, 2, 22, 22, 22, 22).unwrap(); // Assumed to already be in UTC
         assert_eq!(parsed, expected);
     }
@@ -972,48 +1130,86 @@ mod date_timezones {
 #[cfg(test)]
 mod parse_date_normalization_tests {
     use super::*;
-    use chrono::{TimeZone};
+    use chrono::TimeZone;
 
     #[test]
     fn parses_space_z_without_fraction() {
-        let dt = Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23Z", "%Y-%m-%d %H:%M:%SZ").unwrap();
-        let expected = chrono::Utc.with_ymd_and_hms(2025, 9, 25, 14, 31, 23).unwrap();
+        let dt =
+            Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23Z", "%Y-%m-%d %H:%M:%SZ")
+                .unwrap();
+        let expected = chrono::Utc
+            .with_ymd_and_hms(2025, 9, 25, 14, 31, 23)
+            .unwrap();
         assert_eq!(dt.with_timezone(&chrono::Utc), expected);
     }
 
     #[test]
     fn parses_space_z_with_fraction() {
-        let dt = Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23.123Z", "%Y-%m-%d %H:%M:%S.%fZ").unwrap();
-        let expected = chrono::Utc.with_ymd_and_hms(2025, 9, 25, 14, 31, 23).unwrap();
-        assert_eq!(dt.with_timezone(&chrono::Utc).timestamp(), expected.timestamp());
+        let dt = Helpers::parse_date_from_string_with_tz(
+            "2025-09-25 14:31:23.123Z",
+            "%Y-%m-%d %H:%M:%S.%fZ",
+        )
+        .unwrap();
+        let expected = chrono::Utc
+            .with_ymd_and_hms(2025, 9, 25, 14, 31, 23)
+            .unwrap();
+        assert_eq!(
+            dt.with_timezone(&chrono::Utc).timestamp(),
+            expected.timestamp()
+        );
     }
 
     #[test]
     fn parses_offset_no_colon() {
-        let dt = Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23+0000", "%Y-%m-%d %H:%M:%S%z").unwrap();
-        let expected = chrono::Utc.with_ymd_and_hms(2025, 9, 25, 14, 31, 23).unwrap();
+        let dt = Helpers::parse_date_from_string_with_tz(
+            "2025-09-25 14:31:23+0000",
+            "%Y-%m-%d %H:%M:%S%z",
+        )
+        .unwrap();
+        let expected = chrono::Utc
+            .with_ymd_and_hms(2025, 9, 25, 14, 31, 23)
+            .unwrap();
         assert_eq!(dt.with_timezone(&chrono::Utc), expected);
     }
 
     #[test]
     fn parses_offset_with_colon() {
-        let dt = Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23+00:00", "%Y-%m-%d %H:%M:%S%z").unwrap();
-        let expected = chrono::Utc.with_ymd_and_hms(2025, 9, 25, 14, 31, 23).unwrap();
+        let dt = Helpers::parse_date_from_string_with_tz(
+            "2025-09-25 14:31:23+00:00",
+            "%Y-%m-%d %H:%M:%S%z",
+        )
+        .unwrap();
+        let expected = chrono::Utc
+            .with_ymd_and_hms(2025, 9, 25, 14, 31, 23)
+            .unwrap();
         assert_eq!(dt.with_timezone(&chrono::Utc), expected);
     }
 
     #[test]
     fn parses_with_utc_token() {
-        let dt = Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23 UTC", "%Y-%m-%d %H:%M:%S").unwrap();
-        let expected = chrono::Utc.with_ymd_and_hms(2025, 9, 25, 14, 31, 23).unwrap();
+        let dt =
+            Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23 UTC", "%Y-%m-%d %H:%M:%S")
+                .unwrap();
+        let expected = chrono::Utc
+            .with_ymd_and_hms(2025, 9, 25, 14, 31, 23)
+            .unwrap();
         assert_eq!(dt.with_timezone(&chrono::Utc), expected);
     }
 
     #[test]
     fn parses_comma_fraction_z() {
-        let dt = Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23,123Z", "%Y-%m-%d %H:%M:%S.%fZ").unwrap();
-        let expected = chrono::Utc.with_ymd_and_hms(2025, 9, 25, 14, 31, 23).unwrap();
-        assert_eq!(dt.with_timezone(&chrono::Utc).timestamp(), expected.timestamp());
+        let dt = Helpers::parse_date_from_string_with_tz(
+            "2025-09-25 14:31:23,123Z",
+            "%Y-%m-%d %H:%M:%S.%fZ",
+        )
+        .unwrap();
+        let expected = chrono::Utc
+            .with_ymd_and_hms(2025, 9, 25, 14, 31, 23)
+            .unwrap();
+        assert_eq!(
+            dt.with_timezone(&chrono::Utc).timestamp(),
+            expected.timestamp()
+        );
     }
 }
 
@@ -1058,7 +1254,6 @@ mod tests_get_nested_value_from_dot_notation {
         assert_eq!(result, None);
     }
 }
-
 
 #[cfg(test)]
 mod clean_field_name_tests {
@@ -1157,7 +1352,7 @@ mod parse_time_field_tests {
     #[serial]
     fn test_parse_time_field_with_valid_millisecond_timestamp() {
         Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time1");
-        
+
         let time = 1646901960000i64; // Valid millisecond timestamp
         let message = json!({ "time1": time });
 
@@ -1276,10 +1471,10 @@ mod parse_partition_tests {
 #[cfg(test)]
 mod parse_partition_allowed_values_tests {
     use super::*;
-    use serde_json::json;
-    use serial_test::serial;
     #[allow(unused_imports)]
     use crate::ingest_work::PARTITION_ALLOWED_VALUES_CACHE;
+    use serde_json::json;
+    use serial_test::serial;
 
     #[test]
     #[serial]
@@ -1289,7 +1484,8 @@ mod parse_partition_allowed_values_tests {
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "bar");
 
         let allowed_values = Config::get_partition_allowed_values();
-        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+        let allowed_values_vec: HashSet<String> =
+            allowed_values.split(',').map(|s| s.to_string()).collect();
 
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "");
@@ -1303,7 +1499,8 @@ mod parse_partition_allowed_values_tests {
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
 
         let allowed_values = Config::get_partition_allowed_values();
-        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+        let allowed_values_vec: HashSet<String> =
+            allowed_values.split(',').map(|s| s.to_string()).collect();
 
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_foo=");
@@ -1317,7 +1514,8 @@ mod parse_partition_allowed_values_tests {
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "bar,def");
 
         let allowed_values = Config::get_partition_allowed_values();
-        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+        let allowed_values_vec: HashSet<String> =
+            allowed_values.split(',').map(|s| s.to_string()).collect();
 
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_foo=bar");
@@ -1331,7 +1529,8 @@ mod parse_partition_allowed_values_tests {
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
 
         let allowed_values = Config::get_partition_allowed_values();
-        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+        let allowed_values_vec: HashSet<String> =
+            allowed_values.split(',').map(|s| s.to_string()).collect();
 
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=baz");
@@ -1345,7 +1544,8 @@ mod parse_partition_allowed_values_tests {
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
 
         let allowed_values = Config::get_partition_allowed_values();
-        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+        let allowed_values_vec: HashSet<String> =
+            allowed_values.split(',').map(|s| s.to_string()).collect();
 
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
@@ -1359,9 +1559,10 @@ mod parse_partition_allowed_values_tests {
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz  , def  ");
 
         let allowed_values = Config::get_partition_allowed_values();
-        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| {
-            Helpers::clean_field_name(s.to_string())
-        }).collect();
+        let allowed_values_vec: HashSet<String> = allowed_values
+            .split(',')
+            .map(|s| Helpers::clean_field_name(s.to_string()))
+            .collect();
 
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
@@ -1382,7 +1583,8 @@ mod parse_partition_not_allowed_values_tests {
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah");
 
         let allowed_values = Config::get_partition_allowed_values();
-        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+        let allowed_values_vec: HashSet<String> =
+            allowed_values.split(',').map(|s| s.to_string()).collect();
 
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "");
@@ -1396,7 +1598,8 @@ mod parse_partition_not_allowed_values_tests {
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
 
         let allowed_values = Config::get_partition_allowed_values();
-        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+        let allowed_values_vec: HashSet<String> =
+            allowed_values.split(',').map(|s| s.to_string()).collect();
 
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_foo=");
@@ -1410,7 +1613,8 @@ mod parse_partition_not_allowed_values_tests {
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah,def");
 
         let allowed_values = Config::get_partition_allowed_values();
-        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+        let allowed_values_vec: HashSet<String> =
+            allowed_values.split(',').map(|s| s.to_string()).collect();
 
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_foo=");
@@ -1424,7 +1628,8 @@ mod parse_partition_not_allowed_values_tests {
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah,def");
 
         let allowed_values = Config::get_partition_allowed_values();
-        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+        let allowed_values_vec: HashSet<String> =
+            allowed_values.split(',').map(|s| s.to_string()).collect();
 
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=");
@@ -1438,7 +1643,8 @@ mod parse_partition_not_allowed_values_tests {
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah,nope");
 
         let allowed_values = Config::get_partition_allowed_values();
-        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+        let allowed_values_vec: HashSet<String> =
+            allowed_values.split(',').map(|s| s.to_string()).collect();
 
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=/p_abc1=");
@@ -1452,7 +1658,8 @@ mod parse_partition_not_allowed_values_tests {
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah  , nope  ");
 
         let allowed_values = Config::get_partition_allowed_values();
-        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+        let allowed_values_vec: HashSet<String> =
+            allowed_values.split(',').map(|s| s.to_string()).collect();
 
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=/p_abc1=");
@@ -1577,7 +1784,7 @@ mod flattern_tests {
     #[test]
     fn test_flatten_empty_object() {
         let json = json!({});
-        
+
         let metadata = Metadata::new().unwrap();
         let mut metadata_hashmap = HashMap::new();
         metadata_hashmap.insert("field".to_string(), metadata);
@@ -1749,42 +1956,56 @@ mod flattern_tests {
                 repetition_count: 1,
             },
         );
-        metadata.get_mut("contacts").unwrap().fields.get_mut("0").unwrap().fields.insert(
-            "name".into(),
-            Metadata {
-                count: 2,
-                types: HashMap::new(),
-                parent_type: "".into(),
-                fields: Box::new(HashMap::new()),
-                date_candidate: None,
-                date_parser_kind: None,
-                timezone: false,
-                evolution: Box::new(HashMap::new()),
-                enabled: true,
-                out_field_name: "name".into(),
-                determined_type: "string".into(),
-                determined_type_values: "".into(),
-                repetition_count: 1,
-            },
-        );
-        metadata.get_mut("contacts").unwrap().fields.get_mut("0").unwrap().fields.insert(
-            "tel".into(),
-            Metadata {
-                count: 2,
-                types: HashMap::new(),
-                parent_type: "".into(),
-                fields: Box::new(HashMap::new()),
-                date_candidate: None,
-                date_parser_kind: None,
-                timezone: false,
-                evolution: Box::new(HashMap::new()),
-                enabled: true,
-                out_field_name: "tel".into(),
-                determined_type: "int".into(),
-                determined_type_values: "".into(),
-                repetition_count: 1,
-            },
-        );
+        metadata
+            .get_mut("contacts")
+            .unwrap()
+            .fields
+            .get_mut("0")
+            .unwrap()
+            .fields
+            .insert(
+                "name".into(),
+                Metadata {
+                    count: 2,
+                    types: HashMap::new(),
+                    parent_type: "".into(),
+                    fields: Box::new(HashMap::new()),
+                    date_candidate: None,
+                    date_parser_kind: None,
+                    timezone: false,
+                    evolution: Box::new(HashMap::new()),
+                    enabled: true,
+                    out_field_name: "name".into(),
+                    determined_type: "string".into(),
+                    determined_type_values: "".into(),
+                    repetition_count: 1,
+                },
+            );
+        metadata
+            .get_mut("contacts")
+            .unwrap()
+            .fields
+            .get_mut("0")
+            .unwrap()
+            .fields
+            .insert(
+                "tel".into(),
+                Metadata {
+                    count: 2,
+                    types: HashMap::new(),
+                    parent_type: "".into(),
+                    fields: Box::new(HashMap::new()),
+                    date_candidate: None,
+                    date_parser_kind: None,
+                    timezone: false,
+                    evolution: Box::new(HashMap::new()),
+                    enabled: true,
+                    out_field_name: "tel".into(),
+                    determined_type: "int".into(),
+                    determined_type_values: "".into(),
+                    repetition_count: 1,
+                },
+            );
         let flattened = Helpers::flatten(&json, &metadata);
         assert_eq!(
             flattened.unwrap(),
@@ -1869,49 +2090,61 @@ mod tests_flatten_special_cases {
     fn test_flatten_special_chars_and_case() {
         // Setup metadata for test
         let mut metadata = HashMap::new();
-        
+
         // Case for uppercase field (IMEI)
         let mut imei_metadata = Metadata::new().unwrap();
         imei_metadata.out_field_name = "imei".to_string();
         imei_metadata.determined_type = "long".to_string();
         metadata.insert("IMEI".to_string(), imei_metadata);
-        
+
         // Case for special characters (preasure\bar)
         let mut pressure_metadata = Metadata::new().unwrap();
         pressure_metadata.out_field_name = "preasure_bar".to_string();
         pressure_metadata.determined_type = "double".to_string();
         metadata.insert("preasure\\bar".to_string(), pressure_metadata);
-        
+
         // Create test JSON with both cases - using both original and transformed field names
         // to test both code paths
         let json_value = json!({
             "IMEI": 12345678901i64,             // Original case (using i64 for large numbers)
             "preasure_bar": 98.6                 // Already transformed name
         });
-        
+
         // Test flattening
         let result = Helpers::flatten(&json_value, &metadata).unwrap();
-        
+
         // Verify results - we should find both fields with their transformed names
-        assert!(result.as_object().unwrap().contains_key("imei"), "Field 'imei' missing from flattened result");
-        assert!(result.as_object().unwrap().contains_key("preasure_bar"), "Field 'preasure_bar' missing from flattened result");
-        
+        assert!(
+            result.as_object().unwrap().contains_key("imei"),
+            "Field 'imei' missing from flattened result"
+        );
+        assert!(
+            result.as_object().unwrap().contains_key("preasure_bar"),
+            "Field 'preasure_bar' missing from flattened result"
+        );
+
         // Verify the values
         assert_eq!(result["imei"], json!(12345678901i64));
         assert_eq!(result["preasure_bar"], json!(98.6));
-        
+
         // Test with lowercase field names to test case-insensitive matching
         let json_value2 = json!({
             "imei": 12345678901i64,             // Lowercase (using i64 for large numbers)
             "preasure\\bar": 98.6                // Original with backslash
         });
-        
+
         let result2 = Helpers::flatten(&json_value2, &metadata).unwrap();
-        
+
         // Verify both fields exist with correct values
-        assert!(result2.as_object().unwrap().contains_key("imei"), "Field 'imei' missing from flattened result (lowercase test)");
-        assert!(result2.as_object().unwrap().contains_key("preasure_bar"), "Field 'preasure_bar' missing from flattened result (original name test)");
-        
+        assert!(
+            result2.as_object().unwrap().contains_key("imei"),
+            "Field 'imei' missing from flattened result (lowercase test)"
+        );
+        assert!(
+            result2.as_object().unwrap().contains_key("preasure_bar"),
+            "Field 'preasure_bar' missing from flattened result (original name test)"
+        );
+
         assert_eq!(result2["imei"], json!(12345678901i64));
         assert_eq!(result2["preasure_bar"], json!(98.6));
     }
@@ -1920,9 +2153,9 @@ mod tests_flatten_special_cases {
 #[cfg(test)]
 mod tests_flatten_performance {
     use super::*;
+    use serde_json::json;
     use std::collections::HashMap;
     use std::time::Instant;
-    use serde_json::json;
 
     #[test]
     fn test_flatten_performance_with_cache() {
@@ -1931,7 +2164,7 @@ mod tests_flatten_performance {
         let mut field1 = Metadata::new().unwrap();
         field1.out_field_name = "imei".to_string();
         metadata.insert("IMEI".to_string(), field1);
-        
+
         let mut field2 = Metadata::new().unwrap();
         field2.out_field_name = "pressure_bar".to_string();
         metadata.insert("preasure\\bar".to_string(), field2);
@@ -1965,17 +2198,26 @@ mod tests_flatten_performance {
         println!("First flatten duration: {:?}", first_duration);
         println!("Second flatten duration: {:?}", second_duration);
         println!("Flattened result: {:#?}", flattened1);
-        
+
         // Check for expected output field names
         // The original test was looking for "imei" and "pressure_bar"
-        assert!(flattened1.as_object().unwrap().contains_key("imei"), "Field 'imei' missing from result");
-        assert!(flattened1.as_object().unwrap().contains_key("pressure_bar"), "Field 'pressure_bar' missing from result");
-        
+        assert!(
+            flattened1.as_object().unwrap().contains_key("imei"),
+            "Field 'imei' missing from result"
+        );
+        assert!(
+            flattened1.as_object().unwrap().contains_key("pressure_bar"),
+            "Field 'pressure_bar' missing from result"
+        );
+
         // We don't check for nested fields since metadata for them isn't provided
         // and they'll be flattened with default field paths
 
         // The second run should be faster due to caching, but don't make a hard assertion
         // since timing can vary based on system load, but typically it would be faster
-        println!("Speedup factor: {:.2}x", first_duration.as_nanos() as f64 / second_duration.as_nanos() as f64);
+        println!(
+            "Speedup factor: {:.2}x",
+            first_duration.as_nanos() as f64 / second_duration.as_nanos() as f64
+        );
     }
 }

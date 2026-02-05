@@ -195,14 +195,27 @@ fn build_error_blob(observation: &ToolObservation) -> String {
         env.insert("ok".to_string(), Value::Bool(observation.ok));
         env.insert(
             "errors".to_string(),
-            Value::Array(observation.errors.iter().map(|s| Value::String(s.clone())).collect()),
+            Value::Array(
+                observation
+                    .errors
+                    .iter()
+                    .map(|s| Value::String(s.clone()))
+                    .collect(),
+            ),
         );
         env.insert(
             "warnings".to_string(),
-            Value::Array(observation.warnings.iter().map(|s| Value::String(s.clone())).collect()),
+            Value::Array(
+                observation
+                    .warnings
+                    .iter()
+                    .map(|s| Value::String(s.clone()))
+                    .collect(),
+            ),
         );
         env.insert("extra".to_string(), extra_v);
-        return serde_json::to_string_pretty(&Value::Object(env)).unwrap_or_else(|_| "{}".to_string());
+        return serde_json::to_string_pretty(&Value::Object(env))
+            .unwrap_or_else(|_| "{}".to_string());
     }
 
     parts.join("\n")
@@ -235,13 +248,21 @@ fn extract_common_string_fields(
         }
         Value::Object(m) => {
             for (k, vv) in m.iter() {
-                let next = if path.is_empty() { k.clone() } else { format!("{}.{}", path, k) };
+                let next = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{}.{}", path, k)
+                };
                 extract_common_string_fields(vv, out, &next, depth + 1, max_depth);
             }
         }
         Value::Array(arr) => {
             for (i, vv) in arr.iter().enumerate() {
-                let next = if path.is_empty() { format!("[{}]", i) } else { format!("{}[{}]", path, i) };
+                let next = if path.is_empty() {
+                    format!("[{}]", i)
+                } else {
+                    format!("{}[{}]", path, i)
+                };
                 extract_common_string_fields(vv, out, &next, depth + 1, max_depth);
             }
         }
@@ -321,4 +342,3 @@ mod tests {
         assert!(rendered.chars().count() <= 2000);
     }
 }
-

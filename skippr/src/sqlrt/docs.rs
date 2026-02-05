@@ -1,5 +1,5 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 
 /// Documentation for a SQL statement, including its syntax and description
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,8 +111,10 @@ pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
         "ALTER SCHEMA DROP COLUMN".to_string(),
         SqlStatementDoc {
             name: "ALTER SCHEMA DROP COLUMN".to_string(),
-            syntax: "ALTER SCHEMA <pipeline_name>[.<schema_name>] DROP COLUMN <column_name>".to_string(),
-            description: "Drops a column from a schema. Supports nested fields using dot notation.".to_string(),
+            syntax: "ALTER SCHEMA <pipeline_name>[.<schema_name>] DROP COLUMN <column_name>"
+                .to_string(),
+            description: "Drops a column from a schema. Supports nested fields using dot notation."
+                .to_string(),
             example: "ALTER SCHEMA bike_hire DROP COLUMN user_id".to_string(),
         },
     );
@@ -201,16 +203,16 @@ pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
 pub fn get_sql_docs_formatted() -> String {
     let docs = get_sql_docs();
     let mut result = String::new();
-    
+
     result.push_str("# Skippr SQL Documentation\n\n");
     result.push_str("This document describes all SQL statements supported by Skippr.\n\n");
-    
+
     // Group docs by category
     let mut schema_operations: Vec<&SqlStatementDoc> = Vec::new();
     let mut pipeline_operations: Vec<&SqlStatementDoc> = Vec::new();
     let mut data_operations: Vec<&SqlStatementDoc> = Vec::new();
     let mut query_operations: Vec<&SqlStatementDoc> = Vec::new();
-    
+
     for (_, doc) in &docs {
         if doc.name.contains("SCHEMA") {
             schema_operations.push(doc);
@@ -222,31 +224,31 @@ pub fn get_sql_docs_formatted() -> String {
             query_operations.push(doc);
         }
     }
-    
+
     // Add schema operations
     result.push_str("## Schema Operations\n\n");
     for doc in schema_operations {
         add_doc_to_result(&mut result, doc);
     }
-    
+
     // Add pipeline operations
     result.push_str("## Pipeline Operations\n\n");
     for doc in pipeline_operations {
         add_doc_to_result(&mut result, doc);
     }
-    
+
     // Add data operations
     result.push_str("## Data Operations\n\n");
     for doc in data_operations {
         add_doc_to_result(&mut result, doc);
     }
-    
+
     // Add query operations
     result.push_str("## Query Operations\n\n");
     for doc in query_operations {
         add_doc_to_result(&mut result, doc);
     }
-    
+
     result
 }
 
@@ -260,7 +262,10 @@ fn add_doc_to_result(result: &mut String, doc: &SqlStatementDoc) {
 /// Returns a list of supported SQL statements with their syntax
 #[allow(dead_code)]
 pub fn list_supported_sql_statements() -> Vec<String> {
-    get_sql_docs().into_iter().map(|(_, doc)| format!("{}: {}", doc.name, doc.syntax)).collect()
+    get_sql_docs()
+        .into_iter()
+        .map(|(_, doc)| format!("{}: {}", doc.name, doc.syntax))
+        .collect()
 }
 
 /// Format for documentation output
@@ -283,7 +288,7 @@ pub fn get_docs_in_format(format: DocFormat) -> String {
 pub fn get_sql_docs_html() -> String {
     let docs = get_sql_docs();
     let mut result = String::new();
-    
+
     result.push_str("<!DOCTYPE html>\n<html>\n<head>\n");
     result.push_str("<title>Skippr SQL Documentation</title>\n");
     result.push_str("<style>\n");
@@ -295,16 +300,16 @@ pub fn get_sql_docs_html() -> String {
     result.push_str(".example { background-color: #f0f8ff; padding: 10px; border-radius: 5px; font-family: monospace; }\n");
     result.push_str("</style>\n");
     result.push_str("</head>\n<body>\n");
-    
+
     result.push_str("<h1>Skippr SQL Documentation</h1>\n");
     result.push_str("<p>This document describes all SQL statements supported by Skippr.</p>\n");
-    
+
     // Group docs by category
     let mut schema_operations: Vec<&SqlStatementDoc> = Vec::new();
     let mut pipeline_operations: Vec<&SqlStatementDoc> = Vec::new();
     let mut data_operations: Vec<&SqlStatementDoc> = Vec::new();
     let mut query_operations: Vec<&SqlStatementDoc> = Vec::new();
-    
+
     for (_, doc) in &docs {
         if doc.name.contains("SCHEMA") {
             schema_operations.push(doc);
@@ -316,55 +321,55 @@ pub fn get_sql_docs_html() -> String {
             query_operations.push(doc);
         }
     }
-    
+
     // Add schema operations
     result.push_str("<h2>Schema Operations</h2>\n");
     for doc in schema_operations {
         add_doc_to_html(&mut result, doc);
     }
-    
+
     // Add pipeline operations
     result.push_str("<h2>Pipeline Operations</h2>\n");
     for doc in pipeline_operations {
         add_doc_to_html(&mut result, doc);
     }
-    
+
     // Add data operations
     result.push_str("<h2>Data Operations</h2>\n");
     for doc in data_operations {
         add_doc_to_html(&mut result, doc);
     }
-    
+
     // Add query operations
     result.push_str("<h2>Query Operations</h2>\n");
     for doc in query_operations {
         add_doc_to_html(&mut result, doc);
     }
-    
+
     result.push_str("</body>\n</html>");
-    
+
     result
 }
 
 /// Returns documentation in JSON format
 pub fn get_sql_docs_json() -> String {
-    use serde::{Serialize, Deserialize};
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
-    
+
     #[derive(Serialize, Deserialize)]
     struct DocCategory {
         name: String,
         statements: Vec<SqlStatementDoc>,
     }
-    
+
     let docs = get_sql_docs();
-    
+
     // Group docs by category
     let mut schema_operations: Vec<SqlStatementDoc> = Vec::new();
     let mut pipeline_operations: Vec<SqlStatementDoc> = Vec::new();
     let mut data_operations: Vec<SqlStatementDoc> = Vec::new();
     let mut query_operations: Vec<SqlStatementDoc> = Vec::new();
-    
+
     for (_, doc) in docs {
         if doc.name.contains("SCHEMA") {
             schema_operations.push(doc);
@@ -376,7 +381,7 @@ pub fn get_sql_docs_json() -> String {
             query_operations.push(doc);
         }
     }
-    
+
     let categories = vec![
         DocCategory {
             name: "Schema Operations".to_string(),
@@ -395,13 +400,13 @@ pub fn get_sql_docs_json() -> String {
             statements: query_operations,
         },
     ];
-    
+
     let json_value = json!({
         "title": "Skippr SQL Documentation",
         "description": "This document describes all SQL statements supported by Skippr.",
         "categories": categories,
     });
-    
+
     serde_json::to_string_pretty(&json_value).unwrap()
 }
 
@@ -413,4 +418,4 @@ fn add_doc_to_html(result: &mut String, doc: &SqlStatementDoc) {
     result.push_str(&format!("<p>{}</p>\n", doc.description));
     result.push_str("<h4>Example:</h4>\n");
     result.push_str(&format!("<div class=\"example\">{}</div>\n", doc.example));
-} 
+}

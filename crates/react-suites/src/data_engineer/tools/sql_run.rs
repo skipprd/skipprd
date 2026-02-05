@@ -12,7 +12,9 @@ pub struct SqlRunTool {
 
 #[async_trait]
 impl Tool for SqlRunTool {
-    fn name(&self) -> &'static str { "run_sql" }
+    fn name(&self) -> &'static str {
+        "run_sql"
+    }
     async fn call(&self, args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
         let sql = args.get("sql").and_then(|x| x.as_str()).unwrap_or("");
         let mut forced = sql.trim().to_string();
@@ -27,7 +29,9 @@ impl Tool for SqlRunTool {
             forced.push_str(" LIMIT 50");
         }
         match self.query.query(&forced).await {
-            Ok(qr) => Ok(serde_json::json!({"ok": true, "header": qr.header, "rows": qr.rows, "meta": qr.meta})),
+            Ok(qr) => Ok(
+                serde_json::json!({"ok": true, "header": qr.header, "rows": qr.rows, "meta": qr.meta}),
+            ),
             Err(e) => Ok(serde_json::json!({"ok": false, "error": e})),
         }
     }

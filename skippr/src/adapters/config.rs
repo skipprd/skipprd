@@ -22,4 +22,3 @@ impl ConfigAdapter for EnvConfigAdapter {
         std::env::var(key).unwrap_or_else(|_| default.to_string())
     }
 }
-

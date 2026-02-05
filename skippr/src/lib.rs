@@ -28,6 +28,5 @@ pub mod llm;
 pub mod metrics;
 pub mod plugins;
 pub mod serdes;
-pub mod vector;
 pub mod sqlrt;
-
+pub mod vector;

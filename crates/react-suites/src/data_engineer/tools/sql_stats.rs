@@ -13,10 +13,22 @@ pub struct SqlStatsTool {
 
 #[async_trait]
 impl Tool for SqlStatsTool {
-    fn name(&self) -> &'static str { "sql_stats" }
+    fn name(&self) -> &'static str {
+        "sql_stats"
+    }
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
-        let table = args.get("table").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-        let field = args.get("field").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let table = args
+            .get("table")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let field = args
+            .get("field")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if table.is_empty() || field.is_empty() {
             return Ok(serde_json::json!({"ok": false, "error": "missing table/field"}));
         }
@@ -44,7 +56,12 @@ impl Tool for SqlStatsTool {
             }
         }
 
-        if distinct.is_none() && min_numeric.is_none() && max_numeric.is_none() && max_len.is_none() && nulls == 0 {
+        if distinct.is_none()
+            && min_numeric.is_none()
+            && max_numeric.is_none()
+            && max_len.is_none()
+            && nulls == 0
+        {
             // Optional fallback to provider stats (if available)
             if let Some(dsprov) = self.datasets.as_ref() {
                 if let Ok(ds) = parse_dataset_id_strict(&table) {
@@ -61,8 +78,15 @@ impl Tool for SqlStatsTool {
             }
         }
 
-        if distinct.is_none() && min_numeric.is_none() && max_numeric.is_none() && max_len.is_none() && nulls == 0 {
-            return Ok(serde_json::json!({"ok": false, "error": "no stats in catalog (and provider stats unavailable)"}));
+        if distinct.is_none()
+            && min_numeric.is_none()
+            && max_numeric.is_none()
+            && max_len.is_none()
+            && nulls == 0
+        {
+            return Ok(
+                serde_json::json!({"ok": false, "error": "no stats in catalog (and provider stats unavailable)"}),
+            );
         }
         Ok(serde_json::json!({"ok": true, "stats": {
             "distinct": distinct,

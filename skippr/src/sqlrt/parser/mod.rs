@@ -1,13 +1,13 @@
 use core::fmt;
-use sqlparser::dialect::GenericDialect;
-use std::collections::VecDeque;
-use datafusion::sql::{sqlparser};
-use datafusion::sql::sqlparser::ast::{ObjectName};
+use datafusion::sql::sqlparser;
+use datafusion::sql::sqlparser::ast::ObjectName;
 use datafusion::sql::sqlparser::dialect::Dialect;
 use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
 use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
 use sqlparser::ast::{ArrayElemTypeDef, DataType, Ident};
+use sqlparser::dialect::GenericDialect;
+use std::collections::VecDeque;
 
 // Keywords used in Skippr SQL
 // Defined as a separate enum to avoid conflicts with `sqlparser::ast::Keyword`
@@ -28,7 +28,6 @@ enum SkipprKeyword {
 }
 
 impl SkipprKeyword {
-
     fn from_str(s: &str) -> Option<SkipprKeyword> {
         match s.to_uppercase().as_str() {
             "DUMP" => Some(SkipprKeyword::DUMP),
@@ -41,7 +40,7 @@ impl SkipprKeyword {
             "DROP" => Some(SkipprKeyword::DROP),
             "RESET" => Some(SkipprKeyword::RESET),
             "TABLE" => Some(SkipprKeyword::TABLE),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -61,7 +60,7 @@ impl SkipprShowCommand {
             "STATS" => Some(SkipprShowCommand::STATS),
             "SEMANTIC" => Some(SkipprShowCommand::SEMANTIC),
             "CATALOG" => Some(SkipprShowCommand::CATALOG),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -76,14 +75,14 @@ pub enum SchemaDumpSource {
 impl std::fmt::Display for SchemaDumpSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SchemaDumpSource::Relation(name) => write!(f, "{}", name)
+            SchemaDumpSource::Relation(name) => write!(f, "{}", name),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaLoadDest {
-     // `SCHEMA LOAD <schema file> INTO <object_name>`
+    // `SCHEMA LOAD <schema file> INTO <object_name>`
     #[allow(dead_code)]
     Relation(ObjectName),
 }
@@ -91,7 +90,7 @@ pub enum SchemaLoadDest {
 impl std::fmt::Display for SchemaLoadDest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SchemaLoadDest::Relation(name) => write!(f, "{}", name)
+            SchemaLoadDest::Relation(name) => write!(f, "{}", name),
         }
     }
 }
@@ -99,19 +98,17 @@ impl std::fmt::Display for SchemaLoadDest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PipelineToggle {
     Enable,
-    Disable
+    Disable,
 }
 
 impl PipelineToggle {
-
     fn from_str(s: &str) -> Option<PipelineToggle> {
         match s.to_uppercase().as_str() {
             "ENABLE" => Some(PipelineToggle::Enable),
             "DISABLE" => Some(PipelineToggle::Disable),
-            _ => None
+            _ => None,
         }
     }
-
 }
 
 impl fmt::Display for PipelineToggle {
@@ -119,7 +116,7 @@ impl fmt::Display for PipelineToggle {
         match self {
             PipelineToggle::Enable => {
                 write!(f, "Enable")
-            },
+            }
             PipelineToggle::Disable => {
                 write!(f, "Disable")
             }
@@ -162,7 +159,6 @@ pub(crate) struct DatabaseDropStatement {
     pub(crate) database: ObjectName,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PipelineDropStatement {
     pub(crate) pipeline: ObjectName,
@@ -199,9 +195,9 @@ pub(crate) struct SchemaLoadStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PipelineToggleStatement {
     /// The object name to where the data is heading
-    pub(crate)  pipeline: ObjectName,
+    pub(crate) pipeline: ObjectName,
     /// The url from where the data comes
-    pub(crate)  toggle: PipelineToggle,
+    pub(crate) toggle: PipelineToggle,
 }
 
 #[allow(dead_code)]
@@ -228,7 +224,6 @@ pub(crate) struct AlterSchemaAlterColumnType {
     pub(crate) column_name: ObjectName,
     pub(crate) new_type: DataType,
     pub(crate) values_new_type: Option<DataType>,
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,13 +259,21 @@ pub enum Statement {
     /// Extension: `SHOW DOCS`
     ShowDocs,
     /// Extension: `SHOW STATS FOR <pipeline>.<namespace>` (namespace optional)
-    ShowStats { pipeline: String, namespace: Option<String> },
+    ShowStats {
+        pipeline: String,
+        namespace: Option<String>,
+    },
     /// Extension: `SHOW SEMANTIC FOR <pipeline>.<namespace>` (namespace optional)
-    ShowSemantic { pipeline: String, namespace: Option<String> },
+    ShowSemantic {
+        pipeline: String,
+        namespace: Option<String>,
+    },
     /// Extension: `SHOW CATALOG FOR <pipeline>.<namespace>` (namespace optional)
-    ShowCatalog { pipeline: String, namespace: Option<String> },
+    ShowCatalog {
+        pipeline: String,
+        namespace: Option<String>,
+    },
 }
-
 
 /// SQL Parser for Skipprs's SQL dialect, which will often delegate to [`Datafusion`] or [`sqlparser`]
 ///
@@ -281,16 +284,12 @@ pub struct SParser<'a> {
 }
 
 impl<'a> SParser<'a> {
-
     pub fn new(sql: &str) -> Result<Self, ParserError> {
         let dialect = &GenericDialect {};
         SParser::new_with_dialect(sql, dialect)
     }
 
-    pub fn new_with_dialect(
-        sql: &str,
-        dialect: &'a dyn Dialect,
-    ) -> Result<Self, ParserError> {
+    pub fn new_with_dialect(sql: &str, dialect: &'a dyn Dialect) -> Result<Self, ParserError> {
         let mut tokenizer = Tokenizer::new(dialect, sql);
         let tokens = tokenizer.tokenize()?;
 
@@ -323,7 +322,9 @@ impl<'a> SParser<'a> {
                 break;
             }
             if expecting_statement_delimiter {
-                return parser.parser.expected("end of statement", parser.parser.peek_token());
+                return parser
+                    .parser
+                    .expected("end of statement", parser.parser.peek_token());
             }
 
             let statement = parser.parse_statement()?;
@@ -340,58 +341,102 @@ impl<'a> SParser<'a> {
                     self.parser.next_token(); // SHOW
                     if let Token::Word(w) = self.parser.peek_token().token {
                         match SkipprShowCommand::from_str(&w.value) {
-                            Some(SkipprShowCommand::DOCS) => { self.parser.next_token(); return Ok(Statement::ShowDocs); },
+                            Some(SkipprShowCommand::DOCS) => {
+                                self.parser.next_token();
+                                return Ok(Statement::ShowDocs);
+                            }
                             Some(SkipprShowCommand::STATS) => {
                                 self.parser.next_token(); // STATS
                                 self.parser.expect_keyword(Keyword::FOR)?;
                                 let name = self.parser.parse_object_name(true)?;
-                                let parts: Vec<String> = name.0.iter().map(|i| i.to_string()).collect();
+                                let parts: Vec<String> =
+                                    name.0.iter().map(|i| i.to_string()).collect();
                                 let (pipeline, namespace) = match parts.len() {
                                     0 => ("".to_string(), None),
                                     1 => (parts[0].clone(), None),
                                     _ => (parts[0].clone(), Some(parts[1..].join("."))),
                                 };
-                                return Ok(Statement::ShowStats { pipeline, namespace });
-                            },
+                                return Ok(Statement::ShowStats {
+                                    pipeline,
+                                    namespace,
+                                });
+                            }
                             Some(SkipprShowCommand::SEMANTIC) => {
                                 self.parser.next_token(); // SEMANTIC
                                 self.parser.expect_keyword(Keyword::FOR)?;
                                 let name = self.parser.parse_object_name(true)?;
-                                let parts: Vec<String> = name.0.iter().map(|i| i.to_string()).collect();
+                                let parts: Vec<String> =
+                                    name.0.iter().map(|i| i.to_string()).collect();
                                 let (pipeline, namespace) = match parts.len() {
                                     0 => ("".to_string(), None),
                                     1 => (parts[0].clone(), None),
                                     _ => (parts[0].clone(), Some(parts[1..].join("."))),
                                 };
-                                return Ok(Statement::ShowSemantic { pipeline, namespace });
-                            },
+                                return Ok(Statement::ShowSemantic {
+                                    pipeline,
+                                    namespace,
+                                });
+                            }
                             Some(SkipprShowCommand::CATALOG) => {
                                 self.parser.next_token(); // CATALOG
                                 self.parser.expect_keyword(Keyword::FOR)?;
                                 let name = self.parser.parse_object_name(true)?;
-                                let parts: Vec<String> = name.0.iter().map(|i| i.to_string()).collect();
+                                let parts: Vec<String> =
+                                    name.0.iter().map(|i| i.to_string()).collect();
                                 let (pipeline, namespace) = match parts.len() {
                                     0 => ("".to_string(), None),
                                     1 => (parts[0].clone(), None),
                                     _ => (parts[0].clone(), Some(parts[1..].join("."))),
                                 };
-                                return Ok(Statement::ShowCatalog { pipeline, namespace });
-                            },
-                            _ => { return Err(ParserError::ParserError("Unrecognized SHOW command".to_string())); }
+                                return Ok(Statement::ShowCatalog {
+                                    pipeline,
+                                    namespace,
+                                });
+                            }
+                            _ => {
+                                return Err(ParserError::ParserError(
+                                    "Unrecognized SHOW command".to_string(),
+                                ));
+                            }
                         }
                     } else {
-                        return Err(ParserError::ParserError("Expected command after SHOW".to_string()));
+                        return Err(ParserError::ParserError(
+                            "Expected command after SHOW".to_string(),
+                        ));
                     }
                 }
                 match SkipprKeyword::from_str(&w.value) {
-                    Some(SkipprKeyword::DUMP) => { self.parser.next_token(); self.parse_dump() }
-                    Some(SkipprKeyword::DROP) => { self.parser.next_token(); self.parse_drop() }
-                    Some(SkipprKeyword::RESET) => { self.parser.next_token(); self.parse_reset() }
-                    Some(SkipprKeyword::LOAD) => { self.parser.next_token(); self.parse_load() }
-                    Some(SkipprKeyword::ENABLE) => { self.parser.next_token(); self.parse_enable() }
-                    Some(SkipprKeyword::DISABLE) => { self.parser.next_token(); self.parse_disable() }
-                    Some(SkipprKeyword::TABLE) => { self.parser.next_token(); self.parse_drop() }
-                    Some(SkipprKeyword::SCHEMA) | Some(SkipprKeyword::PIPELINE) | Some(SkipprKeyword::DATABASE) => {
+                    Some(SkipprKeyword::DUMP) => {
+                        self.parser.next_token();
+                        self.parse_dump()
+                    }
+                    Some(SkipprKeyword::DROP) => {
+                        self.parser.next_token();
+                        self.parse_drop()
+                    }
+                    Some(SkipprKeyword::RESET) => {
+                        self.parser.next_token();
+                        self.parse_reset()
+                    }
+                    Some(SkipprKeyword::LOAD) => {
+                        self.parser.next_token();
+                        self.parse_load()
+                    }
+                    Some(SkipprKeyword::ENABLE) => {
+                        self.parser.next_token();
+                        self.parse_enable()
+                    }
+                    Some(SkipprKeyword::DISABLE) => {
+                        self.parser.next_token();
+                        self.parse_disable()
+                    }
+                    Some(SkipprKeyword::TABLE) => {
+                        self.parser.next_token();
+                        self.parse_drop()
+                    }
+                    Some(SkipprKeyword::SCHEMA)
+                    | Some(SkipprKeyword::PIPELINE)
+                    | Some(SkipprKeyword::DATABASE) => {
                         Err(ParserError::ParserError("Not implemented".to_string()))
                     }
                     None => {
@@ -406,20 +451,23 @@ impl<'a> SParser<'a> {
                                                 match w3.keyword {
                                                     // Hard-disable SCHEMA and instruct to use TABLE
                                                     Keyword::SCHEMA => {
-                                                        Err(ParserError::ParserError("Use TABLE instead of SCHEMA".to_string()))
+                                                        Err(ParserError::ParserError(
+                                                            "Use TABLE instead of SCHEMA"
+                                                                .to_string(),
+                                                        ))
                                                     }
                                                     Keyword::TABLE => {
                                                         self.parser.next_token(); // TABLE
                                                         self.parse_alter_schema()
                                                     }
-                                                    _ => {
-                                                        Err(ParserError::ParserError("Not implemented".to_string()))
-                                                    }
+                                                    _ => Err(ParserError::ParserError(
+                                                        "Not implemented".to_string(),
+                                                    )),
                                                 }
                                             }
-                                            _ => {
-                                                Err(ParserError::ParserError("Not implemented".to_string()))
-                                            }
+                                            _ => Err(ParserError::ParserError(
+                                                "Not implemented".to_string(),
+                                            )),
                                         }
                                     }
                                     _ => {
@@ -427,58 +475,58 @@ impl<'a> SParser<'a> {
                                     }
                                 }
                             }
-                            _ => {
-                                Err(ParserError::ParserError("Not implemented".to_string()))
-                            }
+                            _ => Err(ParserError::ParserError("Not implemented".to_string())),
                         }
                     }
                 }
             }
-            _ => { Err(ParserError::ParserError("Not implemented".to_string())) }
-        }
+            _ => Err(ParserError::ParserError("Not implemented".to_string())),
+        };
     }
 
     // This is a simplified sketch and needs to be integrated with your existing parsing logic.
 
     pub fn parse_alter_schema(&mut self) -> Result<Statement, ParserError> {
-
         let pipeline = self.parser.next_token().token.to_string();
 
         let schema = match self.parser.peek_token().token.to_string().as_str() {
             "." => {
                 self.parser.next_token(); // .
                 let schema = self.parser.next_token().token.to_string();
-                Some(ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(schema))]))
-            },
-            _ => {
-                None
+                Some(ObjectName(vec![
+                    datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(
+                        Ident::new(schema),
+                    ),
+                ]))
             }
+            _ => None,
         };
 
         match self.parser.next_token().token {
-            Token::Word(w) => match w.keyword {
-                Keyword::ADD => {
-                    Err(ParserError::ParserError("ALTER COLUMN ADD Not implemented".to_string()))
-                },
-                Keyword::DROP => {
-                    self.parser.expect_keyword(Keyword::COLUMN)?;
-                    let column_name = self.parser.parse_object_name(false)?;
+            Token::Word(w) => {
+                match w.keyword {
+                    Keyword::ADD => Err(ParserError::ParserError(
+                        "ALTER COLUMN ADD Not implemented".to_string(),
+                    )),
+                    Keyword::DROP => {
+                        self.parser.expect_keyword(Keyword::COLUMN)?;
+                        let column_name = self.parser.parse_object_name(false)?;
                         Ok(Statement::AlterSchemaDropColumn(AlterSchemaDropColumn {
                         pipeline: ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(pipeline))]),
                         schema,
                         column_name,
                     }))
-                },
-                Keyword::ALTER => {
-                    self.parser.expect_keyword(Keyword::COLUMN)?;
-                    
-                    let column_name = self.parser.parse_object_name(false)?;
+                    }
+                    Keyword::ALTER => {
+                        self.parser.expect_keyword(Keyword::COLUMN)?;
 
-                    self.parser.expect_keyword(Keyword::TYPE)?;
+                        let column_name = self.parser.parse_object_name(false)?;
 
-                    let column_new_type = self.parser.parse_data_type()?;
+                        self.parser.expect_keyword(Keyword::TYPE)?;
 
-                    match column_new_type  {
+                        let column_new_type = self.parser.parse_data_type()?;
+
+                        match column_new_type  {
                         DataType::Array(value_type) => {
                             match value_type {
                                 ArrayElemTypeDef::AngleBracket(value) => {
@@ -507,11 +555,13 @@ impl<'a> SParser<'a> {
                             }))
                         }
                     }
-
-                },
-                _ => Err(ParserError::ParserError("Unexpected keyword".to_string())),
-            },
-            _ => Err(ParserError::ParserError("Expected keyword after ALTER TABLE".to_string())),
+                    }
+                    _ => Err(ParserError::ParserError("Unexpected keyword".to_string())),
+                }
+            }
+            _ => Err(ParserError::ParserError(
+                "Expected keyword after ALTER TABLE".to_string(),
+            )),
         }
     }
 
@@ -526,20 +576,14 @@ impl<'a> SParser<'a> {
 
                         Ok(Statement::PipelineToggle(PipelineToggleStatement {
                             pipeline,
-                            toggle: PipelineToggle::from_str("ENABLE").unwrap()
-
+                            toggle: PipelineToggle::from_str("ENABLE").unwrap(),
                         }))
-
-                    },
-                    _ => {
-                        Err(ParserError::ParserError("Not implemented".to_string()))
                     }
+                    _ => Err(ParserError::ParserError("Not implemented".to_string())),
                 }
-            },
-            _ => {
-                Err(ParserError::ParserError("Unknown error".to_string()))
             }
-        }
+            _ => Err(ParserError::ParserError("Unknown error".to_string())),
+        };
     }
 
     pub fn parse_disable(&mut self) -> Result<Statement, ParserError> {
@@ -553,19 +597,14 @@ impl<'a> SParser<'a> {
 
                         Ok(Statement::PipelineToggle(PipelineToggleStatement {
                             pipeline,
-                            toggle: PipelineToggle::from_str("DISABLE").unwrap()
+                            toggle: PipelineToggle::from_str("DISABLE").unwrap(),
                         }))
-
-                    },
-                    _ => {
-                        Err(ParserError::ParserError("Not implemented".to_string()))
                     }
+                    _ => Err(ParserError::ParserError("Not implemented".to_string())),
                 }
-            },
-            _ => {
-                Err(ParserError::ParserError("Unknown error".to_string()))
             }
-        }
+            _ => Err(ParserError::ParserError("Unknown error".to_string())),
+        };
     }
 
     pub fn parse_load(&mut self) -> Result<Statement, ParserError> {
@@ -573,8 +612,9 @@ impl<'a> SParser<'a> {
             Token::Word(w) => {
                 match SkipprKeyword::from_str(&w.value) {
                     Some(SkipprKeyword::SCHEMA) => {
-
-                        Err(ParserError::ParserError("Not implemented - LOAD SCHEMA not currently supported".to_string()))
+                        Err(ParserError::ParserError(
+                            "Not implemented - LOAD SCHEMA not currently supported".to_string(),
+                        ))
 
                         // @todo - this functions, but we need to think about how to serialise the dump
 
@@ -593,28 +633,21 @@ impl<'a> SParser<'a> {
                         //     table: SchemaLoadDest::Relation(table_name),
                         //     source,
                         // }))
-
-                    },
-                    _ => {
-                        Err(ParserError::ParserError("Not implemented".to_string()))
                     }
+                    _ => Err(ParserError::ParserError("Not implemented".to_string())),
                 }
-            },
-            _ => {
-                Err(ParserError::ParserError("Unknown error".to_string()))
             }
-        }
+            _ => Err(ParserError::ParserError("Unknown error".to_string())),
+        };
     }
 
     pub fn parse_dump(&mut self) -> Result<Statement, ParserError> {
-        
         return match self.parser.peek_token().token {
             Token::Word(w) => {
                 match SkipprKeyword::from_str(&w.value) {
                     Some(SkipprKeyword::TABLE) => {
-                        
                         self.parser.next_token(); // TABLE
-                        
+
                         let pipeline = self.parser.next_token().token.to_string();
 
                         let schema = match self.parser.peek_token().token.to_string().as_str() {
@@ -622,12 +655,10 @@ impl<'a> SParser<'a> {
                                 self.parser.next_token(); // .
                                 let schema = self.parser.next_token().token.to_string();
                                 Some(schema)
-                            },
-                            _ => {
-                                None
                             }
+                            _ => None,
                         };
-                        
+
                         self.parser.expect_keyword(Keyword::TO)?;
 
                         let target = match self.parser.parse_literal_string() {
@@ -636,62 +667,50 @@ impl<'a> SParser<'a> {
                                 return Err(e);
                             }
                         };
-                        
+
                         Ok(Statement::SchemaDump(SchemaDumpStatement {
                             // pipeline: SchemaDumpSource::Relation(pipeline),
                             pipeline: ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(pipeline))]),
                             schema: schema.map(|s| ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(s))])),
                             target
                         }))
-
                     }
-                    Some(SkipprKeyword::SCHEMA) => { Err(ParserError::ParserError("Use TABLE instead of SCHEMA".to_string())) }
-                    _ => {
-                        Err(ParserError::ParserError("Not implemented".to_string()))
-                    }
+                    Some(SkipprKeyword::SCHEMA) => Err(ParserError::ParserError(
+                        "Use TABLE instead of SCHEMA".to_string(),
+                    )),
+                    _ => Err(ParserError::ParserError("Not implemented".to_string())),
                 }
-            },
-            _ => {
-                Err(ParserError::ParserError("Unknown error".to_string()))
             }
-        }
+            _ => Err(ParserError::ParserError("Unknown error".to_string())),
+        };
     }
 
     pub fn parse_reset(&mut self) -> Result<Statement, ParserError> {
-
         return match self.parser.peek_token().token {
             Token::Word(w) => {
                 match SkipprKeyword::from_str(&w.value) {
                     Some(SkipprKeyword::PIPELINE) => {
-
                         self.parser.next_token(); // PIPELINE
 
                         let table_name = self.parser.parse_object_name(true)?;
 
                         Ok(Statement::PipelineReset(PipelineResetStatement {
-                            pipeline: table_name
+                            pipeline: table_name,
                         }))
-
                     }
-                    _ => {
-                        Err(ParserError::ParserError("Not implemented".to_string()))
-                    }
+                    _ => Err(ParserError::ParserError("Not implemented".to_string())),
                 }
-            },
-            _ => {
-                Err(ParserError::ParserError("Unknown error".to_string()))
             }
-        }
+            _ => Err(ParserError::ParserError("Unknown error".to_string())),
+        };
     }
 
     pub fn parse_drop(&mut self) -> Result<Statement, ParserError> {
-
         return match self.parser.peek_token().token {
             Token::Word(w) => {
                 match SkipprKeyword::from_str(&w.value) {
                     // Support both DUMP SCHEMA ... and DUMP TABLE ...
                     Some(SkipprKeyword::TABLE) => {
-
                         self.parser.next_token(); // SCHEMA/TABLE
 
                         let pipeline = self.parser.next_token().token.to_string();
@@ -701,10 +720,8 @@ impl<'a> SParser<'a> {
                                 self.parser.next_token(); // .
                                 let schema = self.parser.next_token().token.to_string();
                                 Some(schema)
-                            },
-                            _ => {
-                                None
                             }
+                            _ => None,
                         };
 
                         Ok(Statement::TableDrop(TableDropStatement {
@@ -712,44 +729,31 @@ impl<'a> SParser<'a> {
                             table: ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(pipeline))])
                         }))
                         // }
-
                     }
                     Some(SkipprKeyword::PIPELINE) => {
-
                         self.parser.next_token(); // PIPELINE
 
                         let table_name = self.parser.parse_object_name(true)?;
 
                         Ok(Statement::PipelineDrop(PipelineDropStatement {
-                            pipeline: table_name
+                            pipeline: table_name,
                         }))
-
                     }
                     Some(SkipprKeyword::DATABASE) => {
-
                         self.parser.next_token(); // DATABASE
 
                         let database = self.parser.parse_object_name(false)?;
-                        
-                        Ok(Statement::DatabaseDrop(DatabaseDropStatement {
-                            database
-                        }))
+
+                        Ok(Statement::DatabaseDrop(DatabaseDropStatement { database }))
                     }
                     // SCHEMA keyword is deprecated; instruct users
-                    Some(SkipprKeyword::SCHEMA) => {
-                        Err(ParserError::ParserError("Use TABLE instead of SCHEMA".to_string()))
-                    }
-                    _ => {
-                        Err(ParserError::ParserError("Not implemented".to_string()))
-                    },
+                    Some(SkipprKeyword::SCHEMA) => Err(ParserError::ParserError(
+                        "Use TABLE instead of SCHEMA".to_string(),
+                    )),
+                    _ => Err(ParserError::ParserError("Not implemented".to_string())),
                 }
-            },
-            _ => {
-                Err(ParserError::ParserError("Unknown error".to_string()))
             }
-        }
+            _ => Err(ParserError::ParserError("Unknown error".to_string())),
+        };
     }
-
 }
-
-

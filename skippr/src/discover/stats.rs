@@ -30,14 +30,22 @@ impl FieldStats {
     pub fn update_value(&mut self, value: &serde_json::Value) {
         self.total = self.total.saturating_add(1);
         self.sample_total = Some(self.total);
-        if value.is_null() { self.nulls = self.nulls.saturating_add(1); return; }
+        if value.is_null() {
+            self.nulls = self.nulls.saturating_add(1);
+            return;
+        }
         match value {
             serde_json::Value::Number(n) => {
                 if let Some(f) = n.as_f64() {
                     self.min_numeric = Some(self.min_numeric.map(|v| v.min(f)).unwrap_or(f));
                     self.max_numeric = Some(self.max_numeric.map(|v| v.max(f)).unwrap_or(f));
                     // Collect transient sample for histogram
-                    Self::reservoir_push(&mut self.numeric_samples, self.total - self.nulls, f, 2048);
+                    Self::reservoir_push(
+                        &mut self.numeric_samples,
+                        self.total - self.nulls,
+                        f,
+                        2048,
+                    );
                 }
                 self.observe_hll(&value);
                 self.push_example(n.to_string());
@@ -49,7 +57,10 @@ impl FieldStats {
                 self.observe_hll(&value);
                 self.push_example(s.clone());
             }
-            serde_json::Value::Bool(b) => { self.observe_hll(&value); self.push_example(b.to_string()); }
+            serde_json::Value::Bool(b) => {
+                self.observe_hll(&value);
+                self.push_example(b.to_string());
+            }
             _ => {}
         }
         self.last_updated_epoch_ms = current_millis();
@@ -65,7 +76,9 @@ impl FieldStats {
         buf.copy_from_slice(&digest[0..8]);
         let x = u64::from_be_bytes(buf);
         let leading = x.leading_zeros() as u8; // 0..=64
-        if leading > self.hll_rho_max { self.hll_rho_max = leading; }
+        if leading > self.hll_rho_max {
+            self.hll_rho_max = leading;
+        }
     }
 
     pub fn finalize(&mut self) {
@@ -77,14 +90,26 @@ impl FieldStats {
             // Estimate ~ 2^R / phi, phi≈0.77351; even R=0 yields ~1.29 → 1
             let r = self.hll_rho_max as f64;
             let estimate = (2f64.powf(r) / 0.77351f64).round() as u64;
-            if estimate > 0 { self.approx_distinct = Some(estimate); }
+            if estimate > 0 {
+                self.approx_distinct = Some(estimate);
+            }
         }
         // Histogram for numeric fields (if enabled via config)
         if crate::helpers::configuration::Config::stats_histogram_enabled() {
             let non_null = self.total.saturating_sub(self.nulls);
             if non_null > 0 && (!self.numeric_samples.is_empty()) {
-                let min_v = self.min_numeric.unwrap_or_else(|| self.numeric_samples.iter().cloned().fold(f64::INFINITY, f64::min));
-                let max_v = self.max_numeric.unwrap_or_else(|| self.numeric_samples.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+                let min_v = self.min_numeric.unwrap_or_else(|| {
+                    self.numeric_samples
+                        .iter()
+                        .cloned()
+                        .fold(f64::INFINITY, f64::min)
+                });
+                let max_v = self.max_numeric.unwrap_or_else(|| {
+                    self.numeric_samples
+                        .iter()
+                        .cloned()
+                        .fold(f64::NEG_INFINITY, f64::max)
+                });
                 let bins = 20usize;
                 let mut counts = vec![0u64; bins];
                 if min_v == max_v {
@@ -93,8 +118,12 @@ impl FieldStats {
                     let width = (max_v - min_v) / bins as f64;
                     for &v in &self.numeric_samples {
                         let mut idx = ((v - min_v) / width).floor() as isize;
-                        if idx < 0 { idx = 0; }
-                        if idx as usize >= bins { idx = bins as isize - 1; }
+                        if idx < 0 {
+                            idx = 0;
+                        }
+                        if idx as usize >= bins {
+                            idx = bins as isize - 1;
+                        }
                         counts[idx as usize] = counts[idx as usize].saturating_add(1);
                     }
                     // Scale sample counts up to total non-null count
@@ -116,13 +145,19 @@ impl FieldStats {
     }
 
     #[inline]
-    pub fn examples(&self) -> &[String] { &self.examples }
+    pub fn examples(&self) -> &[String] {
+        &self.examples
+    }
 
     fn push_example(&mut self, val: String) {
         // Keep a small, unique set of short examples in-memory only
-        if self.examples.len() >= 8 { return; }
+        if self.examples.len() >= 8 {
+            return;
+        }
         let mut v = val;
-        if v.len() > 64 { v.truncate(64); }
+        if v.len() > 64 {
+            v.truncate(64);
+        }
         if !self.examples.iter().any(|e| e == &v) {
             self.examples.push(v);
         }
@@ -130,10 +165,18 @@ impl FieldStats {
 
     #[inline]
     fn reservoir_push(buf: &mut Vec<f64>, seen_non_null: u64, val: f64, capacity: usize) {
-        if buf.len() < capacity { buf.push(val); return; }
+        if buf.len() < capacity {
+            buf.push(val);
+            return;
+        }
         // Deterministic pseudo-random replacement based on seen count
-        let idx = ((seen_non_null as usize).wrapping_mul(1103515245).wrapping_add(12345)) % capacity;
-        if capacity > 0 { buf[idx] = val; }
+        let idx = ((seen_non_null as usize)
+            .wrapping_mul(1103515245)
+            .wrapping_add(12345))
+            % capacity;
+        if capacity > 0 {
+            buf[idx] = val;
+        }
     }
 }
 
@@ -146,11 +189,18 @@ pub struct NamespaceStats {
 
 impl NamespaceStats {
     pub fn new(namespace: &str) -> Self {
-        Self { namespace: namespace.to_string(), fields: HashMap::new(), last_updated_epoch_ms: current_millis() }
+        Self {
+            namespace: namespace.to_string(),
+            fields: HashMap::new(),
+            last_updated_epoch_ms: current_millis(),
+        }
     }
 
     pub fn update_field(&mut self, field: &str, value: &serde_json::Value) {
-        let entry = self.fields.entry(field.to_string()).or_insert_with(FieldStats::default);
+        let entry = self
+            .fields
+            .entry(field.to_string())
+            .or_insert_with(FieldStats::default);
         entry.update_value(value);
         self.last_updated_epoch_ms = current_millis();
     }
@@ -158,7 +208,10 @@ impl NamespaceStats {
 
 fn current_millis() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[cfg(test)]
@@ -216,14 +269,15 @@ mod tests {
         f2.update_value(&json!(null));
         assert!(f2.last_updated_epoch_ms >= prev);
         // no approx when only nulls
-        let mut f3 = f2.clone(); f3.finalize();
+        let mut f3 = f2.clone();
+        f3.finalize();
         assert!(f3.approx_distinct.is_none());
     }
 
     #[test]
     fn ignores_arrays_and_objects_for_bounds() {
         let mut ns = NamespaceStats::new("ns1");
-        ns.update_field("x", &json!([1,2,3]));
+        ns.update_field("x", &json!([1, 2, 3]));
         ns.update_field("x", &json!({"a":1}));
         let f = ns.fields.get("x").unwrap();
         assert_eq!(f.total, 2);
@@ -254,7 +308,9 @@ mod tests {
     fn numeric_histogram_is_generated() {
         crate::helpers::configuration::Config::set_evncache("STATS_HISTOGRAM_ENABLED", "true");
         let mut ns = NamespaceStats::new("ns1");
-        for i in 0..1000 { ns.update_field("x", &json!(i as f64)); }
+        for i in 0..1000 {
+            ns.update_field("x", &json!(i as f64));
+        }
         let mut f = ns.fields.get("x").unwrap().clone();
         f.finalize();
         assert!(f.histogram_bins.is_some());
@@ -264,5 +320,3 @@ mod tests {
         assert!(f.histogram_max.is_some());
     }
 }
-
-

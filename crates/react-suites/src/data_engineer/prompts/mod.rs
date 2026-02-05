@@ -37,4 +37,3 @@ pub fn review_system_prompt() -> String {
 pub fn review_tool_card() -> String {
     crate::prompts::review::tool_card()
 }
-

@@ -1,9 +1,9 @@
 use crate::llm::ChatMessage;
+use dashmap::{DashMap, DashSet};
+use once_cell::sync::OnceCell;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use once_cell::sync::OnceCell;
-use dashmap::{DashMap, DashSet};
 
 fn env_truthy(key: &str) -> bool {
     std::env::var(key)
@@ -206,7 +206,10 @@ pub fn build_parts_for_thread(thread_id: &str, parts: &[PartInput]) -> BuiltPart
         }));
     }
 
-    BuiltParts { parts: out_parts, part_hashes: out_hashes }
+    BuiltParts {
+        parts: out_parts,
+        part_hashes: out_hashes,
+    }
 }
 
 #[cfg(test)]
@@ -216,8 +219,14 @@ mod tests {
     #[test]
     fn prompt_hash_is_stable_for_same_messages() {
         let msgs = vec![
-            ChatMessage { role: "system".to_string(), content: "s".to_string() },
-            ChatMessage { role: "user".to_string(), content: "u".to_string() },
+            ChatMessage {
+                role: "system".to_string(),
+                content: "s".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "u".to_string(),
+            },
         ];
         let h1 = prompt_hash_for_messages(&msgs);
         let h2 = prompt_hash_for_messages(&msgs);
@@ -229,8 +238,14 @@ mod tests {
     fn parts_dedup_marks_unchanged() {
         let tid = "t1";
         let parts = vec![
-            PartInput { name: "a".to_string(), text: "hello".to_string() },
-            PartInput { name: "b".to_string(), text: "world".to_string() },
+            PartInput {
+                name: "a".to_string(),
+                text: "hello".to_string(),
+            },
+            PartInput {
+                name: "b".to_string(),
+                text: "world".to_string(),
+            },
         ];
         let first = build_parts_for_thread(tid, &parts);
         assert_eq!(first.parts.len(), 2);
@@ -241,15 +256,29 @@ mod tests {
 
         let second = build_parts_for_thread(tid, &parts);
         assert_eq!(second.parts.len(), 2);
-        assert!(second.parts[0].get("text").and_then(|v| v.as_str()).unwrap().starts_with("unchanged: "));
-        assert!(second.parts[1].get("text").and_then(|v| v.as_str()).unwrap().starts_with("unchanged: "));
+        assert!(second.parts[0]
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .starts_with("unchanged: "));
+        assert!(second.parts[1]
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .starts_with("unchanged: "));
     }
 
     #[test]
     fn parts_dedup_marks_unchanged_if_seen_before_not_just_last() {
         let tid = "t_seen";
-        let hello = PartInput { name: "a".to_string(), text: "hello".to_string() };
-        let world = PartInput { name: "a".to_string(), text: "world".to_string() };
+        let hello = PartInput {
+            name: "a".to_string(),
+            text: "hello".to_string(),
+        };
+        let world = PartInput {
+            name: "a".to_string(),
+            text: "world".to_string(),
+        };
 
         let first = build_parts_for_thread(tid, &[hello.clone()]);
         let t1 = first.parts[0].get("text").and_then(|v| v.as_str()).unwrap();
@@ -257,7 +286,10 @@ mod tests {
         assert!(t1.contains(&sha256_hex_str("hello")));
 
         let second = build_parts_for_thread(tid, &[world.clone()]);
-        let t2 = second.parts[0].get("text").and_then(|v| v.as_str()).unwrap();
+        let t2 = second.parts[0]
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap();
         assert!(t2.contains("world"));
         assert!(t2.contains(&sha256_hex_str("world")));
 
@@ -289,8 +321,14 @@ mod tests {
             text: "some system prompt\n\nsome previous user prompt\n\nbrand new tail".to_string(),
         };
         let second = build_parts_for_thread(tid, &[p2]);
-        let t = second.parts[0].get("text").and_then(|v| v.as_str()).unwrap();
-        assert!(t.contains(&format!("unchanged: {}", sha256_hex_str("some system prompt"))));
+        let t = second.parts[0]
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert!(t.contains(&format!(
+            "unchanged: {}",
+            sha256_hex_str("some system prompt")
+        )));
         assert!(t.contains(&format!(
             "unchanged: {}",
             sha256_hex_str("some previous user prompt")

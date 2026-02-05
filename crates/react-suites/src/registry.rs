@@ -9,7 +9,9 @@ pub struct SuiteRegistry {
 
 impl SuiteRegistry {
     pub fn new() -> Self {
-        Self { suites: HashMap::new() }
+        Self {
+            suites: HashMap::new(),
+        }
     }
 
     pub fn register<S: Suite + 'static>(&mut self, suite: S) {
@@ -34,4 +36,3 @@ pub fn default_registry() -> SuiteRegistry {
     reg.register(crate::kb::KbSuite);
     reg
 }
-

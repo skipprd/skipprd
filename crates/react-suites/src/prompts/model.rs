@@ -138,4 +138,3 @@ Usage guidance:
 - Use vect_query scope:"metric" to find MetricFlow artifacts and scope:"artifact" to list any artifacts.
 - Map time-relative constraints (e.g., "joined over 1 day ago") to discovered timestamp fields (e.g., created_at, signup_ts, verified_at) using reasonable default comparisons; prefer dataset-qualified references."#.to_string()
 }
-

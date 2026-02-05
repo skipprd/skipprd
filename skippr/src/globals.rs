@@ -1,14 +1,14 @@
-use std::sync::{Arc};
 use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use arrow::datatypes::Schema;
 use once_cell::sync::Lazy;
 
+use crate::discover::PipelineMetadata;
 use crate::helpers::logger::Logger;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::metrics::Metrics;
-use crate::discover::PipelineMetadata;
 
 /// Process-level runtime flags used by ingestion and other subsystems.
 pub static RUNNING: Lazy<TimedRwLock<AtomicBool>> =
@@ -37,4 +37,3 @@ pub static ARROW_SCHEMA: Lazy<dashmap::DashMap<String, ArcSwap<Schema>>> =
     Lazy::new(|| dashmap::DashMap::new());
 pub static ARROW_SCHEMA_VERSION: Lazy<dashmap::DashMap<String, AtomicU64>> =
     Lazy::new(|| dashmap::DashMap::new());
-

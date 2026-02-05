@@ -21,7 +21,9 @@ impl LanceVectorStore {
         crate::vector::lance_store::LanceDbStore::new(&uri)
     }
 
-    pub fn global_dbt_examples_store(&self) -> crate::vector::global_lance_store::GlobalLanceDbStore {
+    pub fn global_dbt_examples_store(
+        &self,
+    ) -> crate::vector::global_lance_store::GlobalLanceDbStore {
         let uri = self.keyspace.global_dbt_examples_lancedb_uri();
         crate::vector::global_lance_store::GlobalLanceDbStore::new(uri)
     }
@@ -54,7 +56,10 @@ impl VectorStore for LanceVectorStore {
         k: usize,
         scope_filter: Option<&str>,
     ) -> Result<Vec<ScoredVectorChunk>, String> {
-        let out = self.store_for(scope).query(query_vec, k, scope_filter).await?;
+        let out = self
+            .store_for(scope)
+            .query(query_vec, k, scope_filter)
+            .await?;
         Ok(out
             .into_iter()
             .map(|s| ScoredVectorChunk {
@@ -73,12 +78,17 @@ impl VectorStore for LanceVectorStore {
             .collect())
     }
 
-    async fn delete_thread_embeddings(&self, scope: &RequestScope, thread_id: &str) -> Result<(), String> {
-        self.store_for(scope).delete_thread_embeddings(thread_id).await
+    async fn delete_thread_embeddings(
+        &self,
+        scope: &RequestScope,
+        thread_id: &str,
+    ) -> Result<(), String> {
+        self.store_for(scope)
+            .delete_thread_embeddings(thread_id)
+            .await
     }
 
     async fn delete_project_embeddings(&self, scope: &RequestScope) -> Result<(), String> {
         self.store_for(scope).delete_pipeline_embeddings().await
     }
 }
-

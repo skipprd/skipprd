@@ -1,6 +1,9 @@
 use crate::discover::stats::{DatasetFieldStats, FieldStats};
 
-pub fn dataset_field_stats_from_catalog_json(dataset_id: &str, val: &serde_json::Value) -> Option<DatasetFieldStats> {
+pub fn dataset_field_stats_from_catalog_json(
+    dataset_id: &str,
+    val: &serde_json::Value,
+) -> Option<DatasetFieldStats> {
     let fields = val.get("fields")?.as_array()?;
     let mut ns = DatasetFieldStats::new(dataset_id);
     for f in fields {
@@ -32,4 +35,3 @@ pub fn dataset_field_stats_from_catalog_json(dataset_id: &str, val: &serde_json:
     }
     Some(ns)
 }
-

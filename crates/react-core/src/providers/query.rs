@@ -22,7 +22,6 @@ pub trait QueryProvider: Send + Sync {
     ///
     /// Suites should treat this as the canonical concurrency limit for query batching.
     fn max_concurrency(&self) -> usize {
-        crate::providers::limits::DEFAULT_ATHENA_MAX_CONCURRENCY
+        crate::providers::limits::DEFAULT_WAREHOUSE_MAX_CONCURRENCY
     }
 }
-

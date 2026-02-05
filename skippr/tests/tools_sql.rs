@@ -6,7 +6,13 @@ async fn test_sql_run_enforces_limit() {
     let ctx = SessionContext::new();
     let df = ctx.sql("SELECT 1 AS x").await.unwrap();
     ctx.register_table("t", df.into_view()).unwrap();
-    let res = ctx.sql("SELECT x FROM t LIMIT 1").await.unwrap().collect().await.unwrap();
+    let res = ctx
+        .sql("SELECT x FROM t LIMIT 1")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
     assert_eq!(res.len(), 1);
 }
 
@@ -20,5 +26,3 @@ async fn test_sql_schema_describe_table() {
     let batches = df.collect().await.unwrap();
     assert_eq!(batches[0].schema().fields().len(), 2);
 }
-
-

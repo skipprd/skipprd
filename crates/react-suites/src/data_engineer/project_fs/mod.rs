@@ -44,7 +44,12 @@ pub fn create_patch_text(old: &str, new: &str) -> String {
 ///
 /// This is intended for deterministic/internal patch generation (not LLM authoring).
 /// For new files, it uses `--- /dev/null` which is required by the patch protocol.
-pub fn create_git_patch_text(old: &str, new: &str, rel_path: &str, existed: bool) -> Result<String, String> {
+pub fn create_git_patch_text(
+    old: &str,
+    new: &str,
+    rel_path: &str,
+    existed: bool,
+) -> Result<String, String> {
     let rel = normalize_rel_path(rel_path)?;
     let base = diffy::create_patch(old, new).to_string();
     let mut lines: Vec<&str> = base.lines().collect();
@@ -113,7 +118,12 @@ fn join_lines_preserve_trailing_newline(lines: &[String], had_trailing_newline: 
 /// Apply a 1-based inclusive line replacement to a text blob.
 ///
 /// Supports insertion by specifying `start_line == end_line + 1`.
-pub fn apply_replace_range(old_text: &str, start_line: usize, end_line: usize, new_text: &str) -> Result<String, String> {
+pub fn apply_replace_range(
+    old_text: &str,
+    start_line: usize,
+    end_line: usize,
+    new_text: &str,
+) -> Result<String, String> {
     let (mut lines, had_trailing_newline) = split_lines_preserve_trailing_newline(old_text);
     let n = lines.len();
     if start_line == 0 {
@@ -123,10 +133,17 @@ pub fn apply_replace_range(old_text: &str, start_line: usize, end_line: usize, n
         return Err(format!("end_line out of bounds: {} > {}", end_line, n));
     }
     if start_line > n + 1 {
-        return Err(format!("start_line out of bounds: {} > {}", start_line, n + 1));
+        return Err(format!(
+            "start_line out of bounds: {} > {}",
+            start_line,
+            n + 1
+        ));
     }
     if start_line > end_line + 1 {
-        return Err(format!("invalid range: start_line {} > end_line {} + 1", start_line, end_line));
+        return Err(format!(
+            "invalid range: start_line {} > end_line {} + 1",
+            start_line, end_line
+        ));
     }
 
     // Convert to 0-based indices in the current line vector.
@@ -142,7 +159,10 @@ pub fn apply_replace_range(old_text: &str, start_line: usize, end_line: usize, n
     }
 
     lines.splice(start_idx..end_idx_excl, new_lines.drain(..));
-    Ok(join_lines_preserve_trailing_newline(&lines, had_trailing_newline))
+    Ok(join_lines_preserve_trailing_newline(
+        &lines,
+        had_trailing_newline,
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -163,7 +183,11 @@ pub fn apply_replace_list(old_text: &str, edits: &[ReplaceListEdit]) -> Result<S
     }
 
     let mut sorted: Vec<ReplaceListEdit> = edits.to_vec();
-    sorted.sort_by(|a, b| a.start_line.cmp(&b.start_line).then(a.end_line.cmp(&b.end_line)));
+    sorted.sort_by(|a, b| {
+        a.start_line
+            .cmp(&b.start_line)
+            .then(a.end_line.cmp(&b.end_line))
+    });
 
     // Validate and check overlaps in 1-based coordinates.
     let mut prev_end: Option<usize> = None;
@@ -175,7 +199,11 @@ pub fn apply_replace_list(old_text: &str, edits: &[ReplaceListEdit]) -> Result<S
             return Err(format!("end_line out of bounds: {} > {}", e.end_line, n));
         }
         if e.start_line > n + 1 {
-            return Err(format!("start_line out of bounds: {} > {}", e.start_line, n + 1));
+            return Err(format!(
+                "start_line out of bounds: {} > {}",
+                e.start_line,
+                n + 1
+            ));
         }
         if e.start_line > e.end_line + 1 {
             return Err(format!(
@@ -212,7 +240,10 @@ pub fn apply_replace_list(old_text: &str, edits: &[ReplaceListEdit]) -> Result<S
         lines.splice(start_idx..end_idx_excl, new_lines.drain(..));
     }
 
-    Ok(join_lines_preserve_trailing_newline(&lines, had_trailing_newline))
+    Ok(join_lines_preserve_trailing_newline(
+        &lines,
+        had_trailing_newline,
+    ))
 }
 
 pub fn normalize_rel_path(rel: &str) -> Result<String, String> {
@@ -224,7 +255,11 @@ pub fn normalize_rel_path(rel: &str) -> Result<String, String> {
 }
 
 pub fn join_storage_key(ctx: &AgentCtx, rel: &str) -> String {
-    let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+    let base = ctx
+        .keyspace
+        .dbt_prefix(&ctx.scope)
+        .trim_end_matches('/')
+        .to_string();
     format!("{}/{}", base, rel)
 }
 
@@ -235,12 +270,23 @@ pub async fn list_files(ctx: &AgentCtx, prefix: &str, limit: usize) -> Result<Va
         normalize_rel_path(prefix)?
     };
     let key_prefix = join_storage_key(ctx, &rel_prefix.trim_start_matches('/'));
-    let mut keys = ctx.storage.list_prefix(&key_prefix).await.unwrap_or_default();
+    let mut keys = ctx
+        .storage
+        .list_prefix(&key_prefix)
+        .await
+        .unwrap_or_default();
     keys.sort();
     let mut out: Vec<Value> = Vec::new();
     for k in keys.into_iter().take(limit) {
         let rel = k
-            .strip_prefix(&(ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/"))
+            .strip_prefix(
+                &(ctx
+                    .keyspace
+                    .dbt_prefix(&ctx.scope)
+                    .trim_end_matches('/')
+                    .to_string()
+                    + "/"),
+            )
             .unwrap_or(&k)
             .to_string();
         out.push(serde_json::json!({"path": rel, "key": k}));
@@ -273,13 +319,17 @@ pub async fn get_json(ctx: &AgentCtx, path: &str, pointer: Option<&str>) -> Resu
     let bytes = match ctx.storage.get_bytes(&key).await {
         Ok(b) => b,
         Err(e) => {
-            return Ok(serde_json::json!({"ok": false, "path": rel, "key": key, "error": format!("not found or failed to fetch: {}", e)}))
+            return Ok(
+                serde_json::json!({"ok": false, "path": rel, "key": key, "error": format!("not found or failed to fetch: {}", e)}),
+            )
         }
     };
     let v: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
         Err(e) => {
-            return Ok(serde_json::json!({"ok": false, "path": rel, "key": key, "error": format!("failed to parse json: {}", e)}));
+            return Ok(
+                serde_json::json!({"ok": false, "path": rel, "key": key, "error": format!("failed to parse json: {}", e)}),
+            );
         }
     };
     if let Some(ptr) = pointer {
@@ -288,32 +338,49 @@ pub async fn get_json(ctx: &AgentCtx, path: &str, pointer: Option<&str>) -> Resu
             return Ok(serde_json::json!({"ok": true, "path": rel, "key": key, "json": v}));
         }
         if let Some(sub) = v.pointer(ptr) {
-            return Ok(serde_json::json!({"ok": true, "path": rel, "key": key, "pointer": ptr, "json": sub}));
+            return Ok(
+                serde_json::json!({"ok": true, "path": rel, "key": key, "pointer": ptr, "json": sub}),
+            );
         }
-        return Ok(serde_json::json!({"ok": false, "path": rel, "key": key, "pointer": ptr, "error": "pointer not found"}));
+        return Ok(
+            serde_json::json!({"ok": false, "path": rel, "key": key, "pointer": ptr, "error": "pointer not found"}),
+        );
     }
     Ok(serde_json::json!({"ok": true, "path": rel, "key": key, "json": v}))
 }
 
-pub async fn manifest_find(ctx: &AgentCtx, path: &str, unique_id: Option<&str>, name: Option<&str>, resource_type: Option<&str>, limit: usize) -> Result<Value, String> {
+pub async fn manifest_find(
+    ctx: &AgentCtx,
+    path: &str,
+    unique_id: Option<&str>,
+    name: Option<&str>,
+    resource_type: Option<&str>,
+    limit: usize,
+) -> Result<Value, String> {
     let rel = normalize_rel_path(path)?;
     let key = join_storage_key(ctx, &rel);
     let bytes = match ctx.storage.get_bytes(&key).await {
         Ok(b) => b,
         Err(e) => {
-            return Ok(serde_json::json!({"ok": false, "path": rel, "key": key, "error": format!("not found or failed to fetch: {}", e)}))
+            return Ok(
+                serde_json::json!({"ok": false, "path": rel, "key": key, "error": format!("not found or failed to fetch: {}", e)}),
+            )
         }
     };
     let v: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
         Err(e) => {
-            return Ok(serde_json::json!({"ok": false, "path": rel, "key": key, "error": format!("failed to parse json: {}", e)}));
+            return Ok(
+                serde_json::json!({"ok": false, "path": rel, "key": key, "error": format!("failed to parse json: {}", e)}),
+            );
         }
     };
     let nodes = match v.get("nodes").and_then(|n| n.as_object()) {
         Some(n) => n,
         None => {
-            return Ok(serde_json::json!({"ok": false, "path": rel, "key": key, "error": "manifest missing nodes"}))
+            return Ok(
+                serde_json::json!({"ok": false, "path": rel, "key": key, "error": "manifest missing nodes"}),
+            )
         }
     };
 
@@ -331,14 +398,28 @@ pub async fn manifest_find(ctx: &AgentCtx, path: &str, unique_id: Option<&str>, 
             }
         }
         if let Some(ref rt) = resource_type {
-            let node_rt = node.get("resource_type").and_then(|x| x.as_str()).unwrap_or("");
+            let node_rt = node
+                .get("resource_type")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
             if node_rt != *rt {
                 continue;
             }
         }
         let mut slim = serde_json::Map::new();
         slim.insert("unique_id".to_string(), serde_json::json!(uid));
-        for k in ["resource_type", "name", "original_file_path", "path", "package_name", "database", "schema", "alias"].iter() {
+        for k in [
+            "resource_type",
+            "name",
+            "original_file_path",
+            "path",
+            "package_name",
+            "database",
+            "schema",
+            "alias",
+        ]
+        .iter()
+        {
             if let Some(vv) = node.get(*k) {
                 slim.insert((*k).to_string(), vv.clone());
             }
@@ -364,13 +445,21 @@ pub async fn apply_patch(
 ) -> Result<PatchOutcome, String> {
     let rel = normalize_rel_path(path)?;
     let key = join_storage_key(ctx, &rel);
-    let existing = ctx.storage.get_bytes(&key).await.ok().map(|b| String::from_utf8_lossy(&b).to_string());
+    let existing = ctx
+        .storage
+        .get_bytes(&key)
+        .await
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).to_string());
     let existed = existing.is_some();
     let old = existing.unwrap_or_default();
     let base_hash = sha256_hex(&old);
     if let Some(expected) = base_sha256 {
         if expected != base_hash {
-            return Err(format!("base_sha256 mismatch; expected {}, got {}", expected, base_hash));
+            return Err(format!(
+                "base_sha256 mismatch; expected {}, got {}",
+                expected, base_hash
+            ));
         }
     }
 
@@ -384,7 +473,11 @@ pub async fn apply_patch(
             if existed && is_new_file_patch {
                 return Err("invalid patch: patch indicates new file creation ('--- /dev/null') but the file already exists; use structured patch primitives (replace_file/range/list) so the system can rewrite safely".to_string());
             }
-            if existed && patch_text.lines().any(|l| l.trim_start().starts_with("new file mode ")) {
+            if existed
+                && patch_text
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("new file mode "))
+            {
                 return Err("invalid patch: patch indicates new file creation ('new file mode') but the file already exists; use structured patch primitives (replace_file/range/list)".to_string());
             }
             if !existed && !is_new_file_patch {
@@ -412,7 +505,8 @@ pub async fn apply_patch(
                     let fixed = repair_unified_hunk_headers(&unified);
                     if fixed != unified {
                         patch_src = Cow::Owned(fixed);
-                        Patch::from_str(patch_src.as_ref()).map_err(|e2| format!("invalid patch: {}", e2))?
+                        Patch::from_str(patch_src.as_ref())
+                            .map_err(|e2| format!("invalid patch: {}", e2))?
                     } else {
                         return Err(format!("invalid patch: {}", emsg));
                     }
@@ -424,7 +518,9 @@ pub async fn apply_patch(
                     // Fallback: if the patch looks like a full-file rewrite (single hunk replacing the full file),
                     // reconstruct the new content directly from the hunk body. This is much more robust for
                     // large/chaotic files where context matching often fails.
-                    if let Some(repl) = try_reconstruct_full_file_replacement(patch_src.as_ref(), &old) {
+                    if let Some(repl) =
+                        try_reconstruct_full_file_replacement(patch_src.as_ref(), &old)
+                    {
                         repl
                     } else {
                         return Err(format!("patch apply failed: {}", e));
@@ -641,7 +737,10 @@ fn strip_git_preamble_to_unified(patch_chunk: &str) -> Result<String, String> {
         out.push(t.to_string());
     }
     if out.is_empty() {
-        return Err("invalid patch bundle: could not find unified diff header line starting with '--- '".to_string());
+        return Err(
+            "invalid patch bundle: could not find unified diff header line starting with '--- '"
+                .to_string(),
+        );
     }
     Ok(out.join("\n"))
 }
@@ -685,7 +784,10 @@ fn split_git_patch_bundle(patch_text: &str) -> Result<Vec<ParsedFilePatch>, Stri
     if !has_diff_git {
         let rel = parse_patch_target_rel_path(s)?;
         let unified = strip_git_preamble_to_unified(s)?;
-        return Ok(vec![ParsedFilePatch { rel_path: rel, patch_text: unified }]);
+        return Ok(vec![ParsedFilePatch {
+            rel_path: rel,
+            patch_text: unified,
+        }]);
     }
 
     let mut chunks: Vec<String> = Vec::new();
@@ -706,7 +808,10 @@ fn split_git_patch_bundle(patch_text: &str) -> Result<Vec<ParsedFilePatch>, Stri
     for ch in chunks {
         let rel = parse_patch_target_rel_path(&ch)?;
         let unified = strip_git_preamble_to_unified(&ch)?;
-        out.push(ParsedFilePatch { rel_path: rel, patch_text: unified });
+        out.push(ParsedFilePatch {
+            rel_path: rel,
+            patch_text: unified,
+        });
     }
     if out.is_empty() {
         return Err("patch bundle contained no file diffs".to_string());
@@ -722,7 +827,15 @@ pub async fn apply_patch_bundle(
     let files = split_git_patch_bundle(patch_text)?;
     let mut outcomes: Vec<PatchOutcome> = Vec::new();
     for f in files {
-        let out = apply_patch(ctx, datasets, &f.rel_path, &f.patch_text, None, PatchApplyKind::UnifiedDiff).await?;
+        let out = apply_patch(
+            ctx,
+            datasets,
+            &f.rel_path,
+            &f.patch_text,
+            None,
+            PatchApplyKind::UnifiedDiff,
+        )
+        .await?;
         outcomes.push(out);
     }
     Ok(outcomes)
@@ -849,19 +962,17 @@ async fn postprocess_schema_yml(
     // Dynamic, grounded sources:
     // - list_datasets is advisory only (can be incomplete due to permissions/caching).
     // - The only fact we trust is that QueryProvider.schema(<fqn>) succeeds.
-    let q = ctx
-        .query
-        .as_ref()
-        .ok_or_else(|| "query provider missing for schema.yml postprocess".to_string())?;
+    let q = ctx.warehouse.as_ref();
     let cfg = crate::config::resolved_config_from_ctx(ctx)
         .ok_or_else(|| "resolved_config missing for schema.yml postprocess".to_string())?;
-    let want_catalog = cfg.providers.athena.target_catalog.clone();
-    let want_schema = cfg.providers.athena.source_schema.clone();
+    let want_catalog = cfg.providers.warehouse.container.clone();
+    let want_schema = cfg.providers.warehouse.namespace.clone();
     const MAX_PROVED_SOURCES: usize = 200;
 
     fn parse_sources_from_schema_yml(root: &YamlMapping) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = Vec::new();
-        let Some(YamlValue::Sequence(srcs)) = root.get(&YamlValue::String("sources".to_string())) else {
+        let Some(YamlValue::Sequence(srcs)) = root.get(&YamlValue::String("sources".to_string()))
+        else {
             return out;
         };
         for src in srcs.iter() {
@@ -905,16 +1016,28 @@ async fn postprocess_schema_yml(
             tables.sort();
             tables.dedup();
             let mut src = YamlMapping::new();
-            src.insert(YamlValue::String("name".to_string()), YamlValue::String(db.clone()));
-            src.insert(YamlValue::String("database".to_string()), YamlValue::String(cat));
-            src.insert(YamlValue::String("schema".to_string()), YamlValue::String(db));
+            src.insert(
+                YamlValue::String("name".to_string()),
+                YamlValue::String(db.clone()),
+            );
+            src.insert(
+                YamlValue::String("database".to_string()),
+                YamlValue::String(cat),
+            );
+            src.insert(
+                YamlValue::String("schema".to_string()),
+                YamlValue::String(db),
+            );
             let mut tables_seq: Vec<YamlValue> = Vec::new();
             for t in tables.into_iter() {
                 let mut tm = YamlMapping::new();
                 tm.insert(YamlValue::String("name".to_string()), YamlValue::String(t));
                 tables_seq.push(YamlValue::Mapping(tm));
             }
-            src.insert(YamlValue::String("tables".to_string()), YamlValue::Sequence(tables_seq));
+            src.insert(
+                YamlValue::String("tables".to_string()),
+                YamlValue::Sequence(tables_seq),
+            );
             sources_seq.push(YamlValue::Mapping(src));
         }
         YamlValue::Sequence(sources_seq)
@@ -923,7 +1046,8 @@ async fn postprocess_schema_yml(
     let mut root = if content.trim().is_empty() {
         YamlMapping::new()
     } else {
-        let v: YamlValue = serde_yaml::from_str(content).map_err(|e| format!("schema.yml parse error: {}", e))?;
+        let v: YamlValue =
+            serde_yaml::from_str(content).map_err(|e| format!("schema.yml parse error: {}", e))?;
         match v {
             YamlValue::Mapping(m) => m,
             _ => return Err("models/schema.yml must be a YAML mapping at top level".to_string()),
@@ -931,7 +1055,10 @@ async fn postprocess_schema_yml(
     };
 
     if !root.contains_key(&YamlValue::String("version".to_string())) {
-        root.insert(YamlValue::String("version".to_string()), YamlValue::Number(2.into()));
+        root.insert(
+            YamlValue::String("version".to_string()),
+            YamlValue::Number(2.into()),
+        );
     }
 
     // Candidate sources:
@@ -951,7 +1078,12 @@ async fn postprocess_schema_yml(
 
     // (B) Staging model SQL source() calls
     {
-        let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/";
+        let base = ctx
+            .keyspace
+            .dbt_prefix(&ctx.scope)
+            .trim_end_matches('/')
+            .to_string()
+            + "/";
         let staging_prefix = format!("{}models/staging/", base);
         if let Ok(keys) = ctx.storage.list_prefix(&staging_prefix).await {
             for k in keys {
@@ -960,7 +1092,9 @@ async fn postprocess_schema_yml(
                 }
                 if let Ok(bytes) = ctx.storage.get_bytes(&k).await {
                     let sql = String::from_utf8_lossy(&bytes).to_string();
-                    for (schema, table) in crate::data_engineer::naming::extract_source_calls(&sql).into_iter() {
+                    for (schema, table) in
+                        crate::data_engineer::naming::extract_source_calls(&sql).into_iter()
+                    {
                         if schema == want_schema && !table.trim().is_empty() {
                             candidates.insert(format!("{}.{}.{}", want_catalog, schema, table));
                         }
@@ -1001,7 +1135,8 @@ fn postprocess_packages_yml(content: &str) -> Result<String, String> {
     let mut root = if content.trim().is_empty() {
         YamlMapping::new()
     } else {
-        let v: YamlValue = serde_yaml::from_str(content).map_err(|e| format!("packages.yml parse error: {}", e))?;
+        let v: YamlValue = serde_yaml::from_str(content)
+            .map_err(|e| format!("packages.yml parse error: {}", e))?;
         match v {
             YamlValue::Mapping(m) => m,
             _ => return Err("packages.yml must be a YAML mapping at top level".to_string()),
@@ -1016,14 +1151,19 @@ fn postprocess_packages_yml(content: &str) -> Result<String, String> {
 
     let mut by_key: BTreeMap<String, YamlValue> = BTreeMap::new();
     for item in packages_seq.into_iter() {
-        let YamlValue::Mapping(m) = item else { continue };
+        let YamlValue::Mapping(m) = item else {
+            continue;
+        };
         let key = package_entry_key(&m).unwrap_or_else(|| format!("unknown:{}", by_key.len()));
         let canonical = canonicalize_package_entry(&m);
         by_key.insert(key, YamlValue::Mapping(canonical));
     }
 
     let normalized: Vec<YamlValue> = by_key.into_values().collect();
-    root.insert(YamlValue::String("packages".to_string()), YamlValue::Sequence(normalized));
+    root.insert(
+        YamlValue::String("packages".to_string()),
+        YamlValue::Sequence(normalized),
+    );
     serde_yaml::to_string(&YamlValue::Mapping(root)).map_err(|e| e.to_string())
 }
 
@@ -1049,7 +1189,10 @@ fn canonicalize_package_entry(m: &YamlMapping) -> YamlMapping {
     let git = yaml_string_value(m, "git");
     let local = yaml_string_value(m, "local");
     if let Some(p) = package {
-        out.insert(YamlValue::String("package".to_string()), YamlValue::String(p));
+        out.insert(
+            YamlValue::String("package".to_string()),
+            YamlValue::String(p),
+        );
     } else if let Some(g) = git {
         out.insert(YamlValue::String("git".to_string()), YamlValue::String(g));
     } else if let Some(l) = local {
@@ -1062,7 +1205,13 @@ fn canonicalize_package_entry(m: &YamlMapping) -> YamlMapping {
     let mut extra: BTreeMap<String, YamlValue> = BTreeMap::new();
     for (k, v) in m {
         let Some(ks) = k.as_str() else { continue };
-        if ks == "package" || ks == "git" || ks == "local" || ks == "version" || ks == "revision" || ks == "subdir" {
+        if ks == "package"
+            || ks == "git"
+            || ks == "local"
+            || ks == "version"
+            || ks == "revision"
+            || ks == "subdir"
+        {
             continue;
         }
         extra.insert(ks.to_string(), v.clone());
@@ -1089,23 +1238,38 @@ fn yaml_string_value(m: &YamlMapping, key: &str) -> Option<String> {
 fn sources_value_from_dataset_ids(dss: &[DatasetId]) -> YamlValue {
     let mut by_cat_db: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     for ds in dss {
-        by_cat_db.entry((ds.catalog.clone(), ds.database.clone())).or_default().push(ds.table.clone());
+        by_cat_db
+            .entry((ds.catalog.clone(), ds.database.clone()))
+            .or_default()
+            .push(ds.table.clone());
     }
     let mut sources_seq: Vec<YamlValue> = Vec::new();
     for ((cat, db), mut tables) in by_cat_db.into_iter() {
         tables.sort();
         tables.dedup();
         let mut src = YamlMapping::new();
-        src.insert(YamlValue::String("name".to_string()), YamlValue::String(db.clone()));
-        src.insert(YamlValue::String("database".to_string()), YamlValue::String(cat));
-        src.insert(YamlValue::String("schema".to_string()), YamlValue::String(db));
+        src.insert(
+            YamlValue::String("name".to_string()),
+            YamlValue::String(db.clone()),
+        );
+        src.insert(
+            YamlValue::String("database".to_string()),
+            YamlValue::String(cat),
+        );
+        src.insert(
+            YamlValue::String("schema".to_string()),
+            YamlValue::String(db),
+        );
         let mut tables_seq: Vec<YamlValue> = Vec::new();
         for t in tables.into_iter() {
             let mut tm = YamlMapping::new();
             tm.insert(YamlValue::String("name".to_string()), YamlValue::String(t));
             tables_seq.push(YamlValue::Mapping(tm));
         }
-        src.insert(YamlValue::String("tables".to_string()), YamlValue::Sequence(tables_seq));
+        src.insert(
+            YamlValue::String("tables".to_string()),
+            YamlValue::Sequence(tables_seq),
+        );
         sources_seq.push(YamlValue::Mapping(src));
     }
     YamlValue::Sequence(sources_seq)
@@ -1115,8 +1279,10 @@ fn postprocess_model_sql(ctx: &AgentCtx, rel: &str, content: &str) -> Result<Str
     validate_model_sql_identity(rel, content)?;
     let cfg = crate::config::resolved_config_from_ctx(ctx)
         .ok_or_else(|| "resolved_config missing for model SQL postprocess".to_string())?;
-    let suffix = tier_suffix_for_path(rel, &cfg).ok_or_else(|| "unable to infer tier suffix for model path".to_string())?;
-    let alias = model_alias_from_rel(rel).ok_or_else(|| "unable to infer model alias from path".to_string())?;
+    let suffix = tier_suffix_for_path(rel, &cfg)
+        .ok_or_else(|| "unable to infer tier suffix for model path".to_string())?;
+    let alias = model_alias_from_rel(rel)
+        .ok_or_else(|| "unable to infer model alias from path".to_string())?;
     Ok(rewrite_config_header(content, &suffix, &alias))
 }
 
@@ -1186,7 +1352,7 @@ fn model_alias_from_rel(rel: &str) -> Option<String> {
     }
 }
 
-fn rewrite_config_header(content: &str, schema_suffix: &str, alias: &str) -> String {
+fn rewrite_config_header(content: &str, _schema_suffix: &str, alias: &str) -> String {
     let mut body_lines: Vec<String> = Vec::new();
     for line in content.lines() {
         let t = line.trim();
@@ -1198,12 +1364,9 @@ fn rewrite_config_header(content: &str, schema_suffix: &str, alias: &str) -> Str
     }
     let body = body_lines.join("\n").trim_start().to_string();
     if body.is_empty() {
-        return format!("{{{{ config(schema=\"{}\", alias=\"{}\") }}}}\n", schema_suffix, alias);
+        return format!("{{{{ config(alias=\"{}\") }}}}\n", alias);
     }
-    format!(
-        "{{{{ config(schema=\"{}\", alias=\"{}\") }}}}\n\n{}",
-        schema_suffix, alias, body
-    )
+    format!("{{{{ config(alias=\"{}\") }}}}\n\n{}", alias, body)
 }
 
 #[cfg(test)]
@@ -1240,14 +1403,23 @@ mod tests {
         async fn list_datasets(&self) -> Result<Vec<DatasetId>, String> {
             Ok(self.items.clone())
         }
-        async fn get_dataset_schema(&self, _dataset: &DatasetId) -> Result<Vec<(String, String)>, String> {
+        async fn get_dataset_schema(
+            &self,
+            _dataset: &DatasetId,
+        ) -> Result<Vec<(String, String)>, String> {
             Ok(vec![])
         }
         async fn get_dataset_stats(
             &self,
             _dataset: &DatasetId,
             _max_fields: usize,
-        ) -> Result<(react_core::discover::stats::DatasetFieldStats, react_core::providers::catalog::types::DatasetStats), String> {
+        ) -> Result<
+            (
+                react_core::discover::stats::DatasetFieldStats,
+                react_core::providers::catalog::types::DatasetStats,
+            ),
+            String,
+        > {
             Err("not implemented".to_string())
         }
     }
@@ -1255,20 +1427,27 @@ mod tests {
     fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {
         Arc::new(crate::config::ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { bucket: "b".to_string() },
-            scope: RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
+            storage: crate::config::StorageResolved {
+                bucket: "b".to_string(),
+            },
+            scope: RequestScope {
+                tenant: "t".to_string(),
+                workspace: "w".to_string(),
+                project_id: "p".to_string(),
+            },
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
-                athena: crate::config::AthenaResolved {
-                    enabled: true,
-                    workgroup: "wg".to_string(),
-                    region: "eu-west-1".to_string(),
-                    result_s3: "s3://x/".to_string(),
-                    target_catalog: "AwsDataCatalog".to_string(),
-                    source_schema: "test_raw".to_string(),
-                    discovery_cache_ttl_secs: 120,
+                warehouse: crate::config::WarehouseResolved {
+                    kind: "athena".to_string(),
+                    container: "AwsDataCatalog".to_string(),
+                    namespace: "test_raw".to_string(),
+                    extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
                 },
-                catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
+                catalog: crate::config::CatalogResolved {
+                    enabled: false,
+                    refresh_secs: 60,
+                    max_concurrency: 8,
+                },
                 dbt: crate::config::DbtResolved {
                     enabled: true,
                     profiles_dir: None,
@@ -1305,14 +1484,100 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| format!("not found: {}", dataset_fqn))
         }
-        async fn sample(&self, _dataset_fqn: &str, _limit: usize) -> Result<Vec<Vec<String>>, String> {
+        async fn sample(
+            &self,
+            _dataset_fqn: &str,
+            _limit: usize,
+        ) -> Result<Vec<Vec<String>>, String> {
             Err("not implemented".to_string())
         }
     }
 
-    fn make_ctx(storage: Arc<dyn StorageAdapter>, query: Option<Arc<dyn QueryProvider>>) -> AgentCtx {
+    #[derive(Clone, Default)]
+    struct MockWarehouse {
+        schemas: Arc<std::sync::Mutex<HashMap<String, Vec<(String, String)>>>>,
+    }
+
+    #[async_trait]
+    impl QueryProvider for MockWarehouse {
+        async fn query(&self, _sql: &str) -> Result<QueryResult, String> {
+            Err("not implemented".to_string())
+        }
+        async fn schema(&self, dataset_fqn: &str) -> Result<Vec<(String, String)>, String> {
+            let m = self.schemas.lock().unwrap();
+            m.get(dataset_fqn)
+                .cloned()
+                .ok_or_else(|| format!("not found: {}", dataset_fqn))
+        }
+        async fn sample(
+            &self,
+            _dataset_fqn: &str,
+            _limit: usize,
+        ) -> Result<Vec<Vec<String>>, String> {
+            Err("not implemented".to_string())
+        }
+        fn max_concurrency(&self) -> usize {
+            1
+        }
+    }
+
+    #[async_trait]
+    impl DatasetCatalogProvider for MockWarehouse {
+        async fn list_datasets(&self) -> Result<Vec<DatasetId>, String> {
+            Ok(vec![])
+        }
+        async fn get_dataset_schema(
+            &self,
+            dataset: &DatasetId,
+        ) -> Result<Vec<(String, String)>, String> {
+            self.schema(&dataset.fqn()).await
+        }
+        async fn get_dataset_stats(
+            &self,
+            _dataset: &DatasetId,
+            _max_fields: usize,
+        ) -> Result<
+            (
+                react_core::discover::stats::DatasetFieldStats,
+                react_core::providers::catalog::types::DatasetStats,
+            ),
+            String,
+        > {
+            Err("not implemented".to_string())
+        }
+    }
+
+    impl react_core::providers::WarehouseNaming for MockWarehouse {
+        fn kind(&self) -> &'static str {
+            "mock"
+        }
+        fn parse_dataset_fqn(&self, dataset_fqn: &str) -> Result<DatasetId, String> {
+            let raw = dataset_fqn.trim().trim_matches('"').trim_matches('`');
+            let parts: Vec<&str> = raw.split('.').collect();
+            if parts.len() != 3 {
+                return Err("mock dataset id must be <catalog>.<schema>.<table>".to_string());
+            }
+            Ok(DatasetId {
+                catalog: parts[0].to_string(),
+                database: parts[1].to_string(),
+                table: parts[2].to_string(),
+            })
+        }
+        fn quote_ident(&self, ident: &str) -> String {
+            format!("\"{}\"", ident.replace('"', "\"\""))
+        }
+    }
+
+    fn make_ctx(
+        storage: Arc<dyn StorageAdapter>,
+        query: Option<Arc<dyn QueryProvider>>,
+    ) -> AgentCtx {
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
         AgentCtx {
             top_k: 1,
             per_step_timeout_secs: 1,
@@ -1328,6 +1593,7 @@ mod tests {
             scope: scope.clone(),
             keyspace,
             query,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -1340,7 +1606,9 @@ mod tests {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage, None);
         let sql = "select * from {{ source('test_raw','raw_orders') }}";
-        let patch_text = create_git_patch_text("", sql, "models/staging/stg_test_raw_raw_orders.sql", false).expect("patch");
+        let patch_text =
+            create_git_patch_text("", sql, "models/staging/stg_test_raw_raw_orders.sql", false)
+                .expect("patch");
         let outcome = apply_patch(
             &ctx,
             None,
@@ -1349,11 +1617,15 @@ mod tests {
             None,
             PatchApplyKind::UnifiedDiff,
         )
-            .await
-            .expect("apply patch");
-        assert!(outcome.content.contains("config(schema=\"silver\""));
-        assert!(outcome.content.contains("alias=\"stg_test_raw_raw_orders\""));
-        assert!(outcome.content.to_ascii_lowercase().contains("source('test_raw','raw_orders')"));
+        .await
+        .expect("apply patch");
+        assert!(outcome
+            .content
+            .contains("config(alias=\"stg_test_raw_raw_orders\""));
+        assert!(outcome
+            .content
+            .to_ascii_lowercase()
+            .contains("source('test_raw','raw_orders')"));
     }
 
     #[tokio::test]
@@ -1361,10 +1633,18 @@ mod tests {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage, None);
         let sql = "select * from {{ source('test_raw','raw_orders') }}";
-        let patch_text = create_git_patch_text("", sql, "models/staging/stg_wrong.sql", false).expect("patch");
-        let err = apply_patch(&ctx, None, "models/staging/stg_wrong.sql", &patch_text, None, PatchApplyKind::UnifiedDiff)
-            .await
-            .unwrap_err();
+        let patch_text =
+            create_git_patch_text("", sql, "models/staging/stg_wrong.sql", false).expect("patch");
+        let err = apply_patch(
+            &ctx,
+            None,
+            "models/staging/stg_wrong.sql",
+            &patch_text,
+            None,
+            PatchApplyKind::UnifiedDiff,
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("must be written to"));
         assert!(err.contains("models/staging/stg_test_raw_raw_orders.sql"));
     }
@@ -1378,7 +1658,9 @@ select * from {{ source('test_raw','raw_orders') }}
 union all
 select * from {{ source('test_raw','raw_customers') }}
 "#;
-        let patch_text = create_git_patch_text("", sql, "models/staging/stg_test_raw_raw_orders.sql", false).expect("patch");
+        let patch_text =
+            create_git_patch_text("", sql, "models/staging/stg_test_raw_raw_orders.sql", false)
+                .expect("patch");
         let err = apply_patch(
             &ctx,
             None,
@@ -1397,10 +1679,18 @@ select * from {{ source('test_raw','raw_customers') }}
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage, None);
         let sql = "select * from {{ source('test_raw','raw_orders') }}";
-        let patch_text = create_git_patch_text("", sql, "models/marts/fct_orders.sql", false).expect("patch");
-        let err = apply_patch(&ctx, None, "models/marts/fct_orders.sql", &patch_text, None, PatchApplyKind::UnifiedDiff)
-            .await
-            .unwrap_err();
+        let patch_text =
+            create_git_patch_text("", sql, "models/marts/fct_orders.sql", false).expect("patch");
+        let err = apply_patch(
+            &ctx,
+            None,
+            "models/marts/fct_orders.sql",
+            &patch_text,
+            None,
+            PatchApplyKind::UnifiedDiff,
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("gold models must NOT reference dbt source()"));
     }
 
@@ -1409,21 +1699,43 @@ select * from {{ source('test_raw','raw_customers') }}
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let q = MockQuery::default();
         *q.schemas.lock().unwrap() = HashMap::from([
-            ("AwsDataCatalog.test_raw.raw_customers".to_string(), vec![("id".to_string(), "varchar".to_string())]),
-            ("AwsDataCatalog.test_raw.raw_orders".to_string(), vec![("id".to_string(), "varchar".to_string())]),
+            (
+                "AwsDataCatalog.test_raw.raw_customers".to_string(),
+                vec![("id".to_string(), "varchar".to_string())],
+            ),
+            (
+                "AwsDataCatalog.test_raw.raw_orders".to_string(),
+                vec![("id".to_string(), "varchar".to_string())],
+            ),
         ]);
         let ctx = make_ctx(storage, Some(Arc::new(q)));
         let datasets: Arc<dyn DatasetCatalogProvider> = Arc::new(MockDatasets {
             items: vec![
-                DatasetId { catalog: "AwsDataCatalog".to_string(), database: "test_raw".to_string(), table: "raw_customers".to_string() },
-                DatasetId { catalog: "AwsDataCatalog".to_string(), database: "test_raw".to_string(), table: "raw_orders".to_string() },
+                DatasetId {
+                    catalog: "AwsDataCatalog".to_string(),
+                    database: "test_raw".to_string(),
+                    table: "raw_customers".to_string(),
+                },
+                DatasetId {
+                    catalog: "AwsDataCatalog".to_string(),
+                    database: "test_raw".to_string(),
+                    table: "raw_orders".to_string(),
+                },
             ],
         });
         let existing = "version: 2\nmodels:\n  - name: stg_raw_customers\n";
-        let patch_text = create_git_patch_text("", existing, "models/schema.yml", false).expect("patch");
-        let outcome = apply_patch(&ctx, Some(&datasets), "models/schema.yml", &patch_text, None, PatchApplyKind::UnifiedDiff)
-            .await
-            .expect("apply patch");
+        let patch_text =
+            create_git_patch_text("", existing, "models/schema.yml", false).expect("patch");
+        let outcome = apply_patch(
+            &ctx,
+            Some(&datasets),
+            "models/schema.yml",
+            &patch_text,
+            None,
+            PatchApplyKind::UnifiedDiff,
+        )
+        .await
+        .expect("apply patch");
         let v: YamlValue = serde_yaml::from_str(&outcome.content).expect("valid yaml");
         let map = v.as_mapping().expect("mapping root");
         assert!(map.contains_key(&YamlValue::String("models".to_string())));
@@ -1438,7 +1750,14 @@ select * from {{ source('test_raw','raw_customers') }}
             "AwsDataCatalog.test_raw.raw_customers".to_string(),
             vec![("id".to_string(), "varchar".to_string())],
         )]);
-        let ctx = make_ctx(storage, Some(Arc::new(q)));
+        let warehouse: Arc<dyn react_core::providers::WarehouseProvider> =
+            Arc::new(MockWarehouse {
+                schemas: q.schemas.clone(),
+            });
+        let ctx = AgentCtx {
+            warehouse,
+            ..make_ctx(storage, Some(Arc::new(q)))
+        };
         let datasets: Arc<dyn DatasetCatalogProvider> = Arc::new(MockDatasets { items: vec![] });
 
         let existing = r#"
@@ -1451,7 +1770,9 @@ sources:
       - name: raw_customers
       - name: raw_products
 "#;
-        let out = canonicalize_schema_yml(&ctx, Some(&datasets), existing).await.expect("ok");
+        let out = canonicalize_schema_yml(&ctx, Some(&datasets), existing)
+            .await
+            .expect("ok");
         assert!(out.contains("raw_customers"));
         assert!(!out.contains("raw_products"));
     }
@@ -1476,8 +1797,16 @@ sources:
         let out = apply_replace_list(
             old,
             &[
-                ReplaceListEdit { start_line: 2, end_line: 2, new_text: "B".to_string() },
-                ReplaceListEdit { start_line: 4, end_line: 4, new_text: "D".to_string() },
+                ReplaceListEdit {
+                    start_line: 2,
+                    end_line: 2,
+                    new_text: "B".to_string(),
+                },
+                ReplaceListEdit {
+                    start_line: 4,
+                    end_line: 4,
+                    new_text: "D".to_string(),
+                },
             ],
         )
         .expect("replace_list");
@@ -1490,8 +1819,16 @@ sources:
         let err = apply_replace_list(
             old,
             &[
-                ReplaceListEdit { start_line: 1, end_line: 2, new_text: "x".to_string() },
-                ReplaceListEdit { start_line: 2, end_line: 3, new_text: "y".to_string() },
+                ReplaceListEdit {
+                    start_line: 1,
+                    end_line: 2,
+                    new_text: "x".to_string(),
+                },
+                ReplaceListEdit {
+                    start_line: 2,
+                    end_line: 3,
+                    new_text: "y".to_string(),
+                },
             ],
         )
         .unwrap_err();
@@ -1517,7 +1854,16 @@ sources:
         ]
         .join("\n");
 
-        let outcome = apply_patch(&ctx, None, rel, &patch_text, None, PatchApplyKind::UnifiedDiff).await.expect("apply patch");
+        let outcome = apply_patch(
+            &ctx,
+            None,
+            rel,
+            &patch_text,
+            None,
+            PatchApplyKind::UnifiedDiff,
+        )
+        .await
+        .expect("apply patch");
         assert!(outcome.content.contains("source('test_raw','raw_orders')"));
     }
 
@@ -1535,9 +1881,16 @@ packages:
     version: [">=1.0.0", "<2.0.0"]
 "#;
         let patch_text = create_git_patch_text("", raw, "packages.yml", false).expect("patch");
-        let outcome = apply_patch(&ctx, None, "packages.yml", &patch_text, None, PatchApplyKind::UnifiedDiff)
-            .await
-            .expect("apply patch");
+        let outcome = apply_patch(
+            &ctx,
+            None,
+            "packages.yml",
+            &patch_text,
+            None,
+            PatchApplyKind::UnifiedDiff,
+        )
+        .await
+        .expect("apply patch");
         let v: YamlValue = serde_yaml::from_str(&outcome.content).expect("valid yaml");
         let map = v.as_mapping().expect("mapping root");
         let packages = map
@@ -1557,10 +1910,19 @@ packages:
     async fn apply_patch_rejects_base_sha_mismatch() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage, None);
-        let patch_text = create_git_patch_text("", "select 1", "models/staging/stg_orders.sql", false).expect("patch");
-        let err = apply_patch(&ctx, None, "models/staging/stg_orders.sql", &patch_text, Some("bad"), PatchApplyKind::UnifiedDiff)
-            .await
-            .unwrap_err();
+        let patch_text =
+            create_git_patch_text("", "select 1", "models/staging/stg_orders.sql", false)
+                .expect("patch");
+        let err = apply_patch(
+            &ctx,
+            None,
+            "models/staging/stg_orders.sql",
+            &patch_text,
+            Some("bad"),
+            PatchApplyKind::UnifiedDiff,
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("base_sha256 mismatch"));
     }
 }

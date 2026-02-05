@@ -15,7 +15,11 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn new() -> Self { Self { tools: HashMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            tools: HashMap::new(),
+        }
+    }
     pub fn register<T: Tool + 'static>(&mut self, t: T) {
         self.tools.insert(t.name(), Box::new(t));
     }
@@ -26,4 +30,3 @@ impl ToolRegistry {
         }
     }
 }
-

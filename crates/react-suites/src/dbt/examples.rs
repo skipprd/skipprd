@@ -40,7 +40,9 @@ pub async fn search_examples(
     query: &str,
     k: usize,
 ) -> Result<Vec<ScoredVectorChunk>, String> {
-    let vector = vector.ok_or_else(|| "vector provider missing (dbt examples search requires embeddings)".to_string())?;
+    let vector = vector.ok_or_else(|| {
+        "vector provider missing (dbt examples search requires embeddings)".to_string()
+    })?;
     let v = llm
         .embed(&[query.to_string()])
         .map_err(|e| e.to_string())?
@@ -188,7 +190,9 @@ async fn sync_from_local(
     // Best-effort store raw bytes in storage (so tool can point at an object key)
     for (rel, bytes) in files.into_iter() {
         let key = format!("dbt-examples/{}", rel);
-        let _ = storage.put_bytes(&key, &bytes, "application/octet-stream").await;
+        let _ = storage
+            .put_bytes(&key, &bytes, "application/octet-stream")
+            .await;
     }
 
     // Upsert embeddings into current scope vector store
@@ -204,10 +208,12 @@ async fn sync_from_local(
 fn include_dir(path: &Path) -> bool {
     if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
         let n = name.to_ascii_lowercase();
-        if matches!(n.as_str(), ".git" | "target" | "__pycache__" | "node_modules" | ".idea" | ".vscode") {
+        if matches!(
+            n.as_str(),
+            ".git" | "target" | "__pycache__" | "node_modules" | ".idea" | ".vscode"
+        ) {
             return false;
         }
     }
     true
 }
-

@@ -76,13 +76,20 @@ fn take_head_tail(text: &str, max_chars: usize) -> String {
 async fn read_project_file(actx: &AgentCtx, path: &str, max_chars: usize) -> Option<ProjectFile> {
     let tool = DbtFilesTool { datasets: None };
     let obs = tool
-        .call(serde_json::json!({"op":"get","path": path, "max_chars": 0}), actx)
+        .call(
+            serde_json::json!({"op":"get","path": path, "max_chars": 0}),
+            actx,
+        )
         .await
         .ok()?;
     if obs.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return None;
     }
-    let content = obs.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let content = obs
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     Some(ProjectFile {
         path: path.to_string(),
         content: take_head_tail(&content, max_chars),
@@ -106,7 +113,11 @@ async fn list_model_files(actx: &AgentCtx, prefix: &str, limit: usize) -> Vec<St
         .and_then(|v| v.as_array())
         .map(|a| {
             a.iter()
-                .filter_map(|it| it.get("path").and_then(|p| p.as_str()).map(|s| s.to_string()))
+                .filter_map(|it| {
+                    it.get("path")
+                        .and_then(|p| p.as_str())
+                        .map(|s| s.to_string())
+                })
                 .filter(|p| p.ends_with(".sql"))
                 .collect::<Vec<_>>()
         })
@@ -222,7 +233,14 @@ If feedback is substantially unchanged from prior iteration, set actionable=fals
         .to_string()
 }
 
-async fn llm_json(ctx: &SuiteCtx, _actx: &AgentCtx, thread_id: &str, phase: Phase, name: &str, user: String) -> Result<Value, String> {
+async fn llm_json(
+    ctx: &SuiteCtx,
+    _actx: &AgentCtx,
+    thread_id: &str,
+    phase: Phase,
+    name: &str,
+    user: String,
+) -> Result<Value, String> {
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
@@ -284,7 +302,11 @@ async fn llm_json(ctx: &SuiteCtx, _actx: &AgentCtx, thread_id: &str, phase: Phas
                     part_hashes: built.part_hashes,
                     response_hash,
                     response_text,
-                    observation: if ok { Observation::ok() } else { Observation::fail(vec!["llm_call_failed".to_string()]) },
+                    observation: if ok {
+                        Observation::ok()
+                    } else {
+                        Observation::fail(vec!["llm_call_failed".to_string()])
+                    },
                     ts,
                     agent,
                 },
@@ -293,11 +315,13 @@ async fn llm_json(ctx: &SuiteCtx, _actx: &AgentCtx, thread_id: &str, phase: Phas
         if !ok {
             return Err(raw);
         }
-        return serde_json::from_str::<Value>(&raw).map_err(|e| format!("review {}: expected JSON, got parse error: {}", name, e));
+        return serde_json::from_str::<Value>(&raw)
+            .map_err(|e| format!("review {}: expected JSON, got parse error: {}", name, e));
     }
 
     let raw = ctx.llm.chat(&messages).map_err(|e| e.to_string())?;
-    serde_json::from_str::<Value>(&raw).map_err(|e| format!("review {}: expected JSON, got parse error: {}", name, e))
+    serde_json::from_str::<Value>(&raw)
+        .map_err(|e| format!("review {}: expected JSON, got parse error: {}", name, e))
 }
 
 fn upsert_review_snapshot(obj: &mut serde_json::Map<String, Value>, patch: Value) {
@@ -313,12 +337,19 @@ fn upsert_review_snapshot(obj: &mut serde_json::Map<String, Value>, patch: Value
             review_obj.insert(k.clone(), v.clone());
         }
     }
-    review_obj.insert("review_version".to_string(), serde_json::json!(REVIEW_SNAPSHOT_VERSION));
+    review_obj.insert(
+        "review_version".to_string(),
+        serde_json::json!(REVIEW_SNAPSHOT_VERSION),
+    );
 }
 
 fn push_batch_entry(review_obj: &mut serde_json::Map<String, Value>, entry: Value) {
-    let batches = review_obj.entry("batches").or_insert_with(|| serde_json::Value::Array(vec![]));
-    let Some(arr) = batches.as_array_mut() else { return };
+    let batches = review_obj
+        .entry("batches")
+        .or_insert_with(|| serde_json::Value::Array(vec![]));
+    let Some(arr) = batches.as_array_mut() else {
+        return;
+    };
     arr.push(entry);
     while arr.len() > MAX_BATCHES_SAVED {
         arr.remove(0);
@@ -399,7 +430,10 @@ async fn persist_review_batch_to_plan(
                     *review = serde_json::json!({});
                 }
                 let review_obj = review.as_object_mut().unwrap();
-                review_obj.insert("review_version".to_string(), serde_json::json!(REVIEW_SNAPSHOT_VERSION));
+                review_obj.insert(
+                    "review_version".to_string(),
+                    serde_json::json!(REVIEW_SNAPSHOT_VERSION),
+                );
                 push_batch_entry(review_obj, entry);
             }
             let _ = de_plan::save_cleanse_plan(actx, &p).await;
@@ -415,7 +449,10 @@ async fn persist_review_batch_to_plan(
                     *review = serde_json::json!({});
                 }
                 let review_obj = review.as_object_mut().unwrap();
-                review_obj.insert("review_version".to_string(), serde_json::json!(REVIEW_SNAPSHOT_VERSION));
+                review_obj.insert(
+                    "review_version".to_string(),
+                    serde_json::json!(REVIEW_SNAPSHOT_VERSION),
+                );
                 push_batch_entry(review_obj, entry);
             }
             let _ = de_plan::save_model_plan(actx, &p).await;
@@ -444,7 +481,10 @@ async fn persist_review_final_to_plan(
                     *review = serde_json::json!({});
                 }
                 let review_obj = review.as_object_mut().unwrap();
-                review_obj.insert("review_version".to_string(), serde_json::json!(REVIEW_SNAPSHOT_VERSION));
+                review_obj.insert(
+                    "review_version".to_string(),
+                    serde_json::json!(REVIEW_SNAPSHOT_VERSION),
+                );
                 review_obj.insert(
                     "final".to_string(),
                     serde_json::json!({
@@ -469,7 +509,10 @@ async fn persist_review_final_to_plan(
                     *review = serde_json::json!({});
                 }
                 let review_obj = review.as_object_mut().unwrap();
-                review_obj.insert("review_version".to_string(), serde_json::json!(REVIEW_SNAPSHOT_VERSION));
+                review_obj.insert(
+                    "review_version".to_string(),
+                    serde_json::json!(REVIEW_SNAPSHOT_VERSION),
+                );
                 review_obj.insert(
                     "final".to_string(),
                     serde_json::json!({
@@ -495,8 +538,15 @@ fn parse_review_meta_line(text: &str) -> (bool, String, Vec<String>) {
     let Ok(v) = serde_json::from_str::<Value>(json_text) else {
         return (false, "unknown".to_string(), vec![]);
     };
-    let actionable = v.get("actionable").and_then(|x| x.as_bool()).unwrap_or(false);
-    let tier = v.get("tier").and_then(|x| x.as_str()).unwrap_or("unknown").to_string();
+    let actionable = v
+        .get("actionable")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let tier = v
+        .get("tier")
+        .and_then(|x| x.as_str())
+        .unwrap_or("unknown")
+        .to_string();
     let dataset_ids = v
         .get("dataset_ids")
         .and_then(|x| x.as_array())
@@ -509,7 +559,10 @@ fn parse_review_meta_line(text: &str) -> (bool, String, Vec<String>) {
     (actionable, tier, dataset_ids)
 }
 
-fn resolve_cleanse_batch_paths(plan: &de_plan::CleansePlan, batch: &[String]) -> Vec<(String, String, Vec<String>, Vec<String>)> {
+fn resolve_cleanse_batch_paths(
+    plan: &de_plan::CleansePlan,
+    batch: &[String],
+) -> Vec<(String, String, Vec<String>, Vec<String>)> {
     // returns (dataset_id, expected_path, invariants, notes)
     let mut out: Vec<(String, String, Vec<String>, Vec<String>)> = Vec::new();
     for ds in batch.iter() {
@@ -523,7 +576,10 @@ fn resolve_cleanse_batch_paths(plan: &de_plan::CleansePlan, batch: &[String]) ->
     out
 }
 
-fn resolve_model_batch_paths(plan: &de_plan::ModelPlan, batch: &[String]) -> Vec<(String, String, Vec<String>, Vec<String>)> {
+fn resolve_model_batch_paths(
+    plan: &de_plan::ModelPlan,
+    batch: &[String],
+) -> Vec<(String, String, Vec<String>, Vec<String>)> {
     // returns (name, expected_path, invariants, notes)
     let mut out: Vec<(String, String, Vec<String>, Vec<String>)> = Vec::new();
     for name in batch.iter() {
@@ -553,7 +609,10 @@ async fn build_project_context(actx: &AgentCtx) -> Vec<ProjectFile> {
 async fn read_project_json_pointer(actx: &AgentCtx, path: &str, pointer: &str) -> Option<Value> {
     let tool = DbtFilesTool { datasets: None };
     let obs = tool
-        .call(serde_json::json!({"op":"get_json","path": path, "pointer": pointer}), actx)
+        .call(
+            serde_json::json!({"op":"get_json","path": path, "pointer": pointer}),
+            actx,
+        )
         .await
         .ok()?;
     if obs.get("ok").and_then(|v| v.as_bool()) != Some(true) {
@@ -666,7 +725,10 @@ fn render_path_list(label: &str, paths: &[String], max_items: usize) -> String {
         s.push('\n');
     }
     if total > keep {
-        s.push_str(&format!("... omitted {} more (deterministic head)\n", total - keep));
+        s.push_str(&format!(
+            "... omitted {} more (deterministic head)\n",
+            total - keep
+        ));
     }
     s
 }
@@ -764,7 +826,11 @@ pub async fn run_batched_review(
     sctx: &SuiteCtx,
 ) -> Result<Vec<FlowFrame>, String> {
     // AgentCtx for deterministic storage reads/writes and thread store appends.
-    let thread_store = ThreadStore::new(sctx.storage.clone(), sctx.scope.clone(), sctx.keyspace.clone());
+    let thread_store = ThreadStore::new(
+        sctx.storage.clone(),
+        sctx.scope.clone(),
+        sctx.keyspace.clone(),
+    );
     let actx = AgentCtx {
         top_k: 1,
         per_step_timeout_secs: 10,
@@ -780,6 +846,7 @@ pub async fn run_batched_review(
         scope: sctx.scope.clone(),
         keyspace: sctx.keyspace.clone(),
         query: sctx.query.clone(),
+        warehouse: sctx.warehouse.clone(),
         dbt: sctx.dbt.clone(),
         vector: sctx.vector.clone(),
         thread_store: Some(thread_store.clone()),
@@ -790,12 +857,21 @@ pub async fn run_batched_review(
     };
 
     // Determine which plan (if any) to use for batching + persistence target.
-    let (plan_kind, plan_key, batches, item_to_path_inv_notes): (Option<String>, Option<String>, Vec<Vec<String>>, Option<Value>) = match phase {
+    let (plan_kind, plan_key, batches, item_to_path_inv_notes): (
+        Option<String>,
+        Option<String>,
+        Vec<Vec<String>>,
+        Option<Value>,
+    ) = match phase {
         Phase::CleanseReview => {
             let key = de_plan::newest_plan_key_any(&actx, "_cleanse.json").await;
             if let Some(k) = key.clone() {
                 if let Some(p) = de_plan::load_cleanse_plan_by_key(&actx, &k).await {
-                    let batches = if !p.batches.is_empty() { p.batches.clone() } else { vec![] };
+                    let batches = if !p.batches.is_empty() {
+                        p.batches.clone()
+                    } else {
+                        vec![]
+                    };
                     let mut map: Vec<Value> = Vec::new();
                     for b in batches.iter() {
                         let resolved = resolve_cleanse_batch_paths(&p, b);
@@ -808,7 +884,12 @@ pub async fn run_batched_review(
                             }));
                         }
                     }
-                    (Some("cleanse".to_string()), Some(k), batches, Some(Value::Array(map)))
+                    (
+                        Some("cleanse".to_string()),
+                        Some(k),
+                        batches,
+                        Some(Value::Array(map)),
+                    )
                 } else {
                     (None, None, vec![], None)
                 }
@@ -820,7 +901,11 @@ pub async fn run_batched_review(
             let key = de_plan::newest_plan_key_any(&actx, "_model.json").await;
             if let Some(k) = key.clone() {
                 if let Some(p) = de_plan::load_model_plan_by_key(&actx, &k).await {
-                    let batches = if !p.batches.is_empty() { p.batches.clone() } else { vec![] };
+                    let batches = if !p.batches.is_empty() {
+                        p.batches.clone()
+                    } else {
+                        vec![]
+                    };
                     let mut map: Vec<Value> = Vec::new();
                     for b in batches.iter() {
                         let resolved = resolve_model_batch_paths(&p, b);
@@ -833,7 +918,12 @@ pub async fn run_batched_review(
                             }));
                         }
                     }
-                    (Some("model".to_string()), Some(k), batches, Some(Value::Array(map)))
+                    (
+                        Some("model".to_string()),
+                        Some(k),
+                        batches,
+                        Some(Value::Array(map)),
+                    )
                 } else {
                     (None, None, vec![], None)
                 }
@@ -847,7 +937,11 @@ pub async fn run_batched_review(
             let km = de_plan::newest_plan_key_any(&actx, "_model.json").await;
             let choose = match (&kc, &km) {
                 (Some(c), Some(m)) => {
-                    if c >= m { "cleanse" } else { "model" }
+                    if c >= m {
+                        "cleanse"
+                    } else {
+                        "model"
+                    }
                 }
                 (Some(_), None) => "cleanse",
                 (None, Some(_)) => "model",
@@ -857,7 +951,11 @@ pub async fn run_batched_review(
                 "cleanse" => {
                     let k = kc.clone().unwrap();
                     if let Some(p) = de_plan::load_cleanse_plan_by_key(&actx, &k).await {
-                        let batches = if !p.batches.is_empty() { p.batches.clone() } else { vec![] };
+                        let batches = if !p.batches.is_empty() {
+                            p.batches.clone()
+                        } else {
+                            vec![]
+                        };
                         let mut map: Vec<Value> = Vec::new();
                         for b in batches.iter() {
                             let resolved = resolve_cleanse_batch_paths(&p, b);
@@ -870,7 +968,12 @@ pub async fn run_batched_review(
                                 }));
                             }
                         }
-                        (Some("cleanse".to_string()), Some(k), batches, Some(Value::Array(map)))
+                        (
+                            Some("cleanse".to_string()),
+                            Some(k),
+                            batches,
+                            Some(Value::Array(map)),
+                        )
                     } else {
                         (None, None, vec![], None)
                     }
@@ -878,7 +981,11 @@ pub async fn run_batched_review(
                 "model" => {
                     let k = km.clone().unwrap();
                     if let Some(p) = de_plan::load_model_plan_by_key(&actx, &k).await {
-                        let batches = if !p.batches.is_empty() { p.batches.clone() } else { vec![] };
+                        let batches = if !p.batches.is_empty() {
+                            p.batches.clone()
+                        } else {
+                            vec![]
+                        };
                         let mut map: Vec<Value> = Vec::new();
                         for b in batches.iter() {
                             let resolved = resolve_model_batch_paths(&p, b);
@@ -891,7 +998,12 @@ pub async fn run_batched_review(
                                 }));
                             }
                         }
-                        (Some("model".to_string()), Some(k), batches, Some(Value::Array(map)))
+                        (
+                            Some("model".to_string()),
+                            Some(k),
+                            batches,
+                            Some(Value::Array(map)),
+                        )
                     } else {
                         (None, None, vec![], None)
                     }
@@ -960,8 +1072,14 @@ pub async fn run_batched_review(
         meta = serde_json::to_string_pretty(&manifest_meta_small).unwrap_or_else(|_| "null".to_string()),
     );
     let summary_v = llm_json(sctx, &actx, thread_id, phase, "summary", summary_user).await?;
-    let project_notes = clamp_lines(str_list(summary_v.get("project_notes").unwrap_or(&Value::Null)), MAX_PROJECT_NOTES);
-    let project_risks = clamp_lines(str_list(summary_v.get("project_risks").unwrap_or(&Value::Null)), MAX_PROJECT_NOTES);
+    let project_notes = clamp_lines(
+        str_list(summary_v.get("project_notes").unwrap_or(&Value::Null)),
+        MAX_PROJECT_NOTES,
+    );
+    let project_risks = clamp_lines(
+        str_list(summary_v.get("project_risks").unwrap_or(&Value::Null)),
+        MAX_PROJECT_NOTES,
+    );
 
     append_review_step(
         &thread_store,
@@ -976,7 +1094,15 @@ pub async fn run_batched_review(
     )
     .await;
     if let (Some(pk), Some(plan_key)) = (plan_kind.as_deref(), plan_key.as_deref()) {
-        persist_review_summary_to_plan(&actx, phase, pk, plan_key, project_notes.clone(), project_risks.clone()).await;
+        persist_review_summary_to_plan(
+            &actx,
+            phase,
+            pk,
+            plan_key,
+            project_notes.clone(),
+            project_risks.clone(),
+        )
+        .await;
     }
 
     // 2) Per-batch pass (bounded, complete coverage).
@@ -989,7 +1115,10 @@ pub async fn run_batched_review(
         let mapping = item_to_path_inv_notes.clone().unwrap_or(Value::Null);
         let mapping_arr = mapping.as_array().cloned().unwrap_or_default();
         let map_for = |item: &str| -> Option<Value> {
-            mapping_arr.iter().find(|it| it.get("item").and_then(|v| v.as_str()) == Some(item)).cloned()
+            mapping_arr
+                .iter()
+                .find(|it| it.get("item").and_then(|v| v.as_str()) == Some(item))
+                .cloned()
         };
 
         // Build batch payload, reading only expected paths when known.
@@ -998,7 +1127,11 @@ pub async fn run_batched_review(
             let mut invariants: Vec<String> = Vec::new();
             let mut notes: Vec<String> = Vec::new();
             if let Some(m) = map_for(item) {
-                expected_path = m.get("expected_model_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                expected_path = m
+                    .get("expected_model_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 invariants = str_list(m.get("invariants").unwrap_or(&Value::Null));
                 notes = str_list(m.get("notes").unwrap_or(&Value::Null));
             }
@@ -1026,7 +1159,10 @@ pub async fn run_batched_review(
 
             // Also attach dependency schemas derived from the model file content (ref/source schemas),
             // so review suggestions do not invent fields for upstream relations.
-            let deps = if let Some(f) = files.iter().find(|ff| ff.path.trim() == expected_path.trim()) {
+            let deps = if let Some(f) = files
+                .iter()
+                .find(|ff| ff.path.trim() == expected_path.trim())
+            {
                 dependency_schemas_for_sql(sctx, &actx, &f.content).await
             } else {
                 Value::Array(vec![])
@@ -1051,8 +1187,14 @@ pub async fn run_batched_review(
             files = render_files(&files),
         );
         let v = llm_json(sctx, &actx, thread_id, phase, "batch", batch_user).await?;
-        let notes = clamp_lines(str_list(v.get("notes").unwrap_or(&Value::Null)), MAX_NOTES_PER_BATCH);
-        let actionable_hints = clamp_lines(str_list(v.get("actionable_hints").unwrap_or(&Value::Null)), MAX_NOTES_PER_BATCH);
+        let notes = clamp_lines(
+            str_list(v.get("notes").unwrap_or(&Value::Null)),
+            MAX_NOTES_PER_BATCH,
+        );
+        let actionable_hints = clamp_lines(
+            str_list(v.get("actionable_hints").unwrap_or(&Value::Null)),
+            MAX_NOTES_PER_BATCH,
+        );
 
         let detail = serde_json::json!({
             "batch_idx": bidx,
@@ -1060,11 +1202,20 @@ pub async fn run_batched_review(
             "notes": notes,
             "actionable_hints": actionable_hints
         });
-        append_review_step(&thread_store, thread_id, phase, "review", "review_batch", detail.clone()).await;
+        append_review_step(
+            &thread_store,
+            thread_id,
+            phase,
+            "review",
+            "review_batch",
+            detail.clone(),
+        )
+        .await;
 
         all_batch_notes.push(detail.clone());
         if let (Some(pk), Some(plan_key)) = (plan_kind.as_deref(), plan_key.as_deref()) {
-            persist_review_batch_to_plan(&actx, pk, plan_key, bidx, batch.clone(), notes.clone()).await;
+            persist_review_batch_to_plan(&actx, pk, plan_key, bidx, batch.clone(), notes.clone())
+                .await;
         }
     }
 
@@ -1132,7 +1283,10 @@ mod tests {
 
     impl react_core::llm::LargeLanguageModel for ScriptedModel {
         fn chat(&self, _messages: &[react_core::llm::ChatMessage]) -> Result<String, String> {
-            let mut g = self.replies.lock().map_err(|_| "mutex poisoned".to_string())?;
+            let mut g = self
+                .replies
+                .lock()
+                .map_err(|_| "mutex poisoned".to_string())?;
             if g.is_empty() {
                 return Err("no more replies".to_string());
             }
@@ -1144,15 +1298,29 @@ mod tests {
         }
     }
 
-    fn make_suite_ctx(storage: Arc<dyn react_core::storage::StorageAdapter>, llm: Arc<dyn react_core::llm::LargeLanguageModel>) -> SuiteCtx {
-        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+    fn make_suite_ctx(
+        storage: Arc<dyn react_core::storage::StorageAdapter>,
+        llm: Arc<dyn react_core::llm::LargeLanguageModel>,
+    ) -> SuiteCtx {
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
-        SuiteCtx::new(storage, Arc::new(react_core::providers::NullSecretsProvider::default()), llm, scope, keyspace)
+        SuiteCtx::new(
+            storage,
+            Arc::new(react_core::providers::NullSecretsProvider::default()),
+            llm,
+            scope,
+            keyspace,
+        )
     }
 
     #[tokio::test]
     async fn batched_review_persists_project_snapshot_batches_and_final() {
-        let storage: Arc<dyn react_core::storage::StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let storage: Arc<dyn react_core::storage::StorageAdapter> =
+            Arc::new(InMemoryStorageAdapter::default());
         let llm = Arc::new(ScriptedModel {
             replies: Arc::new(Mutex::new(vec![
                 // summary
@@ -1183,6 +1351,7 @@ mod tests {
             scope: sctx.scope.clone(),
             keyspace: sctx.keyspace.clone(),
             query: None,
+            warehouse: std::sync::Arc::new(react_core::providers::NullWarehouseProvider::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -1190,13 +1359,20 @@ mod tests {
         };
 
         // dbt files
-        let base = actx.keyspace.dbt_prefix(&actx.scope).trim_end_matches('/').to_string();
+        let base = actx
+            .keyspace
+            .dbt_prefix(&actx.scope)
+            .trim_end_matches('/')
+            .to_string();
         let put = |rel: &str, content: &str| {
             let key = format!("{}/{}", base, rel);
             let storage = storage.clone();
             let content = content.to_string();
             async move {
-                storage.put_bytes(&key, content.as_bytes(), "text/plain").await.unwrap();
+                storage
+                    .put_bytes(&key, content.as_bytes(), "text/plain")
+                    .await
+                    .unwrap();
             }
         };
         put("dbt_project.yml", "name: x\n").await;
@@ -1236,16 +1412,27 @@ mod tests {
             .expect("ok");
         assert!(matches!(out[0], FlowFrame::Final { .. }));
 
-        let loaded = de_plan::load_cleanse_plan_by_key(&actx, &plan.plan_key).await.expect("plan");
+        let loaded = de_plan::load_cleanse_plan_by_key(&actx, &plan.plan_key)
+            .await
+            .expect("plan");
         let review = loaded
             .project_snapshot
             .get("review")
             .cloned()
             .unwrap_or(Value::Null);
-        assert_eq!(review.get("review_version").and_then(|v| v.as_i64()), Some(REVIEW_SNAPSHOT_VERSION));
+        assert_eq!(
+            review.get("review_version").and_then(|v| v.as_i64()),
+            Some(REVIEW_SNAPSHOT_VERSION)
+        );
         assert!(review.get("project_notes").is_some());
-        assert!(review.get("batches").and_then(|v| v.as_array()).unwrap_or(&vec![]).len() >= 2);
+        assert!(
+            review
+                .get("batches")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&vec![])
+                .len()
+                >= 2
+        );
         assert!(review.get("final").is_some());
     }
 }
-

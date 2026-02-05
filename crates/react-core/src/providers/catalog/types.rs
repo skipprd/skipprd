@@ -145,4 +145,3 @@ pub struct DataCatalog {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub built_at_epoch_secs: Option<u64>,
 }
-

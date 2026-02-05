@@ -1,5 +1,5 @@
 use react_core::agent::AgentCtx;
-use react_core::providers::QueryProvider;
+use react_core::providers::WarehouseProvider;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -66,36 +66,48 @@ impl GroundedDatasetSet {
     }
 }
 
-fn raw_schema_from_ctx(ctx: &AgentCtx) -> Option<String> {
-    crate::config::resolved_config_from_ctx(ctx).map(|c| c.providers.athena.source_schema.clone())
+fn source_container_from_cfg(ctx: &AgentCtx) -> Option<String> {
+    crate::config::resolved_config_from_ctx(ctx).map(|c| c.providers.warehouse.container.clone())
 }
 
-fn target_catalog_from_ctx(ctx: &AgentCtx) -> Option<String> {
-    crate::config::resolved_config_from_ctx(ctx).map(|c| c.providers.athena.target_catalog.clone())
+fn source_namespace_from_cfg(ctx: &AgentCtx) -> Option<String> {
+    crate::config::resolved_config_from_ctx(ctx).map(|c| c.providers.warehouse.namespace.clone())
 }
 
-fn is_in_raw_schema(ctx: &AgentCtx, dataset_id: &str) -> bool {
-    let Some(parts) = parse_dataset_fqn_3(dataset_id) else { return false };
-    let Some(raw_schema) = raw_schema_from_ctx(ctx) else { return false };
-    parts.schema == raw_schema
+fn is_in_source_namespace(ctx: &AgentCtx, dataset_id: &str) -> bool {
+    let Some(parts) = parse_dataset_fqn_3(dataset_id) else {
+        return false;
+    };
+    // If namespace isn't configured (tests / minimal contexts), don't reject candidates on this axis.
+    let Some(ns) = source_namespace_from_cfg(ctx) else {
+        return true;
+    };
+    parts.schema == ns
 }
 
-fn is_in_target_catalog(ctx: &AgentCtx, dataset_id: &str) -> bool {
-    let Some(parts) = parse_dataset_fqn_3(dataset_id) else { return false };
-    let Some(cat) = target_catalog_from_ctx(ctx) else { return false };
+fn is_in_source_container(ctx: &AgentCtx, dataset_id: &str) -> bool {
+    let Some(parts) = parse_dataset_fqn_3(dataset_id) else {
+        return false;
+    };
+    // If container isn't configured (tests / minimal contexts), don't reject candidates on this axis.
+    let Some(cat) = source_container_from_cfg(ctx) else {
+        return true;
+    };
     parts.catalog == cat
 }
 
-async fn schema_proves_dataset(query: &Arc<dyn QueryProvider>, dataset_id: &str) -> Result<(), String> {
-    // If schema() succeeds, that’s the only fact we need.
-    query.schema(dataset_id).await.map(|_cols| ()).map_err(|e| e)
+async fn schema_proves_dataset(
+    wh: &Arc<dyn WarehouseProvider>,
+    dataset_id: &str,
+) -> Result<(), String> {
+    wh.schema(dataset_id).await.map(|_cols| ()).map_err(|e| e)
 }
 
 /// Build a grounded dataset set for **raw/cleanse** (silver):
 /// - only keeps datasets that are in configured raw schema AND proven by schema().
 pub async fn build_grounded_raw_dataset_set(
     ctx: &AgentCtx,
-    query: &Arc<dyn QueryProvider>,
+    wh: &Arc<dyn WarehouseProvider>,
     candidates: &[String],
 ) -> GroundedDatasetSet {
     let mut out = GroundedDatasetSet::default();
@@ -113,25 +125,27 @@ pub async fn build_grounded_raw_dataset_set(
         if parse_dataset_fqn_3(&ds).is_none() {
             out.rejected.push(RejectedDataset {
                 dataset_id: ds,
-                reason: "invalid dataset_id format (expected <catalog>.<schema>.<table>)".to_string(),
+                reason: "invalid dataset_id format (expected <catalog>.<schema>.<table>)"
+                    .to_string(),
             });
             continue;
         }
-        if !is_in_target_catalog(ctx, &ds) {
+        if !is_in_source_container(ctx, &ds) {
             out.rejected.push(RejectedDataset {
                 dataset_id: ds,
-                reason: "dataset is not in configured target catalog".to_string(),
+                reason: "dataset is not in configured source container".to_string(),
             });
             continue;
         }
-        if !is_in_raw_schema(ctx, &ds) {
+        if !is_in_source_namespace(ctx, &ds) {
             out.rejected.push(RejectedDataset {
                 dataset_id: ds,
-                reason: "dataset is not in configured raw source schema (cleanse/silver only)".to_string(),
+                reason: "dataset is not in configured raw source namespace (cleanse/silver only)"
+                    .to_string(),
             });
             continue;
         }
-        match schema_proves_dataset(query, &ds).await {
+        match schema_proves_dataset(wh, &ds).await {
             Ok(()) => {
                 out.allowed.insert(ds.clone());
                 out.proven_by_schema.push(ds);
@@ -168,11 +182,20 @@ pub fn is_ref_only_gold_input(input: &str) -> bool {
 
 pub async fn discover_staging_models_from_storage(ctx: &AgentCtx) -> GroundedStagingModelSet {
     let mut out = GroundedStagingModelSet::default();
-    let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/";
+    let base = ctx
+        .keyspace
+        .dbt_prefix(&ctx.scope)
+        .trim_end_matches('/')
+        .to_string()
+        + "/";
 
     // 1) models/staging/*.sql
     let staging_prefix = format!("{}models/staging/", base);
-    let keys = ctx.storage.list_prefix(&staging_prefix).await.unwrap_or_default();
+    let keys = ctx
+        .storage
+        .list_prefix(&staging_prefix)
+        .await
+        .unwrap_or_default();
     for k in keys {
         if !k.ends_with(".sql") || k.contains("/_versions/") {
             continue;
@@ -194,11 +217,18 @@ pub async fn discover_staging_models_from_storage(ctx: &AgentCtx) -> GroundedSta
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
             if let Some(nodes) = v.get("nodes").and_then(|n| n.as_object()) {
                 for (_uid, node) in nodes.iter() {
-                    let rt = node.get("resource_type").and_then(|x| x.as_str()).unwrap_or("");
+                    let rt = node
+                        .get("resource_type")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
                     if rt != "model" {
                         continue;
                     }
-                    let name = node.get("name").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    let name = node
+                        .get("name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .trim();
                     if !name.is_empty() && is_staging_model_name(name) {
                         let fp = node
                             .get("original_file_path")
@@ -244,10 +274,14 @@ pub fn candidates_from_schema_yml_sources(
 }
 
 /// Group dataset fqn strings by (catalog, schema) for schema.yml sources emission.
-pub fn group_by_catalog_schema(dataset_ids: &BTreeSet<String>) -> BTreeMap<(String, String), Vec<String>> {
+pub fn group_by_catalog_schema(
+    dataset_ids: &BTreeSet<String>,
+) -> BTreeMap<(String, String), Vec<String>> {
     let mut out: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     for id in dataset_ids.iter() {
-        let Some(p) = parse_dataset_fqn_3(id) else { continue };
+        let Some(p) = parse_dataset_fqn_3(id) else {
+            continue;
+        };
         out.entry((p.catalog, p.schema)).or_default().push(p.table);
     }
     for (_k, v) in out.iter_mut() {
@@ -256,4 +290,3 @@ pub fn group_by_catalog_schema(dataset_ids: &BTreeSet<String>) -> BTreeMap<(Stri
     }
     out
 }
-

@@ -2,7 +2,11 @@ use crate::llm::adapter::Adapter;
 use crate::llm::types::*;
 
 pub struct LlamaCppAdapter;
-impl LlamaCppAdapter { pub fn new() -> Self { Self {} } }
+impl LlamaCppAdapter {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
 
 impl Adapter for LlamaCppAdapter {
     fn capabilities(&self, _model: &str) -> Capabilities {
@@ -41,5 +45,3 @@ impl Adapter for LlamaCppAdapter {
         Err("local-llama: not an HTTP provider".to_string())
     }
 }
-
-

@@ -1,11 +1,14 @@
-use std::string::ToString;
+use crate::helpers::timed_rwlock::TimedRwLock;
 use clap::Parser;
 use once_cell::sync::Lazy;
-use crate::helpers::timed_rwlock::TimedRwLock;
+use std::string::ToString;
 
-pub static CLI_MODE: Lazy<TimedRwLock<Mode>> = Lazy::new(|| TimedRwLock::new("cli_mode".to_string(), Mode::Sync(SyncOptions {
-    pipeline: None,
-})));
+pub static CLI_MODE: Lazy<TimedRwLock<Mode>> = Lazy::new(|| {
+    TimedRwLock::new(
+        "cli_mode".to_string(),
+        Mode::Sync(SyncOptions { pipeline: None }),
+    )
+});
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -71,11 +74,11 @@ pub struct SqlHelpOptions {
     /// The SQL command to get help for. If not provided, shows all commands.
     #[arg(short, long)]
     pub command: Option<String>,
-    
+
     /// Generate documentation and save to file
     #[arg(short, long)]
     pub output: Option<String>,
-    
+
     /// Format for documentation output (md, html, json)
     #[arg(short, long, default_value = "md")]
     pub format: Option<String>,
@@ -86,19 +89,19 @@ pub struct BenchmarkOptions {
     /// Number of files to generate for benchmark
     #[arg(short = 'f', long)]
     pub num_files: usize,
-    
+
     /// Number of records per file
     #[arg(short = 'r', long)]
     pub records_per_file: usize,
-    
+
     /// Average record size in bytes
     #[arg(short = 's', long)]
     pub record_size: usize,
-    
+
     /// Benchmark name
     #[arg(short, long, default_value = "baseline")]
     pub name: String,
-    
+
     /// Description of what's being benchmarked (e.g., specific optimization)
     #[arg(short = 'd', long)]
     pub description: Option<String>,

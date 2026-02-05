@@ -1,13 +1,13 @@
-use react_suites::data_engineer::tools::sql_run::SqlRunTool;
-use react_core::tools::Tool;
 use react_core::agent::{AgentCtx, DefaultPolicy};
+use react_core::keyspace::DefaultKeyspace;
+use react_core::llm::NullModel;
+use react_core::providers::{QueryProvider, QueryResult};
+use react_core::scope::RequestScope;
+use react_core::storage::InMemoryStorageAdapter;
+use react_core::tools::Tool;
+use react_suites::data_engineer::tools::sql_run::SqlRunTool;
 use serde_json::json;
 use std::sync::Arc;
-use react_core::providers::{QueryProvider, QueryResult};
-use react_core::storage::InMemoryStorageAdapter;
-use react_core::llm::NullModel;
-use react_core::scope::RequestScope;
-use react_core::keyspace::DefaultKeyspace;
 
 #[derive(Clone)]
 struct DummyQueryProvider;
@@ -34,41 +34,64 @@ impl QueryProvider for DummyQueryProvider {
 
 #[tokio::test]
 async fn run_sql_allows_cte_and_window() {
-	let tool = SqlRunTool { query: Arc::new(DummyQueryProvider) };
-	let sql = r#"
+    let tool = SqlRunTool {
+        query: Arc::new(DummyQueryProvider),
+    };
+    let sql = r#"
 WITH x AS (SELECT 1 AS a)
 SELECT a, ROW_NUMBER() OVER () AS rn
 FROM x
 LIMIT 1
 "#;
-	let args = json!({ "sql": sql });
-	let actx = AgentCtx {
-		top_k: 10,
-		per_step_timeout_secs: 5,
-		max_steps: 1,
-		thread_id: None,
-		progress_tx: None,
-		pre_step_tx: None,
-		trace_tx: None,
-		agent_name: Some("test".to_string()),
-		policy: std::sync::Arc::new(DefaultPolicy),
-		llm: std::sync::Arc::new(NullModel::new()),
-		storage: std::sync::Arc::new(InMemoryStorageAdapter::default()),
-		scope: RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
-		keyspace: std::sync::Arc::new(DefaultKeyspace::new("b".into())),
-		query: None,
-		dbt: None,
-		vector: None,
-		thread_store: None,
-		runtime: None,
-	};
-	let res = tool.call(args, &actx).await.expect("tool call");
-	assert!(res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false), "expected ok response, got {}", res);
-	let header = res.get("header").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-	let cols: Vec<String> = header.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
-	assert!(cols.contains(&"a".to_string()), "expected column 'a' in header, got {:?}", cols);
-	assert!(cols.contains(&"rn".to_string()), "expected column 'rn' in header, got {:?}", cols);
+    let args = json!({ "sql": sql });
+    let actx = AgentCtx {
+        top_k: 10,
+        per_step_timeout_secs: 5,
+        max_steps: 1,
+        thread_id: None,
+        progress_tx: None,
+        pre_step_tx: None,
+        trace_tx: None,
+        agent_name: Some("test".to_string()),
+        policy: std::sync::Arc::new(DefaultPolicy),
+        llm: std::sync::Arc::new(NullModel::new()),
+        storage: std::sync::Arc::new(InMemoryStorageAdapter::default()),
+        scope: RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        },
+        keyspace: std::sync::Arc::new(DefaultKeyspace::new("b".into())),
+        query: None,
+        warehouse: std::sync::Arc::new(react_core::providers::NullWarehouseProvider::default()),
+        dbt: None,
+        vector: None,
+        thread_store: None,
+        runtime: None,
+    };
+    let res = tool.call(args, &actx).await.expect("tool call");
+    assert!(
+        res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
+        "expected ok response, got {}",
+        res
+    );
+    let header = res
+        .get("header")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let cols: Vec<String> = header
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    assert!(
+        cols.contains(&"a".to_string()),
+        "expected column 'a' in header, got {:?}",
+        cols
+    );
+    assert!(
+        cols.contains(&"rn".to_string()),
+        "expected column 'rn' in header, got {:?}",
+        cols
+    );
 }
-
-
-

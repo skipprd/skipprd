@@ -205,7 +205,13 @@ Output JSON:"#,
     )
 }
 
-pub fn english_synthesis(meta_ctx: &str, sql_json: &str, rows_ctx: &str, extra_ctx: &str, user_q: &str) -> String {
+pub fn english_synthesis(
+    meta_ctx: &str,
+    sql_json: &str,
+    rows_ctx: &str,
+    extra_ctx: &str,
+    user_q: &str,
+) -> String {
     format!(
         r#"You are a data assistant.
 Given the Question, SQL (JSON), result rows, and optional extra context, produce ONE concise English sentence that directly answers the Question.
@@ -263,4 +269,3 @@ Output JSON:"#,
         field_names_json, fields_ctx, schema_ctx, user_q, top_k
     )
 }
-

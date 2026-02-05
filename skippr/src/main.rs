@@ -1,5 +1,5 @@
-use std::time::{Duration, SystemTime};
 use rand::Rng;
+use std::time::{Duration, SystemTime};
 
 use arrow::datatypes::Schema;
 
@@ -14,18 +14,17 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::{io, process};
 
-
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::thread;
 
 use std::fs;
 
-use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::sleep;
 use std::time::Instant;
 
-use skippr::discover::PipelineMetadata;
 use skippr::cli::{Cli, Mode, CLI_MODE};
+use skippr::discover::PipelineMetadata;
 
 extern crate clap;
 extern crate core;
@@ -49,7 +48,7 @@ use skippr::helpers::logging::init_logging;
 use skippr::helpers::progress::ProgressUi;
 use tracing::{error, info, warn};
 
-use skippr::helpers::logger::{Logger, LogLevel};
+use skippr::helpers::logger::{LogLevel, Logger};
 use skippr::helpers::offsets::Offsets;
 
 use skippr::plugins::athena::DataOutputAwsAthenaPlugin;
@@ -59,26 +58,29 @@ use skippr::plugins::s3_input::DataSourceS3Plugin;
 
 use skippr::metrics::{Metrics, MetricsStatus};
 use skippr::plugins::file_input::DataSourceLocalFilePlugin;
-use skippr::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, LOGGER, METADATA, METRICS, OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE, OUTPUT_RUNNING, RUNNING};
+use skippr::{
+    ARROW_SCHEMA, ARROW_SCHEMA_VERSION, LOGGER, METADATA, METRICS,
+    OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE, OUTPUT_RUNNING, RUNNING,
+};
 // use crate::plugins::file_output::DataOutputFilePlugin;
 // use crate::plugins::s3_output::DataOutputS3Plugin;
 // use crate::plugins::stdin_input::DataSourceStdinPlugin;
 // use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
-use skippr::buffer::ingest_buffer::{Buffers, wal_recover};
+use skippr::buffer::ingest_buffer::{wal_recover, Buffers};
 // use crate::buffer::BufferChunker;
+use arc_swap::ArcSwap;
+use skippr::benchmark::PerformanceBenchmark;
 use skippr::helpers::timed_rwlock::TimedRwLock;
 use skippr::ingest_work::Ingest;
-use arc_swap::ArcSwap;
-use skippr::plugins::DataOutputPlugin;
-use skippr::plugins::file_output::DataOutputFilePlugin;
-use skippr::sqlrt::query::query;
-use skippr::sqlrt::docs::{DocFormat, get_docs_in_format};
-use skippr::sqlrt::doc_parser::SqlDocParser;
-use skippr::benchmark::PerformanceBenchmark;
-use std::io::IsTerminal as _;
 use skippr::llm;
+use skippr::plugins::file_output::DataOutputFilePlugin;
+use skippr::plugins::DataOutputPlugin;
+use skippr::sqlrt::doc_parser::SqlDocParser;
+use skippr::sqlrt::docs::{get_docs_in_format, DocFormat};
+use skippr::sqlrt::query::query;
+use std::io::IsTerminal as _;
 
 // use crate::plugins::pcap_input::DataSourcePcapPlugin;
 
@@ -88,24 +90,17 @@ use skippr::llm;
 // Global runtime state now lives in the library crate (see `src/globals.rs`).
 
 #[derive(Clone, Debug)]
-struct PipelineCache {
-}
+struct PipelineCache {}
 
 // @todo, last_ran should be the updated_at timestamp for the file DATA_DIR/LASTRAN
 impl PipelineCache {
     fn get_metadata() -> fs::Metadata {
-
         let last_ran_file = format!("{}/LASTRAN", Config::get_data_dir());
 
         match fs::metadata(&last_ran_file) {
-            Ok(metadata) => {
-                metadata
-            },
-            Err(_e) => {
-                PipelineCache::set_last_ran()
-            }
+            Ok(metadata) => metadata,
+            Err(_e) => PipelineCache::set_last_ran(),
         }
-
     }
 
     fn last_ran() -> SystemTime {
@@ -120,24 +115,25 @@ impl PipelineCache {
     }
 
     fn get_last_ran_elapsed() -> u64 {
-        SystemTime::now().duration_since(PipelineCache::last_ran()).unwrap().as_secs()
+        SystemTime::now()
+            .duration_since(PipelineCache::last_ran())
+            .unwrap()
+            .as_secs()
     }
 
     fn last_ran_is_elapsed() -> bool {
-
         let duration = match SystemTime::now().duration_since(PipelineCache::last_ran()) {
             Ok(duration) => duration,
-            Err(_e) => Duration::from_secs(0) // probably microsecond difference
+            Err(_e) => Duration::from_secs(0), // probably microsecond difference
         };
 
-        duration.as_secs() > Config::get_sync_frequency()
-            || duration.as_secs() == 0 // just created on first run
+        duration.as_secs() > Config::get_sync_frequency() || duration.as_secs() == 0
+        // just created on first run
     }
 }
 
 #[tokio::main]
 async fn main() {
-
     // let now = Instant::now();
 
     // lazy_static! {
@@ -154,9 +150,7 @@ async fn main() {
     CLI_MODE.write().clone_from(&cli.mode);
 
     match cli.mode {
-
         Mode::Sync(options) => {
-
             Config::build_config();
 
             Metrics::init_send_loop();
@@ -164,11 +158,12 @@ async fn main() {
             if options.pipeline.is_some() {
                 // println!("Syncing pipeline: {}", options.pipeline.unwrap().clone());
                 PIPELINE_NAME.write().clear();
-                PIPELINE_NAME.write().push_str(&options.pipeline.unwrap().clone());
+                PIPELINE_NAME
+                    .write()
+                    .push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
                 sync().await;
-
             } else {
                 let pipeline_name = Config::getenv("PIPELINE_NAME", "");
                 if !pipeline_name.is_empty() {
@@ -178,13 +173,11 @@ async fn main() {
                     Config::init().await;
 
                     sync().await;
-
                 } else {
                     info!("Syncing all pipelines");
                     let pipelines = Config::get_pipelines();
                     // loop {
                     for pipeline_name in pipelines {
-
                         Config::reset_envcache();
                         {
                             PIPELINE_NAME.write().clear();
@@ -192,9 +185,9 @@ async fn main() {
                         }
                         Config::init().await;
 
-
                         if !PipelineCache::last_ran_is_elapsed() {
-                            let remaining = Config::get_sync_frequency() - PipelineCache::get_last_ran_elapsed();
+                            let remaining = Config::get_sync_frequency()
+                                - PipelineCache::get_last_ran_elapsed();
                             info!(
                                 "Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.",
                                 &pipeline_name,
@@ -214,7 +207,7 @@ async fn main() {
                         sync().await;
                     }
 
-                        // sleep(Duration::from_secs(10));
+                    // sleep(Duration::from_secs(10));
                     // }
                 }
                 // PIPELINE_NAME.write().unwrap().clear();
@@ -222,8 +215,6 @@ async fn main() {
                 // Config::init().await;
                 // sync().await;
             }
-
-
         }
         Mode::Discover(options) => {
             Config::build_config();
@@ -231,7 +222,9 @@ async fn main() {
             if options.pipeline.is_some() {
                 // println!("Syncing pipeline: {}", options.pipeline.unwrap().clone());
                 PIPELINE_NAME.write().clear();
-                PIPELINE_NAME.write().push_str(&options.pipeline.unwrap().clone());
+                PIPELINE_NAME
+                    .write()
+                    .push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
                 discover(options.log).await;
@@ -256,10 +249,16 @@ async fn main() {
                     print!("sql> ");
                     let _ = io::stdout().flush();
                     let mut line = String::new();
-                    if io::stdin().read_line(&mut line).is_err() { break; }
+                    if io::stdin().read_line(&mut line).is_err() {
+                        break;
+                    }
                     let stmt = line.trim();
-                    if stmt.is_empty() { continue; }
-                    if stmt == ":q" || stmt == ":quit" || stmt.eq_ignore_ascii_case("exit") { break; }
+                    if stmt.is_empty() {
+                        continue;
+                    }
+                    if stmt == ":q" || stmt == ":quit" || stmt.eq_ignore_ascii_case("exit") {
+                        break;
+                    }
                     let now = Instant::now();
                     query(stmt).await;
                     let elapsed = now.elapsed();
@@ -283,21 +282,24 @@ async fn main() {
                     Some("json") => DocFormat::Json,
                     _ => DocFormat::Markdown,
                 };
-                
+
                 let content = get_docs_in_format(format);
-                
+
                 match std::fs::File::create(&output_path) {
                     Ok(mut file) => {
                         match std::io::Write::write_all(&mut file, content.as_bytes()) {
                             Ok(_) => {
-                                println!("SQL documentation generated and saved to: {}", output_path);
-                            },
+                                println!(
+                                    "SQL documentation generated and saved to: {}",
+                                    output_path
+                                );
+                            }
                             Err(e) => {
                                 println!("Error: Failed to write to file: {}", e);
                                 process::exit(1);
                             }
                         }
-                    },
+                    }
                     Err(e) => {
                         println!("Error: Failed to create file: {}", e);
                         process::exit(1);
@@ -315,11 +317,11 @@ async fn main() {
                         println!("Syntax: {}", doc.syntax);
                         println!();
                         println!("Example: {}", doc.example);
-                    },
+                    }
                     Ok(None) => {
                         println!("Unknown SQL command or standard SQL query.");
                         println!("If this is a standard SQL query, it may be supported by the system but not specifically documented.");
-                    },
+                    }
                     Err(e) => {
                         println!("Error: {}", e);
                     }
@@ -328,13 +330,13 @@ async fn main() {
                 // Show all SQL commands
                 println!("Supported SQL Commands:");
                 println!();
-                
+
                 // Group by category for better readability
                 let mut schema_cmds = Vec::new();
                 let mut pipeline_cmds = Vec::new();
                 let mut data_cmds = Vec::new();
                 let mut query_cmds = Vec::new();
-                
+
                 for doc in SqlDocParser::list_all_statements() {
                     if doc.name.contains("SCHEMA") {
                         schema_cmds.push(doc);
@@ -346,7 +348,7 @@ async fn main() {
                         query_cmds.push(doc);
                     }
                 }
-                
+
                 if !schema_cmds.is_empty() {
                     println!("Schema Operations:");
                     println!("-----------------");
@@ -355,7 +357,7 @@ async fn main() {
                     }
                     println!();
                 }
-                
+
                 if !pipeline_cmds.is_empty() {
                     println!("Pipeline Operations:");
                     println!("-------------------");
@@ -364,7 +366,7 @@ async fn main() {
                     }
                     println!();
                 }
-                
+
                 if !data_cmds.is_empty() {
                     println!("Data Operations:");
                     println!("---------------");
@@ -373,7 +375,7 @@ async fn main() {
                     }
                     println!();
                 }
-                
+
                 if !query_cmds.is_empty() {
                     println!("Query Operations:");
                     println!("----------------");
@@ -382,7 +384,7 @@ async fn main() {
                     }
                     println!();
                 }
-                
+
                 println!("For more details on a specific command, use:");
                 println!("  skippr sql-help --command \"<SQL COMMAND>\"");
                 println!();
@@ -396,22 +398,24 @@ async fn main() {
             PIPELINE_NAME.write().clear();
             PIPELINE_NAME.write().push_str("benchmark");
             Config::init().await;
-            
+
             // Initialize benchmark
             let benchmark = PerformanceBenchmark::new(
                 options.num_files,
                 options.records_per_file,
-                options.record_size
+                options.record_size,
             );
-            
+
             println!("Creating benchmark data...");
             match benchmark.create_benchmark_data() {
                 Ok(total_bytes) => {
-                    println!("Generated {} files with {} records each ({} bytes total)",
-                        options.num_files, options.records_per_file, total_bytes);
-                    
+                    println!(
+                        "Generated {} files with {} records each ({} bytes total)",
+                        options.num_files, options.records_per_file, total_bytes
+                    );
+
                     println!("Running benchmark '{}'...", options.name);
-                    
+
                     // Get description or use a default
                     let description = options.description.unwrap_or_else(|| {
                         if options.name == "baseline" {
@@ -420,17 +424,17 @@ async fn main() {
                             format!("Performance test: {}", options.name)
                         }
                     });
-                    
+
                     match benchmark.run_benchmark(&options.name, &description).await {
                         Ok(_) => {
                             println!("Benchmark completed successfully");
-                        },
+                        }
                         Err(e) => {
                             println!("Benchmark failed: {}", e);
                             process::exit(1);
                         }
                     }
-                },
+                }
                 Err(e) => {
                     println!("Failed to create benchmark data: {}", e);
                     process::exit(1);
@@ -438,27 +442,54 @@ async fn main() {
             }
         }
         Mode::Llm(options) => {
-            println!("{} LLM: initializing model config...", chrono::Utc::now().to_rfc3339());
+            println!(
+                "{} LLM: initializing model config...",
+                chrono::Utc::now().to_rfc3339()
+            );
             let cfg = llm::config_from_env();
-            println!("{} LLM: provider={:?} chat_model={:?} base_url={:?}", chrono::Utc::now().to_rfc3339(), cfg.provider, cfg.chat_model, cfg.base_url);
+            println!(
+                "{} LLM: provider={:?} chat_model={:?} base_url={:?}",
+                chrono::Utc::now().to_rfc3339(),
+                cfg.provider,
+                cfg.chat_model,
+                cfg.base_url
+            );
             let llm = llm::create_llm(&cfg);
             // NOTE: ReAct suite features moved to the standalone `react` crate/binary.
-            if options.ask_list || options.ask_open.is_some() || options.cleanse || options.model || options.ask.is_some() {
+            if options.ask_list
+                || options.ask_open.is_some()
+                || options.cleanse
+                || options.model
+                || options.ask.is_some()
+            {
                 eprintln!("This command moved to the standalone `react` crate.");
-                eprintln!("Run the ReAct server via `cargo run -p react -- serve --port <PORT> --log`.");
+                eprintln!(
+                    "Run the ReAct server via `cargo run -p react -- serve --port <PORT> --log`."
+                );
                 eprintln!("(Ask/model/threads utilities will be exposed via the react CLI/server going forward.)");
                 return;
             }
             if !options.embed.is_empty() {
                 let out = llm.embed(&options.embed);
-                match out { Ok(v) => {
-                    for (i, emb) in v.iter().enumerate() { println!("{}:{}", i, emb.len()); }
-                }, Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); } }
+                match out {
+                    Ok(v) => {
+                        for (i, emb) in v.iter().enumerate() {
+                            println!("{}:{}", i, emb.len());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("ERROR: {}", e);
+                        std::process::exit(1);
+                    }
+                }
             }
         }
         Mode::Serve(opts) => {
             eprintln!("The ReAct WebSocket server moved to the standalone `react` crate.");
-            eprintln!("Run: `cargo run -p react -- serve --port {} --log`", opts.port);
+            eprintln!(
+                "Run: `cargo run -p react -- serve --port {} --log`",
+                opts.port
+            );
             return;
         }
     }
@@ -472,7 +503,6 @@ async fn schema(pipeline: &str) {
     let session_config = SessionConfig::new();
     let ctx = SessionContext::new_with_config(session_config);
 
-
     PIPELINE_NAME.write().clear();
     PIPELINE_NAME.write().push_str(&pipeline);
     Config::init().await;
@@ -481,7 +511,6 @@ async fn schema(pipeline: &str) {
     let _full_table_name = format!("{}.{}", workspace, pipeline);
 
     // @todo - check dir exists for provided table name, otherwise we end up creating erroneous dirs
-
 
     // itterate over data dir output buffers
     let data_dir = Config::get_data_dir();
@@ -492,14 +521,16 @@ async fn schema(pipeline: &str) {
     // Use ListingTable for local output_buffer to inspect schema
     {
         use datafusion::datasource::file_format::parquet::ParquetFormat;
-        use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
+        use datafusion::datasource::listing::{
+            ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+        };
         let url = ListingTableUrl::parse(&output_dir).expect("invalid dir");
         let fmt = ParquetFormat::default();
         let opts = ListingOptions::new(Arc::new(fmt)).with_file_extension(".parquet");
-        let cfg = ListingTableConfig::new(url)
-            .with_listing_options(opts);
+        let cfg = ListingTableConfig::new(url).with_listing_options(opts);
         let table = ListingTable::try_new(cfg).expect("listing table");
-        ctx.register_table(pipeline, Arc::new(table)).expect("register table");
+        ctx.register_table(pipeline, Arc::new(table))
+            .expect("register table");
     }
     let dfn = ctx.table(pipeline).await.unwrap();
 
@@ -507,7 +538,11 @@ async fn schema(pipeline: &str) {
     let schema = dfn.schema();
     let mut fields: Vec<String> = Vec::new();
     for i in 0..schema.fields().len() {
-        fields.push(format!("{}: {}", schema.field(i).name(), schema.field(i).data_type().to_string()));
+        fields.push(format!(
+            "{}: {}",
+            schema.field(i).name(),
+            schema.field(i).data_type().to_string()
+        ));
     }
 
     fields.sort();
@@ -518,7 +553,6 @@ async fn schema(pipeline: &str) {
 }
 
 async fn discover(log: bool) {
-
     let pipeline_name = Config::get_pipeline_name();
     let _start_time = Instant::now();
 
@@ -534,7 +568,10 @@ async fn discover(log: bool) {
         ]);
     }
 
-    info!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
+    info!(
+        "Analysing data and generating Skippr metadata for pipeline: {}",
+        pipeline_name
+    );
 
     // Stats tailer removed; catalogs built at end-of-run only
 
@@ -543,7 +580,7 @@ async fn discover(log: bool) {
     let pipeline_metadata = match Config::get_metadata().await {
         Ok(pipeline_metadata) => {
             info!("Found existing Skippr metadata, will update with schema discovered from sampled data");
-            
+
             pipeline_metadata
         }
         Err(_e) => {
@@ -570,7 +607,9 @@ async fn discover(log: bool) {
     // let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
     // let shared_output = Arc::new(TimedRwLock::new("output_plugin".to_string(), output));
     let output_plugin_name = Config::get_pipeline_output_plugin_name();
-    let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
+    let output = sync_output_plugin(&output_plugin_name, "output".to_string())
+        .await
+        .unwrap();
     let shared_output = Arc::new(output);
 
     // sync schema if output plugin configured
@@ -580,7 +619,11 @@ async fn discover(log: bool) {
         // Just build the arrow schemas internally
         let flatten = Config::get_transform_flatten_events();
         for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
-            match Ingest::prepare_arrow_schema_with_metadata(&namespace, &pipeline_metadata.metadata, flatten) {
+            match Ingest::prepare_arrow_schema_with_metadata(
+                &namespace,
+                &pipeline_metadata.metadata,
+                flatten,
+            ) {
                 Ok(_t) => {}
                 Err(e) => {
                     error!("Failed to prepare arrow schema: {}", e);
@@ -591,9 +634,13 @@ async fn discover(log: bool) {
     }
 
     let shared_output_clone = shared_output.clone();
-    if progress.enabled() { progress.start("Ingesting"); }
+    if progress.enabled() {
+        progress.start("Ingesting");
+    }
     sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
-    if progress.enabled() { progress.complete("Ingesting"); }
+    if progress.enabled() {
+        progress.complete("Ingesting");
+    }
 
     info!("Reached end of source data");
     info!(
@@ -604,10 +651,7 @@ async fn discover(log: bool) {
             .unwrap()
     );
 
-
-
     // Stats tailer removed; stats computed by orchestrator from DataFusion at end-of-run
-
 
     // Late rebuild from existing S3 parquet if no new data (bounded)
     // (legacy catalog module removed; this is now provider-driven)
@@ -617,37 +661,52 @@ async fn discover(log: bool) {
 
     // Final metrics snapshot (same as periodic per-minute print)
     // if log {
-        use std::sync::atomic::Ordering as AtomicOrdering;
-        let messages_total_counter = skippr::metrics::counters::MESSAGES_TOTAL.load(AtomicOrdering::Relaxed);
-        let source_bytes_total_counter = skippr::metrics::counters::SOURCE_BYTES_TOTAL.load(AtomicOrdering::Relaxed);
-        let deadletters_total_counter = skippr::metrics::counters::DEADLETTERS_TOTAL.load(AtomicOrdering::Relaxed);
-        let _ingested_slow_total_counter = skippr::metrics::counters::INGESTED_SLOW_TOTAL.load(AtomicOrdering::Relaxed);
-        let human_bytes = skippr::helpers::Helpers::human_readable_size(source_bytes_total_counter);
-        info!("Messages per Min: {}", 0);
-        info!("Messages Fixed per Min: {}", 0);
-        info!("Bytes Total: {}", human_bytes);
-        info!("Messages Total: {}", messages_total_counter);
-        info!("Deadletters per Min: {}", 0);
-        info!("Deadletter Total: {}", deadletters_total_counter);
-        // Runtime not directly accessible here; print 0 to keep format consistent
-        info!("Runtime: {} seconds", 0);
-        let up_total = skippr::metrics::counters::UPLOADS_TOTAL.load(AtomicOrdering::SeqCst);
-        let up_inflight = skippr::metrics::counters::UPLOADS_IN_FLIGHT.load(AtomicOrdering::SeqCst);
-        let up_lat_ns_total = skippr::metrics::counters::UPLOAD_LATENCY_NS_TOTAL.load(AtomicOrdering::SeqCst);
-        let avg_up_ms = if up_total > 0 { (up_lat_ns_total / up_total) as f64 / 1_000_000.0 } else { 0.0 };
-        let up_target = skippr::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
-        let wal_target = skippr::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
-        let dl_target = skippr::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
-        let active = skippr::metrics::counters::ACTIVE_THREADS.load(AtomicOrdering::SeqCst);
-        let queue = skippr::metrics::counters::QUEUE_LENGTH.load(AtomicOrdering::SeqCst);
-        info!("Uploads total: {}, inflight: {}, avg latency: {:.2} ms", up_total, up_inflight, avg_up_ms);
-        info!("Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}", up_target, wal_target, dl_target, active, queue);
+    use std::sync::atomic::Ordering as AtomicOrdering;
+    let messages_total_counter =
+        skippr::metrics::counters::MESSAGES_TOTAL.load(AtomicOrdering::Relaxed);
+    let source_bytes_total_counter =
+        skippr::metrics::counters::SOURCE_BYTES_TOTAL.load(AtomicOrdering::Relaxed);
+    let deadletters_total_counter =
+        skippr::metrics::counters::DEADLETTERS_TOTAL.load(AtomicOrdering::Relaxed);
+    let _ingested_slow_total_counter =
+        skippr::metrics::counters::INGESTED_SLOW_TOTAL.load(AtomicOrdering::Relaxed);
+    let human_bytes = skippr::helpers::Helpers::human_readable_size(source_bytes_total_counter);
+    info!("Messages per Min: {}", 0);
+    info!("Messages Fixed per Min: {}", 0);
+    info!("Bytes Total: {}", human_bytes);
+    info!("Messages Total: {}", messages_total_counter);
+    info!("Deadletters per Min: {}", 0);
+    info!("Deadletter Total: {}", deadletters_total_counter);
+    // Runtime not directly accessible here; print 0 to keep format consistent
+    info!("Runtime: {} seconds", 0);
+    let up_total = skippr::metrics::counters::UPLOADS_TOTAL.load(AtomicOrdering::SeqCst);
+    let up_inflight = skippr::metrics::counters::UPLOADS_IN_FLIGHT.load(AtomicOrdering::SeqCst);
+    let up_lat_ns_total =
+        skippr::metrics::counters::UPLOAD_LATENCY_NS_TOTAL.load(AtomicOrdering::SeqCst);
+    let avg_up_ms = if up_total > 0 {
+        (up_lat_ns_total / up_total) as f64 / 1_000_000.0
+    } else {
+        0.0
+    };
+    let up_target =
+        skippr::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
+    let wal_target =
+        skippr::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
+    let dl_target =
+        skippr::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
+    let active = skippr::metrics::counters::ACTIVE_THREADS.load(AtomicOrdering::SeqCst);
+    let queue = skippr::metrics::counters::QUEUE_LENGTH.load(AtomicOrdering::SeqCst);
+    info!(
+        "Uploads total: {}, inflight: {}, avg latency: {:.2} ms",
+        up_total, up_inflight, avg_up_ms
+    );
+    info!(
+        "Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}",
+        up_target, wal_target, dl_target, active, queue
+    );
     // }
 
-
     // LLM enrichment is run via the catalog provider (see provider.run_llm_enrichment_all above).
-    
-
 
     // Insightful LLM summary based on Catalog Stats (not ingest counters)
     {
@@ -656,46 +715,84 @@ async fn discover(log: bool) {
         // Collect namespaces from registry (preferred) or metadata
         let pipeline = Config::get_pipeline_name();
         let mut namespaces = skippr::sqlrt::registry::list_namespaces(&pipeline).await;
-        if namespaces.is_empty() { namespaces = pipeline_metadata.metadata.keys().cloned().collect::<Vec<_>>(); }
+        if namespaces.is_empty() {
+            namespaces = pipeline_metadata
+                .metadata
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+        }
 
         // Gather per-namespace stats and descriptions
         #[derive(Clone, Default)]
-        struct NsSummary { approx_rows: u64, desc: Option<String>, earliest_ts: Option<i64>, latest_ts: Option<i64> }
+        struct NsSummary {
+            approx_rows: u64,
+            desc: Option<String>,
+            earliest_ts: Option<i64>,
+            latest_ts: Option<i64>,
+        }
         let mut by_ns: HashMap<String, NsSummary> = HashMap::new();
 
         fn parse_epoch_to_secs(x: f64) -> Option<i64> {
             let v = x as i64;
-            if v <= 0 { return None; }
-            if v > 1_000_000_000_000_000 { // micros
+            if v <= 0 {
+                return None;
+            }
+            if v > 1_000_000_000_000_000 {
+                // micros
                 Some(v / 1_000_000)
-            } else if v > 1_000_000_000_000 { // millis
+            } else if v > 1_000_000_000_000 {
+                // millis
                 Some(v / 1_000)
-            } else if v > 1_000_000_000 { // seconds
+            } else if v > 1_000_000_000 {
+                // seconds
                 Some(v)
-            } else { None }
+            } else {
+                None
+            }
         }
 
         for ns in namespaces.iter() {
             // Stats → approx rows and date range heuristic
             if let Some(v) = Config::read_namespace_stats_async(ns).await {
-                if let Ok(stats) = serde_json::from_value::<skippr::discover::stats::NamespaceStats>(v) {
+                if let Ok(stats) =
+                    serde_json::from_value::<skippr::discover::stats::NamespaceStats>(v)
+                {
                     let mut approx_rows: u64 = 0;
                     let mut min_ts: Option<i64> = None;
                     let mut max_ts: Option<i64> = None;
                     for (fname, fs) in stats.fields.iter() {
                         approx_rows = approx_rows.max(fs.sample_total.unwrap_or(fs.total));
                         // Name-agnostic: infer time window only when numeric epoch-like stats are present
-                            if let Some(min_num) = fs.min_numeric { if let Some(s) = parse_epoch_to_secs(min_num) { min_ts = Some(min_ts.map(|m| m.min(s)).unwrap_or(s)); } }
-                            if let Some(max_num) = fs.max_numeric { if let Some(s) = parse_epoch_to_secs(max_num) { max_ts = Some(max_ts.map(|m| m.max(s)).unwrap_or(s)); } }
+                        if let Some(min_num) = fs.min_numeric {
+                            if let Some(s) = parse_epoch_to_secs(min_num) {
+                                min_ts = Some(min_ts.map(|m| m.min(s)).unwrap_or(s));
+                            }
+                        }
+                        if let Some(max_num) = fs.max_numeric {
+                            if let Some(s) = parse_epoch_to_secs(max_num) {
+                                max_ts = Some(max_ts.map(|m| m.max(s)).unwrap_or(s));
+                            }
+                        }
                     }
-                    by_ns.insert(ns.clone(), NsSummary { approx_rows, desc: None, earliest_ts: min_ts, latest_ts: max_ts });
+                    by_ns.insert(
+                        ns.clone(),
+                        NsSummary {
+                            approx_rows,
+                            desc: None,
+                            earliest_ts: min_ts,
+                            latest_ts: max_ts,
+                        },
+                    );
                 }
             }
             // Catalog → description
             if let Some(entry) = skippr::sqlrt::registry::find_entry(&pipeline, ns).await {
                 if !entry.catalog_key.is_empty() {
                     if let Ok(val) = skippr::helpers::s3::get_json(&entry.catalog_key).await {
-                        if let Some(s) = val.get("description").and_then(|x| x.as_str()) { by_ns.entry(ns.clone()).or_default().desc = Some(s.to_string()); }
+                        if let Some(s) = val.get("description").and_then(|x| x.as_str()) {
+                            by_ns.entry(ns.clone()).or_default().desc = Some(s.to_string());
+                        }
                     }
                 }
             }
@@ -709,9 +806,16 @@ async fn discover(log: bool) {
             (Some(a), Some(b)) => {
                 let a_dt = Utc.timestamp_opt(a, 0).single();
                 let b_dt = Utc.timestamp_opt(b, 0).single();
-                match (a_dt, b_dt) { (Some(x), Some(y)) => format!("{} → {}", x.date_naive(), y.date_naive()), _ => String::new() }
+                match (a_dt, b_dt) {
+                    (Some(x), Some(y)) => format!("{} → {}", x.date_naive(), y.date_naive()),
+                    _ => String::new(),
+                }
             }
-            (Some(a), None) => Utc.timestamp_opt(a, 0).single().map(|d| d.date_naive().to_string()).unwrap_or_default(),
+            (Some(a), None) => Utc
+                .timestamp_opt(a, 0)
+                .single()
+                .map(|d| d.date_naive().to_string())
+                .unwrap_or_default(),
             _ => String::new(),
         };
 
@@ -720,9 +824,15 @@ async fn discover(log: bool) {
         for ns in namespaces.iter() {
             let s = by_ns.get(ns).cloned().unwrap_or_default();
             let d = s.desc.unwrap_or_else(|| String::from(""));
-            let line = if d.is_empty() { format!("{} (≈{} rows)", ns, s.approx_rows) } else { format!("{}: {} (≈{} rows)", ns, d, s.approx_rows) };
+            let line = if d.is_empty() {
+                format!("{} (≈{} rows)", ns, s.approx_rows)
+            } else {
+                format!("{}: {} (≈{} rows)", ns, d, s.approx_rows)
+            };
             digest_lines.push(line);
-            if digest_lines.len() >= 6 { break; } // cap prompt size
+            if digest_lines.len() >= 6 {
+                break;
+            } // cap prompt size
         }
 
         let cfg = llm::config_from_env();
@@ -734,13 +844,24 @@ async fn discover(log: bool) {
             if period_str.is_empty() { "unknown".to_string() } else { period_str.clone() },
             digest_lines.join("\n")
         );
-        match llm.chat(&[llm::ChatMessage { role: "user".into(), content: prompt }]) {
-            Ok(text) => { println!("{} {}", chrono::Utc::now().to_rfc3339(), text.trim()); }
+        match llm.chat(&[llm::ChatMessage {
+            role: "user".into(),
+            content: prompt,
+        }]) {
+            Ok(text) => {
+                println!("{} {}", chrono::Utc::now().to_rfc3339(), text.trim());
+            }
             Err(_) => {
                 if period_str.is_empty() {
-                    println!("Warehouse spans {} table(s) with ≈{} rows in total.", tables, approx_total);
+                    println!(
+                        "Warehouse spans {} table(s) with ≈{} rows in total.",
+                        tables, approx_total
+                    );
                 } else {
-                    println!("Warehouse spans {} table(s) with ≈{} rows from {}.", tables, approx_total, period_str);
+                    println!(
+                        "Warehouse spans {} table(s) with ≈{} rows from {}.",
+                        tables, approx_total, period_str
+                    );
                 }
             }
         }
@@ -753,7 +874,9 @@ async fn discover(log: bool) {
         counter_lock.status = MetricsStatus::Finishing;
     }
 
-    if progress.enabled() { progress.start("Finalising"); }
+    if progress.enabled() {
+        progress.start("Finalising");
+    }
     while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
     }
@@ -763,15 +886,12 @@ async fn discover(log: bool) {
     }
 
     {
-        OUTPUT_RUNNING
-            .write()
-            .store(false, Ordering::SeqCst);
+        OUTPUT_RUNNING.write().store(false, Ordering::SeqCst);
     }
 
     {
         let mut counter_lock = METRICS.write();
         counter_lock.status = MetricsStatus::Completed;
-
     }
 
     {
@@ -785,9 +905,13 @@ async fn discover(log: bool) {
     match Metrics::send_metrics(Some(0)).await {
         Ok(_res) => (),
         Err(e) => {
-            LOGGER.write()
+            LOGGER
+                .write()
                 .await
-                .log(LogLevel::Error, format!("Failed to send metrics to Skippr API: {}", e))
+                .log(
+                    LogLevel::Error,
+                    format!("Failed to send metrics to Skippr API: {}", e),
+                )
                 .await;
         }
     }
@@ -798,14 +922,15 @@ async fn discover(log: bool) {
         }
     }
 
-    if progress.enabled() { progress.complete("Finalising"); progress.finish(); }
-
+    if progress.enabled() {
+        progress.complete("Finalising");
+        progress.finish();
+    }
 }
 
 async fn sync() {
-
     let pipeline_name = Config::get_pipeline_name();
-    
+
     let stdout_is_tty = std::io::stdout().is_terminal();
     let progress = ProgressUi::new(stdout_is_tty && !skippr::helpers::logging::cli_logs_enabled());
     if progress.enabled() {
@@ -827,9 +952,13 @@ async fn sync() {
         match Metrics::send_config().await {
             Ok(_res) => (),
             Err(e) => {
-                LOGGER.write()
+                LOGGER
+                    .write()
                     .await
-                    .log(LogLevel::Error, format!("Failed to send config to Skippr API: {}", e))
+                    .log(
+                        LogLevel::Error,
+                        format!("Failed to send config to Skippr API: {}", e),
+                    )
                     .await;
             }
         }
@@ -853,7 +982,7 @@ async fn sync() {
                     }
 
                     return;
-                },
+                }
                 None => {}
             }
 
@@ -872,12 +1001,10 @@ async fn sync() {
         }
     };
 
-
     info!("Syncing pipeline: {}", pipeline_name);
     // Stats tailer removed; catalogs built at end-of-run only
 
     METADATA.store(Arc::new(pipeline_metadata.clone()));
-
 
     let offsets_db = match Offsets::init() {
         Ok(offsets) => offsets,
@@ -895,13 +1022,15 @@ async fn sync() {
     Buffers::migrate_segs_once();
 
     wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
-    
+
     {
         METRICS.write().status = MetricsStatus::Running;
     }
 
     let output_plugin_name = Config::get_pipeline_output_plugin_name();
-    let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
+    let output = sync_output_plugin(&output_plugin_name, "output".to_string())
+        .await
+        .unwrap();
     let shared_output = Arc::new(output);
 
     // Start background WAL compactor pool after WAL recovery
@@ -931,7 +1060,11 @@ async fn sync() {
         // Just build the arrow schemas internally
         let flatten = Config::get_transform_flatten_events();
         for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
-            match Ingest::prepare_arrow_schema_with_metadata(&namespace, &pipeline_metadata.metadata, flatten) {
+            match Ingest::prepare_arrow_schema_with_metadata(
+                &namespace,
+                &pipeline_metadata.metadata,
+                flatten,
+            ) {
                 Ok(_t) => {}
                 Err(e) => {
                     error!("Failed to prepare arrow schema: {}", e);
@@ -941,9 +1074,13 @@ async fn sync() {
         }
     }
 
-    if progress.enabled() { progress.start("Ingesting"); }
+    if progress.enabled() {
+        progress.start("Ingesting");
+    }
     sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
-    if progress.enabled() { progress.complete("Ingesting"); }
+    if progress.enabled() {
+        progress.complete("Ingesting");
+    }
 
     info!("Reached end of source data");
     info!(
@@ -964,13 +1101,18 @@ async fn sync() {
 
     // Deterministic drain: compact all remaining on-disk segments to parquet
     {
-        if progress.enabled() { progress.start("Finalising"); }
+        if progress.enabled() {
+            progress.start("Finalising");
+        }
         // Stop background compactor pool and wait for in-flight to drain
         Buffers::request_compactor_stop();
         // Wait for in-flight to reach zero (bounded wait)
         for _ in 0..40 {
-            let inflight = skippr::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed);
-            if inflight == 0 { break; }
+            let inflight = skippr::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if inflight == 0 {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
@@ -982,14 +1124,18 @@ async fn sync() {
     // Single-thread model: no background compaction tasks remain here
     // Wait for background Glue partition tasks to settle to avoid undercount at end
     skippr::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
-    if progress.enabled() { progress.complete("Finalising"); }
+    if progress.enabled() {
+        progress.complete("Finalising");
+    }
 
     // Summary and integrity check: uploaded rows vs expected msgs, quarantined parts
     {
         use std::sync::atomic::Ordering as AO;
-        let uploaded_rows = skippr::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(AO::Relaxed);
+        let uploaded_rows =
+            skippr::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(AO::Relaxed);
         let expected_msgs = skippr::metrics::counters::MESSAGES_TOTAL.load(AO::Relaxed);
-        let quarantined_parts = skippr::metrics::counters::QUARANTINED_PARTITIONS_TOTAL.load(AO::Relaxed);
+        let quarantined_parts =
+            skippr::metrics::counters::QUARANTINED_PARTITIONS_TOTAL.load(AO::Relaxed);
         info!(
             "Compactor: summary uploaded_rows={} expected_msgs={} quarantined_parts={}",
             uploaded_rows, expected_msgs, quarantined_parts
@@ -1006,9 +1152,13 @@ async fn sync() {
     match Metrics::send_metrics(Some(0)).await {
         Ok(_res) => (),
         Err(e) => {
-            LOGGER.write()
+            LOGGER
+                .write()
                 .await
-                .log(LogLevel::Error, format!("Failed to send metrics to Skippr API: {}", e))
+                .log(
+                    LogLevel::Error,
+                    format!("Failed to send metrics to Skippr API: {}", e),
+                )
                 .await;
         }
     }
@@ -1025,13 +1175,18 @@ async fn sync() {
 
     // Final concise metrics
     {
-        use skippr::metrics::counters as counters;
+        use skippr::metrics::counters;
         let m = METRICS.read();
-        let messages_total = m.messages_total + counters::MESSAGES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
-        let source_bytes_total = m.source_bytes_total + counters::SOURCE_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
-        let parquet_objects = m.parquet_persisted_objects_total + counters::PARQUET_PERSISTED_OBJECTS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
-        let parquet_rows = m.parquet_persisted_rows_total + counters::PARQUET_PERSISTED_ROWS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
-        let parquet_bytes = m.parquet_persisted_bytes_total + counters::PARQUET_PERSISTED_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+        let messages_total =
+            m.messages_total + counters::MESSAGES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+        let source_bytes_total = m.source_bytes_total
+            + counters::SOURCE_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+        let parquet_objects = m.parquet_persisted_objects_total
+            + counters::PARQUET_PERSISTED_OBJECTS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+        let parquet_rows = m.parquet_persisted_rows_total
+            + counters::PARQUET_PERSISTED_ROWS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+        let parquet_bytes = m.parquet_persisted_bytes_total
+            + counters::PARQUET_PERSISTED_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
         info!(
             "Final metrics: msgs_total={} src_bytes_total={} parquet_rows_total={} parquet_bytes_total={} parquet_objects_total={}",
             messages_total,
@@ -1043,16 +1198,20 @@ async fn sync() {
     }
     info!("Pipeline sync complete");
     // NOTE: ReAct catalog/semantic/embeddings work moved to the standalone `react` crate.
-    if progress.enabled() { progress.finish(); }
+    if progress.enabled() {
+        progress.finish();
+    }
 }
 
 // legacy no-op; replaced by catalog::orchestrator
 async fn build_catalog(_pipeline_metadata: &PipelineMetadata) {}
 
-pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
-
+pub async fn sync_output_plugin(
+    plugin_name: &str,
+    buffer_name: String,
+) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
     info!("Output plugin: {}", plugin_name);
-    
+
     match plugin_name {
         // "stdout" => {
         //     let output = DataOutputStdoutPlugin::new(buffer_name).await;
@@ -1063,7 +1222,6 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Resul
         "File" => {
             let plugin = DataOutputFilePlugin::new(buffer_name).await;
             Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
-
         }
         // "s3" => {
         //     if *HAS_LICENSE.read() {
@@ -1081,18 +1239,27 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Resul
             Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
         }
         "" => {
-            info!("No Data {} plugin specified, defaulting to local file", buffer_name);
+            info!(
+                "No Data {} plugin specified, defaulting to local file",
+                buffer_name
+            );
             let plugin = DataOutputFilePlugin::new(buffer_name).await;
             Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
         }
         _ => {
             // println!("Unknown Data {} plugin specified", buffer_name);
-            Err(io::Error::new(io::ErrorKind::Other, "Unknown Data plugin specified"))
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Unknown Data plugin specified",
+            ))
         }
     }
 }
 
-pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
+pub async fn sync_input_plugin(
+    offsets_clone: Arc<Offsets>,
+    shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+) {
     match Config::get_pipeline_input_plugin_name().as_str() {
         // "pcap" => {
         //     panic!("PCAP input plugin not installed, please contact support")
@@ -1113,11 +1280,7 @@ pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>, shared_output: Arc<B
         // }
         "File" => {
             let mut input = DataSourceLocalFilePlugin::new().await;
-            input.sync(
-                offsets_clone,
-                shared_output
-            )
-                .await;
+            input.sync(offsets_clone, shared_output).await;
         }
         "S3" => {
             let mut input = DataSourceS3Plugin::new().await;

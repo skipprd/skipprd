@@ -34,4 +34,3 @@ impl Tool for SqlRegisterTool {
         Ok(serde_json::json!({"ok": true, "count": out.len(), "note": "no-op (engine-agnostic)"}))
     }
 }
-

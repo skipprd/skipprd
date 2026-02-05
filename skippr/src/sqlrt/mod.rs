@@ -11,4 +11,3 @@ pub mod query;
 pub mod registry;
 pub mod tables;
 pub mod tui;
-
