@@ -892,10 +892,16 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
              - Coverage requirement: include ALL raw/bronze tables in scope by default, and include all valid fields from those tables in silver.\n\
                - Do NOT drop columns; preserve raw values (e.g., *_raw) and add cleaned/cast columns alongside them.\n\
                - If a field is unusable, keep the raw column and add a best-effort cleaned column with safe casting/normalization.\n\
+             - Row preservation (CRITICAL): silver/staging is a row-preserving cleanse layer.\n\
+               - Do NOT filter rows, deduplicate, or enforce grains/primary keys in silver.\n\
+               - If raw/bronze values are NULL/blank, it is valid for silver to produce NULL/blank after cleansing.\n\
+               - Prefer quality flags (has_*, is_valid_*) and conditional tests instead of row drops.\n\
              - Model relationships and flow:\n\
                - Identify join keys (user/profile/account/session/device identifiers) and timestamp fields using sql_schema + sql_sample/sql_stats.\n\
                - Prefer staged normalization (consistent key/timestamp names) to make downstream joins reliable.\n\
-              - Add dbt tests (not_null/unique/relationships) for chosen keys and key timestamps.\n\
+              - Add dbt tests for chosen keys and key timestamps (data-aware):\n\
+                - Prefer conditional tests with where: anchored on raw input presence.\n\
+                - Avoid unique tests in silver unless the raw source is proven unique and you intend to enforce it here.\n\
               - IMPORTANT: be data-aware and permissive: NEVER add unconditional not_null on parsed/cast timestamp fields produced via try_cast; instead use conditional tests with where: anchored on the raw value being present (and document why).\n\
              - Batch scaffolding: use dbt_files op=patch to write MANY files, but keep each call small enough to fit the output limit.\n\
                - If you need more files, do multiple dbt_files calls over multiple steps.\n\

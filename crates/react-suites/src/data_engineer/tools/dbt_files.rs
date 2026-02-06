@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
@@ -22,6 +22,354 @@ fn sha256_hex(s: &str) -> String {
     hasher.update(s.as_bytes());
     let out = hasher.finalize();
     hex::encode(out)
+}
+
+fn file_stem(rel_path: &str) -> Option<String> {
+    std::path::Path::new(rel_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.trim().is_empty())
+}
+
+fn strip_ident_quotes(s: &str) -> String {
+    let t = s.trim();
+    if t.len() >= 2 {
+        let bytes = t.as_bytes();
+        if (bytes[0] == b'"' && bytes[t.len() - 1] == b'"')
+            || (bytes[0] == b'`' && bytes[t.len() - 1] == b'`')
+        {
+            return t[1..t.len() - 1].to_string();
+        }
+    }
+    t.to_string()
+}
+
+fn split_top_level_commas(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut depth: i32 = 0;
+    let mut in_sq = false;
+    let mut in_dq = false;
+    let mut prev = '\0';
+    for ch in s.chars() {
+        if in_sq {
+            cur.push(ch);
+            if ch == '\'' && prev != '\\' {
+                in_sq = false;
+            }
+            prev = ch;
+            continue;
+        }
+        if in_dq {
+            cur.push(ch);
+            if ch == '"' && prev != '\\' {
+                in_dq = false;
+            }
+            prev = ch;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_sq = true;
+                cur.push(ch);
+            }
+            '"' => {
+                in_dq = true;
+                cur.push(ch);
+            }
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth = (depth - 1).max(0);
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                let t = cur.trim();
+                if !t.is_empty() {
+                    out.push(t.to_string());
+                }
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+        prev = ch;
+    }
+    let t = cur.trim();
+    if !t.is_empty() {
+        out.push(t.to_string());
+    }
+    out
+}
+
+fn extract_final_select_output_columns(sql: &str) -> Result<BTreeSet<String>, String> {
+    // Conservative heuristic: staging models written by this suite typically end with:
+    //   select
+    //     a,
+    //     expr as b
+    //   from ...
+    //
+    // We parse the final SELECT list and return a set of output column names.
+    let lower = sql.to_ascii_lowercase();
+    let mut last_select: Option<usize> = None;
+    let mut idx = 0usize;
+    while let Some(pos) = lower[idx..].find("select") {
+        last_select = Some(idx + pos);
+        idx = idx + pos + "select".len();
+    }
+    let sel = last_select.ok_or_else(|| "unable to find SELECT in staging SQL".to_string())?;
+    let after_sel = sel + "select".len();
+
+    // Prefer a line-starting FROM to avoid matching 'from' inside expressions.
+    let from_pos = lower[after_sel..]
+        .find("\nfrom")
+        .or_else(|| lower[after_sel..].find("\r\nfrom"))
+        .ok_or_else(|| "unable to find FROM for final SELECT in staging SQL".to_string())?;
+    let list = &sql[after_sel..after_sel + from_pos];
+    let items = split_top_level_commas(list);
+    if items.is_empty() {
+        return Err("final SELECT list appears empty".to_string());
+    }
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for it in items {
+        let t = it.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t == "*" || t.ends_with(".*") {
+            return Err(
+                "staging SQL uses '*' in final SELECT; cannot safely validate schema YAML (use an explicit select list)"
+                    .to_string(),
+            );
+        }
+        let tl = t.to_ascii_lowercase();
+        if let Some(as_pos) = tl.rfind(" as ") {
+            let alias = strip_ident_quotes(&t[as_pos + 4..]);
+            let a = alias.trim();
+            if !a.is_empty() {
+                out.insert(a.to_string());
+            }
+            continue;
+        }
+        // Bare identifier or quoted identifier.
+        let ident = strip_ident_quotes(t);
+        let name = ident.split('.').last().unwrap_or("").trim().to_string();
+        if !name.is_empty() {
+            out.insert(name);
+        }
+    }
+    if out.is_empty() {
+        return Err("unable to extract any output columns from final SELECT".to_string());
+    }
+    Ok(out)
+}
+
+fn extract_idents_ending_with_raw(s: &str) -> Vec<String> {
+    // Tokenize on non-identifier chars; return tokens ending with _raw.
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in s.chars() {
+        let is_ident = ch.is_ascii_alphanumeric() || ch == '_';
+        if is_ident {
+            cur.push(ch);
+        } else {
+            let t = cur.trim();
+            if !t.is_empty() && t.to_ascii_lowercase().ends_with("_raw") {
+                out.push(t.to_string());
+            }
+            cur.clear();
+        }
+    }
+    let t = cur.trim();
+    if !t.is_empty() && t.to_ascii_lowercase().ends_with("_raw") {
+        out.push(t.to_string());
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn yaml_collect_model_section<'a>(
+    root: &'a serde_yaml::Value,
+    model_name: &str,
+) -> Vec<&'a serde_yaml::Mapping> {
+    let mut out: Vec<&'a serde_yaml::Mapping> = Vec::new();
+    let Some(models) = root
+        .as_mapping()
+        .and_then(|m| m.get(serde_yaml::Value::String("models".to_string())))
+        .and_then(|v| v.as_sequence())
+    else {
+        return out;
+    };
+    for it in models.iter() {
+        let Some(mm) = it.as_mapping() else { continue };
+        let name = mm
+            .get(serde_yaml::Value::String("name".to_string()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if name == model_name {
+            out.push(mm);
+        }
+    }
+    out
+}
+
+fn yaml_collect_column_names(model: &serde_yaml::Mapping) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Some(cols) = model
+        .get(serde_yaml::Value::String("columns".to_string()))
+        .and_then(|v| v.as_sequence())
+    else {
+        return out;
+    };
+    for c in cols.iter() {
+        let Some(cm) = c.as_mapping() else { continue };
+        if let Some(n) = cm
+            .get(serde_yaml::Value::String("name".to_string()))
+            .and_then(|v| v.as_str())
+        {
+            let t = n.trim();
+            if !t.is_empty() {
+                out.push(t.to_string());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn yaml_collect_where_strings(v: &serde_yaml::Value, out: &mut Vec<String>) {
+    match v {
+        serde_yaml::Value::Mapping(m) => {
+            for (k, val) in m.iter() {
+                if k.as_str().map(|s| s == "where").unwrap_or(false) {
+                    if let Some(s) = val.as_str() {
+                        let t = s.trim();
+                        if !t.is_empty() {
+                            out.push(t.to_string());
+                        }
+                    }
+                }
+                yaml_collect_where_strings(val, out);
+            }
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for it in seq.iter() {
+                yaml_collect_where_strings(it, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn validate_staging_schema_ymls(
+    ctx: &AgentCtx,
+    outcomes: &[project_fs::PatchOutcome],
+) -> Result<(), String> {
+    // Build a rel_path -> new content map so we validate against the content that will be written.
+    let mut new_by_rel: HashMap<String, String> = HashMap::new();
+    for o in outcomes.iter() {
+        new_by_rel.insert(o.rel_path.clone(), o.content.clone());
+    }
+
+    for o in outcomes.iter() {
+        let rel = o.rel_path.as_str();
+        if !(rel.starts_with("models/staging/") && rel.ends_with(".yml")) {
+            continue;
+        }
+        let Some(stem) = file_stem(rel) else { continue };
+        let model_name = stem.clone();
+        let sql_rel = format!("models/staging/{}.sql", stem);
+
+        let sql_text = if let Some(s) = new_by_rel.get(&sql_rel) {
+            s.clone()
+        } else {
+            // Fall back to existing sibling SQL in storage.
+            let key = project_fs::join_storage_key(ctx, &sql_rel);
+            let bytes = ctx
+                .storage
+                .get_bytes(&key)
+                .await
+                .map_err(|_| format!("cannot validate {}: missing sibling SQL {}", rel, sql_rel))?;
+            String::from_utf8_lossy(&bytes).to_string()
+        };
+
+        let allowed_cols = extract_final_select_output_columns(&sql_text).map_err(|e| {
+            format!(
+                "cannot validate {} against {}: {}",
+                rel,
+                sql_rel,
+                e.trim()
+            )
+        })?;
+
+        let yml_root: serde_yaml::Value = serde_yaml::from_str(&o.content).map_err(|e| {
+            format!(
+                "invalid YAML in {}: {}",
+                rel,
+                e.to_string().trim()
+            )
+        })?;
+
+        let models = yaml_collect_model_section(&yml_root, &model_name);
+        if models.is_empty() {
+            // If the file doesn't declare the expected model name, skip (best-effort).
+            continue;
+        }
+
+        // (1) Validate declared columns exist in the sibling SQL output.
+        let mut unknown_cols: BTreeSet<String> = BTreeSet::new();
+        for mm in models.iter() {
+            for c in yaml_collect_column_names(mm).into_iter() {
+                if !allowed_cols.contains(&c) {
+                    unknown_cols.insert(c);
+                }
+            }
+        }
+
+        // (2) Validate any where: predicates that reference *_raw also exist in the sibling output.
+        let mut unknown_raw: BTreeSet<String> = BTreeSet::new();
+        for mm in models.iter() {
+            let mut where_strs: Vec<String> = Vec::new();
+            yaml_collect_where_strings(&serde_yaml::Value::Mapping((*mm).clone()), &mut where_strs);
+            where_strs.sort();
+            where_strs.dedup();
+            for ws in where_strs.iter() {
+                for tok in extract_idents_ending_with_raw(ws).into_iter() {
+                    if !allowed_cols.contains(&tok) {
+                        unknown_raw.insert(tok);
+                    }
+                }
+            }
+        }
+
+        if !unknown_cols.is_empty() || !unknown_raw.is_empty() {
+            let mut msg = format!(
+                "schema contract references unknown columns for staging model '{}'.\n\
+File: {}\n\
+Sibling SQL (defines allowed output columns): {}\n",
+                model_name, rel, sql_rel
+            );
+            if !unknown_cols.is_empty() {
+                msg.push_str(&format!(
+                    "\nUnknown columns declared under models[].columns[].name:\n- {}\n",
+                    unknown_cols.into_iter().collect::<Vec<_>>().join("\n- ")
+                ));
+            }
+            if !unknown_raw.is_empty() {
+                msg.push_str(&format!(
+                    "\nUnknown *_raw identifiers referenced in where: clauses:\n- {}\n",
+                    unknown_raw.into_iter().collect::<Vec<_>>().join("\n- ")
+                ));
+            }
+            msg.push_str("\nFix: either (a) update the staging SQL to actually output these columns, or (b) remove/rename the YAML references to match the staging model output. Do NOT invent new column names.\n");
+            return Err(msg);
+        }
+    }
+    Ok(())
 }
 
 fn parse_one_or_many<T: DeserializeOwned>(args: &Value, key: &str) -> Result<Vec<T>, String> {
@@ -401,6 +749,9 @@ impl Tool for DbtFilesTool {
 
                 // Canonical applied patch: based on *postprocessed* file content actually produced by apply_patch.
                 outcomes.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+                // Safety: reject staging schema YAML that references columns not produced by
+                // the sibling staging SQL output (prevents COLUMN_NOT_FOUND runtime errors).
+                validate_staging_schema_ymls(ctx, &outcomes).await?;
                 let applied_patch_text = outcomes
                     .iter()
                     .map(|o| o.git_patch.trim_end().to_string())
@@ -658,5 +1009,83 @@ mod tests {
             .unwrap_err();
         assert!(err.to_lowercase().contains("contract violation"));
         assert!(err.to_lowercase().contains("replace_file"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_rejects_staging_yml_referencing_unknown_columns() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        // Seed sibling staging SQL (explicit select list).
+        tool.call(
+            serde_json::json!({
+                "op": "patch",
+                "replace_file": {
+                    "path": "models/staging/stg_test_raw_raw_orders.sql",
+                    "new_text": "with source as (\n  select\n    '2020-01-01 00:00:00' as placed_at_raw,\n    try_cast('2020-01-01 00:00:00' as timestamp) as placed_at\n  from {{ source('test_raw','raw_orders') }}\n)\n\nselect\n  placed_at_raw,\n  placed_at\nfrom source\n"
+                }
+            }),
+            &ctx,
+        )
+        .await
+        .expect("sql patch ok");
+
+        // Patch YAML that invents created_at_raw / updated_at_raw.
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "replace_file": {
+                        "path": "models/staging/stg_test_raw_raw_orders.yml",
+                        "new_text": "version: 2\nmodels:\n  - name: stg_test_raw_raw_orders\n    columns:\n      - name: created_at_raw\n        tests:\n          - not_null\n      - name: placed_at\n        tests:\n          - not_null:\n              where: \"updated_at_raw is not null\"\n"
+                    }
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("stg_test_raw_raw_orders"));
+        assert!(err.contains("models/staging/stg_test_raw_raw_orders.yml"));
+        assert!(err.contains("models/staging/stg_test_raw_raw_orders.sql"));
+        assert!(err.contains("created_at_raw"));
+        assert!(err.contains("updated_at_raw"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_allows_staging_yml_when_columns_match_sibling_sql() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        tool.call(
+            serde_json::json!({
+                "op": "patch",
+                "replace_file": {
+                    "path": "models/staging/stg_test_raw_raw_orders.sql",
+                    "new_text": "with source as (\n  select\n    '2020-01-01 00:00:00' as placed_at_raw,\n    try_cast('2020-01-01 00:00:00' as timestamp) as placed_at\n  from {{ source('test_raw','raw_orders') }}\n)\n\nselect\n  placed_at_raw,\n  placed_at\nfrom source\n"
+                }
+            }),
+            &ctx,
+        )
+        .await
+        .expect("sql patch ok");
+
+        let obs = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "replace_file": {
+                        "path": "models/staging/stg_test_raw_raw_orders.yml",
+                        "new_text": "version: 2\nmodels:\n  - name: stg_test_raw_raw_orders\n    columns:\n      - name: placed_at_raw\n        tests: []\n      - name: placed_at\n        tests:\n          - not_null:\n              where: \"placed_at_raw is not null\"\n"
+                    }
+                }),
+                &ctx,
+            )
+            .await
+            .expect("yml patch ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
     }
 }

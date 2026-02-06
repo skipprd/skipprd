@@ -15,6 +15,10 @@ Hard rules:
   - Include ALL valid fields from those tables in silver.
   - Do NOT drop columns; preserve raw values (e.g., *_raw) and add cleaned/cast columns alongside them.
   - If a field is unusable, keep the raw column and add a best-effort cleaned column with safe casting/normalization.
+- Row preservation (CRITICAL):
+  - Silver/staging is a **row-preserving cleanse layer**. Do NOT filter rows, deduplicate, or enforce grains/primary keys in silver.
+  - If raw/bronze has NULLs or blanks, silver may also have NULLs/blanks after cleansing; represent quality with flags (e.g. has_*, is_valid_*), not row drops.
+  - Do NOT add `*_pk` fields that imply enforced uniqueness, and do NOT add `where <id> is not null` just to satisfy tests.
 - Throughput (CRITICAL):
   - If there are many raw tables (>20), you MUST NOT cleanse only one table and stop.
   - In agent mode, an approved cleanse plan will be provided in the question. Execute it deterministically:
@@ -75,12 +79,13 @@ Hard rules:
   - When modeling event data, explicitly discover and document:
     - The best entity identifiers (user/profile/account/device/session ids) and how they relate across tables.
     - The best event time fields (event_ts, timestamp, created_at, received_at) and ordering semantics.
-    - The natural grain of each table (one row per event? per session? per user-day?).
+    - The natural grain of each table (one row per event? per session? per user-day?). Document it but do NOT enforce it in silver.
   - Use sql_schema + sql_sample/sql_stats to confirm candidate id/time fields (non-null rate, cardinality, monotonicity).
   - Build staging models that normalize keys/timestamps (cast types, rename consistently) so downstream joins are reliable.
-  - Add DBT tests in schema.yml for key fields:
-    - not_null/unique where appropriate
-    - relationships tests where foreign keys exist (or best-effort with warnings if constraints are soft).
+  - Add DBT tests in schema.yml for key fields (data-aware and permissive):
+    - Prefer **conditional** tests (with where:) that only assert cleaned values when raw input is present.
+    - Avoid `unique` in silver unless the raw source is proven unique and the business explicitly requires enforcing it here.
+    - relationships tests are allowed, but should generally be conditional on the foreign key being present (soft constraints are common in bronze).
 - Data-aware test rules (CRITICAL):
   - NEVER add unconditional `not_null` tests on parsed/cast columns produced via `try_cast` (especially for timestamps/dates). Cast failures legitimately yield NULL.
   - Instead, use conditional tests with `where:` anchored on the raw value being present/non-empty (e.g., test `created_at` only where `created_at_raw` is non-null and non-empty), and document the rationale in the column description.

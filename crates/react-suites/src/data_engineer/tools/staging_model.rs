@@ -158,10 +158,13 @@ fn build_staging_sys_prompt(
          - For any time-like field:\n\
            - If the source is string-ish: create a `*_raw` expression using trim + nullif-empty so empty strings become NULL deterministically.\n\
            - Produce the cleaned output field as a safe cast (Athena/Trino: try_cast(... as timestamp) or try_cast(... as date)).\n\
-           - Choose ONE explicitly:\n\
-             (A) Enforce non-null semantics by filtering rows where the cleaned field is NULL, OR\n\
-             (B) Keep NULLs and add a note recommending a conditional dbt test (with where:) and why.\n\
+           - Row preservation (CRITICAL): do NOT filter rows to enforce non-nullness in silver.\n\
+             - Keep NULLs and add quality flags (e.g. is_valid_*) where helpful.\n\
+             - Recommend conditional dbt tests (with where:) only when raw input is present, and document why.\n\
            - IMPORTANT: Never recommend an unconditional not_null test on a try_cast-produced field; cast failures legitimately yield NULL.\n\
+         - Silver/staging must be row-preserving:\n\
+           - Do NOT enforce grains/primary keys in silver (no deduping, no windowing row_number(), no filtering to non-null IDs).\n\
+           - Do NOT add `*_pk` fields that imply enforced uniqueness; if you add canonical IDs, they must be nullable and accompanied by has_* flags.\n\
          - IMPORTANT: Do NOT include a dbt config block or alias; the suite enforces canonical config/alias deterministically.\n\
          - Nested fields / dotted columns:\n\
            - Use schema_columns as ground truth.\n\
