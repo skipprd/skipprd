@@ -377,28 +377,36 @@ fn env_bool(key: &str, default: bool) -> bool {
 fn ws_log_in(txt: &str) {
     // Full WS payloads can be enormous (prompts, plan snapshots, etc). Default to compact logs.
     if env_bool("WS_LOG_BODIES", false) {
-        tracing::info!("WS <- {}", txt);
+        // Only log full bodies when TRACE is enabled.
+        tracing::trace!("WS <- {}", txt);
+        return;
+    }
+    if !tracing::enabled!(tracing::Level::DEBUG) {
         return;
     }
     if let Ok(v) = serde_json::from_str::<Value>(txt) {
         let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("unknown");
         let cid = v.get("cid").and_then(|x| x.as_str());
         let thread_id = v.get("thread_id").and_then(|x| x.as_str());
-        tracing::info!(
+        tracing::debug!(
             "WS <- type={} cid={} thread_id={}",
             typ,
             cid.unwrap_or("-"),
             thread_id.unwrap_or("-")
         );
     } else {
-        tracing::info!("WS <- (non-json) bytes={}", txt.len());
+        tracing::debug!("WS <- (non-json) bytes={}", txt.len());
     }
 }
 
 fn ws_log_out(txt: &str) {
     // Full WS payloads can be enormous (thread_state, plans). Default to compact logs.
     if env_bool("WS_LOG_BODIES", false) {
-        tracing::info!("WS -> {}", txt);
+        // Only log full bodies when TRACE is enabled.
+        tracing::trace!("WS -> {}", txt);
+        return;
+    }
+    if !tracing::enabled!(tracing::Level::DEBUG) {
         return;
     }
     if let Ok(v) = serde_json::from_str::<Value>(txt) {
@@ -407,7 +415,8 @@ fn ws_log_out(txt: &str) {
         let cid = v.get("cid").and_then(|x| x.as_str());
         let for_cid = v.get("for_cid").and_then(|x| x.as_str());
         let thread_id = v.get("thread_id").and_then(|x| x.as_str());
-        tracing::info!(
+        // Extremely frequent in headless mode; keep it at DEBUG.
+        tracing::debug!(
             "WS -> type={} seq={} cid={} for_cid={} thread_id={}",
             typ,
             seq.map(|n| n.to_string())
@@ -417,7 +426,7 @@ fn ws_log_out(txt: &str) {
             thread_id.unwrap_or("-")
         );
     } else {
-        tracing::info!("WS -> (non-json) bytes={}", txt.len());
+        tracing::debug!("WS -> (non-json) bytes={}", txt.len());
     }
 }
 

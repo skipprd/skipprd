@@ -965,6 +965,30 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
     let done: std::collections::HashSet<String> =
         t.completed_phases.iter().cloned().collect();
 
+    // Anchor plan rendering under the phase where work is actually happening.
+    // Example: once we move into `model_author`, render the model plan tree under `model_author`
+    // instead of under `model_plan`.
+    let anchor_cleanse: Option<String> = if t.cleanse_plan.is_some()
+        && cur.starts_with("cleanse_")
+        && cur != "cleanse_plan"
+    {
+        Some(cur.clone())
+    } else if t.cleanse_plan.is_some() {
+        Some("cleanse_plan".to_string())
+    } else {
+        None
+    };
+    let anchor_model: Option<String> = if t.model_plan.is_some()
+        && cur.starts_with("model_")
+        && cur != "model_plan"
+    {
+        Some(cur.clone())
+    } else if t.model_plan.is_some() {
+        Some("model_plan".to_string())
+    } else {
+        None
+    };
+
     // Precompute span buckets (active + recent) in stable occurrence order.
     let mut span_buckets: HashMap<WorkItemKey, Vec<SpanAgg>> =
         HashMap::new();
@@ -1042,8 +1066,8 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
         v.sort_by(|a, b| a.order_idx.cmp(&b.order_idx));
     }
 
-    let mut saw_cleanse_phase = false;
-    let mut saw_model_phase = false;
+    let mut rendered_cleanse = false;
+    let mut rendered_model = false;
 
     for ph in t.phases.iter() {
         let key = format!("phase:{ph}");
@@ -1079,9 +1103,8 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
             push_span_list(&mut lines, "  ", spans, spinner_idx);
         }
 
-        // Render a focused plan view under its phase.
-        if ph == "cleanse_plan" {
-            saw_cleanse_phase = true;
+        // Render compact plan trees under their anchor phases.
+        if anchor_cleanse.as_deref() == Some(ph.as_str()) && !rendered_cleanse {
             if let Some(ref p) = t.cleanse_plan {
                 render_plan_compact(
                     &mut lines,
@@ -1091,10 +1114,10 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
                     t.focus_by_kind.get("cleanse"),
                     spinner_idx,
                 );
+                rendered_cleanse = true;
             }
         }
-        if ph == "model_plan" {
-            saw_model_phase = true;
+        if anchor_model.as_deref() == Some(ph.as_str()) && !rendered_model {
             if let Some(ref p) = t.model_plan {
                 render_plan_compact(
                     &mut lines,
@@ -1104,12 +1127,13 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
                     t.focus_by_kind.get("model"),
                     spinner_idx,
                 );
+                rendered_model = true;
             }
         }
     }
 
-    // If we have a plan snapshot but didn't see its phase, append it.
-    if t.cleanse_plan.is_some() && !saw_cleanse_phase {
+    // If we have a plan snapshot but didn't render it (anchor not present), append it.
+    if t.cleanse_plan.is_some() && !rendered_cleanse {
         lines.push(String::new());
         render_plan_compact(
             &mut lines,
@@ -1120,7 +1144,7 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
             spinner_idx,
         );
     }
-    if t.model_plan.is_some() && !saw_model_phase {
+    if t.model_plan.is_some() && !rendered_model {
         lines.push(String::new());
         render_plan_compact(
             &mut lines,
