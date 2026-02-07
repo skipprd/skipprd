@@ -40,6 +40,8 @@ pub struct ToolStartResponse {
     pub status: models::ToolEventStatus,
     #[serde(rename = "payload", skip_serializing_if = "Option::is_none")]
     pub payload: Option<std::collections::HashMap<String, serde_json::Value>>,
+    #[serde(rename = "ctx", skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<models::ExecutionContext>,
 }
 
 impl ToolStartResponse {
@@ -58,6 +60,7 @@ impl ToolStartResponse {
             phase: None,
             status,
             payload: None,
+            ctx: None,
         }
     }
 }

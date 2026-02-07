@@ -7,10 +7,14 @@ This crate implements a **WebSocket-based ReAct agent runtime**. Clients send JS
 From the workspace root:
 
 ```bash
-cargo run -p react -- serve --port 8787 --log
+cargo run -p react -- serve --config react/config.example.yml --port 8787 --terminal
 ```
 
 The server speaks WebSocket on `ws://localhost:8787/` using schemas in `../ask-ws.yaml`.
+
+Notes:
+- By default, storage is **local** (`storage.mode: local`) and persists under `storage.path` (default `./.react`).
+- To use S3 storage, pass `--storage-mode s3 --bucket <BUCKET>` (or set `storage.mode: s3` + `storage.bucket` in YAML / env `SKIPPR_S3_BUCKET`).
 
 ### Configuration notes (LLM output size)
 

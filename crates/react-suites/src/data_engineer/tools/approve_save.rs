@@ -445,6 +445,7 @@ impl Tool for ApproveAndSaveArtifactTool {
                                     "failed".to_string()
                                 },
                                 payload: None,
+                                ctx: None,
                                 observation: obs_norm,
                                 ts: chrono::Utc::now().to_rfc3339(),
                                 agent: agent.clone(),
@@ -468,6 +469,7 @@ impl Tool for ApproveAndSaveArtifactTool {
                                 args: serde_json::json!({"s3_prefix": s3_prefix, "build": true}),
                                 status: "failed".to_string(),
                                 payload: None,
+                                ctx: None,
                                 observation: obs_norm,
                                 ts: chrono::Utc::now().to_rfc3339(),
                                 agent: agent.clone(),

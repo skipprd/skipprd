@@ -318,6 +318,7 @@ impl AgentPolicy for SqlValidatedPolicy {
                             "failed".to_string()
                         },
                         payload: None,
+                        ctx: None,
                         observation: ToolObservation::normalize(obs.clone()),
                         ts: chrono::Utc::now().to_rfc3339(),
                         agent,
@@ -488,6 +489,7 @@ mod tests {
                     args: serde_json::json!({}),
                     status: "ok".to_string(),
                     payload: None,
+                    ctx: None,
                     observation: ToolObservation::normalize(serde_json::json!({"ok": true})),
                     ts: chrono::Utc::now().to_rfc3339(),
                     agent: "model".to_string(),
@@ -504,6 +506,7 @@ mod tests {
                     args: serde_json::json!({"build": true}),
                     status: "failed".to_string(),
                     payload: None,
+                    ctx: None,
                     observation: ToolObservation::normalize(
                         serde_json::json!({"ok": false, "compile_ok": false, "errors": ["fail"]}),
                     ),
@@ -532,6 +535,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: Some(store.clone()),
+            exec_ctx: None,
             runtime: None,
         };
 

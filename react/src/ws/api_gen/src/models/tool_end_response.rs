@@ -42,6 +42,8 @@ pub struct ToolEndResponse {
     pub payload: Option<std::collections::HashMap<String, serde_json::Value>>,
     #[serde(rename = "error", skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(rename = "ctx", skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<models::ExecutionContext>,
 }
 
 impl ToolEndResponse {
@@ -61,6 +63,7 @@ impl ToolEndResponse {
             status,
             payload: None,
             error: None,
+            ctx: None,
         }
     }
 }

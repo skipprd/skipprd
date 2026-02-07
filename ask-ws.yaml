@@ -616,6 +616,27 @@ components:
       type: string
       enum: [running, ok, failed]
 
+    ExecutionContext:
+      type: object
+      additionalProperties: false
+      properties:
+        plan_kind:
+          type: string
+          nullable: true
+          description: Plan kind (cleanse|model).
+        plan_key:
+          type: string
+          nullable: true
+        workgroup_id:
+          type: string
+          nullable: true
+        task_id:
+          type: string
+          nullable: true
+        checklist_item_id:
+          type: string
+          nullable: true
+
     ThreadEventKind:
       type: string
       enum: [tool_start, tool_end, llm_start, llm_end]
@@ -664,6 +685,8 @@ components:
         phase:
           type: string
           nullable: true
+        ctx:
+          $ref: '#/components/schemas/ExecutionContext'
 
     ToolStartResponse:
       type: object
@@ -691,6 +714,8 @@ components:
           type: object
           nullable: true
           additionalProperties: true
+        ctx:
+          $ref: '#/components/schemas/ExecutionContext'
 
     ToolEndResponse:
       type: object
@@ -721,6 +746,8 @@ components:
         error:
           type: string
           nullable: true
+        ctx:
+          $ref: '#/components/schemas/ExecutionContext'
 
     LlmStartResponse:
       type: object
@@ -737,6 +764,8 @@ components:
         call_id: { type: integer }
         phase: { type: string }
         model: { type: string, nullable: true }
+        ctx:
+          $ref: '#/components/schemas/ExecutionContext'
 
     LlmEndResponse:
       type: object
@@ -757,6 +786,8 @@ components:
           type: string
           enum: [ok, failed]
         error: { type: string, nullable: true }
+        ctx:
+          $ref: '#/components/schemas/ExecutionContext'
 
     PlanSnapshot:
       type: object

@@ -121,6 +121,9 @@ pub use llm_start_response::LlmStartResponse;
 pub mod llm_end_response;
 pub use llm_end_response::LlmEndResponse;
 
+pub mod execution_context;
+pub use execution_context::ExecutionContext;
+
 pub mod plan_snapshot;
 pub use plan_snapshot::PlanSnapshot;
 

@@ -68,6 +68,22 @@ pub struct ThreadEvent {
     pub model: Option<String>,
     #[serde(default)]
     pub phase: Option<String>,
+
+    pub ctx: Option<ExecutionContext>,
+}
+
+/// Explicit execution context for hierarchical UI rendering.
+///
+/// This is carried on Tool/LLM steps so UIs can nest spans under the correct
+/// plan/workgroup/task/checklist nodes without heuristics.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionContext {
+    pub plan_kind: Option<String>, // cleanse|model
+    pub plan_key: Option<String>,
+    pub workgroup_id: Option<String>,
+    pub task_id: Option<String>,
+    pub checklist_item_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -250,6 +266,7 @@ pub enum ThreadStep {
         status: String,
         #[serde(default)]
         payload: Option<Value>,
+        ctx: Option<ExecutionContext>,
         ts: String,
         agent: String,
     },
@@ -265,6 +282,7 @@ pub enum ThreadStep {
         status: String,
         #[serde(default)]
         payload: Option<Value>,
+        ctx: Option<ExecutionContext>,
         observation: ToolObservation,
         ts: String,
         agent: String,
@@ -274,6 +292,7 @@ pub enum ThreadStep {
         #[serde(default)]
         model: Option<String>,
         phase: String,
+        ctx: Option<ExecutionContext>,
         ts: String,
         agent: String,
     },
@@ -285,6 +304,7 @@ pub enum ThreadStep {
         status: String, // ok|failed
         #[serde(default)]
         error: Option<String>,
+        ctx: Option<ExecutionContext>,
         ts: String,
         agent: String,
     },
@@ -920,6 +940,7 @@ fn apply_step_to_state(
             args: _,
             status,
             payload,
+            ctx,
             ts,
             ..
         } => {
@@ -961,6 +982,7 @@ fn apply_step_to_state(
                             .current_phase
                             .clone()
                             .or_else(|| Some("preflight".to_string())),
+                        ctx: ctx.clone(),
                     },
                 );
             }
@@ -972,6 +994,7 @@ fn apply_step_to_state(
             args: _,
             status,
             payload,
+            ctx,
             observation,
             ts,
             ..
@@ -1061,6 +1084,7 @@ fn apply_step_to_state(
                             .current_phase
                             .clone()
                             .or_else(|| Some("preflight".to_string())),
+                        ctx: ctx.clone(),
                     },
                 );
             }
@@ -1069,6 +1093,7 @@ fn apply_step_to_state(
             call_id,
             model,
             phase,
+            ctx,
             ts,
             ..
         } => {
@@ -1088,6 +1113,7 @@ fn apply_step_to_state(
                     call_id: Some(*call_id),
                     model: model.clone(),
                     phase: Some(phase.clone()),
+                    ctx: ctx.clone(),
                 },
             );
         }
@@ -1097,6 +1123,7 @@ fn apply_step_to_state(
             phase,
             status,
             error,
+            ctx,
             ts,
             ..
         } => {
@@ -1116,6 +1143,7 @@ fn apply_step_to_state(
                     call_id: Some(*call_id),
                     model: model.clone(),
                     phase: Some(phase.clone()),
+                    ctx: ctx.clone(),
                 },
             );
         }
@@ -1215,6 +1243,7 @@ mod tests {
                 args: serde_json::json!({}),
                 status: "ok".to_string(),
                 payload: None,
+                ctx: None,
                 observation: ToolObservation::normalize(serde_json::json!({"ok": true})),
                 ts: "t".to_string(),
                 agent: "ask".to_string(),
@@ -1241,6 +1270,7 @@ mod tests {
                 args: serde_json::json!({}),
                 status: "running".to_string(),
                 payload: None,
+                ctx: None,
                 ts: "t".to_string(),
                 agent: "ask".to_string(),
             }],
@@ -1253,6 +1283,60 @@ mod tests {
             st.events.is_empty(),
             "orphan tool_start should not appear in timeline events"
         );
+    }
+
+    #[test]
+    fn tool_timeline_events_embed_execution_ctx() {
+        let ctx = ExecutionContext {
+            plan_kind: Some("cleanse".to_string()),
+            plan_key: Some("plan_k".to_string()),
+            workgroup_id: Some("wg1".to_string()),
+            task_id: Some("task1".to_string()),
+            checklist_item_id: Some("sql_model".to_string()),
+        };
+        let log = ThreadLog {
+            schema_version: THREAD_SCHEMA_VERSION,
+            steps: vec![
+                ThreadStep::ToolStart {
+                    tool_id: "t1".to_string(),
+                    name: "dbt_files".to_string(),
+                    clean_name: "Read file".to_string(),
+                    args: serde_json::json!({"op":"get"}),
+                    status: "running".to_string(),
+                    payload: None,
+                    ctx: Some(ctx.clone()),
+                    ts: "t".to_string(),
+                    agent: "agent".to_string(),
+                },
+                ThreadStep::ToolEnd {
+                    tool_id: "t1".to_string(),
+                    name: "dbt_files".to_string(),
+                    clean_name: "Read file".to_string(),
+                    args: serde_json::json!({"op":"get"}),
+                    status: "ok".to_string(),
+                    payload: None,
+                    ctx: Some(ctx.clone()),
+                    observation: ToolObservation::normalize(serde_json::json!({"ok": true})),
+                    ts: "t".to_string(),
+                    agent: "agent".to_string(),
+                },
+            ],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        let st = build_thread_state_from_log("tid", &log);
+        assert!(
+            st.events.iter().any(|e| e.event_kind == "tool_start"),
+            "expected tool_start event"
+        );
+        let ev = st
+            .events
+            .iter()
+            .find(|e| e.event_kind == "tool_start")
+            .and_then(|e| e.ctx.as_ref())
+            .and_then(|c| c.plan_kind.as_deref());
+        assert_eq!(ev, Some("cleanse"));
     }
 
     #[test]
@@ -1401,6 +1485,7 @@ mod tests {
                     args: serde_json::json!({"build": true}),
                     status: "running".to_string(),
                     payload: None,
+                    ctx: None,
                     ts: t2.clone(),
                     agent: "agent".to_string(),
                 },
@@ -1417,6 +1502,7 @@ mod tests {
                     args: serde_json::json!({"build": true}),
                     status: "failed".to_string(),
                     payload: None,
+                    ctx: None,
                     observation: ToolObservation::normalize(serde_json::json!({"ok": false, "errors": ["boom"], "logs": {"run_or_build": {"stdout": "line 1:1 error"}}})),
                     ts: t2.clone(),
                     agent: "agent".to_string(),

@@ -23,7 +23,7 @@ pub use react_core::scope::RequestScope;
 
 pub use athena_query::{AthenaQueryProvider, AthenaSettings};
 pub use dbt::DbtProjectProvider;
-pub use keyspace::{DefaultKeyspace, Keyspace}; // runtime impl of core Keyspace
+pub use keyspace::{DefaultKeyspace, Keyspace, LocalKeyspace}; // runtime impl of core Keyspace
 pub use postgres::{PostgresProvider, PostgresSettings};
 pub use secrets::EnvSecretsProvider;
 pub use type_parse::FlattenedField;

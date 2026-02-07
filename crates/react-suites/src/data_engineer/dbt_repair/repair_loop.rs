@@ -589,6 +589,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
 
@@ -696,6 +697,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
 
@@ -820,6 +822,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
         // Attach a thread store so llm_call steps can be persisted.
@@ -977,6 +980,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
 
@@ -1094,6 +1098,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
 
@@ -1199,6 +1204,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
 

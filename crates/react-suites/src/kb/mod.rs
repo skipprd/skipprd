@@ -69,6 +69,7 @@ impl KbSuite {
             dbt: None,
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
+            exec_ctx: None,
             runtime: None,
         };
 

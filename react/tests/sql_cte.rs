@@ -67,6 +67,7 @@ LIMIT 1
         dbt: None,
         vector: None,
         thread_store: None,
+        exec_ctx: None,
         runtime: None,
     };
     let res = tool.call(args, &actx).await.expect("tool call");

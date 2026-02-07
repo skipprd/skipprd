@@ -157,6 +157,91 @@ impl Keyspace for DefaultKeyspace {
     }
 }
 
+/// Local filesystem keyspace.
+///
+/// Mirrors the default key layout, but produces local LanceDB URIs.
+#[derive(Clone, Debug)]
+pub struct LocalKeyspace {
+    pub root_dir: String,
+}
+
+impl LocalKeyspace {
+    pub fn new(root_dir: String) -> Self {
+        Self { root_dir }
+    }
+
+    fn file_uri(&self, rel: &str) -> String {
+        let root = self.root_dir.trim_end_matches('/');
+        if rel.is_empty() {
+            format!("file://{}", root)
+        } else {
+            format!("file://{}/{}", root, rel.trim_start_matches('/'))
+        }
+    }
+}
+
+impl Keyspace for LocalKeyspace {
+    fn threads_prefix(&self, scope: &RequestScope) -> String {
+        DefaultKeyspace { bucket: "".to_string() }.threads_prefix(scope)
+    }
+
+    fn thread_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String> {
+        DefaultKeyspace { bucket: "".to_string() }.thread_key(scope, thread_id)
+    }
+
+    fn thread_state_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String> {
+        DefaultKeyspace { bucket: "".to_string() }.thread_state_key(scope, thread_id)
+    }
+
+    fn catalog_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
+        DefaultKeyspace { bucket: "".to_string() }.catalog_key(scope, dataset_id)
+    }
+
+    fn semantic_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
+        DefaultKeyspace { bucket: "".to_string() }.semantic_key(scope, dataset_id)
+    }
+
+    fn stats_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
+        DefaultKeyspace { bucket: "".to_string() }.stats_key(scope, dataset_id)
+    }
+
+    fn manifest_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
+        DefaultKeyspace { bucket: "".to_string() }.manifest_key(scope, dataset_id)
+    }
+
+    fn lancedb_uri(&self, scope: &RequestScope) -> String {
+        // Path layout (relative): <tenant>/<workspace>/<project_id>/lancedb
+        self.file_uri(&format!(
+            "{}/{}/{}/lancedb",
+            scope.tenant, scope.workspace, scope.project_id
+        ))
+    }
+
+    fn global_dbt_examples_lancedb_uri(&self) -> String {
+        self.file_uri("dbt-examples/lancedb")
+    }
+
+    fn dbt_prefix(&self, scope: &RequestScope) -> String {
+        DefaultKeyspace { bucket: "".to_string() }.dbt_prefix(scope)
+    }
+
+    fn dbt_project_key(&self, scope: &RequestScope) -> String {
+        DefaultKeyspace { bucket: "".to_string() }.dbt_project_key(scope)
+    }
+
+    fn dbt_models_prefix(&self, scope: &RequestScope) -> String {
+        DefaultKeyspace { bucket: "".to_string() }.dbt_models_prefix(scope)
+    }
+
+    fn dbt_metrics_prefix(&self, scope: &RequestScope) -> String {
+        DefaultKeyspace { bucket: "".to_string() }.dbt_metrics_prefix(scope)
+    }
+
+    fn dbt_target_prefix(&self, scope: &RequestScope) -> String {
+        DefaultKeyspace { bucket: "".to_string() }.dbt_target_prefix(scope)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

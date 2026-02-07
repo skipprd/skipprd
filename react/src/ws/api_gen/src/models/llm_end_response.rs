@@ -37,6 +37,8 @@ pub struct LlmEndResponse {
     pub status: Status,
     #[serde(rename = "error", skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(rename = "ctx", skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<models::ExecutionContext>,
 }
 
 impl LlmEndResponse {
@@ -54,6 +56,7 @@ impl LlmEndResponse {
             model: None,
             status,
             error: None,
+            ctx: None,
         }
     }
 }

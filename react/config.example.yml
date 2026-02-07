@@ -2,8 +2,12 @@ server:
   port: 8089
 
 storage:
-  # Required even when using in-memory adapters in tests.
-  bucket: "example-bucket"
+  # Local-first storage: artifacts/threads/catalog/vectors are persisted under this path.
+  mode: local
+  path: "./.react"
+  # For S3 storage instead:
+  # mode: s3
+  # bucket: "example-bucket"
 
 scope:
   tenant: "example"

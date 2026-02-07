@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 
 use crate::providers::RequestScope;
 use react_core::providers::DEFAULT_WAREHOUSE_MAX_CONCURRENCY;
@@ -24,7 +25,12 @@ use react_core::providers::DEFAULT_WAREHOUSE_MAX_CONCURRENCY;
 ///   port: 8787
 ///
 /// storage:
-///   bucket: my-react-bucket
+///   # Local-first (default)
+///   mode: local
+///   path: ./.react
+///   # For S3:
+///   # mode: s3
+///   # bucket: my-react-bucket
 ///
 /// scope:
 ///   tenant: default
@@ -71,7 +77,8 @@ use react_core::providers::DEFAULT_WAREHOUSE_MAX_CONCURRENCY;
 ///
 /// Notes:
 /// - Secrets remain env-driven (e.g. `LLM_API_KEY`).
-/// - `storage.bucket` can also be provided via env `SKIPPR_S3_BUCKET` or CLI `--bucket`.
+/// - Local-first: `storage.mode` defaults to `local` (stores artifacts under `storage.path`).
+/// - For S3: set `storage.mode: s3` and provide `storage.bucket` (or env `SKIPPR_S3_BUCKET` / CLI `--bucket`).
 
 /// CLI overrides for `react serve`.
 ///
@@ -79,7 +86,9 @@ use react_core::providers::DEFAULT_WAREHOUSE_MAX_CONCURRENCY;
 #[derive(Clone, Debug, Default)]
 pub struct ServeOverrides {
     pub port: Option<u16>,
+    pub storage_mode: Option<String>,
     pub bucket: Option<String>,
+    pub storage_path: Option<String>,
     pub tenant: Option<String>,
     pub workspace: Option<String>,
     pub project_id: Option<String>,
@@ -102,7 +111,9 @@ pub struct ServerFile {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct StorageFile {
+    pub mode: Option<String>,
     pub bucket: Option<String>,
+    pub path: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -231,7 +242,9 @@ pub struct ServerResolved {
 
 #[derive(Clone, Debug)]
 pub struct StorageResolved {
-    pub bucket: String,
+    pub mode: String,              // local|s3
+    pub bucket: Option<String>,     // required for s3
+    pub path: Option<String>,       // required for local (absolute)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -346,12 +359,53 @@ impl ReactResolvedConfig {
             .or_else(|| file.server.as_ref().and_then(|s| s.port))
             .unwrap_or(8787);
 
-        // Bucket: CLI > env > YAML
-        let bucket = ov
-            .bucket
-            .or_else(|| getenv_nonempty("SKIPPR_S3_BUCKET"))
-            .or_else(|| file.storage.as_ref().and_then(|s| s.bucket.clone()))
-            .ok_or_else(|| "missing storage bucket (set --bucket, env SKIPPR_S3_BUCKET, or storage.bucket in YAML)".to_string())?;
+        // Storage mode: CLI > env > YAML > default(local)
+        let mode = ov
+            .storage_mode
+            .or_else(|| getenv_nonempty("REACT_STORAGE_MODE"))
+            .or_else(|| file.storage.as_ref().and_then(|s| s.mode.clone()))
+            .unwrap_or_else(|| "local".to_string())
+            .trim()
+            .to_ascii_lowercase();
+        let mode = match mode.as_str() {
+            "local" => "local".to_string(),
+            "s3" => "s3".to_string(),
+            other => return Err(format!("unsupported storage.mode '{other}' (expected local|s3)")),
+        };
+
+        fn abs_path(p: &str) -> Result<String, String> {
+            let t = p.trim();
+            if t.is_empty() {
+                return Err("empty storage.path".to_string());
+            }
+            let pb = PathBuf::from(t);
+            if pb.is_absolute() {
+                return Ok(pb.to_string_lossy().to_string());
+            }
+            let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+            Ok(cwd.join(pb).to_string_lossy().to_string())
+        }
+
+        // Resolve storage fields based on mode.
+        let (bucket, path) = if mode == "s3" {
+            // Bucket: CLI > env > YAML
+            let b = ov
+                .bucket
+                .or_else(|| getenv_nonempty("SKIPPR_S3_BUCKET"))
+                .or_else(|| file.storage.as_ref().and_then(|s| s.bucket.clone()))
+                .ok_or_else(|| {
+                    "missing storage bucket for s3 mode (set --bucket, env SKIPPR_S3_BUCKET, or storage.bucket in YAML)".to_string()
+                })?;
+            (Some(b), None)
+        } else {
+            // Path: CLI > env > YAML > default(./.react)
+            let p = ov
+                .storage_path
+                .or_else(|| getenv_nonempty("REACT_STORAGE_PATH"))
+                .or_else(|| file.storage.as_ref().and_then(|s| s.path.clone()))
+                .unwrap_or_else(|| "./.react".to_string());
+            (None, Some(abs_path(&p)?))
+        };
 
         let tenant = ov
             .tenant
@@ -479,7 +533,9 @@ impl ReactResolvedConfig {
         let cfg = Self {
             server: ServerResolved { port: server_port },
             storage: StorageResolved {
+                mode: mode.clone(),
                 bucket: bucket.clone(),
+                path: path.clone(),
             },
             scope: RequestScope {
                 tenant,
@@ -620,7 +676,9 @@ mod tests {
 
         let file = ReactConfigFile {
             storage: Some(StorageFile {
+                mode: Some("s3".into()),
                 bucket: Some("yaml-bucket".into()),
+                path: None,
             }),
             providers: Some(ProvidersFile {
                 warehouse: Some(WarehouseFile::Postgres {
@@ -632,12 +690,14 @@ mod tests {
             ..Default::default()
         };
         let ov = ServeOverrides {
+            storage_mode: Some("s3".into()),
             bucket: Some("cli-bucket".into()),
             ..Default::default()
         };
 
         let cfg = ReactResolvedConfig::resolve(file, ov).expect("resolve");
-        assert_eq!(cfg.storage.bucket, "cli-bucket");
+        assert_eq!(cfg.storage.mode, "s3");
+        assert_eq!(cfg.storage.bucket, Some("cli-bucket".to_string()));
 
         clear_env(&["SKIPPR_S3_BUCKET"]);
     }
@@ -656,11 +716,14 @@ mod tests {
             }),
             ..Default::default()
         };
-        let ov = ServeOverrides::default();
+        let ov = ServeOverrides {
+            storage_mode: Some("s3".into()),
+            ..Default::default()
+        };
         let err = ReactResolvedConfig::resolve(file, ov)
             .err()
             .unwrap_or_default();
-        assert!(err.contains("missing storage bucket"));
+        assert!(err.contains("missing storage bucket for s3 mode"));
     }
 
     #[test]
@@ -669,7 +732,9 @@ mod tests {
         clear_env(&["SKIPPR_S3_BUCKET"]);
         let file = ReactConfigFile {
             storage: Some(StorageFile {
+                mode: Some("s3".into()),
                 bucket: Some("b".into()),
+                path: None,
             }),
             scope: Some(ScopeFile {
                 tenant: Some("a/b".into()),
@@ -689,5 +754,25 @@ mod tests {
             .err()
             .unwrap_or_default();
         assert!(err.contains("must not contain path separators"));
+    }
+
+    #[test]
+    fn resolve_defaults_to_local_storage_without_bucket() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_env(&["SKIPPR_S3_BUCKET", "REACT_STORAGE_MODE", "REACT_STORAGE_PATH"]);
+        let file = ReactConfigFile {
+            providers: Some(ProvidersFile {
+                warehouse: Some(WarehouseFile::Postgres {
+                    database: None,
+                    schema: None,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let cfg = ReactResolvedConfig::resolve(file, ServeOverrides::default()).expect("resolve");
+        assert_eq!(cfg.storage.mode, "local");
+        assert!(cfg.storage.bucket.is_none());
+        assert!(cfg.storage.path.as_ref().is_some());
     }
 }

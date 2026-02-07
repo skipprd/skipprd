@@ -714,6 +714,62 @@ pub fn cleanse_next_action(plan: &CleansePlan) -> Option<(WorkGroupKind, Vec<Str
     Some((WorkGroupKind::Validate, vec![]))
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NextWorkItemCtx {
+    pub workgroup_id: String,
+    #[serde(default)]
+    pub workgroup_label: Option<String>,
+    pub task_id: String,
+    pub checklist_item_id: String,
+}
+
+/// Returns the next concrete work item (group + single checklist ref) for the cleanse plan.
+///
+/// This is used to populate explicit execution context for tool/LLM spans so UIs can render a
+/// stable hierarchy without heuristics.
+pub fn cleanse_next_work_item_ctx(plan: &CleansePlan) -> Option<NextWorkItemCtx> {
+    if plan.work_groups.is_empty() {
+        return None;
+    }
+
+    let mut completed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for g in plan.work_groups.iter() {
+        if group_is_complete_cleanse(plan, g) {
+            completed.insert(g.group_id.clone());
+        }
+    }
+
+    for g in plan.work_groups.iter() {
+        if completed.contains(&g.group_id) {
+            continue;
+        }
+        if !group_deps_satisfied(&completed, g.depends_on_group_ids.as_ref()) {
+            continue;
+        }
+        if g.kind == WorkGroupKind::Validate {
+            return None;
+        }
+        for it in g.items.iter() {
+            let need = match plan.tasks.iter().find(|t| t.dataset_id == it.task_id) {
+                Some(t) => {
+                    checklist_status(&t.checklist, it.checklist_item_id.as_str())
+                        != ChecklistItemStatus::Done
+                }
+                None => true,
+            };
+            if need {
+                return Some(NextWorkItemCtx {
+                    workgroup_id: g.group_id.clone(),
+                    workgroup_label: Some(g.label.clone()).filter(|s| !s.trim().is_empty()),
+                    task_id: it.task_id.clone(),
+                    checklist_item_id: it.checklist_item_id.clone(),
+                });
+            }
+        }
+    }
+    None
+}
+
 /// Returns the next work-group driven action for the model plan.
 /// - If `work_groups` is empty, returns None (caller should fall back to `batches` heuristics).
 /// - For `AuthorSql` / `AuthorSchema`, returns up to 5 task_ids that still need that checklist item.
@@ -764,6 +820,50 @@ pub fn model_next_action(plan: &ModelPlan) -> Option<(WorkGroupKind, Vec<String>
     }
 
     Some((WorkGroupKind::Validate, vec![]))
+}
+
+/// Returns the next concrete work item (group + single checklist ref) for the model plan.
+pub fn model_next_work_item_ctx(plan: &ModelPlan) -> Option<NextWorkItemCtx> {
+    if plan.work_groups.is_empty() {
+        return None;
+    }
+
+    let mut completed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for g in plan.work_groups.iter() {
+        if group_is_complete_model(plan, g) {
+            completed.insert(g.group_id.clone());
+        }
+    }
+
+    for g in plan.work_groups.iter() {
+        if completed.contains(&g.group_id) {
+            continue;
+        }
+        if !group_deps_satisfied(&completed, g.depends_on_group_ids.as_ref()) {
+            continue;
+        }
+        if g.kind == WorkGroupKind::Validate {
+            return None;
+        }
+        for it in g.items.iter() {
+            let need = match plan.tasks.iter().find(|t| t.name == it.task_id) {
+                Some(t) => {
+                    checklist_status(&t.checklist, it.checklist_item_id.as_str())
+                        != ChecklistItemStatus::Done
+                }
+                None => true,
+            };
+            if need {
+                return Some(NextWorkItemCtx {
+                    workgroup_id: g.group_id.clone(),
+                    workgroup_label: Some(g.label.clone()).filter(|s| !s.trim().is_empty()),
+                    task_id: it.task_id.clone(),
+                    checklist_item_id: it.checklist_item_id.clone(),
+                });
+            }
+        }
+    }
+    None
 }
 
 pub fn cleanse_pending_schema_contracts(plan: &CleansePlan) -> Vec<String> {
@@ -1772,6 +1872,7 @@ mod tests {
                 "failed".to_string()
             },
             payload: None,
+            ctx: None,
             observation: obs,
             ts: "t".to_string(),
             agent: "test".to_string(),

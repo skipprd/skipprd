@@ -14,6 +14,7 @@ Name | Type | Description | Notes
 **call_id** | **i32** |  | 
 **phase** | **String** |  | 
 **model** | Option<**String**> |  | [optional]
+**ctx** | Option<[**models::ExecutionContext**](ExecutionContext.md)> |  | [optional]
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

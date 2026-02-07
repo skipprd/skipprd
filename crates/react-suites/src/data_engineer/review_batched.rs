@@ -850,6 +850,7 @@ pub async fn run_batched_review(
         dbt: sctx.dbt.clone(),
         vector: sctx.vector.clone(),
         thread_store: Some(thread_store.clone()),
+        exec_ctx: None,
         runtime: sctx
             .resolved_config
             .clone()
@@ -1355,6 +1356,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: None,
         };
 

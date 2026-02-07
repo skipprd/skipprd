@@ -104,6 +104,7 @@ async fn agent_default_policy_accepts_typed_final() {
         dbt: None,
         vector: None,
         thread_store: None,
+        exec_ctx: None,
         runtime: None,
     };
     let reg = ToolRegistry::new();
@@ -150,6 +151,7 @@ async fn agent_does_not_special_case_ask_user_tool_name() {
         dbt: None,
         vector: None,
         thread_store: None,
+        exec_ctx: None,
         runtime: None,
     };
     let mut reg = ToolRegistry::new();
@@ -195,6 +197,7 @@ async fn agent_interrupts_only_when_policy_requests_it() {
         dbt: None,
         vector: None,
         thread_store: None,
+        exec_ctx: None,
         runtime: None,
     };
     let mut reg = ToolRegistry::new();

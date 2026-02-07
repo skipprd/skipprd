@@ -960,6 +960,7 @@ pub async fn call_and_record_tool(
                 args: args.clone(),
                 status: "running".to_string(),
                 payload: None,
+                ctx: ctx.exec_ctx.clone(),
                 ts: ts_start,
                 agent: agent.clone(),
             },
@@ -996,6 +997,7 @@ pub async fn call_and_record_tool(
                 args,
                 status,
                 payload,
+                ctx: ctx.exec_ctx.clone(),
                 observation: obs,
                 ts: chrono::Utc::now().to_rfc3339(),
                 agent,
@@ -1088,6 +1090,7 @@ mod tests {
                         "failed".to_string()
                     },
                     payload: None,
+                    ctx: None,
                     observation: obs,
                     ts,
                     agent: "test".to_string(),
@@ -1536,6 +1539,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: None,
         }
     }

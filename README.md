@@ -26,7 +26,7 @@ This will generate Rust models under `react/src/ws/api_gen/`. Only `components/s
 Run the server locally (default port 8787 shown; choose any open port):
 
 ```bash
-cargo run -p react -- serve --port 8787 --log
+cargo run -p react -- serve --config react/config.example.yml --port 8787 --terminal
 ```
 
 ## Suites

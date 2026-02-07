@@ -10,7 +10,7 @@ use crate::providers::{
     DbtProvider, NullWarehouseProvider, QueryProvider, VectorStore, WarehouseProvider,
 };
 use crate::scope::RequestScope;
-use crate::session::{Observation, ThreadResult, ThreadStep, ThreadStore, ToolObservation};
+use crate::session::{ExecutionContext, Observation, ThreadResult, ThreadStep, ThreadStore, ToolObservation};
 use crate::storage::StorageAdapter;
 use crate::tools::ToolRegistry;
 use async_trait::async_trait;
@@ -57,6 +57,9 @@ pub struct AgentCtx {
     pub vector: Option<Arc<dyn VectorStore>>,
     /// Optional thread store (for transcript persistence and artifact context).
     pub thread_store: Option<ThreadStore>,
+
+    /// Optional explicit execution context for hierarchical UI rendering.
+    pub exec_ctx: Option<ExecutionContext>,
 
     /// Optional runtime-specific context/configuration blob (type-erased).
     ///
@@ -478,6 +481,7 @@ impl Agent {
                         call_id,
                         model: Some("unknown".to_string()),
                         phase: phase.clone(),
+                        ctx: ctx.exec_ctx.clone(),
                         ts: chrono::Utc::now().to_rfc3339(),
                         agent: agent.clone(),
                     },
@@ -520,6 +524,7 @@ impl Agent {
                         } else {
                             Some(response_raw.to_string())
                         },
+                        ctx: ctx.exec_ctx.clone(),
                         ts: chrono::Utc::now().to_rfc3339(),
                         agent: agent.clone(),
                     },
@@ -851,6 +856,7 @@ impl Agent {
                             args: args.clone(),
                             status: "running".to_string(),
                             payload: None,
+                            ctx: ctx.exec_ctx.clone(),
                             ts: chrono::Utc::now().to_rfc3339(),
                             agent: agent.clone(),
                         },
@@ -892,6 +898,7 @@ impl Agent {
                             args: args.clone(),
                             status,
                             payload,
+                            ctx: ctx.exec_ctx.clone(),
                             observation: obs_env,
                             ts: chrono::Utc::now().to_rfc3339(),
                             agent: agent.clone(),
@@ -1075,6 +1082,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: None,
         };
 
@@ -1128,6 +1136,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: None,
         };
 

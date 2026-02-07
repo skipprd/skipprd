@@ -1540,6 +1540,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
             dbt: sctx.dbt.clone(),
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
+            exec_ctx: None,
             runtime: sctx
                 .resolved_config
                 .clone()
@@ -1602,6 +1603,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
             dbt: sctx.dbt.clone(),
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
+            exec_ctx: None,
             runtime: sctx
                 .resolved_config
                 .clone()
@@ -1655,6 +1657,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
             dbt: sctx.dbt.clone(),
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
+            exec_ctx: None,
             runtime: sctx
                 .resolved_config
                 .clone()
@@ -1693,6 +1696,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
             dbt: sctx.dbt.clone(),
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
+            exec_ctx: None,
             runtime: sctx
                 .resolved_config
                 .clone()
@@ -2876,7 +2880,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                     } else {
                         prompts::model_system_prompt()
                     });
-                    let actx = AgentCtx {
+                    let mut actx = AgentCtx {
                         top_k: 30,
                         per_step_timeout_secs: 10,
                         max_steps: 60,
@@ -2899,6 +2903,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         dbt: sctx.dbt.clone(),
                         vector: sctx.vector.clone(),
                         thread_store: Some(thread_store.clone()),
+                        exec_ctx: None,
                         runtime: sctx
                             .resolved_config
                             .clone()
@@ -2951,6 +2956,19 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
                                     .await;
                             }
+
+                            // Explicit execution context for hierarchical UI (best-effort).
+                            let next_item =
+                                crate::data_engineer::plan::cleanse_next_work_item_ctx(&plan);
+                            actx.exec_ctx = Some(react_core::session::ExecutionContext {
+                                plan_kind: Some("cleanse".to_string()),
+                                plan_key: Some(plan.plan_key.clone()),
+                                workgroup_id: next_item.as_ref().map(|x| x.workgroup_id.clone()),
+                                task_id: next_item.as_ref().map(|x| x.task_id.clone()),
+                                checklist_item_id: next_item
+                                    .as_ref()
+                                    .map(|x| x.checklist_item_id.clone()),
+                            });
                             // Hard stop: if plan-batched authoring is locked due to too many consecutive failures,
                             // return control to the user with a single actionable message (do not loop).
                             if plan.progress.consecutive_batch_failures
@@ -3225,6 +3243,19 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 let _ =
                                     crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
                             }
+
+                            // Explicit execution context for hierarchical UI (best-effort).
+                            let next_item =
+                                crate::data_engineer::plan::model_next_work_item_ctx(&plan);
+                            actx.exec_ctx = Some(react_core::session::ExecutionContext {
+                                plan_kind: Some("model".to_string()),
+                                plan_key: Some(plan.plan_key.clone()),
+                                workgroup_id: next_item.as_ref().map(|x| x.workgroup_id.clone()),
+                                task_id: next_item.as_ref().map(|x| x.task_id.clone()),
+                                checklist_item_id: next_item
+                                    .as_ref()
+                                    .map(|x| x.checklist_item_id.clone()),
+                            });
                             if plan.progress.consecutive_batch_failures
                             >= crate::data_engineer::tools::apply_next_batch::MAX_CONSECUTIVE_BATCH_FAILURES
                         {
@@ -3964,6 +3995,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     args: args_compile.clone(),
                                     status: "running".to_string(),
                                     payload: None,
+                                    ctx: None,
                                     ts: chrono::Utc::now().to_rfc3339(),
                                     agent: "agent".to_string(),
                                 },
@@ -3992,6 +4024,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         "failed".to_string()
                                     },
                                     payload: None,
+                                    ctx: None,
                                     observation: obs_compile_norm,
                                     ts: chrono::Utc::now().to_rfc3339(),
                                     agent: "agent".to_string(),
@@ -4024,6 +4057,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         args: args_build.clone(),
                                         status: "running".to_string(),
                                         payload: None,
+                                        ctx: None,
                                         ts: chrono::Utc::now().to_rfc3339(),
                                         agent: "agent".to_string(),
                                     },
@@ -4053,6 +4087,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                             "failed".to_string()
                                         },
                                         payload: None,
+                                        ctx: None,
                                         observation: obs_build_norm,
                                         ts: chrono::Utc::now().to_rfc3339(),
                                         agent: "agent".to_string(),
@@ -4089,6 +4124,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                             args: args_full.clone(),
                                             status: "running".to_string(),
                                             payload: None,
+                                            ctx: None,
                                             ts: chrono::Utc::now().to_rfc3339(),
                                             agent: "agent".to_string(),
                                         },
@@ -4114,6 +4150,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                                 "failed".to_string()
                                             },
                                             payload: None,
+                                            ctx: None,
                                             observation: obs_norm,
                                             ts: chrono::Utc::now().to_rfc3339(),
                                             agent: "agent".to_string(),
@@ -4136,6 +4173,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     args: args_full.clone(),
                                     status: "running".to_string(),
                                     payload: None,
+                                    ctx: None,
                                     ts: chrono::Utc::now().to_rfc3339(),
                                     agent: "agent".to_string(),
                                 },
@@ -4160,6 +4198,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         "failed".to_string()
                                     },
                                     payload: None,
+                                    ctx: None,
                                     observation: obs_norm,
                                     ts: chrono::Utc::now().to_rfc3339(),
                                     agent: "agent".to_string(),
@@ -4863,6 +4902,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
             dbt: sctx.dbt.clone(),
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store.clone()),
+            exec_ctx: None,
             runtime: sctx
                 .resolved_config
                 .clone()
@@ -5743,6 +5783,7 @@ mod tests {
                     args: serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
                     status: "ok".to_string(),
                     payload: None,
+                    ctx: None,
                     observation: react_core::session::ToolObservation::normalize(
                         serde_json::json!({"ok": true, "written_keys":["k1"]}),
                     ),
@@ -5813,6 +5854,7 @@ mod tests {
                     args: serde_json::json!({"build": true}),
                     status: "failed".to_string(),
                     payload: None,
+                    ctx: None,
                     observation: react_core::session::ToolObservation::normalize(
                         serde_json::json!({
                             "ok": false,
@@ -5848,6 +5890,7 @@ mod tests {
                     args: serde_json::json!({"op": "patch"}),
                     status: "ok".to_string(),
                     payload: None,
+                    ctx: None,
                     observation: react_core::session::ToolObservation::normalize(
                         serde_json::json!({
                             "ok": true,

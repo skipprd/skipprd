@@ -41,6 +41,8 @@ pub struct ThreadEvent {
     pub model: Option<String>,
     #[serde(rename = "phase", skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    #[serde(rename = "ctx", skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<models::ExecutionContext>,
 }
 
 impl ThreadEvent {
@@ -59,6 +61,7 @@ impl ThreadEvent {
             call_id: None,
             model: None,
             phase: None,
+            ctx: None,
         }
     }
 }

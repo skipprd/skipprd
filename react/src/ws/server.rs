@@ -5,7 +5,9 @@ use tokio_tungstenite::tungstenite::Message;
 // Agent loop is invoked through suites; WS server doesn't call Agent directly.
 // Removed unused tool imports; flows handle registry/tool selection
 use crate::models as m;
+use crate::run::event_hub::EventHub;
 use crate::ws::api_gen::src::models as api;
+use crate::ws::terminal::{self, TerminalEvent, TerminalSink};
 use chrono::Utc;
 use react_core::session::{
     Observation, ThreadItemError as CoreThreadItemError, ThreadItemState as CoreThreadItemState,
@@ -170,6 +172,15 @@ fn ws_thread_state_snapshot_from_core(
     let completed_phases = derive_completed_phases(&phases, &current_phase);
 
     // Durable, bounded timeline events (post reconnect tool timeline).
+    fn map_ctx(c: &react_core::session::ExecutionContext) -> api::ExecutionContext {
+        let mut out = api::ExecutionContext::new();
+        out.plan_kind = c.plan_kind.clone();
+        out.plan_key = c.plan_key.clone();
+        out.workgroup_id = c.workgroup_id.clone();
+        out.task_id = c.task_id.clone();
+        out.checklist_item_id = c.checklist_item_id.clone();
+        out
+    }
     let events: Vec<api::ThreadEvent> = st
         .events
         .iter()
@@ -204,6 +215,7 @@ fn ws_thread_state_snapshot_from_core(
                 }
                 hm
             });
+            out.ctx = ev.ctx.as_ref().map(map_ctx);
             out
         })
         .collect();
@@ -418,6 +430,12 @@ pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await.map_err(|e| e.to_string())?;
     tracing::info!("WebSocket server listening on ws://{}", addr);
+    if let Some(t) = terminal::sink() {
+        t.emit(TerminalEvent::Info(format!(
+            "WS server listening on ws://{}",
+            addr
+        )));
+    }
     loop {
         let (stream, _sockaddr) = listener.accept().await.map_err(|e| e.to_string())?;
         let reg = reg.clone();
@@ -425,7 +443,7 @@ pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String
         tokio::spawn(async move {
             if let Ok(ws_stream) = tokio_tungstenite::accept_async(stream).await {
                 let (mut write, mut read) = ws_stream.split();
-                let mut state = ConnState::new(reg, suite_ctx);
+                let mut state = ConnState::new(reg, suite_ctx, None);
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(Message::Text(txt)) => {
@@ -545,6 +563,9 @@ pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String
                             match handle_message(&txt, &mut state).await {
                                 Ok(frames) => {
                                     for f in frames {
+                                        if let Some(t) = state.term() {
+                                            t.emit(TerminalEvent::RawJson(f.clone()));
+                                        }
                                         ws_log_out(&f);
                                         let _ = write.send(Message::Text(f)).await;
                                     }
@@ -1458,6 +1479,13 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
             resp.for_cid = Some(req.cid.clone());
             resp.cleanse = cleanse;
             resp.model = model;
+            if let Some(t) = state.term() {
+                t.emit(TerminalEvent::Plans {
+                    thread_id: thread_id.clone(),
+                    cleanse: resp.cleanse.clone(),
+                    model: resp.model.clone(),
+                });
+            }
             let s = serde_json::to_string(&resp).unwrap();
             state.buffer_last(&s);
             out.push(s);
@@ -1476,6 +1504,9 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
             let store = state.thread_store();
             let st = store.get_thread_state(&thread_id).await?;
             let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+            if let Some(t) = state.term() {
+                t.emit(TerminalEvent::ThreadState(snap.clone()));
+            }
             let mut resp = api::ThreadStateResponse::new(
                 1,
                 m::thread_state_response::Type::ThreadState,
@@ -1521,6 +1552,128 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
         }
     }
     Ok(out)
+}
+
+/// Headless runner for `react run`.
+///
+/// It reuses the WS request handlers + streaming loop, but sends frames into a
+/// "null" sink (no socket) and emits the same typed `api::ServerMessage` events
+/// to the provided `EventHub`.
+pub async fn run_headless_with_hub(
+    suite_ctx: SuiteCtx,
+    thread_id: Option<String>,
+    suite_id: String,
+    agent: String,
+    hub: EventHub,
+) -> Result<String, String> {
+    use serde_json::json;
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    let reg = Arc::new(react_suites::default_registry());
+    let mut state = ConnState::new(reg, suite_ctx, Some(hub));
+    #[derive(Clone, Default)]
+    struct Capture {
+        thread_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    }
+    impl Capture {
+        fn get(&self) -> Option<String> {
+            self.thread_id.lock().ok().and_then(|g| g.clone())
+        }
+        fn capture(&self, s: &str) {
+            if let Ok(v) = serde_json::from_str::<Value>(s) {
+                if v.get("type").and_then(|x| x.as_str()) == Some("thread_assigned") {
+                    if let Some(tid) = v.get("thread_id").and_then(|x| x.as_str()) {
+                        if let Ok(mut g) = self.thread_id.lock() {
+                            *g = Some(tid.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    struct CaptureSink {
+        cap: Capture,
+        _recent: VecDeque<String>,
+    }
+    impl CaptureSink {
+        fn new(cap: Capture) -> Self {
+            Self {
+                cap,
+                _recent: VecDeque::new(),
+            }
+        }
+    }
+    impl futures::sink::Sink<Message> for CaptureSink {
+        type Error = String;
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            if let Message::Text(s) = item {
+                self.cap.capture(&s);
+                self._recent.push_back(s);
+                while self._recent.len() > 32 {
+                    self._recent.pop_front();
+                }
+            }
+            Ok(())
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    let cap = Capture::default();
+    let mut write = CaptureSink::new(cap.clone());
+
+    if let Some(tid) = thread_id {
+        if tid.trim().is_empty() {
+            return Err("thread_id required".into());
+        }
+        if uuid::Uuid::parse_str(&tid).is_err() {
+            return Err("invalid thread_id".into());
+        }
+        // Enforce "must exist" semantics with a clear error message.
+        let store = state.thread_store();
+        if store.get(&tid).await.is_err() {
+            return Err(format!("thread does not exist: {}", tid));
+        }
+
+        let v = json!({
+            "v": 1,
+            "type": "open",
+            "cid": "headless",
+            "thread_id": tid,
+            "suiteId": suite_id,
+            "agentType": agent,
+            "question": "continue"
+        });
+        let tid = v
+            .get("thread_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        process_open(&v, &mut state, &mut write).await?;
+        return Ok(tid);
+    }
+
+    // Create a new thread with an initial "go" prompt.
+    let v = json!({
+        "v": 1,
+        "type": "new",
+        "cid": "headless",
+        "suiteId": suite_id,
+        "agentType": agent,
+        "question": "go"
+    });
+    process_new(&v, &mut state, &mut write).await?;
+
+    cap.get()
+        .ok_or_else(|| "internal: failed to capture thread_id from new thread".to_string())
 }
 
 fn now_iso() -> String {
@@ -1834,6 +1987,8 @@ struct ConnState {
     current_agent: HashMap<String, String>,
     reg: Arc<SuiteRegistry>,
     suite_ctx: SuiteCtx,
+    terminal: Option<TerminalSink>,
+    hub: Option<EventHub>,
 }
 
 async fn load_last_run_sql_async(thread_id: &str) -> (Vec<String>, Vec<Vec<String>>) {
@@ -1856,7 +2011,7 @@ async fn synthesize_summary(
 }
 
 impl ConnState {
-    fn new(reg: Arc<SuiteRegistry>, suite_ctx: SuiteCtx) -> Self {
+    fn new(reg: Arc<SuiteRegistry>, suite_ctx: SuiteCtx, hub: Option<EventHub>) -> Self {
         Self {
             seq: 0,
             sent: VecDeque::new(),
@@ -1866,7 +2021,15 @@ impl ConnState {
             current_agent: HashMap::new(),
             reg,
             suite_ctx,
+            terminal: terminal::sink().cloned(),
+            hub,
         }
+    }
+    fn term(&self) -> Option<&TerminalSink> {
+        self.terminal.as_ref()
+    }
+    fn hub(&self) -> Option<&EventHub> {
+        self.hub.as_ref()
     }
     fn thread_store(&self) -> ThreadStore {
         ThreadStore::new(
@@ -2916,6 +3079,18 @@ async fn run_agent_with_processing_suite(
     state: &mut ConnState,
     write: &mut (impl SinkExt<Message> + Unpin),
 ) -> Result<(), String> {
+    let headless = env_bool("REACT_HEADLESS", false) || terminal::enabled();
+    let go_text = std::env::var("REACT_HEADLESS_GO")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "go!".to_string());
+    let auto_approve = if headless {
+        env_bool("REACT_HEADLESS_AUTO_APPROVE", true)
+    } else {
+        env_bool("REACT_HEADLESS_AUTO_APPROVE", false)
+    };
+
     let mut sctx2 = state.suite_ctx.clone();
 
     // Preflight is often the implicit "no phase yet" state; emit it explicitly so the UI sees activity.
@@ -2951,30 +3126,32 @@ async fn run_agent_with_processing_suite(
         .get(suite_id)
         .ok_or_else(|| format!("invalid suite_id '{}'", suite_id))?
         .clone();
-    let thread_id_s = thread_id.to_string();
-    let q_s = question.to_string();
-    let agent_s = agent.to_string();
-
-    let agent_task = tokio::spawn(async move {
-        let tid_scope = thread_id_s.clone();
-        crate::llm::thread_ctx::scope_thread_id(&tid_scope, async move {
-            match kind {
-                SuiteRunKind::New => suite.handle_new(&thread_id_s, &q_s, &agent_s, &sctx2).await,
-                SuiteRunKind::Open => {
-                    suite
-                        .handle_open(&thread_id_s, &q_s, &agent_s, &sctx2)
-                        .await
+    let spawn_task = |run_kind: SuiteRunKind, q: String| {
+        let suite2 = suite.clone();
+        let sctx3 = sctx2.clone();
+        let thread_id_s = thread_id.to_string();
+        let agent_s = agent.to_string();
+        tokio::spawn(async move {
+            let tid_scope = thread_id_s.clone();
+            crate::llm::thread_ctx::scope_thread_id(&tid_scope, async move {
+                match run_kind {
+                    SuiteRunKind::New => suite2
+                        .handle_new(&thread_id_s, &q, &agent_s, &sctx3)
+                        .await,
+                    SuiteRunKind::Open => suite2
+                        .handle_open(&thread_id_s, &q, &agent_s, &sctx3)
+                        .await,
+                    SuiteRunKind::User => suite2
+                        .handle_user(&thread_id_s, &q, &agent_s, &sctx3)
+                        .await,
                 }
-                SuiteRunKind::User => {
-                    suite
-                        .handle_user(&thread_id_s, &q_s, &agent_s, &sctx2)
-                        .await
-                }
-            }
+            })
+            .await
         })
-        .await
-    });
-    tokio::pin!(agent_task);
+    };
+
+    let mut agent_task = spawn_task(kind, question.to_string());
+    let mut auto_turns: usize = 0;
 
     // Periodically refresh plan summaries/tasks into thread_state.
     let mut plan_tick = tokio::time::interval(std::time::Duration::from_millis(800));
@@ -2994,6 +3171,40 @@ async fn run_agent_with_processing_suite(
     let mut last_state_sent: Option<api::ThreadStateSnapshot> = None;
     let mut state_tick = tokio::time::interval(std::time::Duration::from_millis(250));
     state_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    async fn emit_ws(
+        state: &mut ConnState,
+        write: &mut (impl SinkExt<Message> + Unpin),
+        msg: api::ServerMessage,
+    ) {
+        if let Some(hub) = state.hub() {
+            hub.emit(msg.clone());
+        }
+        // Best-effort: update terminal from typed messages (no JSON parsing).
+        if let Some(t) = state.term() {
+            match &msg {
+                api::ServerMessage::ThreadState(r) => t.emit(TerminalEvent::ThreadState(r.state.clone())),
+                api::ServerMessage::Plans(r) => t.emit(TerminalEvent::Plans {
+                    thread_id: r.thread_id.clone(),
+                    cleanse: r.cleanse.clone(),
+                    model: r.model.clone(),
+                }),
+                api::ServerMessage::PlansChanged(r) => t.emit(TerminalEvent::PlansChanged(r.clone())),
+                api::ServerMessage::Phase(r) => t.emit(TerminalEvent::Phase(r.clone())),
+                api::ServerMessage::ToolStart(r) => t.emit(TerminalEvent::ToolStart(r.clone())),
+                api::ServerMessage::ToolEnd(r) => t.emit(TerminalEvent::ToolEnd(r.clone())),
+                api::ServerMessage::LlmStart(r) => t.emit(TerminalEvent::LlmStart(r.clone())),
+                api::ServerMessage::LlmEnd(r) => t.emit(TerminalEvent::LlmEnd(r.clone())),
+                _ => {}
+            }
+        }
+        if let Ok(s) = serde_json::to_string(&msg) {
+            state.buffer_last(&s);
+            ws_log_out(&s);
+            let _ = write.send(Message::Text(s)).await;
+        }
+    }
+
     loop {
         tokio::select! {
             _ = plan_tick.tick() => {
@@ -3027,10 +3238,24 @@ async fn run_agent_with_processing_suite(
                         ev.for_cid = Some(cid.to_string());
                         ev.cleanse_plan_key = cleanse.as_ref().map(|p| p.plan_key.clone());
                         ev.model_plan_key = model.as_ref().map(|p| p.plan_key.clone());
-                        let s = serde_json::to_string(&api::ServerMessage::PlansChanged(ev)).unwrap();
-                        state.buffer_last(&s);
-                        ws_log_out(&s);
-                        let _ = write.send(Message::Text(s)).await;
+                        if let Some(t) = state.term() {
+                            t.emit(TerminalEvent::PlansChanged(ev.clone()));
+                        }
+                        emit_ws(state, write, api::ServerMessage::PlansChanged(ev)).await;
+
+                        // Also emit full plan snapshots so terminal/headless can render hierarchy
+                        // without making an explicit `plans` request.
+                        let mut pr = api::PlansResponse::new(
+                            1,
+                            api::plans_response::Type::Plans,
+                            now_iso(),
+                            state.next_seq(),
+                            thread_id.to_string(),
+                        );
+                        pr.for_cid = Some(cid.to_string());
+                        pr.cleanse = cleanse.clone();
+                        pr.model = model.clone();
+                        emit_ws(state, write, api::ServerMessage::Plans(pr)).await;
                     }
                 }
                 upsert_thread_state_from_plans(&store, thread_id, &cleanse, &model).await;
@@ -3094,12 +3319,12 @@ async fn run_agent_with_processing_suite(
                                 }
                                 hm
                             });
-                            let s = serde_json::to_string(&api::ServerMessage::Phase(ev)).unwrap();
-                            state.buffer_last(&s);
-                            ws_log_out(&s);
-                            let _ = write.send(Message::Text(s)).await;
+                            if let Some(t) = state.term() {
+                                t.emit(TerminalEvent::Phase(ev.clone()));
+                            }
+                            emit_ws(state, write, api::ServerMessage::Phase(ev)).await;
                         }
-                        ThreadStep::ToolStart { tool_id, name, clean_name, status, payload, .. } => {
+                        ThreadStep::ToolStart { tool_id, name, clean_name, status, payload, ctx, .. } => {
                             let st = match status.as_str() {
                                 "running" => api::ToolEventStatus::Running,
                                 "ok" => api::ToolEventStatus::Ok,
@@ -3122,12 +3347,21 @@ async fn run_agent_with_processing_suite(
                             }
                             ev.phase = phase_at_step_idx(&log.steps, i);
                             ev.payload = payload_map(payload);
-                            let s = serde_json::to_string(&api::ServerMessage::ToolStart(ev)).unwrap();
-                            state.buffer_last(&s);
-                            ws_log_out(&s);
-                            let _ = write.send(Message::Text(s)).await;
+                            ev.ctx = ctx.as_ref().map(|c| {
+                                let mut out = api::ExecutionContext::new();
+                                out.plan_kind = c.plan_kind.clone();
+                                out.plan_key = c.plan_key.clone();
+                                out.workgroup_id = c.workgroup_id.clone();
+                                out.task_id = c.task_id.clone();
+                                out.checklist_item_id = c.checklist_item_id.clone();
+                                out
+                            });
+                            if let Some(t) = state.term() {
+                                t.emit(TerminalEvent::ToolStart(ev.clone()));
+                            }
+                            emit_ws(state, write, api::ServerMessage::ToolStart(ev)).await;
                         }
-                        ThreadStep::ToolEnd { tool_id, name, clean_name, status, payload, observation, .. } => {
+                        ThreadStep::ToolEnd { tool_id, name, clean_name, status, payload, ctx, observation, .. } => {
                             let st = match status.as_str() {
                                 "running" => api::ToolEventStatus::Running,
                                 "ok" => api::ToolEventStatus::Ok,
@@ -3153,12 +3387,21 @@ async fn run_agent_with_processing_suite(
                             if !observation.ok {
                                 ev.error = observation.errors.first().cloned();
                             }
-                            let s = serde_json::to_string(&api::ServerMessage::ToolEnd(ev)).unwrap();
-                            state.buffer_last(&s);
-                            ws_log_out(&s);
-                            let _ = write.send(Message::Text(s)).await;
+                            ev.ctx = ctx.as_ref().map(|c| {
+                                let mut out = api::ExecutionContext::new();
+                                out.plan_kind = c.plan_kind.clone();
+                                out.plan_key = c.plan_key.clone();
+                                out.workgroup_id = c.workgroup_id.clone();
+                                out.task_id = c.task_id.clone();
+                                out.checklist_item_id = c.checklist_item_id.clone();
+                                out
+                            });
+                            if let Some(t) = state.term() {
+                                t.emit(TerminalEvent::ToolEnd(ev.clone()));
+                            }
+                            emit_ws(state, write, api::ServerMessage::ToolEnd(ev)).await;
                         }
-                        ThreadStep::LlmStart { call_id, phase, model, .. } => {
+                        ThreadStep::LlmStart { call_id, phase, model, ctx, .. } => {
                             let mut ev = api::LlmStartResponse::new(
                                 1,
                                 api::llm_start_response::Type::LlmStart,
@@ -3170,12 +3413,21 @@ async fn run_agent_with_processing_suite(
                             );
                             ev.for_cid = Some(cid.to_string());
                             ev.model = model.clone();
-                            let s = serde_json::to_string(&api::ServerMessage::LlmStart(ev)).unwrap();
-                            state.buffer_last(&s);
-                            ws_log_out(&s);
-                            let _ = write.send(Message::Text(s)).await;
+                            ev.ctx = ctx.as_ref().map(|c| {
+                                let mut out = api::ExecutionContext::new();
+                                out.plan_kind = c.plan_kind.clone();
+                                out.plan_key = c.plan_key.clone();
+                                out.workgroup_id = c.workgroup_id.clone();
+                                out.task_id = c.task_id.clone();
+                                out.checklist_item_id = c.checklist_item_id.clone();
+                                out
+                            });
+                            if let Some(t) = state.term() {
+                                t.emit(TerminalEvent::LlmStart(ev.clone()));
+                            }
+                            emit_ws(state, write, api::ServerMessage::LlmStart(ev)).await;
                         }
-                        ThreadStep::LlmEnd { call_id, phase, model, status, error, .. } => {
+                        ThreadStep::LlmEnd { call_id, phase, model, status, error, ctx, .. } => {
                             let mut ev = api::LlmEndResponse::new(
                                 1,
                                 api::llm_end_response::Type::LlmEnd,
@@ -3189,10 +3441,19 @@ async fn run_agent_with_processing_suite(
                             ev.for_cid = Some(cid.to_string());
                             ev.model = model.clone();
                             ev.error = error.clone();
-                            let s = serde_json::to_string(&api::ServerMessage::LlmEnd(ev)).unwrap();
-                            state.buffer_last(&s);
-                            ws_log_out(&s);
-                            let _ = write.send(Message::Text(s)).await;
+                            ev.ctx = ctx.as_ref().map(|c| {
+                                let mut out = api::ExecutionContext::new();
+                                out.plan_kind = c.plan_kind.clone();
+                                out.plan_key = c.plan_key.clone();
+                                out.workgroup_id = c.workgroup_id.clone();
+                                out.task_id = c.task_id.clone();
+                                out.checklist_item_id = c.checklist_item_id.clone();
+                                out
+                            });
+                            if let Some(t) = state.term() {
+                                t.emit(TerminalEvent::LlmEnd(ev.clone()));
+                            }
+                            emit_ws(state, write, api::ServerMessage::LlmEnd(ev)).await;
                         }
                         _ => {}
                     }
@@ -3210,6 +3471,9 @@ async fn run_agent_with_processing_suite(
                     continue;
                 }
                 last_state_sent = Some(snap.clone());
+                if let Some(t) = state.term() {
+                    t.emit(TerminalEvent::ThreadState(snap.clone()));
+                }
                 let mut resp = api::ThreadStateResponse::new(
                     1,
                     m::thread_state_response::Type::ThreadState,
@@ -3219,10 +3483,7 @@ async fn run_agent_with_processing_suite(
                     snap,
                 );
                 resp.for_cid = Some(cid.to_string());
-                let s = serde_json::to_string(&resp).unwrap();
-                state.buffer_last(&s);
-                ws_log_out(&s);
-                let _ = write.send(Message::Text(s)).await;
+                emit_ws(state, write, api::ServerMessage::ThreadState(resp)).await;
             }
             res = &mut agent_task => {
                 let frames = match res {
@@ -3242,6 +3503,7 @@ async fn run_agent_with_processing_suite(
                 // Continue with normal WS frame emission below.
                 let frames = frames;
 
+                let mut rerun: Option<(SuiteRunKind, String)> = None;
                 for f in frames {
                     match f {
                         AgentFrame::Review { text, meta } => {
@@ -3267,10 +3529,12 @@ async fn run_agent_with_processing_suite(
                                     }
                                 }
                             }
-                            let s = serde_json::to_string(&resp).unwrap();
-                            state.buffer_last(&s);
-                            ws_log_out(&s);
-                            let _ = write.send(Message::Text(s)).await;
+                            // Persist meta before moving `resp` into the event sink.
+                            let meta_json = resp
+                                .meta
+                                .as_ref()
+                                .and_then(|m| serde_json::to_value(m).ok());
+                            emit_ws(state, write, api::ServerMessage::Review(resp)).await;
 
                             // Persist as its own step so history can show reviewer output.
                             {
@@ -3280,7 +3544,7 @@ async fn run_agent_with_processing_suite(
                                         thread_id,
                                         ThreadStep::ReviewResponse {
                                             text: text.clone(),
-                                            meta: resp.meta.as_ref().and_then(|m| serde_json::to_value(m).ok()),
+                                            meta: meta_json,
                                             observation: Observation::ok(),
                                             ts: chrono::Utc::now().to_rfc3339(),
                                             agent: agent.to_string(),
@@ -3320,10 +3584,7 @@ async fn run_agent_with_processing_suite(
                                 tseq,
                                 final_result,
                             );
-                            let s = serde_json::to_string(&resp).unwrap();
-                            state.buffer_last(&s);
-                            ws_log_out(&s);
-                            let _ = write.send(Message::Text(s)).await;
+                            emit_ws(state, write, api::ServerMessage::Final(resp)).await;
 
                             // Debug: print persisted thread steps
                             {
@@ -3348,6 +3609,33 @@ async fn run_agent_with_processing_suite(
                                 )
                                 .await;
                             }
+                            if headless && auto_turns < 32 {
+                                auto_turns += 1;
+                                // Auto-answer with "go!" (headless terminal mode).
+                                {
+                                    let store = state.thread_store();
+                                    let _ = store
+                                        .append_step(
+                                            thread_id,
+                                            ThreadStep::User {
+                                                text: go_text.clone(),
+                                                observation: Observation::ok(),
+                                                ts: chrono::Utc::now().to_rfc3339(),
+                                                agent: agent.to_string(),
+                                            },
+                                        )
+                                        .await;
+                                }
+                                if let Some(t) = state.term() {
+                                    t.emit(TerminalEvent::Info(format!(
+                                        "headless: auto user='{}' (prompt='{}')",
+                                        go_text,
+                                        prompt
+                                    )));
+                                }
+                                rerun = Some((SuiteRunKind::User, go_text.clone()));
+                                break;
+                            }
                             let tseq = state.next_thread_seq(thread_id);
                             let resp = api::AwaitUserResponse::new(
                                 1,
@@ -3358,10 +3646,7 @@ async fn run_agent_with_processing_suite(
                                 tseq,
                                 prompt,
                             );
-                            let s = serde_json::to_string(&resp).unwrap();
-                            state.buffer_last(&s);
-                            ws_log_out(&s);
-                            let _ = write.send(Message::Text(s)).await;
+                            emit_ws(state, write, api::ServerMessage::AwaitUser(resp)).await;
                             {
                                 let store = state.thread_store();
                                 log_thread_steps_if_enabled(&store, thread_id, "await_user").await;
@@ -3384,6 +3669,32 @@ async fn run_agent_with_processing_suite(
                                 )
                                 .await;
                             }
+                            if headless && auto_approve && auto_turns < 32 {
+                                auto_turns += 1;
+                                // Auto-approve (best-effort) to keep headless runs moving.
+                                {
+                                    let store = state.thread_store();
+                                    let _ = store
+                                        .append_step(
+                                            thread_id,
+                                            ThreadStep::User {
+                                                text: "approve".to_string(),
+                                                observation: Observation::ok(),
+                                                ts: chrono::Utc::now().to_rfc3339(),
+                                                agent: agent.to_string(),
+                                            },
+                                        )
+                                        .await;
+                                }
+                                if let Some(t) = state.term() {
+                                    t.emit(TerminalEvent::Info(format!(
+                                        "headless: auto approve (prompt='{}')",
+                                        prompt
+                                    )));
+                                }
+                                rerun = Some((SuiteRunKind::User, "Continue.".to_string()));
+                                break;
+                            }
                             let tseq = state.next_thread_seq(thread_id);
                             let resp = api::AwaitApprovalResponse::new(
                                 1,
@@ -3394,10 +3705,7 @@ async fn run_agent_with_processing_suite(
                                 tseq,
                                 prompt,
                             );
-                            let s = serde_json::to_string(&resp).unwrap();
-                            state.buffer_last(&s);
-                            ws_log_out(&s);
-                            let _ = write.send(Message::Text(s)).await;
+                            emit_ws(state, write, api::ServerMessage::AwaitApproval(resp)).await;
                             {
                                 let store = state.thread_store();
                                 log_thread_steps_if_enabled(&store, thread_id, "await_approval").await;
@@ -3405,6 +3713,10 @@ async fn run_agent_with_processing_suite(
                             return Ok(());
                         }
                     }
+                }
+                if let Some((k2, q2)) = rerun {
+                    agent_task = spawn_task(k2, q2);
+                    continue;
                 }
                 return Ok(());
             }
@@ -3654,6 +3966,37 @@ mod tests {
     use std::task::{Context, Poll};
     use std::time::Duration;
 
+    #[test]
+    fn thread_state_snapshot_maps_ctx_from_core_event_field() {
+        let mut core = CoreThreadState::default();
+        core.thread_state_schema_version = 1;
+        core.thread_id = "tid".to_string();
+        core.suite_id = Some("data_engineer".to_string());
+        core.agent_type = Some("agent".to_string());
+        core.current_phase = Some("preflight".to_string());
+        core.events = vec![react_core::session::ThreadEvent {
+            step_idx: 0,
+            event_kind: "tool_start".to_string(),
+            ts: "t".to_string(),
+            ctx: Some(react_core::session::ExecutionContext {
+                plan_kind: Some("cleanse".to_string()),
+                plan_key: Some("p1".to_string()),
+                workgroup_id: Some("wg1".to_string()),
+                task_id: Some("task1".to_string()),
+                checklist_item_id: Some("sql_model".to_string()),
+            }),
+            ..Default::default()
+        }];
+        let reg = react_suites::registry::SuiteRegistry::new();
+        let snap = ws_thread_state_snapshot_from_core(&core, &reg);
+        let ctx = snap.events[0].ctx.as_ref().expect("ctx");
+        assert_eq!(ctx.plan_kind.as_deref(), Some("cleanse"));
+        assert_eq!(ctx.plan_key.as_deref(), Some("p1"));
+        assert_eq!(ctx.workgroup_id.as_deref(), Some("wg1"));
+        assert_eq!(ctx.task_id.as_deref(), Some("task1"));
+        assert_eq!(ctx.checklist_item_id.as_deref(), Some("sql_model"));
+    }
+
     #[derive(Clone, Default)]
     struct CollectSink {
         out: Arc<Mutex<Vec<String>>>,
@@ -3752,6 +4095,7 @@ mod tests {
                         args: serde_json::json!({"op":"patch"}),
                         status: "running".to_string(),
                         payload: Some(serde_json::json!({"hint":"starting"})),
+                        ctx: None,
                         ts: chrono::Utc::now().to_rfc3339(),
                         agent: "agent".to_string(),
                     },
@@ -3767,6 +4111,7 @@ mod tests {
                         args: serde_json::json!({"op":"patch"}),
                         status: "ok".to_string(),
                         payload: Some(serde_json::json!({"written_keys": []})),
+                        ctx: None,
                         observation: ToolObservation::normalize(serde_json::json!({"ok": true})),
                         ts: chrono::Utc::now().to_rfc3339(),
                         agent: "agent".to_string(),
@@ -3884,6 +4229,7 @@ mod tests {
                     args: json!({}),
                     status: "ok".to_string(),
                     payload: None,
+                    ctx: None,
                     observation: ToolObservation::normalize(json!({"ok": true})),
                     ts: "t".to_string(),
                     agent: "cleanse".to_string(),
@@ -3989,7 +4335,7 @@ mod tests {
             keyspace,
         );
         let reg = Arc::new(react_suites::default_registry());
-        let mut state = ConnState::new(reg, suite_ctx);
+        let mut state = ConnState::new(reg, suite_ctx, None);
 
         // Missing required fields should fail strict parsing.
         let bad = json!({"type":"suites"}).to_string();
@@ -4013,10 +4359,41 @@ mod tests {
             keyspace,
         );
         let reg = Arc::new(react_suites::default_registry());
-        let mut state = ConnState::new(reg, suite_ctx);
+        let mut state = ConnState::new(reg, suite_ctx, None);
 
         let bad = json!({"type":"delete","thread_id":"not-a-uuid"}).to_string();
         assert!(handle_message(&bad, &mut state).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn headless_run_requires_existing_thread_when_thread_id_provided() {
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
+        let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let suite_ctx = SuiteCtx::new(
+            storage,
+            Arc::new(NullSecretsProvider::default()),
+            Arc::new(NullModel::new()),
+            scope,
+            keyspace,
+        );
+        let missing = uuid::Uuid::new_v4().to_string();
+        let hub = EventHub::new(256);
+        let err = run_headless_with_hub(
+            suite_ctx,
+            Some(missing.clone()),
+            "data_engineer".to_string(),
+            "agent".to_string(),
+            hub,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("thread does not exist"));
+        assert!(err.contains(&missing));
     }
 
     #[tokio::test]
@@ -4036,7 +4413,7 @@ mod tests {
             keyspace.clone(),
         );
         let reg = Arc::new(react_suites::default_registry());
-        let mut state = ConnState::new(reg, suite_ctx.clone());
+        let mut state = ConnState::new(reg, suite_ctx.clone(), None);
 
         let thread_id = uuid::Uuid::new_v4().to_string();
         let base = keyspace
@@ -4111,7 +4488,7 @@ mod tests {
             keyspace.clone(),
         );
         let reg = Arc::new(react_suites::default_registry());
-        let mut state = ConnState::new(reg, suite_ctx.clone());
+        let mut state = ConnState::new(reg, suite_ctx.clone(), None);
 
         let thread_id = uuid::Uuid::new_v4().to_string();
         let base = keyspace
@@ -4191,7 +4568,7 @@ mod tests {
             keyspace.clone(),
         );
         let reg = Arc::new(react_suites::default_registry());
-        let mut state = ConnState::new(reg, suite_ctx.clone());
+        let mut state = ConnState::new(reg, suite_ctx.clone(), None);
 
         let thread_id = uuid::Uuid::new_v4().to_string();
         let base = keyspace
@@ -4246,7 +4623,7 @@ mod tests {
         let mut reg = react_suites::registry::SuiteRegistry::new();
         reg.register(StubDataEngineerSuite);
         let reg = Arc::new(reg);
-        let mut state = ConnState::new(reg, suite_ctx.clone());
+        let mut state = ConnState::new(reg, suite_ctx.clone(), None);
 
         // Seed empty thread log so process_open can load it.
         let thread_id = uuid::Uuid::new_v4().to_string();
@@ -4301,7 +4678,7 @@ mod tests {
         let mut reg = react_suites::registry::SuiteRegistry::new();
         reg.register(StubDataEngineerSuite);
         let reg = Arc::new(reg);
-        let mut state = ConnState::new(reg, suite_ctx.clone());
+        let mut state = ConnState::new(reg, suite_ctx.clone(), None);
 
         let thread_id = uuid::Uuid::new_v4().to_string();
         let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
@@ -4345,7 +4722,7 @@ mod tests {
         let mut reg = react_suites::registry::SuiteRegistry::new();
         reg.register(StubAwaitApprovalSuite);
         let reg = Arc::new(reg);
-        let mut state = ConnState::new(reg, suite_ctx.clone());
+        let mut state = ConnState::new(reg, suite_ctx.clone(), None);
 
         let thread_id = uuid::Uuid::new_v4().to_string();
         let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
@@ -4421,7 +4798,7 @@ mod tests {
         let mut reg = react_suites::registry::SuiteRegistry::new();
         reg.register(StubDataEngineerSuite);
         let reg = Arc::new(reg);
-        let mut state = ConnState::new(reg, suite_ctx);
+        let mut state = ConnState::new(reg, suite_ctx, None);
 
         let msg = json!({"v":1,"type":"user","cid":"c1","thread_id":thread_id,"text":"continue"});
         let mut sink = CollectSink::default();

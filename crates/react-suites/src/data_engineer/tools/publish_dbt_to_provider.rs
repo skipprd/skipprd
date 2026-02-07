@@ -640,6 +640,7 @@ mod tests {
             dbt: Some(dbt),
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: Some(cfg.clone() as Arc<dyn std::any::Any + Send + Sync>),
         };
 

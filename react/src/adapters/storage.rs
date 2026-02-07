@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-pub use react_core::storage::StorageAdapter;
+pub use react_core::storage::{LocalFileStorageAdapter, StorageAdapter};
 use serde_json::Value;
 
 /// S3 storage adapter (used by ReAct WS deployments).

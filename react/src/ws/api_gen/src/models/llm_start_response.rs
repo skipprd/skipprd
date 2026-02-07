@@ -33,6 +33,8 @@ pub struct LlmStartResponse {
     pub phase: String,
     #[serde(rename = "model", skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(rename = "ctx", skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<models::ExecutionContext>,
 }
 
 impl LlmStartResponse {
@@ -48,6 +50,7 @@ impl LlmStartResponse {
             call_id,
             phase,
             model: None,
+            ctx: None,
         }
     }
 }

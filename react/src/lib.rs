@@ -9,6 +9,7 @@ pub mod llm;
 pub mod models;
 pub mod providers;
 pub mod ws;
+pub mod run;
 
 // Concrete implementations and utilities used by runtime wiring.
 pub mod discover;

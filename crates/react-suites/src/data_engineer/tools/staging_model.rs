@@ -1042,6 +1042,7 @@ mod tests {
             dbt: Some(Arc::new(MockDbt)),
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: Some(cfg as Arc<dyn std::any::Any + Send + Sync>),
         };
 
@@ -1289,6 +1290,7 @@ mod tests {
             dbt: Some(Arc::new(MockDbt)),
             vector: None,
             thread_store: None,
+            exec_ctx: None,
             runtime: Some(cfg as Arc<dyn std::any::Any + Send + Sync>),
         };
 
