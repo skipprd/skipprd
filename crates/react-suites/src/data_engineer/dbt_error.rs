@@ -83,6 +83,43 @@ pub fn extract_unresolved_columns(errors: &[String]) -> Vec<String> {
     out
 }
 
+/// Detect the common dbt contract error where `data_type` is missing from YAML column definitions.
+///
+/// This class of failure is remediated by patching YAML schema contracts, not by editing SQL.
+pub fn logs_indicate_contract_data_type_missing(logs: &serde_json::Value) -> bool {
+    let mut parts: Vec<&str> = Vec::new();
+    for phase in ["compile", "run_or_build"] {
+        for stream in ["stdout", "stderr"] {
+            if let Some(s) = logs
+                .get(phase)
+                .and_then(|v| v.get(stream))
+                .and_then(|v| v.as_str())
+            {
+                if !s.trim().is_empty() {
+                    parts.push(s);
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        return false;
+    }
+    let s = strip_ansi(&parts.join("\n"));
+    let sl = s.to_lowercase();
+    // Canonical dbt message (varies slightly by adapter/dbt version).
+    if sl.contains("contracted models require data_type") {
+        return true;
+    }
+    // Defensive heuristics.
+    if sl.contains("data_type")
+        && (sl.contains("yaml configuration") || sl.contains("within the yaml"))
+        && sl.contains("column")
+    {
+        return true;
+    }
+    false
+}
+
 /// Extract structured runtime/test failures from dbt `build`/`run` stdout.
 ///
 /// This is intentionally heuristic (no regex deps) but captures the common dbt log pattern:
@@ -355,9 +392,143 @@ pub fn compact_brief(errors: &[String], max_errors: usize, max_chars_each: usize
     lines.join("\n---\n")
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DbtFailureSummary {
+    /// Human-readable condensed summary (may be multi-line).
+    pub summary: String,
+    /// Best-effort list of failing nodes/models (names or dbt node_ids).
+    #[serde(default)]
+    pub failing_nodes: Vec<String>,
+    /// Best-effort list of suggested file paths to inspect/patch next.
+    #[serde(default)]
+    pub suggested_next_files: Vec<String>,
+}
+
+fn tail_lines(s: &str, max_lines: usize, max_chars: usize) -> String {
+    if s.trim().is_empty() {
+        return String::new();
+    }
+    let mut lines: Vec<&str> = s.lines().collect();
+    if lines.len() > max_lines {
+        lines = lines[lines.len() - max_lines..].to_vec();
+    }
+    let mut out = lines.join("\n");
+    if out.len() > max_chars {
+        out.truncate(max_chars);
+        out.push('…');
+    }
+    out
+}
+
+/// Summarize a dbt compile/build failure into a terminal-friendly, high-signal summary.
+///
+/// This is intentionally LLM-driven for accuracy across adapters. Output is STRICT JSON.
+pub fn summarize_dbt_failure_llm(
+    llm: &dyn react_core::llm::LargeLanguageModel,
+    errors: &[String],
+    logs: &serde_json::Value,
+    runtime_failures: &[serde_json::Value],
+    max_summary_chars: usize,
+) -> Result<DbtFailureSummary, String> {
+    let error_brief = compact_brief(errors, 8, 2400);
+    let failed_models = extract_failed_models_from_logs(logs);
+    let compile_stdout = logs
+        .get("compile")
+        .and_then(|v| v.get("stdout"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let compile_stderr = logs
+        .get("compile")
+        .and_then(|v| v.get("stderr"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let run_stdout = logs
+        .get("run_or_build")
+        .and_then(|v| v.get("stdout"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let run_stderr = logs
+        .get("run_or_build")
+        .and_then(|v| v.get("stderr"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let user_payload = serde_json::json!({
+        "error_brief": error_brief,
+        "failed_models": failed_models,
+        "runtime_failures": runtime_failures,
+        "logs_tail": {
+            "compile_stderr_tail": tail_lines(&strip_ansi(compile_stderr), 120, 8000),
+            "compile_stdout_tail": tail_lines(&strip_ansi(compile_stdout), 120, 8000),
+            "run_or_build_stderr_tail": tail_lines(&strip_ansi(run_stderr), 180, 12000),
+            "run_or_build_stdout_tail": tail_lines(&strip_ansi(run_stdout), 180, 12000)
+        }
+    });
+
+    let sys = concat!(
+        "You summarize dbt compilation/build failures for a terminal UI.\n",
+        "Return STRICT JSON only (no prose, no markdown).\n",
+        "Goal: accuracy + condensed actionable information.\n",
+        "Rules:\n",
+        "- Do NOT restate dbt startup banners (Running with dbt=, Registered adapter, Found X models).\n",
+        "- Prefer quoting the most actionable dbt/Athena/Trino error line(s).\n",
+        "- Include failing model names and file paths when present.\n",
+        "- If the error indicates a common root cause (e.g. Athena 'Only one sql statement is allowed', ambiguous column, missing column), say so explicitly.\n",
+        "- Keep summary <= max_summary_chars (truncate if needed but preserve the root cause).\n",
+        "\n",
+        "Output JSON shape:\n",
+        "{\n",
+        "  \"summary\": \"<multi-line condensed summary>\",\n",
+        "  \"failing_nodes\": [\"...\"] ,\n",
+        "  \"suggested_next_files\": [\"models/.../x.sql\", \"models/.../y.yml\"]\n",
+        "}\n"
+    );
+    let msg = react_core::llm::ChatMessage {
+        role: "user".to_string(),
+        content: serde_json::json!({
+            "max_summary_chars": max_summary_chars.max(200).min(8000),
+            "input": user_payload
+        })
+        .to_string(),
+    };
+    let resp = llm.chat(&[
+        react_core::llm::ChatMessage {
+            role: "system".to_string(),
+            content: sys.to_string(),
+        },
+        msg,
+    ])?;
+
+    let mut parsed: DbtFailureSummary =
+        serde_json::from_str(resp.trim()).map_err(|e| format!("failed to parse LLM JSON: {e}"))?;
+    parsed.summary = strip_ansi(&parsed.summary).trim().to_string();
+    if parsed.summary.len() > max_summary_chars {
+        parsed.summary.truncate(max_summary_chars);
+        parsed.summary.push('…');
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct MockLlm {
+        pub responses: std::sync::Mutex<Vec<String>>,
+    }
+    impl react_core::llm::LargeLanguageModel for MockLlm {
+        fn chat(&self, _messages: &[react_core::llm::ChatMessage]) -> Result<String, String> {
+            let mut q = self.responses.lock().unwrap();
+            if q.is_empty() {
+                return Err("no mock responses remaining".to_string());
+            }
+            Ok(q.remove(0))
+        }
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(vec![])
+        }
+    }
 
     #[test]
     fn classify_duplicate_sources() {
@@ -430,5 +601,24 @@ mod tests {
             stg_raw_orders.get("file").and_then(|x| x.as_str()),
             Some("models/staging/stg_raw_orders.sql")
         );
+    }
+
+    #[test]
+    fn summarize_dbt_failure_llm_parses_and_truncates() {
+        let llm = MockLlm {
+            responses: std::sync::Mutex::new(vec![serde_json::json!({
+                "summary": "Root cause line 1\nRoot cause line 2",
+                "failing_nodes": ["stg_x"],
+                "suggested_next_files": ["models/staging/stg_x.sql"]
+            })
+            .to_string()]),
+        };
+        let errors = vec!["Compilation Error: nope".to_string()];
+        let logs = serde_json::json!({"compile": {"stdout": "x", "stderr": ""}});
+        let rf: Vec<serde_json::Value> = vec![];
+        let out = summarize_dbt_failure_llm(&llm, &errors, &logs, &rf, 10).unwrap();
+        // `.len()` is bytes; ellipsis is multi-byte. Bound by chars.
+        assert!(out.summary.chars().count() <= 11); // 10 + ellipsis
+        assert_eq!(out.failing_nodes, vec!["stg_x".to_string()]);
     }
 }

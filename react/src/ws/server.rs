@@ -3392,7 +3392,37 @@ async fn run_agent_with_processing_suite(
                                 ev.clean_name = Some(clean_name.clone());
                             }
                             ev.phase = phase_at_step_idx(&log.steps, i);
-                            ev.payload = payload_map(payload);
+                            // Prefer an explicit tool-owned payload when present, but also allow a small,
+                            // safe subset of observation.extra to flow through for terminal rendering.
+                            // (Avoid emitting giant dbt stdout/stderr blobs via payload.)
+                            let mut pm: std::collections::HashMap<String, serde_json::Value> =
+                                payload_map(payload).unwrap_or_default();
+                            if name == "dbt_validate" {
+                                for k in [
+                                    "error_summary",
+                                    "failing_nodes",
+                                    "suggested_next_files",
+                                    "runtime_failures",
+                                    "uploaded_target_files",
+                                    "deps_ok",
+                                    "parse_ok",
+                                    "compile_ok",
+                                    "run_ok",
+                                    "dialect",
+                                ] {
+                                    if pm.contains_key(k) {
+                                        continue;
+                                    }
+                                    if let Some(v) = observation.extra.get(k) {
+                                        pm.insert(k.to_string(), v.clone());
+                                    }
+                                }
+                            }
+                            if !pm.is_empty() {
+                                ev.payload = Some(pm);
+                            } else {
+                                ev.payload = None;
+                            }
                             if !observation.ok {
                                 ev.error = observation.errors.first().cloned();
                             }
@@ -3582,6 +3612,31 @@ async fn run_agent_with_processing_suite(
                                 )
                                 .await;
                             }
+
+                            // Before we emit the terminal `final` frame (which causes headless runs
+                            // to return and the terminal UI to shutdown), emit one last strongly-consistent
+                            // thread_state snapshot so the UI can reflect the terminal phase (`done`) and
+                            // mark completion before exit.
+                            {
+                                let store = state.thread_store();
+                                if let Ok(st) = store.get_thread_state(thread_id).await {
+                                    let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+                                    if let Some(t) = state.term() {
+                                        t.emit(TerminalEvent::ThreadState(snap.clone()));
+                                    }
+                                    let mut resp = api::ThreadStateResponse::new(
+                                        1,
+                                        m::thread_state_response::Type::ThreadState,
+                                        now_iso(),
+                                        state.next_seq(),
+                                        thread_id.to_string(),
+                                        snap,
+                                    );
+                                    resp.for_cid = Some(cid.to_string());
+                                    emit_ws(state, write, api::ServerMessage::ThreadState(resp)).await;
+                                }
+                            }
+
                             let tseq = state.next_thread_seq(thread_id);
                             let final_result = ws_final_result_from_typed_final(&kind, &payload, &display);
                             let resp = api::FinalResponse::new(
@@ -3617,6 +3672,24 @@ async fn run_agent_with_processing_suite(
                                     },
                                 )
                                 .await;
+                            }
+                            // In headless `react run`, some suite guards indicate the run cannot proceed
+                            // automatically (e.g. batch_locked requires a human/applied patch).
+                            if cid == "headless"
+                                && (prompt.contains("Plan-batched authoring is locked")
+                                    || prompt.contains("kind: batch_locked")
+                                    || prompt.contains("batch_locked"))
+                            {
+                                if let Some(t) = state.term() {
+                                    t.emit(TerminalEvent::Info(format!(
+                                        "headless: stopping due to batch_locked guard (prompt='{}')",
+                                        truncate_str(&prompt, 220)
+                                    )));
+                                }
+                                return Err(format!(
+                                    "batch_locked: {}",
+                                    truncate_str(&prompt, 1200)
+                                ));
                             }
                             if headless && auto_turns < 32 {
                                 auto_turns += 1;
@@ -4187,6 +4260,55 @@ mod tests {
         }
     }
 
+    struct StubBatchLockedSuite;
+
+    #[async_trait]
+    impl react_suites::suite::Suite for StubBatchLockedSuite {
+        fn id(&self) -> &'static str {
+            "data_engineer"
+        }
+
+        fn phase_order(&self, _agent_type: &str) -> Vec<String> {
+            vec!["cleanse_author".to_string()]
+        }
+
+        async fn handle_new(
+            &self,
+            _thread_id: &str,
+            _question: &str,
+            _agent_type: &str,
+            _ctx: &SuiteCtx,
+        ) -> Result<Vec<react_suites::FlowFrame>, String> {
+            Ok(vec![react_suites::FlowFrame::AwaitUser {
+                prompt: "Plan-batched authoring is locked (cleanse).".to_string(),
+            }])
+        }
+
+        async fn handle_open(
+            &self,
+            _thread_id: &str,
+            _question: &str,
+            _agent_type: &str,
+            _ctx: &SuiteCtx,
+        ) -> Result<Vec<react_suites::FlowFrame>, String> {
+            Ok(vec![react_suites::FlowFrame::AwaitUser {
+                prompt: "Plan-batched authoring is locked (cleanse).".to_string(),
+            }])
+        }
+
+        async fn handle_user(
+            &self,
+            _thread_id: &str,
+            _text: &str,
+            _agent_type: &str,
+            _ctx: &SuiteCtx,
+        ) -> Result<Vec<react_suites::FlowFrame>, String> {
+            Ok(vec![react_suites::FlowFrame::AwaitUser {
+                prompt: "Plan-batched authoring is locked (cleanse).".to_string(),
+            }])
+        }
+    }
+
     #[test]
     fn normalize_agent_includes_agent_and_review() {
         assert_eq!(
@@ -4403,6 +4525,34 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("thread does not exist"));
         assert!(err.contains(&missing));
+    }
+
+    #[tokio::test]
+    async fn headless_run_exits_with_error_on_batch_locked_prompt() {
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
+        let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let suite_ctx = SuiteCtx::new(
+            storage,
+            Arc::new(NullSecretsProvider::default()),
+            Arc::new(NullModel::new()),
+            scope,
+            keyspace,
+        );
+
+        let mut reg = react_suites::registry::SuiteRegistry::new();
+        reg.register(StubBatchLockedSuite);
+        let reg = Arc::new(reg);
+        let mut state = ConnState::new(reg, suite_ctx, None);
+
+        let msg = json!({"v":1,"type":"new","cid":"headless","suiteId":"data_engineer","agentType":"agent","question":"go"});
+        let mut sink = CollectSink::default();
+        let err = process_new(&msg, &mut state, &mut sink).await.unwrap_err();
+        assert!(err.to_ascii_lowercase().contains("batch_locked"));
     }
 
     #[tokio::test]

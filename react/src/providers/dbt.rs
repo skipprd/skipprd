@@ -7,6 +7,7 @@ use crate::adapters::storage::StorageAdapter;
 use crate::providers::{Keyspace, RequestScope};
 
 use react_core::providers::{DbtProvider, DbtValidateArgs, DbtValidateResult};
+use crate::ws::terminal::{self, TerminalEvent};
 
 #[derive(Clone)]
 pub struct DbtProjectProvider {
@@ -109,6 +110,537 @@ fn redact_docker_args_for_log(args: &[String]) -> String {
     out.join(" ")
 }
 
+fn strip_ansi(s: &str) -> String {
+    // Very small ANSI stripper for dbt CLI output (primarily color codes).
+    // Removes ESC [ ... m sequences.
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(ch) = it.next() {
+        if ch == '\u{1b}' && matches!(it.peek(), Some('[')) {
+            // consume '['
+            let _ = it.next();
+            // skip until 'm' (or end)
+            while let Some(c2) = it.next() {
+                if c2 == 'm' {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbtProgressMode {
+    Build,
+    Compile,
+}
+
+impl Default for DbtProgressMode {
+    fn default() -> Self {
+        Self::Build
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbtItemStatus {
+    Start,
+    Ok,
+    Pass,
+    Error,
+    Fail,
+    Skip,
+    Warn,
+    NoOp,
+}
+
+impl Default for DbtItemStatus {
+    fn default() -> Self {
+        Self::Start
+    }
+}
+
+impl DbtItemStatus {
+    fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            DbtItemStatus::Ok
+                | DbtItemStatus::Pass
+                | DbtItemStatus::Error
+                | DbtItemStatus::Fail
+                | DbtItemStatus::Skip
+                | DbtItemStatus::Warn
+                | DbtItemStatus::NoOp
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct DbtItemState {
+    status: DbtItemStatus,
+    name: Option<String>,
+    kind: Option<String>, // e.g. "model" | "test"
+}
+
+#[derive(Default)]
+struct DbtProgressState {
+    mode: DbtProgressMode,
+    total: Option<usize>,
+    items_by_idx: std::collections::HashMap<usize, DbtItemState>,
+    // Build: running items captured from START lines.
+    running_names_set: std::collections::HashSet<String>,
+    running_names_recent: std::collections::VecDeque<String>,
+    // Early init signals (useful before any START lines).
+    found_models: Option<usize>,
+    found_tests: Option<usize>,
+    concurrency_threads: Option<usize>,
+    dbt_version: Option<String>,
+    // Compile: derived progress.
+    compiled_total: Option<usize>,
+    compiled_count: usize,
+    last_compiled_node: Option<String>,
+    in_compile_sql_dump: bool,
+    // Build: authoritative final summary (if present).
+    summary_pass: Option<usize>,
+    summary_ok: Option<usize>,
+    summary_error: Option<usize>,
+    summary_skip: Option<usize>,
+    summary_total: Option<usize>,
+    // Debounce
+    last_emit: Option<String>,
+}
+
+impl DbtProgressState {
+    fn new(mode: DbtProgressMode) -> Self {
+        Self {
+            mode,
+            ..Default::default()
+        }
+    }
+
+    fn consume_line(&mut self, raw: &str) -> Option<String> {
+        let s = strip_ansi(raw);
+        let line = s.trim();
+        if line.is_empty() {
+            return None;
+        }
+        let content = strip_leading_hms_prefix(line);
+
+        // Common early signals.
+        if let Some(pos) = content.find("Running with dbt=") {
+            let v = &content[pos + "Running with dbt=".len()..];
+            let ver = v.split_whitespace().next().unwrap_or("").trim();
+            if !ver.is_empty() {
+                self.dbt_version = Some(ver.to_string());
+            }
+        }
+        if content.contains("Found ") && content.contains(" models") {
+            // Example: "Found 6 models, 9 data tests, 3 sources, 461 macros"
+            // Very conservative parse: only the first two integers (models, tests).
+            let toks: Vec<&str> = content.split_whitespace().collect();
+            if toks.len() >= 2 {
+                // Find token after "Found"
+                if let Some(found_idx) = toks.iter().position(|t| *t == "Found") {
+                    if let Some(v) = toks.get(found_idx + 1) {
+                        if let Ok(n) = v.parse::<usize>() {
+                            self.found_models = Some(n);
+                            if self.mode == DbtProgressMode::Compile {
+                                self.compiled_total = Some(n);
+                            }
+                        }
+                    }
+                } else if let Ok(n) = toks[1].parse::<usize>() {
+                    self.found_models = Some(n);
+                    if self.mode == DbtProgressMode::Compile {
+                        self.compiled_total = Some(n);
+                    }
+                }
+            }
+            if let Some(pos) = toks.iter().position(|t| *t == "tests," || *t == "tests") {
+                if pos >= 1 {
+                    if let Ok(n) = toks[pos - 1].parse::<usize>() {
+                        self.found_tests = Some(n);
+                    }
+                }
+            }
+        }
+        if content.contains("Concurrency:") && content.contains("threads") {
+            // Example: "Concurrency: 15 threads (target='athena')"
+            let toks: Vec<&str> = content.split_whitespace().collect();
+            if toks.len() >= 2 {
+                if let Some(conc_idx) = toks.iter().position(|t| t.starts_with("Concurrency:")) {
+                    if let Some(v) = toks.get(conc_idx + 1) {
+                        if let Ok(n) = v.parse::<usize>() {
+                            self.concurrency_threads = Some(n);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Compile-specific headers.
+        if self.mode == DbtProgressMode::Compile {
+            if let Some(pos) = content.find("Compiled node '") {
+                let rest = &content[pos + "Compiled node '".len()..];
+                if let Some((name, _tail)) = rest.split_once("'") {
+                    let nm = name.trim();
+                    if !nm.is_empty() {
+                        // Only increment once per node (best-effort).
+                        if self.last_compiled_node.as_deref() != Some(nm) {
+                            self.compiled_count = self.compiled_count.saturating_add(1);
+                        }
+                        self.last_compiled_node = Some(nm.to_string());
+                    }
+                    self.in_compile_sql_dump = true;
+                }
+            } else if line.starts_with("finished") || line.starts_with("starting") {
+                self.in_compile_sql_dump = false;
+            } else if self.in_compile_sql_dump {
+                // Ignore noisy compiled SQL dump lines.
+                return None;
+            }
+        }
+
+        // Build/compile shared: i-of-n lines.
+        if let Some((idx, total, status, rest_after_status)) = parse_i_of_n_status(content) {
+            if total > 0 {
+                self.total = Some(self.total.unwrap_or(0).max(total));
+            }
+            let st = parse_status(status);
+            let item = self.items_by_idx.entry(idx).or_insert_with(|| DbtItemState {
+                status: st,
+                ..Default::default()
+            });
+            item.status = st;
+
+            // Try to extract a compact name for START/running display.
+            if item.name.is_none() {
+                if let Some((kind, nm)) = extract_item_kind_and_name(rest_after_status) {
+                    item.kind = Some(kind);
+                    item.name = Some(nm.clone());
+                }
+            }
+
+            // Maintain running set.
+            if st == DbtItemStatus::Start {
+                if let Some(ref nm) = item.name {
+                    if self.running_names_set.insert(nm.clone()) {
+                        self.running_names_recent.push_back(nm.clone());
+                    } else {
+                        // Refresh recency: move to back.
+                        self.running_names_recent.retain(|x| x != nm);
+                        self.running_names_recent.push_back(nm.clone());
+                    }
+                }
+            } else if st.is_terminal() {
+                if let Some(ref nm) = item.name {
+                    self.running_names_set.remove(nm);
+                    self.running_names_recent.retain(|x| x != nm);
+                }
+            }
+        }
+
+        // Build: final summary line.
+        if self.mode == DbtProgressMode::Build && content.starts_with("Done.") {
+            // Example: "Done. PASS=15 WARN=0 ERROR=2 SKIP=0 NO-OP=0 TOTAL=17"
+            for tok in content.split_whitespace() {
+                if let Some((k, v)) = tok.split_once('=') {
+                    let v = v.trim().trim_end_matches(',');
+                    let n = v.parse::<usize>().ok();
+                    match k {
+                        "PASS" => self.summary_pass = n,
+                        "OK" => self.summary_ok = n,
+                        "ERROR" => self.summary_error = n,
+                        "SKIP" => self.summary_skip = n,
+                        "TOTAL" => self.summary_total = n,
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(t) = self.summary_total {
+                self.total = Some(t);
+            }
+        }
+
+        let detail = self.render_detail();
+        if self.last_emit.as_deref() == Some(&detail) {
+            return None;
+        }
+        self.last_emit = Some(detail.clone());
+        Some(detail)
+    }
+
+    fn render_detail(&self) -> String {
+        match self.mode {
+            DbtProgressMode::Build => {
+                let total = self.total;
+                let (done, pass, ok, err, skip) = if self.summary_total.is_some() {
+                    let p = self.summary_pass.unwrap_or(0);
+                    let o = self.summary_ok.unwrap_or(0);
+                    let e = self.summary_error.unwrap_or(0);
+                    let sk = self.summary_skip.unwrap_or(0);
+                    let dn = p + o + e + sk;
+                    (dn, p, o, e, sk)
+                } else {
+                    let mut p = 0usize;
+                    let mut o = 0usize;
+                    let mut e = 0usize;
+                    let mut sk = 0usize;
+                    let mut dn = 0usize;
+                    for it in self.items_by_idx.values() {
+                        match it.status {
+                            DbtItemStatus::Pass => {
+                                p += 1;
+                                dn += 1;
+                            }
+                            DbtItemStatus::Ok => {
+                                o += 1;
+                                dn += 1;
+                            }
+                            DbtItemStatus::Error | DbtItemStatus::Fail => {
+                                e += 1;
+                                dn += 1;
+                            }
+                            DbtItemStatus::Skip => {
+                                sk += 1;
+                                dn += 1;
+                            }
+                            DbtItemStatus::Warn | DbtItemStatus::NoOp => {
+                                dn += 1;
+                            }
+                            DbtItemStatus::Start => {}
+                        }
+                    }
+                    (dn, p, o, e, sk)
+                };
+
+                let mut base = if let Some(t) = total {
+                    format!("({done}/{t} (PASS={pass} OK={ok} ERROR={err} SKIP={skip}))")
+                } else {
+                    let mut bits: Vec<String> = Vec::new();
+                    if let Some(v) = self.dbt_version.as_deref() {
+                        bits.push(format!("dbt={v}"));
+                    }
+                    if let Some(n) = self.concurrency_threads {
+                        bits.push(format!("threads={n}"));
+                    }
+                    if let Some(n) = self.found_models {
+                        bits.push(format!("models={n}"));
+                    }
+                    if let Some(n) = self.found_tests {
+                        bits.push(format!("tests={n}"));
+                    }
+                    if bits.is_empty() {
+                        "(init)".to_string()
+                    } else {
+                        format!("(init: {})", bits.join(" "))
+                    }
+                };
+
+                if !self.running_names_recent.is_empty() {
+                    let shown: Vec<String> = self
+                        .running_names_recent
+                        .iter()
+                        .rev()
+                        .take(2)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    base.push_str(" · running: ");
+                    base.push_str(&shown.join(", "));
+                    let remaining = self
+                        .running_names_set
+                        .len()
+                        .saturating_sub(shown.len());
+                    if remaining > 0 {
+                        base.push_str(&format!(" +{remaining}"));
+                    }
+                }
+                base
+            }
+            DbtProgressMode::Compile => {
+                let total = self.compiled_total.or(self.found_models);
+                let mut s = if let Some(t) = total {
+                    format!("({}/{})", self.compiled_count.min(t), t)
+                } else {
+                    format!("({})", self.compiled_count)
+                };
+                if let Some(ref last) = self.last_compiled_node {
+                    s.push_str(&format!(" · last: {}", last));
+                }
+                s
+            }
+        }
+    }
+}
+
+fn strip_leading_hms_prefix(s: &str) -> &str {
+    // dbt default logs often prefix lines with "HH:MM:SS" and spacing.
+    // Example: "08:10:08  Found 6 models, ..."
+    let mut it = s.splitn(2, ' ');
+    let first = it.next().unwrap_or("").trim();
+    if first.len() == 8
+        && first.as_bytes().get(2) == Some(&b':')
+        && first.as_bytes().get(5) == Some(&b':')
+        && first
+            .chars()
+            .filter(|c| *c != ':')
+            .all(|c| c.is_ascii_digit())
+    {
+        return it.next().unwrap_or("").trim_start();
+    }
+    s
+}
+
+fn parse_i_of_n_status(line: &str) -> Option<(usize, usize, &str, &str)> {
+    // Find "... <i> of <n> <status> <rest> ..."
+    let toks: Vec<&str> = line.split_whitespace().collect();
+    if toks.len() < 5 {
+        return None;
+    }
+    for i in 1..toks.len().saturating_sub(2) {
+        if toks[i] != "of" {
+            continue;
+        }
+        let left = toks.get(i.wrapping_sub(1)).copied().unwrap_or("");
+        let right = toks.get(i + 1).copied().unwrap_or("");
+        let status = toks.get(i + 2).copied().unwrap_or("");
+        if let (Ok(idx), Ok(total)) = (left.parse::<usize>(), right.parse::<usize>()) {
+            // rest after status: slice original line by locating status token occurrence.
+            let mut parts = line.splitn(2, status);
+            let _ = parts.next();
+            let rest = parts.next().unwrap_or("").trim();
+            return Some((idx, total, status, rest));
+        }
+    }
+    None
+}
+
+fn parse_status(s: &str) -> DbtItemStatus {
+    match s.trim().to_ascii_uppercase().as_str() {
+        "START" => DbtItemStatus::Start,
+        "OK" => DbtItemStatus::Ok,
+        "PASS" => DbtItemStatus::Pass,
+        "ERROR" => DbtItemStatus::Error,
+        "FAIL" => DbtItemStatus::Fail,
+        "SKIP" => DbtItemStatus::Skip,
+        "WARN" => DbtItemStatus::Warn,
+        "NO-OP" | "NOOP" => DbtItemStatus::NoOp,
+        _ => DbtItemStatus::Start,
+    }
+}
+
+fn extract_item_kind_and_name(rest: &str) -> Option<(String, String)> {
+    // Examples:
+    // - "sql view model de_picnic_dev_example_gold2.dim_customers .......... [RUN]"
+    // - "test not_null_dim_customers_customer_id ........................... [RUN]"
+    // - "creating sql view model de_picnic...fct_order_items [ERROR in 70.87s]"
+    let r = rest.trim();
+    // Cut off bracket status suffix.
+    let r = r.split("[").next().unwrap_or(r).trim();
+    let toks: Vec<&str> = r.split_whitespace().collect();
+    if toks.is_empty() {
+        return None;
+    }
+    let mut kind = None;
+    let mut name = None;
+    if let Some(pos) = toks.iter().position(|t| *t == "test") {
+        kind = Some("test".to_string());
+        name = toks.get(pos + 1).map(|s| s.to_string());
+    } else if toks.iter().any(|t| *t == "model") {
+        kind = Some("model".to_string());
+        // pick the last token that contains a dot (relation fqn) and take suffix after last dot.
+        for t in toks.iter().rev() {
+            if t.contains('.') {
+                let nm = t.split('.').last().unwrap_or(t).to_string();
+                name = Some(nm);
+                break;
+            }
+        }
+    } else if toks.get(0).map(|s| *s) == Some("relationships") {
+        kind = Some("test".to_string());
+        name = Some(toks[0].to_string());
+    }
+    let nm = name?.trim_matches('.').trim().to_string();
+    if nm.is_empty() {
+        return None;
+    }
+    Some((kind.unwrap_or_else(|| "item".to_string()), nm))
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    fn feed(mode: DbtProgressMode, lines: &[&str]) -> Vec<String> {
+        let mut st = DbtProgressState::new(mode);
+        let mut out = Vec::new();
+        for l in lines {
+            if let Some(d) = st.consume_line(l) {
+                out.push(d);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn build_progress_emits_on_start_and_completion_and_tracks_running_names() {
+        let lines = [
+            "08:10:08  Found 6 models, 9 data tests, 3 sources, 461 macros",
+            "08:10:08  Concurrency: 15 threads (target='athena')",
+            "08:10:13  1 of 6 START sql view model de_x.stg_test_raw_raw_customers  [RUN]",
+            "08:10:19  1 of 6 OK created sql view model de_x.stg_test_raw_raw_customers  [OK -1 in 6.25s]",
+            "08:10:24  3 of 6 START test not_null_dim_customers_customer_id  [RUN]",
+            "08:10:28  3 of 6 PASS not_null_dim_customers_customer_id  [PASS in 3.96s]",
+        ];
+        let out = feed(DbtProgressMode::Build, &lines);
+        // Should have init, then start, then ok/pass updates.
+        assert!(out.iter().any(|s| s.contains("(init:")));
+        assert!(out.iter().any(|s| s.contains("running:")));
+        assert!(out.iter().any(|s| s.contains("PASS=") && s.contains("OK=")));
+        assert!(out.last().unwrap().contains("PASS=1"));
+    }
+
+    #[test]
+    fn build_progress_parses_out_of_order_and_done_summary() {
+        let lines = [
+            "08:10:24  6 of 6 START test unique_x  [RUN]",
+            "08:10:28  6 of 6 PASS unique_x  [PASS in 3.90s]",
+            "08:10:28  3 of 6 PASS not_null_x  [PASS in 3.96s]",
+            "08:10:28  4 of 6 PASS rel_x  [PASS in 3.97s]",
+            "08:12:01  5 of 6 ERROR rel_y  [ERROR in 96.09s]",
+            "08:12:01  Done. PASS=5 WARN=0 ERROR=1 SKIP=0 NO-OP=0 TOTAL=6",
+        ];
+        let out = feed(DbtProgressMode::Build, &lines);
+        let last = out.last().unwrap();
+        assert!(last.contains("6/6"));
+        assert!(last.contains("PASS=5"));
+        assert!(last.contains("ERROR=1"));
+    }
+
+    #[test]
+    fn compile_progress_counts_compiled_nodes_and_ignores_sql_dump_lines() {
+        let lines = [
+            "08:10:03  Found 6 models, 11 data tests, 3 sources, 461 macros",
+            "Compiled node 'dim_customers' is:",
+            "with customers as (",
+            "    select * from foo",
+            "Compiled node 'dim_orders' is:",
+            "select 1",
+        ];
+        let out = feed(DbtProgressMode::Compile, &lines);
+        // Should include 1/6 then 2/6, and ignore dump lines.
+        assert!(out.iter().any(|s| s.starts_with("(1/6)")));
+        assert!(out.iter().any(|s| s.starts_with("(2/6)")));
+        assert!(!out.iter().any(|s| s.contains("select * from foo")));
+        assert!(out.last().unwrap().contains("last: dim_orders"));
+    }
+}
+
 fn run_cmd_labeled(
     cmd: &str,
     args: &[&str],
@@ -172,12 +704,29 @@ fn run_cmd_labeled(
 
     let mut out_buf = String::new();
     let mut err_buf = String::new();
+    let mut prog = if label == "build" {
+        Some(DbtProgressState::new(DbtProgressMode::Build))
+    } else if label == "compile" {
+        Some(DbtProgressState::new(DbtProgressMode::Compile))
+    } else {
+        None
+    };
     for (is_err, line) in rx {
         if is_err {
             tracing::info!(target: "dbt", phase = %label, runner = "host", stream = "stderr", "{}", line);
             err_buf.push_str(&line);
             err_buf.push('\n');
         } else {
+            if let Some(p) = prog.as_mut() {
+                if let Some(detail) = p.consume_line(&line) {
+                    if let Some(s) = terminal::sink() {
+                        s.emit(TerminalEvent::DbtProgress {
+                            phase: label.to_string(),
+                            detail,
+                        });
+                    }
+                }
+            }
             tracing::info!(target: "dbt", phase = %label, runner = "host", stream = "stdout", "{}", line);
             out_buf.push_str(&line);
             out_buf.push('\n');

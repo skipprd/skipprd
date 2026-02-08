@@ -359,12 +359,14 @@ pub fn generate_profiles_yml(
 }
 
 fn derive_scope_db_name(cfg: &ReactResolvedConfig) -> String {
-    // Conservative identifier: de_<tenant>_<workspace>_<project_id>
-    let raw = format!(
-        "de_{}_{}_{}",
-        cfg.scope.tenant, cfg.scope.workspace, cfg.scope.project_id
-    );
-    sanitize_ident(&raw)
+    // Default to a simple, stable base schema derived from project_id.
+    //
+    // dbt's default generate_schema_name macro will append our tier suffixes, yielding:
+    //   <project_id>_<silver_suffix> and <project_id>_<gold_suffix>
+    //
+    // This keeps warehouse names short and predictable (e.g. "example_silver2"),
+    // while still allowing overrides via providers.dbt.naming.target_schema.
+    sanitize_ident(&cfg.scope.project_id)
 }
 
 fn sanitize_ident(s: &str) -> String {

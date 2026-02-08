@@ -4,6 +4,7 @@ pub mod ask_user;
 // Internal-only deterministic persistence helpers (NOT exposed as editing tools).
 // These are intentionally not re-exported and not registered in the tool registry.
 pub mod apply_next_batch;
+pub mod apply_next_schema_batch;
 mod approve_save;
 mod approve_save_batch;
 pub mod artifacts;

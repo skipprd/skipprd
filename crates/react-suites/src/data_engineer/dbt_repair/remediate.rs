@@ -236,10 +236,12 @@ struct ReplaceListEdit {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct ReplaceList {
+    #[serde(default)]
     edits: Vec<ReplaceListEdit>,
     #[serde(default)]
     expected_sha256: Option<String>,
 }
+
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct LlmRemediationDecision {
@@ -553,10 +555,10 @@ pub async fn remediate_dbt_sql_keys_with_llm(
              - Do not invent new tables/columns.\n\
              - Output MUST be valid JSON only (no markdown, no commentary).\n\
              Output schema:\n\
-             {{\"changes\":[{{\"key\":\"...\",\"replace_file\":{{\"new_text\":\"...\",\"expected_sha256\":\"...\"}}|null,\"replace_range\":{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\",\"expected_sha256\":\"...\"}}|null,\"replace_list\":{{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}],\"expected_sha256\":\"...\"}}|null,\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+             {{\"changes\":[{{\"key\":\"...\",\"replace_file\":{{\"new_text\":\"...\"}}|null,\"replace_range\":{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}|null,\"replace_list\":{{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}]}}|null,\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
              Rules:\n\
              - For each change, choose EXACTLY ONE of replace_file / replace_range / replace_list (the others must be null).\n\
-             - expected_sha256 MUST match the sha256 of the provided file content for that key.\n\
+             - Do NOT include expected_sha256; the suite enforces drift safety from grounded file content.\n\
              Only include a file in changes if you actually modify it.\n"
         );
         let user = serde_json::json!({
@@ -652,17 +654,12 @@ pub async fn remediate_dbt_sql_keys_with_llm(
                 provided += 1;
             }
             if provided != 1 {
-                return Err("remediation change must include exactly one of: replace_file | replace_range | replace_list".to_string());
+                return Err(
+                    "remediation change must include exactly one of: replace_file | replace_range | replace_list"
+                        .to_string(),
+                );
             }
             let patch_text = if let Some(rf) = ch.replace_file.as_ref() {
-                if rf.expected_sha256.as_deref().unwrap_or("") != expected_base {
-                    return Err(format!(
-                        "remediation expected_sha256 mismatch for {}: expected {}, got {}",
-                        rel,
-                        rf.expected_sha256.as_deref().unwrap_or("(missing)"),
-                        expected_base
-                    ));
-                }
                 crate::data_engineer::project_fs::create_git_patch_text(
                     &existing,
                     &rf.new_text,
@@ -670,14 +667,6 @@ pub async fn remediate_dbt_sql_keys_with_llm(
                     true,
                 )?
             } else if let Some(rr) = ch.replace_range.as_ref() {
-                if rr.expected_sha256.as_deref().unwrap_or("") != expected_base {
-                    return Err(format!(
-                        "remediation expected_sha256 mismatch for {}: expected {}, got {}",
-                        rel,
-                        rr.expected_sha256.as_deref().unwrap_or("(missing)"),
-                        expected_base
-                    ));
-                }
                 let new_text = crate::data_engineer::project_fs::apply_replace_range(
                     &existing,
                     rr.start_line,
@@ -688,14 +677,6 @@ pub async fn remediate_dbt_sql_keys_with_llm(
                     &existing, &new_text, &rel, true,
                 )?
             } else if let Some(rl) = ch.replace_list.as_ref() {
-                if rl.expected_sha256.as_deref().unwrap_or("") != expected_base {
-                    return Err(format!(
-                        "remediation expected_sha256 mismatch for {}: expected {}, got {}",
-                        rel,
-                        rl.expected_sha256.as_deref().unwrap_or("(missing)"),
-                        expected_base
-                    ));
-                }
                 let edits: Vec<crate::data_engineer::project_fs::ReplaceListEdit> = rl
                     .edits
                     .iter()
@@ -705,8 +686,10 @@ pub async fn remediate_dbt_sql_keys_with_llm(
                         new_text: e.new_text.clone(),
                     })
                     .collect();
-                let new_text =
-                    crate::data_engineer::project_fs::apply_replace_list(&existing, &edits)?;
+                let new_text = crate::data_engineer::project_fs::apply_replace_list(
+                    &existing,
+                    &edits,
+                )?;
                 crate::data_engineer::project_fs::create_git_patch_text(
                     &existing, &new_text, &rel, true,
                 )?
@@ -718,11 +701,8 @@ pub async fn remediate_dbt_sql_keys_with_llm(
                 None,
                 &rel,
                 &patch_text,
-                if expected_base.is_empty() {
-                    None
-                } else {
-                    Some(expected_base.as_str())
-                },
+                if expected_base.is_empty() { None } else { Some(expected_base.as_str()) },
+                Some(!expected_base.is_empty()),
                 crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
             )
             .await?;
@@ -1106,10 +1086,10 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
          - If you are not absolutely sure the change is correct given the provided schema and data samples, return NO changes and explain what additional evidence would be required.\n\
          - Output MUST be valid JSON only (no markdown, no commentary).\n\
          Output schema:\n\
-         {{\"changes\":[{{\"key\":\"...\",\"replace_file\":{{\"new_text\":\"...\",\"expected_sha256\":\"...\"}}|null,\"replace_range\":{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\",\"expected_sha256\":\"...\"}}|null,\"replace_list\":{{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}],\"expected_sha256\":\"...\"}}|null,\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+        {{\"changes\":[{{\"key\":\"...\",\"replace_file\":{{\"new_text\":\"...\"}}|null,\"replace_range\":{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}|null,\"replace_list\":{{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}]}}|null,\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
          Rules:\n\
-         - For each change, choose EXACTLY ONE of replace_file / replace_range / replace_list (the others must be null).\n\
-         - expected_sha256 MUST match the sha256 of the provided file content for that key.\n\
+        - For each change, choose EXACTLY ONE of replace_file / replace_range / replace_list (the others must be null).\n\
+         - Do NOT include expected_sha256; the suite enforces drift safety from grounded file content.\n\
          Only include a file in changes if you actually modify it.\n"
     );
 
@@ -1221,17 +1201,12 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
             provided += 1;
         }
         if provided != 1 {
-            return Err("grounded repair change must include exactly one of: replace_file | replace_range | replace_list".to_string());
+            return Err(
+                "grounded repair change must include exactly one of: replace_file | replace_range | replace_list"
+                    .to_string(),
+            );
         }
         let patch_text = if let Some(rf) = ch.replace_file.as_ref() {
-            if rf.expected_sha256.as_deref().unwrap_or("") != expected_base {
-                return Err(format!(
-                    "grounded repair expected_sha256 mismatch for {}: expected {}, got {}",
-                    rel,
-                    rf.expected_sha256.as_deref().unwrap_or("(missing)"),
-                    expected_base
-                ));
-            }
             crate::data_engineer::project_fs::create_git_patch_text(
                 &existing,
                 &rf.new_text,
@@ -1239,14 +1214,6 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
                 true,
             )?
         } else if let Some(rr) = ch.replace_range.as_ref() {
-            if rr.expected_sha256.as_deref().unwrap_or("") != expected_base {
-                return Err(format!(
-                    "grounded repair expected_sha256 mismatch for {}: expected {}, got {}",
-                    rel,
-                    rr.expected_sha256.as_deref().unwrap_or("(missing)"),
-                    expected_base
-                ));
-            }
             let new_text = crate::data_engineer::project_fs::apply_replace_range(
                 &existing,
                 rr.start_line,
@@ -1257,14 +1224,6 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
                 &existing, &new_text, &rel, true,
             )?
         } else if let Some(rl) = ch.replace_list.as_ref() {
-            if rl.expected_sha256.as_deref().unwrap_or("") != expected_base {
-                return Err(format!(
-                    "grounded repair expected_sha256 mismatch for {}: expected {}, got {}",
-                    rel,
-                    rl.expected_sha256.as_deref().unwrap_or("(missing)"),
-                    expected_base
-                ));
-            }
             let edits: Vec<crate::data_engineer::project_fs::ReplaceListEdit> = rl
                 .edits
                 .iter()
@@ -1274,7 +1233,8 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
                     new_text: e.new_text.clone(),
                 })
                 .collect();
-            let new_text = crate::data_engineer::project_fs::apply_replace_list(&existing, &edits)?;
+            let new_text =
+                crate::data_engineer::project_fs::apply_replace_list(&existing, &edits)?;
             crate::data_engineer::project_fs::create_git_patch_text(
                 &existing, &new_text, &rel, true,
             )?
@@ -1287,6 +1247,7 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
             &rel,
             &patch_text,
             Some(expected_base.as_str()),
+            Some(true),
             crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
         )
         .await?;
@@ -1538,7 +1499,7 @@ pub async fn remediate_unresolved_columns_with_llm(
          - If the unresolved column token contains dots and schema_columns contains an EXACT matching column name, treat it as a literal column name and quote it as a single identifier (e.g. \\\"context.session.id\\\").\n\
          - Only use struct dereference (e.g. context.session.id) when schema_columns indicate a struct/row parent exists AND there is no exact dotted column name.\n\
          - Return ONLY valid JSON (no markdown, no commentary).\n\
-         Output schema:\n\
+        Output schema:\n\
          {{\"changes\":[{{\"key\":\"...\",\"replace_file\":{{\"new_text\":\"...\",\"expected_sha256\":\"...\"}}|null,\"replace_range\":{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\",\"expected_sha256\":\"...\"}}|null,\"replace_list\":{{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}],\"expected_sha256\":\"...\"}}|null,\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
          Rules:\n\
          - For each change, choose EXACTLY ONE of replace_file / replace_range / replace_list (the others must be null).\n\
@@ -1658,17 +1619,12 @@ pub async fn remediate_unresolved_columns_with_llm(
             provided += 1;
         }
         if provided != 1 {
-            return Err("unresolved-columns repair change must include exactly one of: replace_file | replace_range | replace_list".to_string());
+            return Err(
+                "unresolved-columns repair change must include exactly one of: replace_file | replace_range | replace_list"
+                    .to_string(),
+            );
         }
         let patch_text = if let Some(rf) = ch.replace_file.as_ref() {
-            if rf.expected_sha256.as_deref().unwrap_or("") != expected_base {
-                return Err(format!(
-                    "unresolved-columns expected_sha256 mismatch for {}: expected {}, got {}",
-                    rel,
-                    rf.expected_sha256.as_deref().unwrap_or("(missing)"),
-                    expected_base
-                ));
-            }
             crate::data_engineer::project_fs::create_git_patch_text(
                 &existing,
                 &rf.new_text,
@@ -1676,14 +1632,6 @@ pub async fn remediate_unresolved_columns_with_llm(
                 true,
             )?
         } else if let Some(rr) = ch.replace_range.as_ref() {
-            if rr.expected_sha256.as_deref().unwrap_or("") != expected_base {
-                return Err(format!(
-                    "unresolved-columns expected_sha256 mismatch for {}: expected {}, got {}",
-                    rel,
-                    rr.expected_sha256.as_deref().unwrap_or("(missing)"),
-                    expected_base
-                ));
-            }
             let new_text = crate::data_engineer::project_fs::apply_replace_range(
                 &existing,
                 rr.start_line,
@@ -1694,14 +1642,6 @@ pub async fn remediate_unresolved_columns_with_llm(
                 &existing, &new_text, &rel, true,
             )?
         } else if let Some(rl) = ch.replace_list.as_ref() {
-            if rl.expected_sha256.as_deref().unwrap_or("") != expected_base {
-                return Err(format!(
-                    "unresolved-columns expected_sha256 mismatch for {}: expected {}, got {}",
-                    rel,
-                    rl.expected_sha256.as_deref().unwrap_or("(missing)"),
-                    expected_base
-                ));
-            }
             let edits: Vec<crate::data_engineer::project_fs::ReplaceListEdit> = rl
                 .edits
                 .iter()
@@ -1711,7 +1651,8 @@ pub async fn remediate_unresolved_columns_with_llm(
                     new_text: e.new_text.clone(),
                 })
                 .collect();
-            let new_text = crate::data_engineer::project_fs::apply_replace_list(&existing, &edits)?;
+            let new_text =
+                crate::data_engineer::project_fs::apply_replace_list(&existing, &edits)?;
             crate::data_engineer::project_fs::create_git_patch_text(
                 &existing, &new_text, &rel, true,
             )?
@@ -1724,6 +1665,7 @@ pub async fn remediate_unresolved_columns_with_llm(
             &rel,
             &patch_text,
             Some(expected_base.as_str()),
+            Some(true),
             crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
         )
         .await?;

@@ -59,11 +59,9 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
         if items.is_empty() {
             return Ok(serde_json::json!({"ok": true, "keys": []}));
         }
-        let preview = args
-            .get("preview_diff")
-            .and_then(|x| x.as_bool())
-            .unwrap_or(false);
-        let mut out_diffs: Vec<Value> = Vec::new();
+        if args.get("preview_diff").is_some() {
+            return Err("preview_diff is no longer supported; remove it from the request".to_string());
+        }
         let mut out_keys: Vec<String> = Vec::new();
         let mut out_files: Vec<Value> = Vec::new();
         let warnings: Vec<String> = Vec::new();
@@ -175,29 +173,6 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 Err(_) => None,
             };
 
-            if preview {
-                let outcome = crate::data_engineer::project_fs::apply_patch(
-                    ctx,
-                    self.datasets.as_ref(),
-                    &rel_path,
-                    &content,
-                    None,
-                    crate::data_engineer::project_fs::PatchApplyKind::FullOverwrite,
-                )
-                .await?;
-                out_diffs.push(serde_json::json!({
-                    "name": name,
-                    "dataset_id": dataset_id,
-                    "kind": kind,
-                    "key": current_key,
-                    "diff": outcome.diff,
-                    "exists": existing.is_some(),
-                    "lines_added": outcome.lines_added,
-                    "lines_removed": outcome.lines_removed
-                }));
-                continue;
-            }
-
             // Ensure minimal project file
             let dbt = ctx
                 .dbt
@@ -219,6 +194,7 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 &rel_path,
                 &content,
                 None,
+                None,
                 crate::data_engineer::project_fs::PatchApplyKind::FullOverwrite,
             )
             .await?;
@@ -235,10 +211,6 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 "lines_added": outcome.lines_added,
                 "lines_removed": outcome.lines_removed
             }));
-        }
-
-        if preview {
-            return Ok(serde_json::json!({"ok": true, "diffs": out_diffs}));
         }
         Ok(
             serde_json::json!({"ok": true, "keys": out_keys, "files": out_files, "warnings": warnings}),

@@ -110,7 +110,7 @@ pub fn cleanse_tool_card() -> String {
       | {op:"get", path:string, max_chars?:int}
       | {op:"get_json", path:string, pointer?:string}
       | {op:"manifest_find", path?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int}
-      | {op:"patch", path?:string, replace_file?:{path:string,new_text:string,expected_sha256?:string}|[{...}], replace_range?:{path:string,start_line:int,end_line:int,new_text:string,expected_sha256?:string}|[{...}], replace_list?:{path:string,edits:[{start_line:int,end_line:int,new_text:string}],expected_sha256?:string}|[{...}], preview_diff?:bool}
+  | {op:"patch", path?:string, replace_file?:{path:string,new_text:string,expected_sha256?:string}|[{...}], replace_range?:{path:string,start_line:int,end_line:int,new_text:string,expected_sha256?:string}|[{...}], replace_list?:{path:string,edits:[{start_line:int,end_line:int,new_text:string}],expected_sha256?:string}|[{...}]}
   )
 - vect_query(args:{scope:"dataset"|"field"|"doc"|"artifact"|"metric"|"model", query_text:string, k:int})
 - search_dbt_examples(args:{query:string, k?:int}) -> {"ok":true,"examples":[{project,path,s3_uri,preview,score}]}

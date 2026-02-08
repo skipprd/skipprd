@@ -68,7 +68,7 @@ impl Tool for ApplyNextCleanseBatchTool {
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
-        let mut plan = plan::load_cleanse_plan(ctx)
+        let mut plan = plan::load_cleanse_plan_any(ctx)
             .await
             .ok_or_else(|| "no active cleanse plan found".to_string())?;
         if plan.status != plan::PlanStatus::Approved && plan.status != plan::PlanStatus::Completed {
@@ -239,7 +239,7 @@ impl Tool for ApplyNextModelBatchTool {
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
-        let mut plan = plan::load_model_plan(ctx)
+        let mut plan = plan::load_model_plan_any(ctx)
             .await
             .ok_or_else(|| "no active model plan found".to_string())?;
         if plan.status != plan::PlanStatus::Approved && plan.status != plan::PlanStatus::Completed {

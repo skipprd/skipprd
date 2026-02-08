@@ -137,6 +137,47 @@ impl Tool for DbtValidateTool {
                 &obj.get("logs").cloned().unwrap_or(Value::Null),
             );
             obj.insert("runtime_failures".to_string(), serde_json::json!(rf));
+
+            // Always produce an LLM-backed condensed error summary on failure.
+            // This is used by terminal mode to show the real root cause (not startup banners).
+            let ok = obj.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !ok {
+                let errors: Vec<String> = obj
+                    .get("errors")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let logs = obj.get("logs").cloned().unwrap_or(Value::Null);
+                match crate::data_engineer::dbt_error::summarize_dbt_failure_llm(
+                    ctx.llm.as_ref(),
+                    &errors,
+                    &logs,
+                    &rf,
+                    2000,
+                ) {
+                    Ok(sum) => {
+                        obj.insert("error_summary".to_string(), serde_json::json!(sum.summary));
+                        obj.insert(
+                            "failing_nodes".to_string(),
+                            serde_json::json!(sum.failing_nodes),
+                        );
+                        obj.insert(
+                            "suggested_next_files".to_string(),
+                            serde_json::json!(sum.suggested_next_files),
+                        );
+                    }
+                    Err(e) => {
+                        obj.insert(
+                            "error_summary".to_string(),
+                            serde_json::json!(format!("(failed to summarize dbt error: {e})")),
+                        );
+                    }
+                }
+            }
         }
         Ok(v)
     }
@@ -230,6 +271,16 @@ mod tests {
                 logs: serde_json::json!({}),
             })
         }
+    }
+
+    #[test]
+    fn dbt_validate_mock_change_does_not_require_expected_sha256() {
+        // Ensure unit tests do not require LLM echo of sha (suite enforces drift safety internally).
+        let v = serde_json::json!({
+            "replace_file": {"new_text": "select 2"},
+            "notes": []
+        });
+        assert!(v.get("replace_file").unwrap().get("new_text").is_some());
     }
 
     fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {

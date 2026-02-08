@@ -42,6 +42,7 @@ Plan output rules (CRITICAL):
 - Every batch MUST have at most 5 dataset_ids.
 - `work_groups` is the canonical ordered execution plan for the UI and the deterministic runner. It MUST be present and should encode the same ordering as `batches`.
 - Every work group MUST have at most 5 `items` (the runner executes at most 5 at a time).
+- For planning and repair: every checklist item's `evidence` MUST be an empty array `[]` (no strings, no objects). Evidence is added later by the deterministic runner.
 - You MUST include, per task, the standard checklist items with stable checklist_item_id values:
   - sql_model
   - schema_contract
@@ -126,6 +127,7 @@ Plan output rules (CRITICAL):
 - Gold models MUST ONLY read from existing silver/staging models (ref('stg_*')). Do NOT plan any source() usage.
 - `work_groups` is the canonical ordered execution plan for the UI and the deterministic runner. It MUST be present and should encode the same ordering as `batches`.
 - Every work group MUST have at most 5 `items`.
+- For planning and repair: every checklist item's `evidence` MUST be an empty array `[]` (no strings, no objects). Evidence is added later by the deterministic runner.
 - You MUST include, per task, the standard checklist items with stable checklist_item_id values:
   - sql_model
   - schema_contract

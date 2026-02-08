@@ -289,21 +289,33 @@ fn parse_dataset_id_3(s: &str) -> Option<(String, String, String)> {
     Some((cat.to_string(), schema.to_string(), table.to_string()))
 }
 
-fn ensure_expected_model_paths_cleanse(plan: &mut CleansePlan) {
+fn ensure_expected_model_paths_cleanse(ctx: Option<&AgentCtx>, plan: &mut CleansePlan) -> bool {
+    let mut changed = false;
     for t in plan.tasks.iter_mut() {
-        let missing = t
-            .expected_model_path
-            .as_deref()
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true);
-        if !missing {
-            continue;
-        }
         let Some((_cat, schema, table)) = parse_dataset_id_3(&t.dataset_id) else {
             continue;
         };
-        t.expected_model_path = Some(naming::canonical_staging_rel_path(&schema, &table));
+        let canonical = naming::canonical_staging_rel_path(&schema, &table);
+        let cur = t
+            .expected_model_path
+            .as_deref()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if cur != canonical {
+            changed = true;
+            let from = if cur.is_empty() { "(missing)".to_string() } else { cur };
+            let msg = format!(
+                "canonicalized cleanse expected_model_path for {}: {} -> {}",
+                t.dataset_id, from, canonical
+            );
+            tracing::warn!("{}", msg);
+            if let Some(tx) = ctx.and_then(|c| c.trace_tx.as_ref()) {
+                let _ = tx.send(msg);
+            }
+            t.expected_model_path = Some(canonical);
+        }
     }
+    changed
 }
 
 fn ensure_expected_model_paths_model(plan: &mut ModelPlan) {
@@ -511,13 +523,29 @@ pub async fn load_cleanse_plan(ctx: &AgentCtx) -> Option<CleansePlan> {
     load_cleanse_plan_by_key(ctx, &key).await
 }
 
+/// Load the cleanse plan for this thread, preferring the oldest non-terminal plan.
+///
+/// If there is no active plan (e.g. a restart after we marked it Completed), fall back to the
+/// newest plan key so "continue" can rehydrate context and progress deterministically.
+pub async fn load_cleanse_plan_any(ctx: &AgentCtx) -> Option<CleansePlan> {
+    if let Some(p) = load_cleanse_plan(ctx).await {
+        return Some(p);
+    }
+    let key = newest_plan_key_any(ctx, "_cleanse.json").await?;
+    load_cleanse_plan_by_key(ctx, &key).await
+}
+
 pub async fn load_cleanse_plan_by_key(ctx: &AgentCtx, key: &str) -> Option<CleansePlan> {
     let bytes = ctx.storage.get_bytes(key).await.ok()?;
     let mut p = serde_json::from_slice::<CleansePlan>(&bytes).ok()?;
     if p.plan_key.trim().is_empty() {
         p.plan_key = key.to_string();
     }
-    ensure_expected_model_paths_cleanse(&mut p);
+    let changed = ensure_expected_model_paths_cleanse(Some(ctx), &mut p);
+    if changed {
+        // Best-effort persist so subsequent loads (and humans) see the canonical path.
+        let _ = save_cleanse_plan(ctx, &p).await;
+    }
     Some(p)
 }
 
@@ -534,6 +562,17 @@ pub async fn save_cleanse_plan(ctx: &AgentCtx, plan: &CleansePlan) -> Result<(),
 
 pub async fn load_model_plan(ctx: &AgentCtx) -> Option<ModelPlan> {
     let key = oldest_active_model_plan_key(ctx).await?;
+    load_model_plan_by_key(ctx, &key).await
+}
+
+/// Load the model plan for this thread, preferring the oldest non-terminal plan.
+///
+/// If there is no active plan, fall back to the newest plan key so "continue" can rehydrate.
+pub async fn load_model_plan_any(ctx: &AgentCtx) -> Option<ModelPlan> {
+    if let Some(p) = load_model_plan(ctx).await {
+        return Some(p);
+    }
+    let key = newest_plan_key_any(ctx, "_model.json").await?;
     load_model_plan_by_key(ctx, &key).await
 }
 
@@ -1024,6 +1063,78 @@ pub fn model_mark_done(plan: &mut ModelPlan, name: &str) {
     }
 }
 
+pub fn model_schema_contract_mark_done(plan: &mut ModelPlan, name: &str) {
+    if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == name) {
+        let it = ensure_checklist_item(
+            &mut t.checklist,
+            CHECKLIST_SCHEMA_CONTRACT,
+            "Author schema contract",
+        );
+        set_checklist_status(it, ChecklistItemStatus::Done, None);
+        recompute_model_task_status(t);
+    }
+}
+
+pub fn model_schema_contract_mark_needs_update(plan: &mut ModelPlan, name: &str) {
+    if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == name) {
+        let it = ensure_checklist_item(
+            &mut t.checklist,
+            CHECKLIST_SCHEMA_CONTRACT,
+            "Author schema contract",
+        );
+        set_checklist_status(it, ChecklistItemStatus::NeedsUpdate, None);
+        recompute_model_task_status(t);
+    }
+}
+
+pub fn model_schema_contract_mark_in_progress(plan: &mut ModelPlan, name: &str) {
+    if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == name) {
+        let it = ensure_checklist_item(
+            &mut t.checklist,
+            CHECKLIST_SCHEMA_CONTRACT,
+            "Author schema contract",
+        );
+        set_checklist_status(it, ChecklistItemStatus::InProgress, None);
+        recompute_model_task_status(t);
+    }
+}
+
+pub fn cleanse_schema_contract_mark_done(plan: &mut CleansePlan, dataset_id: &str) {
+    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == dataset_id) {
+        let it = ensure_checklist_item(
+            &mut t.checklist,
+            CHECKLIST_SCHEMA_CONTRACT,
+            "Author schema contract",
+        );
+        set_checklist_status(it, ChecklistItemStatus::Done, None);
+        recompute_cleanse_task_status(t);
+    }
+}
+
+pub fn cleanse_schema_contract_mark_needs_update(plan: &mut CleansePlan, dataset_id: &str) {
+    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == dataset_id) {
+        let it = ensure_checklist_item(
+            &mut t.checklist,
+            CHECKLIST_SCHEMA_CONTRACT,
+            "Author schema contract",
+        );
+        set_checklist_status(it, ChecklistItemStatus::NeedsUpdate, None);
+        recompute_cleanse_task_status(t);
+    }
+}
+
+pub fn cleanse_schema_contract_mark_in_progress(plan: &mut CleansePlan, dataset_id: &str) {
+    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == dataset_id) {
+        let it = ensure_checklist_item(
+            &mut t.checklist,
+            CHECKLIST_SCHEMA_CONTRACT,
+            "Author schema contract",
+        );
+        set_checklist_status(it, ChecklistItemStatus::InProgress, None);
+        recompute_cleanse_task_status(t);
+    }
+}
+
 pub fn cleanse_mark_needs_update(plan: &mut CleansePlan, dataset_id: &str) {
     if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == dataset_id) {
         let it =
@@ -1304,13 +1415,9 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
             if op == "patch" {
                 let ok = observation.ok;
-                let preview = args
-                    .get("preview_diff")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
 
                 let paths = extract_dbt_files_patch_paths(args);
-                // SQL patching can be used for targeted remediation; treat successful non-preview patches as progress.
+                // SQL patching can be used for targeted remediation; treat successful patches as progress.
                 let mut stems: Vec<String> = paths.iter().filter_map(|p| file_stem(p)).collect();
                 stems.sort();
                 stems.dedup();
@@ -1342,7 +1449,7 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                             recompute_cleanse_task_status(t);
                         }
                     }
-                    if ok && !preview {
+                    if ok {
                         plan.progress.consecutive_batch_failures = 0;
                     }
                 }
@@ -1368,10 +1475,8 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                                 "Author schema contract",
                             );
                             let ev_kind = if ok { "tool_end_ok" } else { "tool_end_failed" };
-                            let new_status = if ok && !preview {
+                            let new_status = if ok {
                                 ChecklistItemStatus::Done
-                            } else if ok {
-                                ChecklistItemStatus::InProgress
                             } else {
                                 ChecklistItemStatus::NeedsUpdate
                             };
@@ -1383,8 +1488,8 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                             recompute_cleanse_task_status(t);
                         }
                     }
-                    if ok && !preview {
-                        // Treat a successful non-preview schema patch as forward progress for batching.
+                    if ok {
+                        // Treat a successful schema patch as forward progress for batching.
                         plan.progress.consecutive_batch_failures = 0;
                     }
                 }
@@ -1422,6 +1527,8 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                 let failed = crate::data_engineer::dbt_error::extract_failed_models_from_logs(&logs);
                 let runtime =
                     crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(&logs);
+                let contract_data_type_missing =
+                    crate::data_engineer::dbt_error::logs_indicate_contract_data_type_missing(&logs);
 
                 let mut names: Vec<String> = Vec::new();
                 for f in failed.iter() {
@@ -1467,6 +1574,24 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                         ChecklistItemStatus::NeedsUpdate,
                         Some(evidence_from_tool_end(idx, "tool_end_failed", name, tool_id, ts)),
                     );
+                    if contract_data_type_missing {
+                        let sc = ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SCHEMA_CONTRACT,
+                            "Author schema contract",
+                        );
+                        set_checklist_status(
+                            sc,
+                            ChecklistItemStatus::NeedsUpdate,
+                            Some(evidence_from_tool_end(
+                                idx,
+                                "tool_end_failed",
+                                name,
+                                tool_id,
+                                ts,
+                            )),
+                        );
+                    }
                     recompute_cleanse_task_status(t);
                 }
             }
@@ -1748,14 +1873,59 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
             if op == "patch" {
                 let ok = observation.ok;
-                let preview = args
-                    .get("preview_diff")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
                 let paths = extract_dbt_files_patch_paths(args);
                 let mut stems: Vec<String> = paths.iter().filter_map(|p| file_stem(p)).collect();
                 stems.sort();
                 stems.dedup();
+
+                // Special-case: patching models/schema.yml (canonical schema file) should satisfy
+                // schema_contract for any models present in the YAML content, not by file stem.
+                let touched_models_schema_yml = paths
+                    .iter()
+                    .any(|p| p.trim().replace('\\', "/") == "models/schema.yml");
+                if ok && touched_models_schema_yml {
+                    // Best-effort: extract schema.yml new_text when provided via replace_file.
+                    let mut schema_text: Option<String> = None;
+                    if let Some(v) = args.get("replace_file") {
+                        let mut visit = |obj: &serde_json::Map<String, Value>| {
+                            if schema_text.is_some() {
+                                return;
+                            }
+                            let p = obj.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+                            if p.replace('\\', "/") != "models/schema.yml" {
+                                return;
+                            }
+                            if let Some(nt) = obj.get("new_text").and_then(|v| v.as_str()) {
+                                schema_text = Some(nt.to_string());
+                            }
+                        };
+                        if let Some(arr) = v.as_array() {
+                            for it in arr.iter() {
+                                if let Some(obj) = it.as_object() {
+                                    visit(obj);
+                                }
+                            }
+                        } else if let Some(obj) = v.as_object() {
+                            visit(obj);
+                        }
+                    }
+                    if let Some(text) = schema_text {
+                        if let Ok(vy) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+                            if let Some(models) = vy.get("models").and_then(|m| m.as_sequence()) {
+                                for m in models.iter() {
+                                    let name = m
+                                        .get("name")
+                                        .and_then(|n| n.as_str())
+                                        .map(|s| s.trim().to_string())
+                                        .filter(|s| !s.is_empty());
+                                    if let Some(nm) = name {
+                                        model_schema_contract_mark_done(plan, &nm);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 for t in plan.tasks.iter_mut() {
                     if stems.iter().any(|s| s == &t.name) {
@@ -1765,17 +1935,12 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                             "Author schema contract",
                         );
                         if ok {
-                            let status = if preview {
-                                ChecklistItemStatus::InProgress
-                            } else {
-                                ChecklistItemStatus::Done
-                            };
                             set_checklist_status(
                                 it,
-                                status,
+                                ChecklistItemStatus::Done,
                                 Some(evidence_from_tool_end(
                                     idx,
-                                    if preview { "tool_end_preview" } else { "tool_end_ok" },
+                                    "tool_end_ok",
                                     name,
                                     tool_id,
                                     ts,
@@ -2039,6 +2204,76 @@ mod tests {
     }
 
     #[test]
+    fn model_progress_marks_schema_contract_done_from_models_schema_yml_patch() {
+        let mut plan = ModelPlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![
+                ModelTask {
+                    name: "dim_customers".to_string(),
+                    folder: "marts".to_string(),
+                    goal: "a".to_string(),
+                    inputs: vec!["stg_test_raw_raw_customers".to_string()],
+                    expected_model_path: None,
+                    invariants: vec![],
+                    status: TaskStatus::Pending,
+                    checklist: std_checklist("Author gold SQL"),
+                },
+                ModelTask {
+                    name: "dim_orders".to_string(),
+                    folder: "marts".to_string(),
+                    goal: "b".to_string(),
+                    inputs: vec!["stg_test_raw_raw_orders".to_string()],
+                    expected_model_path: None,
+                    invariants: vec![],
+                    status: TaskStatus::Pending,
+                    checklist: std_checklist("Author gold SQL"),
+                },
+            ],
+            batches: vec![vec!["dim_customers".to_string(), "dim_orders".to_string()]],
+            work_groups: vec![],
+            progress: PlanProgress::default(),
+        };
+
+        let schema_yml = r#"version: 2
+models:
+  - name: dim_customers
+    description: "Customer dimension."
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+          - unique
+sources:
+  - name: test_raw
+    schema: test_raw
+"#;
+
+        let log = ThreadLog {
+            steps: vec![step(
+                "dbt_files",
+                serde_json::json!({
+                    "op":"patch",
+                    "replace_file": {"path":"models/schema.yml","new_text": schema_yml}
+                }),
+                serde_json::json!({"ok": true}),
+            )],
+            ..Default::default()
+        };
+
+        update_model_progress_from_log(&mut plan, &log);
+        assert_eq!(
+            status_of(&plan.tasks[0].checklist, CHECKLIST_SCHEMA_CONTRACT),
+            ChecklistItemStatus::Done
+        );
+        assert_eq!(
+            status_of(&plan.tasks[1].checklist, CHECKLIST_SCHEMA_CONTRACT),
+            ChecklistItemStatus::Pending
+        );
+    }
+
+    #[test]
     fn prune_cleanse_plan_to_grounded_raw_datasets_prunes_tasks_and_batches() {
         let mut plan = CleansePlan {
             plan_key: "k".to_string(),
@@ -2183,7 +2418,7 @@ mod tests {
             work_groups: vec![],
             progress: PlanProgress::default(),
         };
-        ensure_expected_model_paths_cleanse(&mut plan);
+        ensure_expected_model_paths_cleanse(None, &mut plan);
         assert_eq!(
             plan.tasks[0].expected_model_path.as_deref(),
             Some("models/staging/stg_test_raw_raw_customers.sql")
@@ -2191,7 +2426,32 @@ mod tests {
     }
 
     #[test]
-    fn successful_non_preview_mutating_patch_resets_consecutive_batch_failures() {
+    fn ensure_expected_model_paths_cleanse_overwrites_noncanonical_path() {
+        let mut plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![CleanseTask {
+                dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
+                expected_model_path: Some("models/staging/customers.sql".to_string()),
+                invariants: vec![],
+                status: TaskStatus::Pending,
+                checklist: vec![],
+            }],
+            batches: vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]],
+            work_groups: vec![],
+            progress: PlanProgress::default(),
+        };
+        let changed = ensure_expected_model_paths_cleanse(None, &mut plan);
+        assert!(changed);
+        assert_eq!(
+            plan.tasks[0].expected_model_path.as_deref(),
+            Some("models/staging/stg_test_raw_raw_customers.sql")
+        );
+    }
+
+    #[test]
+    fn successful_mutating_patch_resets_consecutive_batch_failures() {
         let mut plan = CleansePlan {
             plan_key: "k".to_string(),
             status: PlanStatus::Approved,

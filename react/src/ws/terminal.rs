@@ -27,6 +27,12 @@ pub enum TerminalEvent {
         cleanse: Option<api::PlanSnapshot>,
         model: Option<api::PlanSnapshot>,
     },
+    DbtProgress {
+        /// dbt subcommand label emitted by the runner (e.g. "compile", "build")
+        phase: String,
+        /// Progress summary (e.g. "4 of 6 PASS")
+        detail: String,
+    },
     PlansChanged(api::PlansChangedResponse),
     Phase(api::PhaseResponse),
     ToolStart(api::ToolStartResponse),
@@ -95,6 +101,7 @@ enum SpanStatus {
 struct SpanAgg {
     status: SpanStatus,
     label: String,
+    description: Option<String>,
     count: usize,
     max_dur: Duration,
     order_idx: usize,
@@ -103,6 +110,8 @@ struct SpanAgg {
 #[derive(Clone, Debug)]
 struct SpanState {
     label: String,
+    detail: Option<String>,
+    description: Option<String>,
     status: SpanStatus,
     started_at: Instant,
     ended_at: Option<Instant>,
@@ -123,11 +132,15 @@ struct ThreadView {
     // Plan snapshots are optional; stored when clients request `plans` or when server loads them.
     cleanse_plan: Option<api::PlanSnapshot>,
     model_plan: Option<api::PlanSnapshot>,
+    cleanse_plan_anchor_phase: Option<String>,
+    model_plan_anchor_phase: Option<String>,
     tool_spans: HashMap<String, SpanState>, // tool_id -> span
     llm_spans: HashMap<i32, SpanState>,     // call_id -> span
     // Persist the most recent concrete work item context per plan kind
     // so focused rendering doesn't "disappear" when some events arrive without ctx.
     focus_by_kind: HashMap<String, WorkItemKey>,
+    // Sticky expansion: once a checklist work item is focused, keep its checklist line visible.
+    expanded_work_items: std::collections::HashSet<WorkItemKey>,
     last_update: Instant,
 }
 
@@ -144,9 +157,12 @@ impl Default for ThreadView {
             items: BTreeMap::new(),
             cleanse_plan: None,
             model_plan: None,
+            cleanse_plan_anchor_phase: None,
+            model_plan_anchor_phase: None,
             tool_spans: HashMap::new(),
             llm_spans: HashMap::new(),
             focus_by_kind: HashMap::new(),
+            expanded_work_items: std::collections::HashSet::new(),
             last_update: Instant::now(),
         }
     }
@@ -406,12 +422,50 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
             });
             if cleanse.is_some() {
                 tv.cleanse_plan = cleanse;
+                if tv.cleanse_plan_anchor_phase.is_none() {
+                    // Plans should be sticky to the planning phase where they originate.
+                    tv.cleanse_plan_anchor_phase = Some("cleanse_plan".to_string());
+                }
             }
             if model.is_some() {
                 tv.model_plan = model;
+                if tv.model_plan_anchor_phase.is_none() {
+                    // Plans should be sticky to the planning phase where they originate.
+                    tv.model_plan_anchor_phase = Some("model_plan".to_string());
+                }
             }
             tv.last_update = Instant::now();
             ensure_selected(m, &thread_id);
+        }
+        TerminalEvent::DbtProgress { phase, detail } => {
+            let Some(tid) = m.selected.clone() else {
+                return;
+            };
+            let Some(tv) = m.threads.get_mut(&tid) else {
+                return;
+            };
+            let want = phase.trim().to_lowercase();
+            let detail = detail.trim().to_string();
+            if detail.is_empty() {
+                return;
+            }
+            for s in tv.tool_spans.values_mut() {
+                if s.status != SpanStatus::Running {
+                    continue;
+                }
+                let base = s.label.to_lowercase();
+                if !base.contains("validate dbt") {
+                    continue;
+                }
+                if want == "build" && !base.contains("build") {
+                    continue;
+                }
+                if want == "compile" && !base.contains("compile") {
+                    continue;
+                }
+                s.detail = Some(detail.clone());
+            }
+            tv.last_update = Instant::now();
         }
         TerminalEvent::PlansChanged(ev) => {
             let _ = ev;
@@ -430,10 +484,39 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
             // later renders show only the active phase.
             let effective_phase: Option<String> =
                 ev.phase.clone().or_else(|| tv.current_phase.clone());
+
+            // DBT validate spans should be replaceable within the same phase:
+            // - A new "compile" validate attempt should clear any stale prior DBT validate lines.
+            // - A new "build"/"full" validate should replace only that specific kind.
+            if ev.name == "dbt_validate" {
+                let label = ev.clean_name.clone().unwrap_or_else(|| ev.name.clone());
+                if let (Some(ref ph), Some(kind)) =
+                    (effective_phase.as_ref(), dbt_validate_kind_from_label(&label))
+                {
+                    tv.tool_spans.retain(|_, s| {
+                        if s.phase.as_deref() != Some(ph.as_str()) {
+                            return true;
+                        }
+                        if !is_dbt_validate_label(&s.label) {
+                            return true;
+                        }
+                        if kind == DbtValidateKind::Compile {
+                            // Compile is the start of a targeted validate attempt in this suite.
+                            // Clear all prior dbt_validate spans so stale "Validate DBT" lines
+                            // do not persist when only compile/build are re-run.
+                            return false;
+                        }
+                        // Otherwise, replace only the same kind.
+                        dbt_validate_kind_from_label(&s.label) != Some(kind)
+                    });
+                }
+            }
             tv.tool_spans.insert(
                 ev.tool_id.clone(),
                 SpanState {
                     label: ev.clean_name.clone().unwrap_or(ev.name.clone()),
+                    detail: None,
+                    description: None,
                     status: SpanStatus::Running,
                     started_at: Instant::now(),
                     ended_at: None,
@@ -450,7 +533,9 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ctx.task_id.clone(),
                     ctx.checklist_item_id.clone(),
                 ) {
-                    tv.focus_by_kind.insert(pk, key_from_ctx(&Some(ctx.clone())));
+                    let k = key_from_ctx(&Some(ctx.clone()));
+                    tv.focus_by_kind.insert(pk, k.clone());
+                    tv.expanded_work_items.insert(k);
                 }
             }
             tv.last_update = Instant::now();
@@ -470,10 +555,42 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
             };
             let effective_phase: Option<String> =
                 ev.phase.clone().or_else(|| tv.current_phase.clone());
+            let (detail, description) = if ev.name == "dbt_validate" && st == SpanStatus::Failed {
+                // Prefer condensed, accurate error summary when available in payload.
+                let from_payload = ev
+                    .payload
+                    .as_ref()
+                    .and_then(|m| m.get("error_summary"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                // Multiline description: show under the span.
+                let desc = from_payload
+                    .clone()
+                    .map(|s| clean_multiline(&s, 14, 4000))
+                    .filter(|s| !s.trim().is_empty());
+
+                // One-line detail: keep the main span line short.
+                let detail_src = from_payload
+                    .as_deref()
+                    .and_then(first_nonempty_line)
+                    .map(|s| s.to_string())
+                    .or_else(|| ev.error.clone());
+                let dt = detail_src
+                    .as_deref()
+                    .map(|s| condense_one_line(s, 180))
+                    .filter(|s| !s.trim().is_empty());
+
+                (dt, desc)
+            } else {
+                (None, None)
+            };
             tv.tool_spans
                 .entry(ev.tool_id.clone())
                 .and_modify(|s| {
                     s.label = ev.clean_name.clone().unwrap_or(ev.name.clone());
+                    s.detail = detail.clone();
+                    s.description = description.clone();
                     s.status = st;
                     s.ended_at = Some(Instant::now());
                     s.phase = effective_phase.clone();
@@ -481,6 +598,8 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                 })
                 .or_insert_with(|| SpanState {
                     label: ev.clean_name.clone().unwrap_or(ev.name.clone()),
+                    detail,
+                    description,
                     status: st,
                     started_at: Instant::now(),
                     ended_at: Some(Instant::now()),
@@ -495,7 +614,9 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ctx.task_id.clone(),
                     ctx.checklist_item_id.clone(),
                 ) {
-                    tv.focus_by_kind.insert(pk, key_from_ctx(&Some(ctx.clone())));
+                    let k = key_from_ctx(&Some(ctx.clone()));
+                    tv.focus_by_kind.insert(pk, k.clone());
+                    tv.expanded_work_items.insert(k);
                 }
             }
             tv.last_update = Instant::now();
@@ -513,6 +634,8 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                 ev.call_id,
                 SpanState {
                     label,
+                    detail: None,
+                    description: None,
                     status: SpanStatus::Running,
                     started_at: Instant::now(),
                     ended_at: None,
@@ -528,7 +651,9 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ctx.task_id.clone(),
                     ctx.checklist_item_id.clone(),
                 ) {
-                    tv.focus_by_kind.insert(pk, key_from_ctx(&Some(ctx.clone())));
+                    let k = key_from_ctx(&Some(ctx.clone()));
+                    tv.focus_by_kind.insert(pk, k.clone());
+                    tv.expanded_work_items.insert(k);
                 }
             }
             tv.last_update = Instant::now();
@@ -550,6 +675,8 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                 .entry(ev.call_id)
                 .and_modify(|s| {
                     s.label = label.clone();
+                    s.detail = None;
+                    s.description = None;
                     s.status = st;
                     s.ended_at = Some(Instant::now());
                     s.phase = Some(ev.phase.clone());
@@ -557,6 +684,8 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                 })
                 .or_insert_with(|| SpanState {
                     label,
+                    detail: None,
+                    description: None,
                     status: st,
                     started_at: Instant::now(),
                     ended_at: Some(Instant::now()),
@@ -571,7 +700,9 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ctx.task_id.clone(),
                     ctx.checklist_item_id.clone(),
                 ) {
-                    tv.focus_by_kind.insert(pk, key_from_ctx(&Some(ctx.clone())));
+                    let k = key_from_ctx(&Some(ctx.clone()));
+                    tv.focus_by_kind.insert(pk, k.clone());
+                    tv.expanded_work_items.insert(k);
                 }
             }
             tv.last_update = Instant::now();
@@ -612,7 +743,128 @@ fn fmt_ms(ms: i64) -> String {
         format!("{:.1}s", (ms as f64) / 1000.0)
     } else {
         let s = ms / 1000;
-        format!("{}m{}s", s / 60, s % 60)
+        if s < 3600 {
+            format!("{}m{}s", s / 60, s % 60)
+        } else {
+            let h = s / 3600;
+            let rem = s % 3600;
+            format!("{}h{}m{}s", h, rem / 60, rem % 60)
+        }
+    }
+}
+
+fn normalize_validate_dbt_label(label: &str) -> String {
+    // Prefer a compact label: "Validate DBT Build" instead of "Validate DBT (build)".
+    let s = label.trim();
+    s.replace(" (build)", " Build")
+        .replace(" (compile)", " Compile")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbtValidateKind {
+    Compile,
+    Build,
+    Full,
+}
+
+fn dbt_validate_kind_from_label(label: &str) -> Option<DbtValidateKind> {
+    let s = label.trim().to_ascii_lowercase();
+    if !s.contains("validate dbt") {
+        return None;
+    }
+    if s.contains("compile") {
+        return Some(DbtValidateKind::Compile);
+    }
+    if s.contains("build") {
+        return Some(DbtValidateKind::Build);
+    }
+    Some(DbtValidateKind::Full)
+}
+
+fn is_dbt_validate_label(label: &str) -> bool {
+    label.trim().to_ascii_lowercase().contains("validate dbt")
+}
+
+fn condense_one_line(s: &str, max_len: usize) -> String {
+    let mut out = s
+        .trim()
+        .replace('\n', " ; ")
+        .replace('\r', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if out.len() > max_len {
+        out.truncate(max_len);
+        out.push('…');
+    }
+    out
+}
+
+fn clean_multiline(s: &str, max_lines: usize, max_chars: usize) -> String {
+    let s = s.replace('\r', "");
+    let mut out: Vec<String> = Vec::new();
+    for line in s.lines() {
+        let t = line.trim_end();
+        if t.trim().is_empty() {
+            // Keep at most a single empty line in a row.
+            if out.last().map(|x| x.is_empty()).unwrap_or(false) {
+                continue;
+            }
+            out.push(String::new());
+            continue;
+        }
+        out.push(t.to_string());
+        if out.len() >= max_lines {
+            break;
+        }
+    }
+    // Trim leading/trailing blank lines.
+    while out.first().map(|x| x.is_empty()).unwrap_or(false) {
+        out.remove(0);
+    }
+    while out.last().map(|x| x.is_empty()).unwrap_or(false) {
+        out.pop();
+    }
+    let mut joined = out.join("\n");
+    if joined.len() > max_chars {
+        joined.truncate(max_chars);
+        joined.push('…');
+    }
+    joined
+}
+
+fn first_nonempty_line(s: &str) -> Option<&str> {
+    for line in s.lines() {
+        let t = line.trim();
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    None
+}
+
+fn validate_dbt_sort_rank(label: &str) -> Option<u8> {
+    // Force stable ordering among Validate DBT items, even if tool_end arrives late/missing tool_start.
+    // Keep this conservative: only rank labels that clearly start with the DBT validate prefix.
+    let s = normalize_validate_dbt_label(label).trim().to_ascii_lowercase();
+    if !s.starts_with("validate dbt") {
+        return None;
+    }
+    if s.starts_with("validate dbt compile") {
+        return Some(0);
+    }
+    if s.starts_with("validate dbt build") {
+        return Some(1);
+    }
+    Some(2)
+}
+
+fn span_display_label(s: &SpanState) -> String {
+    let base = normalize_validate_dbt_label(&s.label);
+    match (&s.status, s.detail.as_ref()) {
+        (SpanStatus::Running, Some(d)) if !d.trim().is_empty() => format!("{base} {}", d.trim()),
+        (SpanStatus::Failed, Some(d)) if !d.trim().is_empty() => format!("{base} — {}", d.trim()),
+        _ => base,
     }
 }
 
@@ -667,6 +919,24 @@ fn push_span_line(lines: &mut Vec<String>, indent: &str, s: &SpanAgg, spinner_id
             "{indent}{sg} {}  {dur}",
             s.label.as_str().white(),
         ));
+    }
+
+    // Optional multi-line description (indented continuation lines).
+    if s.count == 1 {
+        if let Some(desc) = s.description.as_ref() {
+            let d = desc.trim();
+            if !d.is_empty() {
+                // Hard caps to keep the terminal readable.
+                let cleaned = clean_multiline(d, 10, 2000);
+                for line in cleaned.lines() {
+                    let line = line.trim_end();
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    lines.push(format!("{indent}    {}", line.dark_grey()));
+                }
+            }
+        }
     }
 }
 
@@ -917,9 +1187,277 @@ fn render_plan_compact(
     }
 }
 
+fn render_plan_summary_line(lines: &mut Vec<String>, kind: &str, p: &api::PlanSnapshot) {
+    let plan_status = format!("{:?}", p.status).to_lowercase();
+    lines.push(format!(
+        "  {} {} {}  {}",
+        "[~]".cyan(),
+        format!("{kind} plan").white(),
+        p.plan_key.as_str().cyan(),
+        plan_status.dark_grey(),
+    ));
+}
+
+fn summarize_plan_workgroups(
+    p: &api::PlanSnapshot,
+    allowed_kinds: &[api::PlanWorkGroupKind],
+) -> Option<String> {
+    let allowed: std::collections::HashSet<api::PlanWorkGroupKind> =
+        allowed_kinds.iter().copied().collect();
+    let mut wg_count = 0usize;
+    let mut total_items = 0usize;
+    let mut done_items = 0usize;
+    let mut in_progress_items = 0usize;
+    let mut blocked_items = 0usize;
+    for wg in p.work_groups.iter() {
+        if !allowed.contains(&wg.kind) {
+            continue;
+        }
+        wg_count += 1;
+        for r in wg.items.iter() {
+            total_items += 1;
+            match lookup_checklist_item(p, &r.task_id, &r.checklist_item_id).map(|x| &x.status) {
+                Some(api::PlanChecklistItemStatus::Done) => done_items += 1,
+                Some(api::PlanChecklistItemStatus::InProgress) => in_progress_items += 1,
+                Some(api::PlanChecklistItemStatus::Blocked)
+                | Some(api::PlanChecklistItemStatus::NeedsUpdate) => blocked_items += 1,
+                Some(api::PlanChecklistItemStatus::Pending) | None => {}
+            }
+        }
+    }
+    if wg_count == 0 || total_items == 0 {
+        return None;
+    }
+    Some(format!(
+        "{wg_count} wgs, {done_items}/{total_items} items done{}{}",
+        if in_progress_items > 0 {
+            format!(", {in_progress_items} running")
+        } else {
+            "".to_string()
+        },
+        if blocked_items > 0 {
+            format!(", {blocked_items} blocked")
+        } else {
+            "".to_string()
+        }
+    ))
+}
+
+fn phase_detail_summary(t: &ThreadView, ph: &str) -> Option<String> {
+    fn short_plan_key(s: &str) -> String {
+        s.rsplit('/').next().unwrap_or(s).to_string()
+    }
+    match ph {
+        "cleanse_plan" => t.cleanse_plan.as_ref().map(|p| {
+            let st = format!("{:?}", p.status).to_lowercase();
+            format!("cleanse plan {}  {}", short_plan_key(p.plan_key.as_str()), st)
+        }),
+        "model_plan" => t.model_plan.as_ref().map(|p| {
+            let st = format!("{:?}", p.status).to_lowercase();
+            format!("model plan {}  {}", short_plan_key(p.plan_key.as_str()), st)
+        }),
+        "cleanse_author" => t.cleanse_plan.as_ref().and_then(|p| {
+            summarize_plan_workgroups(
+                p,
+                &[
+                    api::PlanWorkGroupKind::AuthorSql,
+                    api::PlanWorkGroupKind::AuthorSchema,
+                ],
+            )
+        }),
+        "cleanse_validate" => t
+            .cleanse_plan
+            .as_ref()
+            .and_then(|p| summarize_plan_workgroups(p, &[api::PlanWorkGroupKind::Validate])),
+        "model_author" => t.model_plan.as_ref().and_then(|p| {
+            summarize_plan_workgroups(
+                p,
+                &[
+                    api::PlanWorkGroupKind::AuthorSql,
+                    api::PlanWorkGroupKind::AuthorSchema,
+                ],
+            )
+        }),
+        "model_validate" => t
+            .model_plan
+            .as_ref()
+            .and_then(|p| summarize_plan_workgroups(p, &[api::PlanWorkGroupKind::Validate])),
+        _ => None,
+    }
+}
+
+fn pick_focus_key_filtered(
+    kind: &str,
+    span_buckets: &HashMap<WorkItemKey, Vec<SpanAgg>>,
+    preferred: Option<&WorkItemKey>,
+    allowed_workgroup_ids: &std::collections::HashSet<String>,
+) -> Option<WorkItemKey> {
+    if let Some(p) = preferred {
+        if p.plan_kind.as_deref() == Some(kind) {
+            if let Some(wg) = p.workgroup_id.as_deref() {
+                if allowed_workgroup_ids.contains(wg) {
+                    return Some(p.clone());
+                }
+            }
+        }
+    }
+    // Prefer in-flight work items within the allowed workgroups.
+    let mut best_running: Option<(WorkItemKey, Duration)> = None;
+    let mut best_any: Option<(WorkItemKey, Duration)> = None;
+    for (k, spans) in span_buckets.iter() {
+        if k.plan_kind.as_deref() != Some(kind) {
+            continue;
+        }
+        if let Some(wg) = k.workgroup_id.as_deref() {
+            if !allowed_workgroup_ids.contains(wg) {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        let mut max_d = Duration::from_millis(0);
+        let mut has_running = false;
+        for s in spans.iter() {
+            if s.max_dur > max_d {
+                max_d = s.max_dur;
+            }
+            if s.status == SpanStatus::Running {
+                has_running = true;
+            }
+        }
+        if has_running {
+            if best_running.as_ref().map(|(_, d)| max_d > *d).unwrap_or(true) {
+                best_running = Some((k.clone(), max_d));
+            }
+        }
+        if best_any.as_ref().map(|(_, d)| max_d > *d).unwrap_or(true) {
+            best_any = Some((k.clone(), max_d));
+        }
+    }
+    best_running.or(best_any).map(|(k, _)| k)
+}
+
+fn render_plan_workgroups_compact(
+    lines: &mut Vec<String>,
+    kind: &str,
+    p: &api::PlanSnapshot,
+    span_buckets: &HashMap<WorkItemKey, Vec<SpanAgg>>,
+    expanded_work_items: &std::collections::HashSet<WorkItemKey>,
+    preferred: Option<&WorkItemKey>,
+    spinner_idx: usize,
+    allowed_kinds: &[api::PlanWorkGroupKind],
+) {
+    let allowed_kind_set: std::collections::HashSet<api::PlanWorkGroupKind> =
+        allowed_kinds.iter().copied().collect();
+    let mut allowed_workgroup_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for wg in p.work_groups.iter() {
+        if allowed_kind_set.contains(&wg.kind) {
+            allowed_workgroup_ids.insert(wg.group_id.clone());
+        }
+    }
+    if allowed_workgroup_ids.is_empty() {
+        return;
+    }
+
+    let focus = pick_focus_key_filtered(kind, span_buckets, preferred, &allowed_workgroup_ids);
+    for wg in p.work_groups.iter() {
+        if !allowed_kind_set.contains(&wg.kind) {
+            continue;
+        }
+
+        // Compute a compact workgroup status + summary.
+        let mut total_items = 0usize;
+        let mut done_items = 0usize;
+        let mut in_progress_items = 0usize;
+        let mut blocked_items = 0usize;
+        let mut pending_items = 0usize;
+        for r in wg.items.iter() {
+            total_items += 1;
+            match lookup_checklist_item(p, &r.task_id, &r.checklist_item_id).map(|x| &x.status) {
+                Some(api::PlanChecklistItemStatus::Done) => done_items += 1,
+                Some(api::PlanChecklistItemStatus::InProgress) => in_progress_items += 1,
+                Some(api::PlanChecklistItemStatus::Blocked)
+                | Some(api::PlanChecklistItemStatus::NeedsUpdate) => blocked_items += 1,
+                Some(api::PlanChecklistItemStatus::Pending) | None => pending_items += 1,
+            }
+        }
+        let wg_done = total_items > 0 && done_items == total_items;
+        let wg_blocked = blocked_items > 0;
+        let wg_running = in_progress_items > 0;
+        let wg_glyph = if wg_blocked {
+            "[!]".magenta().to_string()
+        } else if wg_done {
+            "[✓]".green().to_string()
+        } else if wg_running {
+            "[~]".yellow().to_string()
+        } else {
+            "[ ]".dark_grey().to_string()
+        };
+        let detail = format!(
+            "{done_items}/{total_items} done{}{}",
+            if wg_running { ", running" } else { "" },
+            if pending_items > 0 {
+                format!(", {pending_items} pending")
+            } else {
+                "".to_string()
+            }
+        );
+        lines.push(format!(
+            "  {wg_glyph} {}  {}  {}",
+            wg.label.as_str().white(),
+            wg.group_id.as_str().dark_grey(),
+            detail.dark_grey()
+        ));
+
+        // Collapse completed workgroups into a single summary line.
+        if wg_done {
+            continue;
+        }
+
+        for r in wg.items.iter() {
+            let ci = lookup_checklist_item(p, &r.task_id, &r.checklist_item_id);
+            let (ig, label) = match ci {
+                None => ("[ ]".dark_grey().to_string(), r.checklist_item_id.clone()),
+                Some(x) => (
+                    checklist_item_glyph_colored(&x.status),
+                    x.label.clone(),
+                ),
+            };
+            lines.push(format!("    {ig} {}", r.task_id.as_str().white()));
+
+            let is_focus = focus.as_ref().is_some_and(|f| {
+                f.plan_kind.as_deref() == Some(kind)
+                    && f.plan_key.as_deref() == Some(p.plan_key.as_str())
+                    && f.workgroup_id.as_deref() == Some(wg.group_id.as_str())
+                    && f.task_id.as_deref() == Some(r.task_id.as_str())
+                    && f.checklist_item_id.as_deref() == Some(r.checklist_item_id.as_str())
+            });
+            let k = WorkItemKey {
+                plan_kind: Some(kind.to_string()),
+                plan_key: Some(p.plan_key.clone()),
+                workgroup_id: Some(wg.group_id.clone()),
+                task_id: Some(r.task_id.clone()),
+                checklist_item_id: Some(r.checklist_item_id.clone()),
+            };
+            let has_spans = span_buckets.contains_key(&k);
+            let is_sticky = expanded_work_items.contains(&k);
+            let show_leaf = is_focus || is_sticky || has_spans;
+            if show_leaf {
+                // Sticky checklist label line (never disappears once focused).
+                lines.push(format!("      {ig} {}", label.white()));
+                // Tool/LLM spans: render for any item that has spans, until spans are cleared by existing rules.
+                if let Some(spans) = span_buckets.get(&k) {
+                    push_span_list(lines, "        ", spans, spinner_idx);
+                }
+            }
+        }
+    }
+}
+
 fn render_model(m: &Model) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let up = format!("{}s", m.started.elapsed().as_secs());
+    let up = fmt_ms(m.started.elapsed().as_millis() as i64);
     let spinner_idx =
         ((m.started.elapsed().as_millis() / 120) as usize) % SPINNER_FRAMES.len();
     let sel = m
@@ -965,29 +1503,15 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
     let done: std::collections::HashSet<String> =
         t.completed_phases.iter().cloned().collect();
 
-    // Anchor plan rendering under the phase where work is actually happening.
-    // Example: once we move into `model_author`, render the model plan tree under `model_author`
-    // instead of under `model_plan`.
-    let anchor_cleanse: Option<String> = if t.cleanse_plan.is_some()
-        && cur.starts_with("cleanse_")
-        && cur != "cleanse_plan"
-    {
-        Some(cur.clone())
-    } else if t.cleanse_plan.is_some() {
-        Some("cleanse_plan".to_string())
-    } else {
-        None
-    };
-    let anchor_model: Option<String> = if t.model_plan.is_some()
-        && cur.starts_with("model_")
-        && cur != "model_plan"
-    {
-        Some(cur.clone())
-    } else if t.model_plan.is_some() {
-        Some("model_plan".to_string())
-    } else {
-        None
-    };
+    // Plans are sticky to the planning phase where they originate (not the currently active phase).
+    let anchor_cleanse: Option<String> = t
+        .cleanse_plan_anchor_phase
+        .clone()
+        .or_else(|| t.cleanse_plan.as_ref().map(|_| "cleanse_plan".to_string()));
+    let anchor_model: Option<String> = t
+        .model_plan_anchor_phase
+        .clone()
+        .or_else(|| t.model_plan.as_ref().map(|_| "model_plan".to_string()));
 
     // Precompute span buckets (active + recent) in stable occurrence order.
     let mut span_buckets: HashMap<WorkItemKey, Vec<SpanAgg>> =
@@ -1009,7 +1533,8 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
         };
         let agg = SpanAgg {
             status: s.status,
-            label: s.label.clone(),
+            label: span_display_label(s),
+            description: s.description.clone(),
             count: 1,
             max_dur: dur,
             order_idx: idx,
@@ -1024,9 +1549,9 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
     }
 
     for v in phase_buckets.values_mut() {
-        let mut by_key: HashMap<(SpanStatus, String), SpanAgg> = HashMap::new();
+        let mut by_key: HashMap<(SpanStatus, String, Option<String>), SpanAgg> = HashMap::new();
         for s in v.drain(..) {
-            let k = (s.status, s.label.clone());
+            let k = (s.status, s.label.clone(), s.description.clone());
             by_key
                 .entry(k)
                 .and_modify(|agg| {
@@ -1041,13 +1566,16 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
                 .or_insert(s);
         }
         v.extend(by_key.into_values());
-        v.sort_by(|a, b| a.order_idx.cmp(&b.order_idx));
+        v.sort_by(|a, b| match (validate_dbt_sort_rank(&a.label), validate_dbt_sort_rank(&b.label)) {
+            (Some(ra), Some(rb)) => ra.cmp(&rb).then_with(|| a.order_idx.cmp(&b.order_idx)),
+            _ => a.order_idx.cmp(&b.order_idx),
+        });
     }
     for v in span_buckets.values_mut() {
         // Consolidate duplicates (same status + label).
-        let mut by_key: HashMap<(SpanStatus, String), SpanAgg> = HashMap::new();
+        let mut by_key: HashMap<(SpanStatus, String, Option<String>), SpanAgg> = HashMap::new();
         for s in v.drain(..) {
-            let k = (s.status, s.label.clone());
+            let k = (s.status, s.label.clone(), s.description.clone());
             by_key
                 .entry(k)
                 .and_modify(|agg| {
@@ -1063,11 +1591,11 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
         }
         v.extend(by_key.into_values());
         // Keep the original occurrence ordering (stable, non-jumpy).
-        v.sort_by(|a, b| a.order_idx.cmp(&b.order_idx));
+        v.sort_by(|a, b| match (validate_dbt_sort_rank(&a.label), validate_dbt_sort_rank(&b.label)) {
+            (Some(ra), Some(rb)) => ra.cmp(&rb).then_with(|| a.order_idx.cmp(&b.order_idx)),
+            _ => a.order_idx.cmp(&b.order_idx),
+        });
     }
-
-    let mut rendered_cleanse = false;
-    let mut rendered_model = false;
 
     for ph in t.phases.iter() {
         let key = format!("phase:{ph}");
@@ -1087,15 +1615,23 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
         };
 
         let runtime = t.items.get(&key).and_then(|it| it.runtime_ms).map(fmt_ms);
-        if let Some(r) = runtime {
-            lines.push(format!(
-                "{g} {}  {}",
-                ph.as_str().white(),
-                r.dark_grey()
-            ));
+        let mut phase_line = if let Some(r) = runtime {
+            format!("{g} {}  {}", ph.as_str().white(), r.dark_grey())
         } else {
-            lines.push(format!("{g} {}", ph.as_str().white()));
+            format!("{g} {}", ph.as_str().white())
+        };
+
+        // Collapse completed phases into a single parent line with a compact detail summary.
+        if done.contains(ph) {
+            if let Some(detail) = phase_detail_summary(t, ph.as_str()) {
+                phase_line.push_str("  ");
+                phase_line.push_str(&detail.dark_grey().to_string());
+            }
+            lines.push(phase_line);
+            continue;
         }
+
+        lines.push(phase_line);
 
         // Under phase: show no-ctx spans for *that phase*, so tools don't relocate
         // to whatever phase happens to be active right now.
@@ -1103,57 +1639,81 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
             push_span_list(&mut lines, "  ", spans, spinner_idx);
         }
 
-        // Render compact plan trees under their anchor phases.
-        if anchor_cleanse.as_deref() == Some(ph.as_str()) && !rendered_cleanse {
+        // Plan summaries are sticky to their planning phases.
+        if anchor_cleanse.as_deref() == Some(ph.as_str()) {
             if let Some(ref p) = t.cleanse_plan {
-                render_plan_compact(
+                render_plan_summary_line(&mut lines, "cleanse", p);
+            }
+        }
+        if anchor_model.as_deref() == Some(ph.as_str()) {
+            if let Some(ref p) = t.model_plan {
+                render_plan_summary_line(&mut lines, "model", p);
+            }
+        }
+
+        // Workgroups render under their logical phases (author vs validate).
+        if ph == "cleanse_author" {
+            if let Some(ref p) = t.cleanse_plan {
+                render_plan_workgroups_compact(
                     &mut lines,
                     "cleanse",
                     p,
                     &span_buckets,
+                    &t.expanded_work_items,
                     t.focus_by_kind.get("cleanse"),
                     spinner_idx,
+                    &[
+                        api::PlanWorkGroupKind::AuthorSql,
+                        api::PlanWorkGroupKind::AuthorSchema,
+                    ],
                 );
-                rendered_cleanse = true;
             }
         }
-        if anchor_model.as_deref() == Some(ph.as_str()) && !rendered_model {
+        if ph == "cleanse_validate" {
+            if let Some(ref p) = t.cleanse_plan {
+                render_plan_workgroups_compact(
+                    &mut lines,
+                    "cleanse",
+                    p,
+                    &span_buckets,
+                    &t.expanded_work_items,
+                    t.focus_by_kind.get("cleanse"),
+                    spinner_idx,
+                    &[api::PlanWorkGroupKind::Validate],
+                );
+            }
+        }
+        if ph == "model_author" {
             if let Some(ref p) = t.model_plan {
-                render_plan_compact(
+                render_plan_workgroups_compact(
                     &mut lines,
                     "model",
                     p,
                     &span_buckets,
+                    &t.expanded_work_items,
                     t.focus_by_kind.get("model"),
                     spinner_idx,
+                    &[
+                        api::PlanWorkGroupKind::AuthorSql,
+                        api::PlanWorkGroupKind::AuthorSchema,
+                    ],
                 );
-                rendered_model = true;
             }
         }
-    }
-
-    // If we have a plan snapshot but didn't render it (anchor not present), append it.
-    if t.cleanse_plan.is_some() && !rendered_cleanse {
-        lines.push(String::new());
-        render_plan_compact(
-            &mut lines,
-            "cleanse",
-            t.cleanse_plan.as_ref().unwrap(),
-            &span_buckets,
-            t.focus_by_kind.get("cleanse"),
-            spinner_idx,
-        );
-    }
-    if t.model_plan.is_some() && !rendered_model {
-        lines.push(String::new());
-        render_plan_compact(
-            &mut lines,
-            "model",
-            t.model_plan.as_ref().unwrap(),
-            &span_buckets,
-            t.focus_by_kind.get("model"),
-            spinner_idx,
-        );
+        if ph == "model_validate" {
+            if let Some(ref p) = t.model_plan {
+                render_plan_workgroups_compact(
+                    &mut lines,
+                    "model",
+                    p,
+                    &span_buckets,
+                    &t.expanded_work_items,
+                    t.focus_by_kind.get("model"),
+                    spinner_idx,
+                    &[api::PlanWorkGroupKind::Validate],
+                );
+            }
+        }
     }
 
     lines
@@ -1206,6 +1766,7 @@ mod tests {
             vec![SpanAgg {
                 status: SpanStatus::Running,
                 label: "Read file".to_string(),
+                description: None,
                 count: 1,
                 max_dur: Duration::from_millis(1200),
                 order_idx: 0,
@@ -1225,6 +1786,166 @@ mod tests {
         assert!(joined.contains("t1"));
         assert!(joined.contains("SQL model"));
         assert!(joined.contains("Read file"));
+    }
+
+    #[test]
+    fn render_plan_workgroups_compact_keeps_checklist_line_sticky_after_focus_moves() {
+        let ci = api::PlanChecklistItem::new(
+            "sql_model".to_string(),
+            "Author staging SQL model".to_string(),
+            api::PlanChecklistItemStatus::InProgress,
+            api::PlanChecklistOrigin::Initial,
+        );
+        let task1 = api::CleanseTaskSnapshot::new(
+            "t1".to_string(),
+            "ds1".to_string(),
+            api::PlanTaskStatus::InProgress,
+            vec![ci.clone()],
+        );
+        let task2 = api::CleanseTaskSnapshot::new(
+            "t2".to_string(),
+            "ds2".to_string(),
+            api::PlanTaskStatus::InProgress,
+            vec![ci.clone()],
+        );
+        let wg = api::PlanWorkGroup::new(
+            "wg1".to_string(),
+            "Author SQL models for batch 1".to_string(),
+            api::PlanWorkGroupKind::AuthorSql,
+            vec![
+                api::PlanWorkGroupItemRef::new("t1".to_string(), "sql_model".to_string()),
+                api::PlanWorkGroupItemRef::new("t2".to_string(), "sql_model".to_string()),
+            ],
+        );
+        let plan = api::PlanSnapshot::new(
+            api::plan_snapshot::PlanKind::Cleanse,
+            "plan_k".to_string(),
+            api::PlanStatus::Approved,
+            vec![
+                api::PlanTask::Cleanse(task1),
+                api::PlanTask::Cleanse(task2),
+            ],
+            vec![wg],
+        );
+
+        // Focus moved to t2, but t1 is sticky-expanded.
+        let preferred = WorkItemKey {
+            plan_kind: Some("cleanse".to_string()),
+            plan_key: Some("plan_k".to_string()),
+            workgroup_id: Some("wg1".to_string()),
+            task_id: Some("t2".to_string()),
+            checklist_item_id: Some("sql_model".to_string()),
+        };
+        let mut expanded: std::collections::HashSet<WorkItemKey> = std::collections::HashSet::new();
+        expanded.insert(WorkItemKey {
+            plan_kind: Some("cleanse".to_string()),
+            plan_key: Some("plan_k".to_string()),
+            workgroup_id: Some("wg1".to_string()),
+            task_id: Some("t1".to_string()),
+            checklist_item_id: Some("sql_model".to_string()),
+        });
+
+        let span_buckets: HashMap<WorkItemKey, Vec<SpanAgg>> = HashMap::new();
+        let mut lines: Vec<String> = Vec::new();
+        render_plan_workgroups_compact(
+            &mut lines,
+            "cleanse",
+            &plan,
+            &span_buckets,
+            &expanded,
+            Some(&preferred),
+            0,
+            &[api::PlanWorkGroupKind::AuthorSql],
+        );
+        let joined = lines.join("\n");
+        // Checklist label line should still be present for t1 due to sticky expansion.
+        assert!(joined.contains("t1"));
+        assert!(joined.contains("Author staging SQL model"));
+    }
+
+    #[test]
+    fn render_plan_workgroups_compact_renders_spans_for_nonfocused_item_when_present() {
+        let ci = api::PlanChecklistItem::new(
+            "sql_model".to_string(),
+            "Author staging SQL model".to_string(),
+            api::PlanChecklistItemStatus::InProgress,
+            api::PlanChecklistOrigin::Initial,
+        );
+        let task1 = api::CleanseTaskSnapshot::new(
+            "t1".to_string(),
+            "ds1".to_string(),
+            api::PlanTaskStatus::InProgress,
+            vec![ci.clone()],
+        );
+        let task2 = api::CleanseTaskSnapshot::new(
+            "t2".to_string(),
+            "ds2".to_string(),
+            api::PlanTaskStatus::InProgress,
+            vec![ci.clone()],
+        );
+        let wg = api::PlanWorkGroup::new(
+            "wg1".to_string(),
+            "Author SQL models for batch 1".to_string(),
+            api::PlanWorkGroupKind::AuthorSql,
+            vec![
+                api::PlanWorkGroupItemRef::new("t1".to_string(), "sql_model".to_string()),
+                api::PlanWorkGroupItemRef::new("t2".to_string(), "sql_model".to_string()),
+            ],
+        );
+        let plan = api::PlanSnapshot::new(
+            api::plan_snapshot::PlanKind::Cleanse,
+            "plan_k".to_string(),
+            api::PlanStatus::Approved,
+            vec![
+                api::PlanTask::Cleanse(task1),
+                api::PlanTask::Cleanse(task2),
+            ],
+            vec![wg],
+        );
+
+        let preferred = WorkItemKey {
+            plan_kind: Some("cleanse".to_string()),
+            plan_key: Some("plan_k".to_string()),
+            workgroup_id: Some("wg1".to_string()),
+            task_id: Some("t2".to_string()),
+            checklist_item_id: Some("sql_model".to_string()),
+        };
+
+        let mut span_buckets: HashMap<WorkItemKey, Vec<SpanAgg>> = HashMap::new();
+        span_buckets.insert(
+            WorkItemKey {
+                plan_kind: Some("cleanse".to_string()),
+                plan_key: Some("plan_k".to_string()),
+                workgroup_id: Some("wg1".to_string()),
+                task_id: Some("t1".to_string()),
+                checklist_item_id: Some("sql_model".to_string()),
+            },
+            vec![SpanAgg {
+                status: SpanStatus::Ok,
+                label: "Apply Next Cleanse Batch".to_string(),
+                description: None,
+                count: 1,
+                max_dur: Duration::from_millis(1200),
+                order_idx: 0,
+            }],
+        );
+
+        let expanded: std::collections::HashSet<WorkItemKey> = std::collections::HashSet::new();
+        let mut lines: Vec<String> = Vec::new();
+        render_plan_workgroups_compact(
+            &mut lines,
+            "cleanse",
+            &plan,
+            &span_buckets,
+            &expanded,
+            Some(&preferred),
+            0,
+            &[api::PlanWorkGroupKind::AuthorSql],
+        );
+        let joined = lines.join("\n");
+        // Even though focus is on t2, spans for t1 should render.
+        assert!(joined.contains("t1"));
+        assert!(joined.contains("Apply Next Cleanse Batch"));
     }
 }
 

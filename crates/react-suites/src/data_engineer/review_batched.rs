@@ -1238,6 +1238,27 @@ pub async fn run_batched_review(
         return Err("batched review unify produced empty final_review_text".to_string());
     }
 
+    // Persist full review text to storage; keep thread steps small (store only a reference).
+    let (actionable, tier, dataset_ids) = parse_review_meta_line(&final_review_text);
+    let review_sha256 = react_core::llm_observability::sha256_hex_str(&final_review_text);
+    let review_bytes = final_review_text.as_bytes().len() as u64;
+    let review_key = {
+        // Store alongside other thread-scoped artifacts (plans/, dbt/, etc), not under dbt/.
+        let root = actx
+            .keyspace
+            .threads_prefix(&actx.scope)
+            .trim_end_matches("/threads")
+            .trim_end_matches('/')
+            .to_string();
+        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let sha8 = review_sha256.chars().take(8).collect::<String>();
+        format!("{}/reviews/{}/{}_{}.txt", root, thread_id, ts, sha8)
+    };
+    let _ = sctx
+        .storage
+        .put_bytes(&review_key, final_review_text.as_bytes(), "text/plain")
+        .await;
+
     append_review_step(
         &thread_store,
         thread_id,
@@ -1245,12 +1266,21 @@ pub async fn run_batched_review(
         "review",
         "review_final_unify",
         serde_json::json!({
-            "final_review_text": take_head_tail(&final_review_text, 20_000)
+            "review_ref": {
+                "key": review_key,
+                "sha256": review_sha256,
+                "bytes": review_bytes
+            },
+            "meta": {
+                "actionable": actionable,
+                "tier": tier,
+                "dataset_ids": dataset_ids
+            },
+            "review_phase": phase.as_str()
         }),
     )
     .await;
     if let (Some(pk), Some(plan_key)) = (plan_kind.as_deref(), plan_key.as_deref()) {
-        let (actionable, tier, dataset_ids) = parse_review_meta_line(&final_review_text);
         persist_review_final_to_plan(
             &actx,
             pk,
@@ -1414,6 +1444,21 @@ mod tests {
             .await
             .expect("ok");
         assert!(matches!(out[0], FlowFrame::Final { .. }));
+
+        // Thread log step should store review by reference (not the full text).
+        let thread_store = ThreadStore::new(storage.clone(), sctx.scope.clone(), sctx.keyspace.clone());
+        let log = thread_store.get("tid").await.expect("thread log");
+        let last = log.steps.last().cloned().expect("step");
+        match last {
+            react_core::session::ThreadStep::Phase { reason_detail, .. } => {
+                let d = reason_detail.expect("reason_detail");
+                assert!(d.get("review_ref").is_some());
+                assert!(d.get("review_ref").and_then(|v| v.get("key")).is_some());
+                assert!(d.get("meta").is_some());
+                assert!(d.get("final_review_text").is_none());
+            }
+            other => panic!("expected Phase step, got {other:?}"),
+        }
 
         let loaded = de_plan::load_cleanse_plan_by_key(&actx, &plan.plan_key)
             .await

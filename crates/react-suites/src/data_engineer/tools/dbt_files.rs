@@ -103,66 +103,358 @@ fn split_top_level_commas(s: &str) -> Vec<String> {
     out
 }
 
-fn extract_final_select_output_columns(sql: &str) -> Result<BTreeSet<String>, String> {
-    // Conservative heuristic: staging models written by this suite typically end with:
-    //   select
-    //     a,
-    //     expr as b
-    //   from ...
-    //
-    // We parse the final SELECT list and return a set of output column names.
-    let lower = sql.to_ascii_lowercase();
-    let mut last_select: Option<usize> = None;
-    let mut idx = 0usize;
-    while let Some(pos) = lower[idx..].find("select") {
-        last_select = Some(idx + pos);
-        idx = idx + pos + "select".len();
+pub(crate) fn extract_final_select_output_columns(sql: &str) -> Result<BTreeSet<String>, String> {
+    fn is_boundary(prev: Option<char>) -> bool {
+        match prev {
+            None => true,
+            Some(c) => !(c.is_ascii_alphanumeric() || c == '_'),
+        }
     }
-    let sel = last_select.ok_or_else(|| "unable to find SELECT in staging SQL".to_string())?;
-    let after_sel = sel + "select".len();
 
-    // Prefer a line-starting FROM to avoid matching 'from' inside expressions.
-    let from_pos = lower[after_sel..]
-        .find("\nfrom")
-        .or_else(|| lower[after_sel..].find("\r\nfrom"))
-        .ok_or_else(|| "unable to find FROM for final SELECT in staging SQL".to_string())?;
-    let list = &sql[after_sel..after_sel + from_pos];
-    let items = split_top_level_commas(list);
-    if items.is_empty() {
-        return Err("final SELECT list appears empty".to_string());
-    }
-    let mut out: BTreeSet<String> = BTreeSet::new();
-    for it in items {
-        let t = it.trim();
-        if t.is_empty() {
-            continue;
+    fn parse_quoted_token(s: &str) -> Option<(String, usize)> {
+        let bytes = s.as_bytes();
+        if bytes.is_empty() {
+            return None;
         }
-        if t == "*" || t.ends_with(".*") {
-            return Err(
-                "staging SQL uses '*' in final SELECT; cannot safely validate schema YAML (use an explicit select list)"
-                    .to_string(),
-            );
+        let q = bytes[0];
+        if q != b'"' && q != b'`' {
+            return None;
         }
-        let tl = t.to_ascii_lowercase();
-        if let Some(as_pos) = tl.rfind(" as ") {
-            let alias = strip_ident_quotes(&t[as_pos + 4..]);
-            let a = alias.trim();
-            if !a.is_empty() {
-                out.insert(a.to_string());
+        for i in 1..bytes.len() {
+            if bytes[i] == q && bytes[i.saturating_sub(1)] != b'\\' {
+                let t = &s[..=i];
+                return Some((t.to_string(), i + 1));
             }
-            continue;
         }
-        // Bare identifier or quoted identifier.
-        let ident = strip_ident_quotes(t);
-        let name = ident.split('.').last().unwrap_or("").trim().to_string();
-        if !name.is_empty() {
-            out.insert(name);
+        None
+    }
+
+    fn parse_simple_token(s: &str) -> Option<(String, usize)> {
+        let mut end = 0usize;
+        for (i, ch) in s.char_indices() {
+            if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.') {
+                break;
+            }
+            end = i + ch.len_utf8();
+        }
+        if end == 0 {
+            None
+        } else {
+            Some((s[..end].to_string(), end))
         }
     }
-    if out.is_empty() {
-        return Err("unable to extract any output columns from final SELECT".to_string());
+
+    fn parse_from_target_and_alias(from_rest: &str) -> Option<(String, Option<String>)> {
+        let mut s = from_rest.trim_start();
+        if s.is_empty() {
+            return None;
+        }
+        if s.starts_with('(') {
+            // FROM (subquery ...) is ambiguous; don't guess.
+            return None;
+        }
+        let (tok1, n1) = parse_quoted_token(s).or_else(|| parse_simple_token(s))?;
+        s = &s[n1..];
+        let target = strip_ident_quotes(tok1.trim());
+        if target.is_empty() {
+            return None;
+        }
+        // Optional alias.
+        let mut s2 = s.trim_start();
+        if s2.is_empty() {
+            return Some((target, None));
+        }
+        // Handle optional AS.
+        if s2.to_ascii_lowercase().starts_with("as ") {
+            s2 = s2[3..].trim_start();
+        }
+        let (tok2, _n2) = match parse_quoted_token(s2).or_else(|| parse_simple_token(s2)) {
+            Some(v) => v,
+            None => return Some((target, None)),
+        };
+        let alias = strip_ident_quotes(tok2.trim());
+        let al = alias.to_ascii_lowercase();
+        // Don't treat SQL keywords as aliases.
+        let is_keyword = matches!(
+            al.as_str(),
+            "where"
+                | "group"
+                | "order"
+                | "limit"
+                | "join"
+                | "inner"
+                | "left"
+                | "right"
+                | "full"
+                | "cross"
+                | "union"
+                | "on"
+        );
+        if alias.is_empty() || is_keyword {
+            Some((target, None))
+        } else {
+            Some((target, Some(alias)))
+        }
     }
-    Ok(out)
+
+    fn find_cte_body(sql: &str, cte_name: &str) -> Option<String> {
+        let lower = sql.to_ascii_lowercase();
+        let want = cte_name.to_ascii_lowercase();
+        if want.is_empty() {
+            return None;
+        }
+
+        let mut idx = 0usize;
+        while idx < lower.len() {
+            let Some(pos) = lower[idx..].find(&want) else { break };
+            let start = idx + pos;
+            let prev = lower[..start].chars().rev().next();
+            if !is_boundary(prev) {
+                idx = start + want.len();
+                continue;
+            }
+            let mut j = start + want.len();
+            // Skip whitespace.
+            while j < lower.len() && lower.as_bytes()[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if !lower[j..].starts_with("as") {
+                idx = start + want.len();
+                continue;
+            }
+            j += 2;
+            while j < lower.len() && lower.as_bytes()[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j >= lower.len() || lower.as_bytes()[j] != b'(' {
+                idx = start + want.len();
+                continue;
+            }
+            let open = j;
+
+            // Find matching ')', respecting nested parens and quoted strings.
+            let mut depth: i32 = 0;
+            let mut in_sq = false;
+            let mut in_dq = false;
+            let mut prev_ch = '\0';
+            for (off, ch) in sql[open..].char_indices() {
+                if in_sq {
+                    if ch == '\'' && prev_ch != '\\' {
+                        in_sq = false;
+                    }
+                    prev_ch = ch;
+                    continue;
+                }
+                if in_dq {
+                    if ch == '"' && prev_ch != '\\' {
+                        in_dq = false;
+                    }
+                    prev_ch = ch;
+                    continue;
+                }
+                match ch {
+                    '\'' => in_sq = true,
+                    '"' => in_dq = true,
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let close = open + off;
+                            if close > open + 1 {
+                                return Some(sql[open + 1..close].to_string());
+                            } else {
+                                return Some(String::new());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                prev_ch = ch;
+            }
+            return None;
+        }
+        None
+    }
+
+    fn inner(sql: &str, depth: usize) -> Result<BTreeSet<String>, String> {
+        if depth > 3 {
+            return Err("unable to resolve final SELECT '*' chain (too deep)".to_string());
+        }
+
+        // Conservative heuristic: staging models written by this suite typically end with:
+        //   select
+        //     a,
+        //     expr as b
+        //   from ...
+        //
+        // We parse the final SELECT list and return a set of output column names.
+        let lower = sql.to_ascii_lowercase();
+        let mut last_select: Option<usize> = None;
+        let mut idx = 0usize;
+        while let Some(pos) = lower[idx..].find("select") {
+            last_select = Some(idx + pos);
+            idx = idx + pos + "select".len();
+        }
+        let sel = last_select.ok_or_else(|| "unable to find SELECT in staging SQL".to_string())?;
+        let after_sel = sel + "select".len();
+
+        // Prefer a line-starting FROM (allowing indentation) to avoid matching 'from' inside expressions.
+        let mut from_kw_start: Option<usize> = None;
+        let mut from_list_end: Option<usize> = None; // exclusive index into sql
+        let bytes = lower.as_bytes();
+        let mut i = after_sel;
+        while i < bytes.len() {
+            if bytes[i] == b'\n' {
+                let mut j = i + 1;
+                // Skip indentation.
+                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\r') {
+                    j += 1;
+                }
+                if j + 4 <= bytes.len() && &lower[j..j + 4] == "from" {
+                    from_kw_start = Some(j);
+                    // list ends at the newline (or preceding \r).
+                    let mut end = i;
+                    if end > after_sel && bytes[end.saturating_sub(1)] == b'\r' {
+                        end = end.saturating_sub(1);
+                    }
+                    from_list_end = Some(end);
+                    break;
+                }
+            }
+            i += 1;
+        }
+        let from_kw_start =
+            from_kw_start.ok_or_else(|| "unable to find FROM for final SELECT in staging SQL".to_string())?;
+        let from_list_end =
+            from_list_end.ok_or_else(|| "unable to find FROM for final SELECT in staging SQL".to_string())?;
+        let list = &sql[after_sel..from_list_end];
+        let items = split_top_level_commas(list);
+        if items.is_empty() {
+            return Err("final SELECT list appears empty".to_string());
+        }
+
+        // If the final SELECT is a wildcard, attempt to infer allowed columns from the referenced CTE.
+        // We only allow safe patterns: `select * from <cte>` or `select <alias>.* from <cte> <alias>`.
+        let trimmed_items: Vec<String> = items.iter().map(|s| s.trim().to_string()).collect();
+        let wildcard_item = if trimmed_items.len() == 1 {
+            let one = trimmed_items[0].trim();
+            if one == "*" || one.ends_with(".*") {
+                Some(one.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(wc) = wildcard_item {
+            let from_kw_end = from_kw_start + "from".len();
+            let from_rest = &sql[from_kw_end..];
+            let (target, alias) = parse_from_target_and_alias(from_rest).ok_or_else(|| {
+                "staging SQL uses '*' in final SELECT; cannot safely validate schema YAML (use an explicit select list)"
+                    .to_string()
+            })?;
+            // Only infer for CTE-like single identifiers (no dotted paths).
+            if target.contains('.') {
+                return Err(
+                    "staging SQL uses '*' in final SELECT; cannot safely validate schema YAML (use an explicit select list)"
+                        .to_string(),
+                );
+            }
+            if wc != "*" {
+                // Expect <prefix>.* and ensure prefix matches FROM alias (or target when no alias).
+                let prefix = wc.trim_end_matches(".*").trim();
+                let prefix = strip_ident_quotes(prefix);
+                let ok_prefix = if let Some(a) = alias.as_ref() {
+                    prefix == *a
+                } else {
+                    prefix == target
+                };
+                if !ok_prefix {
+                    return Err(
+                        "staging SQL uses '*' in final SELECT; cannot safely validate schema YAML (use an explicit select list)"
+                            .to_string(),
+                    );
+                }
+            }
+            let body = find_cte_body(sql, &target).ok_or_else(|| {
+                "staging SQL uses '*' in final SELECT; cannot safely validate schema YAML (use an explicit select list)"
+                    .to_string()
+            })?;
+            // Recurse into the CTE body and extract its final explicit projection.
+            return inner(&body, depth + 1);
+        }
+
+        let mut out: BTreeSet<String> = BTreeSet::new();
+
+        fn strip_sql_line_comments_outside_quotes(s: &str) -> String {
+            // Remove `-- ...` line comments (outside quotes/backticks) so comment text can't be
+            // misinterpreted as a column identifier.
+            let mut out_lines: Vec<String> = Vec::new();
+            for line in s.lines() {
+                let mut in_sq = false;
+                let mut in_dq = false;
+                let mut in_bt = false;
+                let mut prev = '\0';
+                let mut kept = String::new();
+                let mut chars = line.chars().peekable();
+                while let Some(ch) = chars.next() {
+                    match ch {
+                        '\'' if !in_dq && !in_bt && prev != '\\' => in_sq = !in_sq,
+                        '"' if !in_sq && !in_bt && prev != '\\' => in_dq = !in_dq,
+                        '`' if !in_sq && !in_dq => in_bt = !in_bt,
+                        '-' if !in_sq && !in_dq && !in_bt => {
+                            if let Some('-') = chars.peek().copied() {
+                                break; // comment start
+                            }
+                            kept.push(ch);
+                        }
+                        _ => kept.push(ch),
+                    }
+                    prev = ch;
+                }
+                let t = kept.trim();
+                if !t.is_empty() {
+                    out_lines.push(t.to_string());
+                }
+            }
+            out_lines.join(" ")
+        }
+
+        for it in items {
+            let t = strip_sql_line_comments_outside_quotes(it.trim());
+            let t = t.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if t == "*" || t.ends_with(".*") {
+                return Err(
+                    "staging SQL uses '*' in final SELECT; cannot safely validate schema YAML (use an explicit select list)"
+                        .to_string(),
+                );
+            }
+            let tl = t.to_ascii_lowercase();
+            if let Some(as_pos) = tl.rfind(" as ") {
+                let alias = strip_ident_quotes(&t[as_pos + 4..]);
+                let a = alias.trim();
+                if !a.is_empty() {
+                    out.insert(a.to_string());
+                }
+                continue;
+            }
+            // Bare identifier or quoted identifier.
+            let ident = strip_ident_quotes(t);
+            let name = ident.split('.').last().unwrap_or("").trim().to_string();
+            if !name.is_empty() {
+                out.insert(name);
+            }
+        }
+        if out.is_empty() {
+            return Err("unable to extract any output columns from final SELECT".to_string());
+        }
+        Ok(out)
+    }
+
+    inner(sql, 0)
 }
 
 fn extract_idents_ending_with_raw(s: &str) -> Vec<String> {
@@ -265,7 +557,41 @@ fn yaml_collect_where_strings(v: &serde_yaml::Value, out: &mut Vec<String>) {
     }
 }
 
-async fn validate_staging_schema_ymls(
+fn disable_contract_enforcement_in_schema_yml_text(yml_text: &str) -> Result<String, String> {
+    let mut root: serde_yaml::Value =
+        serde_yaml::from_str(yml_text).map_err(|e| format!("invalid YAML: {}", e.to_string()))?;
+    let Some(models) = root
+        .as_mapping_mut()
+        .and_then(|m| m.get_mut(serde_yaml::Value::String("models".to_string())))
+        .and_then(|v| v.as_sequence_mut())
+    else {
+        // Nothing to do.
+        return Ok(yml_text.to_string());
+    };
+
+    for m in models.iter_mut() {
+        let Some(mm) = m.as_mapping_mut() else { continue };
+        let cfg = mm
+            .entry(serde_yaml::Value::String("config".to_string()))
+            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        let Some(cfgm) = cfg.as_mapping_mut() else { continue };
+        let contract = cfgm
+            .entry(serde_yaml::Value::String("contract".to_string()))
+            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        let Some(cm) = contract.as_mapping_mut() else { continue };
+        // Force it off (if present), but keep the structure stable for users who expect it.
+        cm.insert(
+            serde_yaml::Value::String("enforced".to_string()),
+            serde_yaml::Value::Bool(false),
+        );
+    }
+
+    serde_yaml::to_string(&root)
+        .map_err(|e| format!("failed to re-serialize YAML: {}", e.to_string()))
+        .map(|s| s.trim_start_matches("---\n").to_string())
+}
+
+pub(crate) async fn validate_staging_schema_ymls(
     ctx: &AgentCtx,
     outcomes: &[project_fs::PatchOutcome],
 ) -> Result<(), String> {
@@ -320,6 +646,99 @@ async fn validate_staging_schema_ymls(
             continue;
         }
 
+        fn yaml_model_contract_enforced(model: &serde_yaml::Mapping) -> bool {
+            // Expected dbt schema.yml shape:
+            // models:
+            //   - name: ...
+            //     config:
+            //       contract:
+            //         enforced: true
+            let cfg = model
+                .get(serde_yaml::Value::String("config".to_string()))
+                .and_then(|v| v.as_mapping());
+            let enforced = cfg
+                .and_then(|m| m.get(serde_yaml::Value::String("contract".to_string())))
+                .and_then(|v| v.as_mapping())
+                .and_then(|m| m.get(serde_yaml::Value::String("enforced".to_string())));
+            enforced.and_then(|v| v.as_bool()).unwrap_or(false)
+        }
+
+        fn yaml_collect_column_name_and_type(
+            model: &serde_yaml::Mapping,
+        ) -> Vec<(String, Option<String>)> {
+            let mut out: Vec<(String, Option<String>)> = Vec::new();
+            let Some(cols) = model
+                .get(serde_yaml::Value::String("columns".to_string()))
+                .and_then(|v| v.as_sequence())
+            else {
+                return out;
+            };
+            for c in cols.iter() {
+                let Some(cm) = c.as_mapping() else { continue };
+                let name = cm
+                    .get(serde_yaml::Value::String("name".to_string()))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                let dt = cm
+                    .get(serde_yaml::Value::String("data_type".to_string()))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                out.push((name, dt));
+            }
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        }
+
+        // Contract enforcement is disabled by suite policy.
+        // We still validate that schema YAML references only columns produced by sibling SQL
+        // (prevents obvious COLUMN_NOT_FOUND and reduces drift), but we do not require full
+        // contract completeness or data_type coverage.
+        let contract_enforced_any = false;
+        let mut missing_cols: BTreeSet<String> = BTreeSet::new();
+        let mut missing_data_type: BTreeSet<String> = BTreeSet::new();
+        if contract_enforced_any {
+            // Consolidate across all declarations for this model name in the file (best-effort).
+            let mut declared: HashMap<String, Option<String>> = HashMap::new();
+            let mut duplicates: BTreeSet<String> = BTreeSet::new();
+            for mm in models.iter() {
+                for (name, dt) in yaml_collect_column_name_and_type(mm).into_iter() {
+                    if declared.contains_key(&name) {
+                        duplicates.insert(name.clone());
+                    }
+                    declared.insert(name, dt);
+                }
+            }
+            if !duplicates.is_empty() {
+                let mut msg = format!(
+                    "schema contract has duplicate column entries for staging model '{}'.\nFile: {}\n",
+                    model_name, rel
+                );
+                msg.push_str(&format!(
+                    "\nDuplicate columns under models[].columns[]:\n- {}\n",
+                    duplicates.into_iter().collect::<Vec<_>>().join("\n- ")
+                ));
+                msg.push_str("\nFix: de-duplicate YAML columns so each output column appears once.\n");
+                return Err(msg);
+            }
+
+            for c in allowed_cols.iter() {
+                if !declared.contains_key(c) {
+                    missing_cols.insert(c.clone());
+                }
+            }
+            for (name, dt) in declared.iter() {
+                if allowed_cols.contains(name) && dt.is_none() {
+                    missing_data_type.insert(name.clone());
+                }
+            }
+        }
+
         // (1) Validate declared columns exist in the sibling SQL output.
         let mut unknown_cols: BTreeSet<String> = BTreeSet::new();
         for mm in models.iter() {
@@ -368,6 +787,34 @@ Sibling SQL (defines allowed output columns): {}\n",
             msg.push_str("\nFix: either (a) update the staging SQL to actually output these columns, or (b) remove/rename the YAML references to match the staging model output. Do NOT invent new column names.\n");
             return Err(msg);
         }
+
+        if contract_enforced_any && (!missing_cols.is_empty() || !missing_data_type.is_empty()) {
+            let mut msg = format!(
+                "schema contract is incomplete for contracted staging model '{}'.\n\
+File: {}\n\
+Sibling SQL (defines required output columns): {}\n",
+                model_name, rel, sql_rel
+            );
+            if !missing_cols.is_empty() {
+                msg.push_str(&format!(
+                    "\nMissing required columns (must declare every output column when contract is enforced):\n- {}\n",
+                    missing_cols.into_iter().collect::<Vec<_>>().join("\n- ")
+                ));
+            }
+            if !missing_data_type.is_empty() {
+                msg.push_str(&format!(
+                    "\nMissing data_type for columns (required when contract is enforced):\n- {}\n",
+                    missing_data_type
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join("\n- ")
+                ));
+            }
+            msg.push_str(
+                "\nFix: declare every output column under models[].columns and set data_type for each column.\n",
+            );
+            return Err(msg);
+        }
     }
     Ok(())
 }
@@ -381,10 +828,10 @@ fn parse_one_or_many<T: DeserializeOwned>(args: &Value, key: &str) -> Result<Vec
     }
     if v.is_array() {
         serde_json::from_value::<Vec<T>>(v.clone())
-            .map_err(|e| format!("{} parse error: {}", key, e))
+            .map_err(|e| patch_contract_error(&format!("{} parse error: {}", key, e)))
     } else {
         let one = serde_json::from_value::<T>(v.clone())
-            .map_err(|e| format!("{} parse error: {}", key, e))?;
+            .map_err(|e| patch_contract_error(&format!("{} parse error: {}", key, e)))?;
         Ok(vec![one])
     }
 }
@@ -394,37 +841,46 @@ fn patch_contract_error(msg: &str) -> String {
         "dbt_files op=patch contract violation: {}\n\n\
 Allowed shape:\n\
 - args.op = \"patch\"\n\
-- preview_diff?: bool (TOP LEVEL ONLY)\n\
 - Provide EXACTLY ONE of:\n\
   - replace_file: {{path,new_text,expected_sha256?}} or array\n\
   - replace_range: {{path,start_line,end_line,new_text,expected_sha256?}} or array\n\
-  - replace_list: {{path,edits:[{{start_line,end_line,new_text}}],expected_sha256?}} or array\n\
+  - replace_list: {{path,edits:[{{start_line,end_line,new_text}}...],expected_sha256?}} or array\n\
 \n\
 Common errors:\n\
-- preview_diff must NOT be nested under replace_* objects\n\
+- preview_diff is no longer supported (remove it entirely)\n\
 - replace_file must be an object/array (not a string)\n\
-- path and new_text are required\n",
+- path and new_text are required\n\
+- expected_sha256 is optional. If provided, it must match the current file sha256.\n\
+\n\
+Examples:\n\
+- replace_file:\n\
+  {{\"action\":\"dbt_files\",\"args\":{{\"op\":\"patch\",\"replace_file\":{{\"path\":\"models/schema.yml\",\"new_text\":\"version: 2\\n...\"}}}}}}\n\
+- replace_range:\n\
+  {{\"action\":\"dbt_files\",\"args\":{{\"op\":\"patch\",\"replace_range\":{{\"path\":\"models/schema.yml\",\"start_line\":1,\"end_line\":3,\"new_text\":\"...\"}}}}}}\n\
+- replace_list:\n\
+  {{\"action\":\"dbt_files\",\"args\":{{\"op\":\"patch\",\"replace_list\":{{\"path\":\"models/schema.yml\",\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}]}}}}}}\n\
+",
         msg
     )
 }
 
 fn validate_patch_args_shape(args: &Value) -> Result<(), String> {
-    // Enforce top-level preview_diff only (never nested).
+    fn contains_key_recursive(v: &Value, key: &str) -> bool {
+        match v {
+            Value::Object(m) => m.contains_key(key) || m.values().any(|vv| contains_key_recursive(vv, key)),
+            Value::Array(a) => a.iter().any(|vv| contains_key_recursive(vv, key)),
+            _ => false,
+        }
+    }
+
+    if contains_key_recursive(args, "preview_diff") {
+        return Err(patch_contract_error(
+            "preview_diff is no longer supported; remove it from the request",
+        ));
+    }
+
+    // Keep explicit shape errors for common LLM mistakes.
     if let Some(v) = args.get("replace_file") {
-        if let Some(obj) = v.as_object() {
-            if obj.contains_key("preview_diff") {
-                return Err(patch_contract_error("replace_file.preview_diff is not allowed (preview_diff must be top-level args.preview_diff)"));
-            }
-        }
-        if let Some(arr) = v.as_array() {
-            for (i, it) in arr.iter().enumerate() {
-                if let Some(obj) = it.as_object() {
-                    if obj.contains_key("preview_diff") {
-                        return Err(patch_contract_error(&format!("replace_file[{}].preview_diff is not allowed (preview_diff must be top-level args.preview_diff)", i)));
-                    }
-                }
-            }
-        }
         if v.is_string() {
             return Err(patch_contract_error(
                 "replace_file must be an object or array (got string)",
@@ -432,20 +888,6 @@ fn validate_patch_args_shape(args: &Value) -> Result<(), String> {
         }
     }
     if let Some(v) = args.get("replace_range") {
-        if let Some(obj) = v.as_object() {
-            if obj.contains_key("preview_diff") {
-                return Err(patch_contract_error("replace_range.preview_diff is not allowed (preview_diff must be top-level args.preview_diff)"));
-            }
-        }
-        if let Some(arr) = v.as_array() {
-            for (i, it) in arr.iter().enumerate() {
-                if let Some(obj) = it.as_object() {
-                    if obj.contains_key("preview_diff") {
-                        return Err(patch_contract_error(&format!("replace_range[{}].preview_diff is not allowed (preview_diff must be top-level args.preview_diff)", i)));
-                    }
-                }
-            }
-        }
         if v.is_string() {
             return Err(patch_contract_error(
                 "replace_range must be an object or array (got string)",
@@ -453,20 +895,6 @@ fn validate_patch_args_shape(args: &Value) -> Result<(), String> {
         }
     }
     if let Some(v) = args.get("replace_list") {
-        if let Some(obj) = v.as_object() {
-            if obj.contains_key("preview_diff") {
-                return Err(patch_contract_error("replace_list.preview_diff is not allowed (preview_diff must be top-level args.preview_diff)"));
-            }
-        }
-        if let Some(arr) = v.as_array() {
-            for (i, it) in arr.iter().enumerate() {
-                if let Some(obj) = it.as_object() {
-                    if obj.contains_key("preview_diff") {
-                        return Err(patch_contract_error(&format!("replace_list[{}].preview_diff is not allowed (preview_diff must be top-level args.preview_diff)", i)));
-                    }
-                }
-            }
-        }
         if v.is_string() {
             return Err(patch_contract_error(
                 "replace_list must be an object or array (got string)",
@@ -565,10 +993,6 @@ impl Tool for DbtFilesTool {
                 project_fs::manifest_find(ctx, path, unique_id, name, resource_type, limit).await
             }
             "patch" => {
-                let preview = args
-                    .get("preview_diff")
-                    .and_then(|x| x.as_bool())
-                    .unwrap_or(false);
                 validate_patch_args_shape(&args)?;
 
                 // Optional single-file guard: if provided, ensure the patch bundle targets exactly this rel path.
@@ -625,22 +1049,28 @@ impl Tool for DbtFilesTool {
                             .await
                             .ok()
                             .map(|b| String::from_utf8_lossy(&b).to_string());
+                        let existed = existing_opt.is_some();
                         let old = existing_opt.unwrap_or_default();
                         let base_sha256 = sha256_hex(&old);
                         if let Some(expected) = rf.expected_sha256.as_deref() {
                             if expected != base_sha256 {
                                 return Err(format!(
-                                    "expected_sha256 mismatch for {}: expected {}, got {}",
+                                    "expected_sha256 mismatch for {}: expected {}, current {}",
                                     rel, expected, base_sha256
                                 ));
                             }
+                        }
+                        let mut new_text = rf.new_text;
+                        if rel.starts_with("models/staging/") && rel.ends_with(".yml") {
+                            new_text = disable_contract_enforcement_in_schema_yml_text(&new_text)?;
                         }
                         let out = project_fs::apply_patch(
                             ctx,
                             self.datasets.as_ref(),
                             &rel,
-                            &rf.new_text,
-                            Some(base_sha256.as_str()),
+                            &new_text,
+                            if existed { Some(base_sha256.as_str()) } else { None },
+                            Some(existed),
                             project_fs::PatchApplyKind::FullOverwrite,
                         )
                         .await?;
@@ -663,23 +1093,27 @@ impl Tool for DbtFilesTool {
                         if let Some(expected) = rr.expected_sha256.as_deref() {
                             if expected != base_sha256 {
                                 return Err(format!(
-                                    "expected_sha256 mismatch for {}: expected {}, got {}",
+                                    "expected_sha256 mismatch for {}: expected {}, current {}",
                                     rel, expected, base_sha256
                                 ));
                             }
                         }
-                        let new_text = project_fs::apply_replace_range(
+                        let mut new_text = project_fs::apply_replace_range(
                             &existing,
                             rr.start_line,
                             rr.end_line,
                             &rr.new_text,
                         )?;
+                        if rel.starts_with("models/staging/") && rel.ends_with(".yml") {
+                            new_text = disable_contract_enforcement_in_schema_yml_text(&new_text)?;
+                        }
                         let out = project_fs::apply_patch(
                             ctx,
                             self.datasets.as_ref(),
                             &rel,
                             &new_text,
                             Some(base_sha256.as_str()),
+                            Some(true),
                             project_fs::PatchApplyKind::FullOverwrite,
                         )
                         .await?;
@@ -702,7 +1136,7 @@ impl Tool for DbtFilesTool {
                         if let Some(expected) = rl.expected_sha256.as_deref() {
                             if expected != base_sha256 {
                                 return Err(format!(
-                                    "expected_sha256 mismatch for {}: expected {}, got {}",
+                                    "expected_sha256 mismatch for {}: expected {}, current {}",
                                     rel, expected, base_sha256
                                 ));
                             }
@@ -716,13 +1150,17 @@ impl Tool for DbtFilesTool {
                                 new_text: e.new_text,
                             })
                             .collect();
-                        let new_text = project_fs::apply_replace_list(&existing, &edits)?;
+                        let mut new_text = project_fs::apply_replace_list(&existing, &edits)?;
+                        if rel.starts_with("models/staging/") && rel.ends_with(".yml") {
+                            new_text = disable_contract_enforcement_in_schema_yml_text(&new_text)?;
+                        }
                         let out = project_fs::apply_patch(
                             ctx,
                             self.datasets.as_ref(),
                             &rel,
                             &new_text,
                             Some(base_sha256.as_str()),
+                            Some(true),
                             project_fs::PatchApplyKind::FullOverwrite,
                         )
                         .await?;
@@ -732,6 +1170,12 @@ impl Tool for DbtFilesTool {
                     return Err("invalid patch request".to_string());
                 }
                 if outcomes.is_empty() {
+                    return Err("patch produced no file changes".to_string());
+                }
+                let any_mutation = outcomes.iter().any(|o| {
+                    o.base_sha256 != o.new_sha256 || (o.lines_added + o.lines_removed) > 0
+                });
+                if !any_mutation {
                     return Err("patch produced no file changes".to_string());
                 }
 
@@ -764,12 +1208,10 @@ impl Tool for DbtFilesTool {
                 for outcome in outcomes.into_iter() {
                     let mutated = outcome.base_sha256 != outcome.new_sha256;
                     mutated_any = mutated_any || mutated;
-                    if !preview {
-                        ctx.storage
-                            .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/plain")
-                            .await?;
-                        written_keys.push(outcome.key.clone());
-                    }
+                    ctx.storage
+                        .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/plain")
+                        .await?;
+                    written_keys.push(outcome.key.clone());
                     results.push(serde_json::json!({
                         "path": outcome.rel_path,
                         "key": outcome.key,
@@ -786,7 +1228,6 @@ impl Tool for DbtFilesTool {
 
                 Ok(serde_json::json!({
                     "ok": true,
-                    "preview": preview,
                     "mutated": mutated_any,
                     "applied_patch_text": applied_patch_text,
                     "written_keys": written_keys,
@@ -968,7 +1409,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dbt_files_patch_rejects_nested_preview_diff_under_replace_file() {
+    async fn dbt_files_patch_rejects_preview_diff_anywhere() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage);
         let tool = DbtFilesTool { datasets: None };
@@ -988,8 +1429,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_lowercase().contains("contract violation"));
-        assert!(err.contains("replace_file.preview_diff"));
-        assert!(err.to_lowercase().contains("top-level"));
+        assert!(err.to_lowercase().contains("preview_diff"));
+        assert!(err.to_lowercase().contains("no longer supported"));
     }
 
     #[tokio::test]
@@ -1088,5 +1529,96 @@ mod tests {
             .expect("yml patch ok");
 
         assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn extract_final_select_output_columns_infers_from_cte_when_final_select_star() {
+        let sql = r#"
+with source as (
+  select
+    a as a_raw,
+    b as b_raw
+  from some_table
+),
+cleaned as (
+  select
+    a_raw,
+    b_raw,
+    try_cast(nullif(trim(b_raw), '') as double) as b_num
+  from source
+)
+select *
+from cleaned
+"#;
+        let cols = extract_final_select_output_columns(sql).expect("should infer from cleaned CTE");
+        let got = cols.into_iter().collect::<Vec<_>>();
+        assert_eq!(got, vec!["a_raw", "b_num", "b_raw"]);
+    }
+
+    #[test]
+    fn extract_final_select_output_columns_infers_from_cte_when_final_select_alias_star() {
+        let sql = r#"
+with cleaned as (
+  select
+    x as x_raw,
+    y as y_raw,
+    x + y as z
+  from t
+)
+select c.*
+from cleaned as c
+"#;
+        let cols =
+            extract_final_select_output_columns(sql).expect("should infer from cleaned CTE via alias.*");
+        let got = cols.into_iter().collect::<Vec<_>>();
+        assert_eq!(got, vec!["x_raw", "y_raw", "z"]);
+    }
+
+    #[test]
+    fn extract_final_select_output_columns_still_errors_on_mixed_star_and_explicit() {
+        let sql = r#"
+with cleaned as (
+  select
+    x as x_raw,
+    y as y_raw
+  from t
+)
+select
+  *,
+  x_raw
+from cleaned
+"#;
+        let err = extract_final_select_output_columns(sql).unwrap_err();
+        assert!(err.to_ascii_lowercase().contains("uses '*'"));
+    }
+
+    #[test]
+    fn extract_final_select_output_columns_still_errors_on_non_cte_star_from_dotted_target() {
+        let sql = r#"
+select *
+from schema.table
+"#;
+        let err = extract_final_select_output_columns(sql).unwrap_err();
+        assert!(err.to_ascii_lowercase().contains("uses '*'"));
+    }
+
+    #[test]
+    fn extract_final_select_output_columns_ignores_line_comments_in_select_list() {
+        let sql = r#"
+with t as (
+  select
+    'a' as customer_id,
+    'x@example.com' as email_raw
+)
+select
+  customer_id,
+  -- Email hygiene: trimmed
+  email_raw,
+  lower(email_raw) as email
+from t
+"#;
+        let cols = extract_final_select_output_columns(sql).expect("should parse select list");
+        let got = cols.into_iter().collect::<Vec<_>>();
+        assert_eq!(got, vec!["customer_id", "email", "email_raw"]);
     }
 }

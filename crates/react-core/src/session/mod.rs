@@ -1147,6 +1147,38 @@ fn apply_step_to_state(
                 },
             );
         }
+        ThreadStep::Final { ts, observation, .. } => {
+            // A `final` marks the end of a run. Close out the currently-running phase so
+            // UIs can mark the terminal phase (often `done`) as completed.
+            let Some(ph) = st
+                .current_phase
+                .clone()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            else {
+                return;
+            };
+
+            let key = format!("phase:{}", ph);
+            let ent = st.items.entry(key).or_insert_with(|| ThreadItemState {
+                kind: "phase".to_string(),
+                status: "running".to_string(),
+                started_at: Some(ts.clone()),
+                finished_at: None,
+                runtime_ms: None,
+                last_error: None,
+                outputs: None,
+            });
+            ent.kind = "phase".to_string();
+            ent.status = if observation.ok { "ok" } else { "failed" }.to_string();
+            ent.finished_at = Some(ts.clone());
+            if ent.runtime_ms.is_none() {
+                if let (Some(ref started), Some(ref finished)) = (&ent.started_at, &ent.finished_at)
+                {
+                    ent.runtime_ms = duration_ms(started, finished);
+                }
+            }
+        }
         ThreadStep::AskUser { prompt, ts, .. } => {
             block_current_phase(st, prompt, ts);
         }
@@ -1525,6 +1557,63 @@ mod tests {
         let tool_item = st.items.get("tool:t1").expect("tool:t1 present");
         assert_eq!(tool_item.status, "failed");
         assert!(tool_item.last_error.as_ref().map(|e| e.summary.as_str()) == Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn final_closes_out_current_phase_as_completed() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let store = ThreadStore::new(storage, scope, keyspace);
+
+        let tid = "tid2";
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-01-26T00:00:00Z")
+            .unwrap()
+            .to_rfc3339();
+        let t1 = chrono::DateTime::parse_from_rfc3339("2026-01-26T00:00:01Z")
+            .unwrap()
+            .to_rfc3339();
+
+        store
+            .append_step(
+                tid,
+                ThreadStep::Phase {
+                    phase: "done".to_string(),
+                    from_phase: None,
+                    reason_code: None,
+                    reason_detail: None,
+                    observation: Observation::ok(),
+                    ts: t0.clone(),
+                    agent: "agent".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .append_step(
+                tid,
+                ThreadStep::Final {
+                    kind: "generic".to_string(),
+                    payload: serde_json::json!({"text":"ok"}),
+                    display: Some("ok".to_string()),
+                    observation: Observation::ok(),
+                    ts: t1.clone(),
+                    agent: "agent".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let st = store.get_thread_state(tid).await.unwrap();
+        assert_eq!(st.current_phase.as_deref(), Some("done"));
+        let ph = st.items.get("phase:done").expect("phase:done present");
+        assert_eq!(ph.status, "ok");
+        assert_eq!(ph.finished_at.as_deref(), Some(t1.as_str()));
     }
 
     #[tokio::test]

@@ -783,8 +783,71 @@ impl Agent {
 
             // Ask model for next action.
             let prompt = transcript.join("\n");
-            let raw = Self::llm_chat_once(ctx, prompt).await?;
-            let action = Self::coerce_args_only_action(Self::parse_action(&raw)?);
+            let mut raw = Self::llm_chat_once(ctx, prompt).await?;
+            let mut action = match Self::parse_action(&raw) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Defense in depth: if the model output is invalid/truncated JSON, retry with a
+                    // minimal prompt so we don't amplify prompt bloat.
+                    if !e.starts_with("invalid JSON from model:") {
+                        return Err(e);
+                    }
+
+                    let resp_hash = crate::llm_observability::sha256_hex_str(&raw);
+                    Self::transcript_add(
+                        &mut transcript,
+                        format!(
+                            "Observation: {}",
+                            serde_json::json!({
+                                "ok": false,
+                                "error": "invalid_json_from_model",
+                                "response_hash": resp_hash,
+                                "bytes": raw.as_bytes().len(),
+                            })
+                        ),
+                        &ctx.trace_tx,
+                    );
+
+                    // Retry 1: keep only System/Tools/initial User + last few observations, plus a strict instruction.
+                    let mut keep: Vec<String> = Vec::new();
+                    if let Some(l) = transcript.iter().find(|l| l.starts_with("System:")) {
+                        keep.push(l.clone());
+                    }
+                    if let Some(l) = transcript.iter().find(|l| l.starts_with("Tools:")) {
+                        keep.push(l.clone());
+                    }
+                    if let Some(l) = transcript.iter().find(|l| l.starts_with("User:")) {
+                        keep.push(l.clone());
+                    }
+                    // Keep a small tail of the transcript for local context.
+                    let tail_n = 12usize.min(transcript.len());
+                    keep.extend(transcript.iter().skip(transcript.len().saturating_sub(tail_n)).cloned());
+                    keep.push("User: IMPORTANT: Return ONLY a single JSON object (no markdown, no code fences).".to_string());
+                    let retry_prompt = keep.join("\n");
+                    raw = Self::llm_chat_once(ctx, retry_prompt).await?;
+                    match Self::parse_action(&raw) {
+                        Ok(v) => v,
+                        Err(e2) => {
+                            if !e2.starts_with("invalid JSON from model:") {
+                                return Err(e2);
+                            }
+                            // Retry 2: ultra-minimal.
+                            let mut keep2: Vec<String> = Vec::new();
+                            if let Some(l) = transcript.iter().find(|l| l.starts_with("System:")) {
+                                keep2.push(l.clone());
+                            }
+                            if let Some(l) = transcript.iter().find(|l| l.starts_with("Tools:")) {
+                                keep2.push(l.clone());
+                            }
+                            keep2.push("User: Return ONLY JSON: either {\"action\":\"<tool>\",\"args\":{...}} or {\"final\":{...}}.".to_string());
+                            let retry_prompt2 = keep2.join("\n");
+                            raw = Self::llm_chat_once(ctx, retry_prompt2).await?;
+                            Self::parse_action(&raw)?
+                        }
+                    }
+                }
+            };
+            action = Self::coerce_args_only_action(action);
 
             if let Some(final_obj) = action.get("final") {
                 let env = match serde_json::from_value::<FinalEnvelope>(final_obj.clone()) {
@@ -1166,5 +1229,80 @@ mod tests {
             env.payload.get("text").and_then(|x| x.as_str()).unwrap(),
             "line1\nline2"
         );
+    }
+
+    struct NoopTool;
+    #[async_trait]
+    impl crate::tools::Tool for NoopTool {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        async fn call(&self, _args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
+            Ok(serde_json::json!({"ok": true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_json_from_model_is_retried_with_minimal_prompt() {
+        let llm = Arc::new(ScriptedModel {
+            replies: Arc::new(Mutex::new(vec![
+                // Truncated/invalid JSON (EOF mid-string).
+                "{\"action\":\"noop\",\"args\":{".to_string(),
+                // Retry succeeds.
+                "{\"action\":\"noop\",\"args\":{}}".to_string(),
+                // Then final.
+                "{\"final\":{\"kind\":\"generic\",\"payload\":{\"text\":\"ok\"}}}".to_string(),
+            ])),
+        });
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+
+        let mut reg = ToolRegistry::new();
+        reg.register(NoopTool);
+
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 8,
+            thread_id: Some("tid".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(DefaultPolicy),
+            llm,
+            storage,
+            scope,
+            keyspace,
+            query: None,
+            warehouse: Arc::new(crate::providers::NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            exec_ctx: None,
+            runtime: None,
+        };
+
+        let out = Agent::run_until_block(
+            &reg,
+            &ctx,
+            "sys",
+            "tools",
+            "q",
+        )
+        .await
+        .expect("run should succeed after retry");
+
+        match out {
+            RunOutcome::Final { thread_id, .. } => {
+                assert_eq!(thread_id, "tid".to_string());
+            }
+            _ => panic!("expected final outcome"),
+        }
     }
 }

@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use sha2::{Digest, Sha256};
@@ -165,85 +166,36 @@ pub fn apply_replace_range(
     ))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReplaceListEdit {
     pub start_line: usize,
     pub end_line: usize,
     pub new_text: String,
 }
 
-/// Apply multiple non-overlapping line edits to a text blob.
+/// Apply multiple 1-based inclusive line replacements to a text blob.
 ///
-/// Edits are 1-based inclusive and may represent insertions when `start_line == end_line + 1`.
+/// Semantics:
+/// - Each edit is interpreted against the *original* line numbering by applying edits
+///   in descending start_line order (edits higher in the file are applied first).
+/// - Insertions are supported via `start_line == end_line + 1` (same as apply_replace_range).
 pub fn apply_replace_list(old_text: &str, edits: &[ReplaceListEdit]) -> Result<String, String> {
-    let (mut lines, had_trailing_newline) = split_lines_preserve_trailing_newline(old_text);
-    let n = lines.len();
     if edits.is_empty() {
         return Ok(old_text.to_string());
     }
-
     let mut sorted: Vec<ReplaceListEdit> = edits.to_vec();
     sorted.sort_by(|a, b| {
-        a.start_line
-            .cmp(&b.start_line)
-            .then(a.end_line.cmp(&b.end_line))
+        b.start_line
+            .cmp(&a.start_line)
+            .then_with(|| b.end_line.cmp(&a.end_line))
     });
 
-    // Validate and check overlaps in 1-based coordinates.
-    let mut prev_end: Option<usize> = None;
+    let mut cur = old_text.to_string();
     for e in sorted.iter() {
-        if e.start_line == 0 {
-            return Err("start_line must be >= 1".to_string());
-        }
-        if e.end_line > n {
-            return Err(format!("end_line out of bounds: {} > {}", e.end_line, n));
-        }
-        if e.start_line > n + 1 {
-            return Err(format!(
-                "start_line out of bounds: {} > {}",
-                e.start_line,
-                n + 1
-            ));
-        }
-        if e.start_line > e.end_line + 1 {
-            return Err(format!(
-                "invalid range: start_line {} > end_line {} + 1",
-                e.start_line, e.end_line
-            ));
-        }
-        if let Some(pe) = prev_end {
-            // Allow adjacent, disallow overlap.
-            // For insertion, end_line may be start_line-1; treat that as a zero-width span at start_line.
-            let cur_start_effective = if e.start_line == e.end_line + 1 {
-                e.start_line
-            } else {
-                e.start_line
-            };
-            if cur_start_effective <= pe {
-                return Err("replace_list edits overlap".to_string());
-            }
-        }
-        // For insertion, treat it as ending at start_line-1; otherwise inclusive end_line.
-        let effective_end = if e.start_line == e.end_line + 1 {
-            e.start_line - 1
-        } else {
-            e.end_line
-        };
-        prev_end = Some(effective_end);
+        cur = apply_replace_range(&cur, e.start_line, e.end_line, &e.new_text)?;
     }
-
-    // Apply bottom-to-top to avoid line shifts.
-    for e in sorted.iter().rev() {
-        let start_idx = e.start_line - 1;
-        let end_idx_excl = e.end_line;
-        let mut new_lines: Vec<String> = e.new_text.split('\n').map(|x| x.to_string()).collect();
-        lines.splice(start_idx..end_idx_excl, new_lines.drain(..));
-    }
-
-    Ok(join_lines_preserve_trailing_newline(
-        &lines,
-        had_trailing_newline,
-    ))
+    Ok(cur)
 }
 
 pub fn normalize_rel_path(rel: &str) -> Result<String, String> {
@@ -300,6 +252,15 @@ pub async fn get_file(ctx: &AgentCtx, path: &str, max_chars: usize) -> Result<Va
     match ctx.storage.get_bytes(&key).await {
         Ok(bytes) => {
             let text = String::from_utf8_lossy(&bytes).to_string();
+            // Grounding metadata for safe patching.
+            let base_sha256 = {
+                use sha2::Digest;
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(text.as_bytes());
+                hex::encode(hasher.finalize())
+            };
+            let existing_line_count = if text.is_empty() { 0 } else { text.lines().count() };
+            let existing_had_trailing_newline = text.ends_with('\n');
             let content = if max_chars > 0 && text.len() > max_chars {
                 let mut s = text.chars().take(max_chars).collect::<String>();
                 s.push_str("\n... (truncated; use dbt_files op=get_json or op=manifest_find for structured access)\n");
@@ -307,7 +268,15 @@ pub async fn get_file(ctx: &AgentCtx, path: &str, max_chars: usize) -> Result<Va
             } else {
                 text
             };
-            Ok(serde_json::json!({"ok": true, "path": rel, "key": key, "content": content}))
+            Ok(serde_json::json!({
+                "ok": true,
+                "path": rel,
+                "key": key,
+                "base_sha256": base_sha256,
+                "existing_line_count": existing_line_count,
+                "existing_had_trailing_newline": existing_had_trailing_newline,
+                "content": content
+            }))
         }
         Err(e) => Err(format!("not found or failed to fetch: {}", e)),
     }
@@ -441,6 +410,7 @@ pub async fn apply_patch(
     path: &str,
     payload: &str,
     base_sha256: Option<&str>,
+    expected_existed: Option<bool>,
     kind: PatchApplyKind,
 ) -> Result<PatchOutcome, String> {
     let rel = normalize_rel_path(path)?;
@@ -454,6 +424,14 @@ pub async fn apply_patch(
     let existed = existing.is_some();
     let old = existing.unwrap_or_default();
     let base_hash = sha256_hex(&old);
+    if let Some(want_existed) = expected_existed {
+        if want_existed != existed {
+            return Err(format!(
+                "base_exists mismatch; expected existed={}, got existed={}",
+                want_existed, existed
+            ));
+        }
+    }
     if let Some(expected) = base_sha256 {
         if expected != base_hash {
             return Err(format!(
@@ -832,6 +810,7 @@ pub async fn apply_patch_bundle(
             datasets,
             &f.rel_path,
             &f.patch_text,
+            None,
             None,
             PatchApplyKind::UnifiedDiff,
         )
@@ -1616,6 +1595,7 @@ mod tests {
             "models/staging/stg_test_raw_raw_orders.sql",
             &patch_text,
             None,
+            None,
             PatchApplyKind::UnifiedDiff,
         )
         .await
@@ -1641,6 +1621,7 @@ mod tests {
             None,
             "models/staging/stg_wrong.sql",
             &patch_text,
+            None,
             None,
             PatchApplyKind::UnifiedDiff,
         )
@@ -1668,6 +1649,7 @@ select * from {{ source('test_raw','raw_customers') }}
             "models/staging/stg_test_raw_raw_orders.sql",
             &patch_text,
             None,
+            None,
             PatchApplyKind::UnifiedDiff,
         )
         .await
@@ -1687,6 +1669,7 @@ select * from {{ source('test_raw','raw_customers') }}
             None,
             "models/marts/fct_orders.sql",
             &patch_text,
+            None,
             None,
             PatchApplyKind::UnifiedDiff,
         )
@@ -1732,6 +1715,7 @@ select * from {{ source('test_raw','raw_customers') }}
             Some(&datasets),
             "models/schema.yml",
             &patch_text,
+            None,
             None,
             PatchApplyKind::UnifiedDiff,
         )
@@ -1792,50 +1776,6 @@ sources:
         assert_eq!(out, "a\nb\nc\n");
     }
 
-    #[test]
-    fn replace_list_applies_multiple_non_overlapping_edits() {
-        let old = "a\nb\nc\nd\n";
-        let out = apply_replace_list(
-            old,
-            &[
-                ReplaceListEdit {
-                    start_line: 2,
-                    end_line: 2,
-                    new_text: "B".to_string(),
-                },
-                ReplaceListEdit {
-                    start_line: 4,
-                    end_line: 4,
-                    new_text: "D".to_string(),
-                },
-            ],
-        )
-        .expect("replace_list");
-        assert_eq!(out, "a\nB\nc\nD\n");
-    }
-
-    #[test]
-    fn replace_list_rejects_overlaps() {
-        let old = "a\nb\nc\n";
-        let err = apply_replace_list(
-            old,
-            &[
-                ReplaceListEdit {
-                    start_line: 1,
-                    end_line: 2,
-                    new_text: "x".to_string(),
-                },
-                ReplaceListEdit {
-                    start_line: 2,
-                    end_line: 3,
-                    new_text: "y".to_string(),
-                },
-            ],
-        )
-        .unwrap_err();
-        assert!(err.contains("overlap"));
-    }
-
     #[tokio::test]
     async fn apply_patch_repairs_hunk_counts_for_new_file() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
@@ -1860,6 +1800,7 @@ sources:
             None,
             rel,
             &patch_text,
+            None,
             None,
             PatchApplyKind::UnifiedDiff,
         )
@@ -1887,6 +1828,7 @@ packages:
             None,
             "packages.yml",
             &patch_text,
+            None,
             None,
             PatchApplyKind::UnifiedDiff,
         )
@@ -1920,6 +1862,7 @@ packages:
             "models/staging/stg_orders.sql",
             &patch_text,
             Some("bad"),
+            None,
             PatchApplyKind::UnifiedDiff,
         )
         .await

@@ -105,6 +105,7 @@ async fn ensure_dbt_utils_package(ctx: &AgentCtx) -> Result<Option<RemediationDi
         "packages.yml",
         &patch_text,
         None,
+        Some(existed),
         crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
     )
     .await?;
@@ -789,7 +790,7 @@ mod tests {
             chat_responses: Mutex::new(vec![
                 serde_json::json!({
                     "changes": [
-                        {"key": base_key, "replace_file": {"new_text": fixed_sql, "expected_sha256": sha256_hex(old_sql)}, "reason": "quote literal dotted column"}
+                        {"key": base_key, "replace_file": {"new_text": fixed_sql}, "reason": "quote literal dotted column"}
                     ],
                     "notes": ["applied quoted identifier for dotted column"]
                 })

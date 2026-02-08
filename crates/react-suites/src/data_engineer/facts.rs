@@ -104,18 +104,17 @@ fn dbt_files_patch_contract_value() -> Value {
             "top_level_args": {
                 "op": "patch",
                 "path": "optional string (single-file guard)",
-                "preview_diff": "optional bool (TOP LEVEL ONLY)",
                 "replace_file": "{path,new_text,expected_sha256?} or array of those",
                 "replace_range": "{path,start_line,end_line,new_text,expected_sha256?} or array of those",
-                "replace_list": "{path,edits:[{start_line,end_line,new_text}],expected_sha256?} or array of those"
+                "replace_list": "{path,edits:[{start_line,end_line,new_text}...],expected_sha256?} or array of those"
             },
             "rules": [
                 "args.op MUST equal \"patch\"",
                 "Provide EXACTLY ONE of replace_file OR replace_range OR replace_list",
-                "preview_diff, if used, MUST be a top-level args field (never nested under replace_file/range/list)",
                 "replace_file object keys MUST be exactly: path, new_text, expected_sha256 (optional)",
                 "replace_range object keys MUST be exactly: path, start_line, end_line, new_text, expected_sha256 (optional)",
                 "replace_list object keys MUST be exactly: path, edits, expected_sha256 (optional)",
+                "replace_list.edits items MUST have exactly: start_line, end_line, new_text",
                 "When expected_sha256 is present, it MUST match the current file content sha256"
             ],
             "example_replace_file": {

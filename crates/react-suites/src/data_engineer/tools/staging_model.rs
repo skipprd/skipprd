@@ -382,6 +382,7 @@ impl Tool for StagingModelTool {
                 &schema_rel,
                 &seed,
                 None,
+                None,
                 project_fs::PatchApplyKind::FullOverwrite,
             )
             .await
@@ -436,6 +437,7 @@ impl Tool for StagingModelTool {
                     self.datasets.as_ref(),
                     &schema_rel,
                     &canonical,
+                    None,
                     None,
                     project_fs::PatchApplyKind::FullOverwrite,
                 )
@@ -607,6 +609,7 @@ impl Tool for StagingModelTool {
                 None,
                 &rel_path,
                 &sql_out,
+                None,
                 None,
                 project_fs::PatchApplyKind::FullOverwrite,
             )

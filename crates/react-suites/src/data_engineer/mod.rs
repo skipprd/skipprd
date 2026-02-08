@@ -58,7 +58,7 @@ Plan:\n\
     if !expected_paths.is_empty() {
         s.push_str("\nRecommended next step:\n");
         s.push_str(
-            "- Apply a targeted non-preview `dbt_files op=patch` to fix the failing artifact(s):\n",
+            "- Apply a targeted `dbt_files op=patch` to fix the failing artifact(s):\n",
         );
         for p in expected_paths.iter().take(6) {
             s.push_str("  - ");
@@ -70,7 +70,7 @@ Plan:\n\
         );
     } else {
         s.push_str(
-            "\nRecommended next step:\n- Apply a targeted non-preview `dbt_files op=patch` to the failing DBT artifact(s), then retry.\n",
+            "\nRecommended next step:\n- Apply a targeted `dbt_files op=patch` to the failing DBT artifact(s), then retry.\n",
         );
     }
     s
@@ -109,24 +109,53 @@ impl AgentPolicy for InterruptOnlyPolicy {
     }
 
     fn timeout_for_tool(&self, action_name: &str) -> Option<u64> {
-        // Keep base tool timeouts snappy, but raise for known-slow operations.
-        match action_name {
-            // Can involve an inner LLM call + writes.
-            "staging_model" => Some(600),
-            // Deterministic batch executor wraps staging_model; allow the same budget.
-            "apply_next_cleanse_batch" => Some(600),
+        // Provide a timeout for *all* tools. Individual tools can override this baseline.
+        //
+        // Rationale:
+        // - In headless/terminal mode we want runs to progress without spurious timeouts.
+        // - Some tools wrap nested LLM calls + storage IO (schema/model batch tools).
+        // - dbt validate/build/publish can take minutes in real environments.
+        let baseline = 120;
+        let secs = match action_name {
+            // Can involve an inner LLM call + multiple writes.
+            "staging_model" => 600,
+            "apply_next_cleanse_batch" => 600,
+            "apply_next_cleanse_schema_batch" => 600,
+
             // Can involve multiple storage reads + an inner LLM call + writes.
-            "gold_model" => Some(120),
-            // Deterministic batch executor wraps gold_model; allow a bit more for plan IO.
-            "apply_next_model_batch" => Some(180),
+            "gold_model" => 300,
+            "apply_next_model_batch" => 300,
+            "apply_next_model_schema_batch" => 300,
+
+            // dbt can be slow (compile/build/test) depending on environment.
+            "dbt_validate" => 900,
+            "publish_dbt_to_provider" => 900,
+
             // Warehouse queries can legitimately take >10s.
-            "run_sql" => Some(60),
-            // Batch writes can be larger.
-            "approve_and_save_artifact_batch" => Some(60),
+            "run_sql" => 120,
+
+            // Writes can be larger.
+            "approve_and_save_artifact_batch" => 120,
+            "approve_and_save_artifact" => 120,
+
             // Storage reads/writes sometimes hit network latency.
-            "dbt_files" => Some(30),
-            _ => None,
-        }
+            "dbt_files" => 120,
+
+            // Discovery tools.
+            "sql_schema" => 120,
+            "sql_stats" => 120,
+            "sql_sample" => 120,
+            "vect_query" => 120,
+            "vect_upsert" => 120,
+
+            // Preflight can fan out and be slow depending on provider.
+            "preflight_catalog_all" => 600,
+            "preflight_catalog_dataset" => 300,
+            "preflight_catalog_schema" => 300,
+
+            _ => baseline,
+        };
+        Some(secs)
     }
 
     async fn handle_final(
@@ -151,7 +180,7 @@ mod interrupt_only_policy_tests {
     #[test]
     fn interrupt_only_policy_overrides_gold_model_timeout() {
         let p = InterruptOnlyPolicy;
-        assert_eq!(p.timeout_for_tool("gold_model"), Some(120));
+        assert_eq!(p.timeout_for_tool("gold_model"), Some(300));
     }
 }
 
@@ -454,6 +483,9 @@ Hard rules:\n\
 You MUST fix it and re-emit the plan.\n\n\
 Validation error:\n{err}\n\n\
 Invalid payload JSON (FULL, do not omit content):\n{payload_str}\n\n\
+Hard constraints:\n\
+- The entire response must be STRICT JSON only.\n\
+- Every checklist item's `evidence` must be an empty array `[]` (no strings, no objects).\n\n\
 Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
         );
 
@@ -1225,13 +1257,31 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         },
                     });
 
-                    tools_card_lines = vec![
+                    // Even in hard_mutation_only, schema batch tools are safe to expose because they are
+                    // inherently mutating and can resolve common "YAML contract" failures without manual
+                    // dbt_files patching.
+                    let mut tool_lines: Vec<&'static str> = vec![
                         "Allowed tools (authoring phase; HARD constraint: mutation required next):",
-                        "- dbt_files(args:{op:\"patch\", replace_file?:{path:string,new_text:string,expected_sha256?:string}|[{...}], replace_range?:{path:string,start_line:int,end_line:int,new_text:string,expected_sha256?:string}|[{...}], replace_list?:{path:string,edits:[{start_line:int,end_line:int,new_text:string}],expected_sha256?:string}|[{...}], path?:string, preview_diff?:bool})",
+                    ];
+                    if phase == control_flow::Phase::CleanseAuthor {
+                        reg.register(tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
+                            datasets: sctx.datasets.clone(),
+                        });
+                        tool_lines.push("- apply_next_cleanse_schema_batch(args:{instructions?:string})");
+                    }
+                    if phase == control_flow::Phase::ModelAuthor {
+                        reg.register(tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
+                            datasets: sctx.datasets.clone(),
+                        });
+                        tool_lines.push("- apply_next_model_schema_batch(args:{instructions?:string})");
+                    }
+                    tool_lines.extend_from_slice(&[
+                        "- dbt_files(args:{op:\"patch\", replace_file?:{path:string,new_text:string,expected_sha256?:string}|[{...}], replace_range?:{path:string,start_line:int,end_line:int,new_text:string,expected_sha256?:string}|[{...}], replace_list?:{path:string,edits:[{start_line:int,end_line:int,new_text:string}],expected_sha256?:string}|[{...}], path?:string})",
                         "- ask_user(args:{prompt:string})",
                         "",
                         "Not available: read/explore tools, dbt_validate, publish_dbt_to_provider.",
-                    ];
+                    ]);
+                    tools_card_lines = tool_lines;
                 } else {
                     // Normal authoring: allow read/explore + probes.
                     if phase == control_flow::Phase::CleanseAuthor {
@@ -1244,8 +1294,14 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             reg.register(tools::apply_next_batch::ApplyNextCleanseBatchTool {
                                 datasets: sctx.datasets.clone(),
                             });
+                            reg.register(tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
+                                datasets: sctx.datasets.clone(),
+                            });
                         } else {
                             reg.register(tools::staging_model::StagingModelTool {
+                                datasets: sctx.datasets.clone(),
+                            });
+                            reg.register(tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
                                 datasets: sctx.datasets.clone(),
                             });
                         }
@@ -1256,8 +1312,14 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             // The tool derives the exact next approved batch from the persisted plan.
                             let _ = allowed; // used only as an enablement signal
                             reg.register(tools::apply_next_batch::ApplyNextModelBatchTool);
+                            reg.register(tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
+                                datasets: sctx.datasets.clone(),
+                            });
                         } else {
                             reg.register(tools::gold_model::GoldModelTool);
+                            reg.register(tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
+                                datasets: sctx.datasets.clone(),
+                            });
                         }
                     }
                     reg.register(SqlRunTool {
@@ -1276,7 +1338,8 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         tools_card_lines = vec![
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_cleanse_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, limit?:int, max_chars?:int, preview_diff?:bool})",
+							"- apply_next_cleanse_schema_batch(args:{instructions?:string})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, limit?:int, max_chars?:int})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -1288,7 +1351,8 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         tools_card_lines = vec![
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_model_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, limit?:int, max_chars?:int, preview_diff?:bool})",
+							"- apply_next_model_schema_batch(args:{instructions?:string})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, limit?:int, max_chars?:int})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -1309,7 +1373,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
 							"  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
 							"- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})",
 							"  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, limit?:int, max_chars?:int, preview_diff?:bool})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, limit?:int, max_chars?:int})",
 							"- ask_user(args:{prompt:string})",
 							"",
 							"Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).",
@@ -2210,6 +2274,15 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 query: query.clone(),
                             };
 
+                            let tool_timeout = |name: &str| {
+                                actx.policy
+                                    .timeout_for_tool(name)
+                                    .unwrap_or(actx.per_step_timeout_secs)
+                            };
+                            let dbt_files_timeout = tool_timeout("dbt_files");
+                            let sql_schema_timeout = tool_timeout("sql_schema");
+                            let run_sql_timeout = tool_timeout("run_sql");
+
                             let models_list = control_flow::call_and_record_tool(
                                 &thread_store,
                                 thread_id,
@@ -2217,7 +2290,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 &dbt_files_tool,
                                 serde_json::json!({"op":"list","prefix":"models/","limit":500}),
                                 &actx,
-                                30,
+                                dbt_files_timeout,
                             )
                             .await;
                             let _dbt_project = control_flow::call_and_record_tool(
@@ -2227,7 +2300,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 &dbt_files_tool,
                                 serde_json::json!({"op":"get","path":"dbt_project.yml","max_chars":4000}),
                                 &actx,
-                                30,
+                                dbt_files_timeout,
                             )
                             .await;
                             let _packages = control_flow::call_and_record_tool(
@@ -2237,7 +2310,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 &dbt_files_tool,
                                 serde_json::json!({"op":"get","path":"packages.yml","max_chars":4000}),
                                 &actx,
-                                30,
+                                dbt_files_timeout,
                             )
                             .await;
                             let _schema_yml = control_flow::call_and_record_tool(
@@ -2247,7 +2320,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 &dbt_files_tool,
                                 serde_json::json!({"op":"get","path":"models/schema.yml","max_chars":6000}),
                                 &actx,
-                                30,
+                                dbt_files_timeout,
                             )
                             .await;
 
@@ -2258,7 +2331,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 &sql_schema_tool,
                                 serde_json::json!({}),
                                 &actx,
-                                30,
+                                sql_schema_timeout,
                             )
                             .await;
                             let tables: Vec<String> = tables_obs
@@ -2280,7 +2353,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     &sql_schema_tool,
                                     serde_json::json!({"table": first}),
                                     &actx,
-                                    30,
+                                    sql_schema_timeout,
                                 )
                                 .await;
                                 let _cnt = control_flow::call_and_record_tool(
@@ -2290,7 +2363,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     &run_sql_tool,
                                     serde_json::json!({"sql": format!("SELECT count(*) AS total FROM {}", first)}),
                                     &actx,
-                                    60,
+                                    run_sql_timeout,
                                 )
                                 .await;
                                 probed = Some(first.clone());
@@ -2354,16 +2427,20 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         idx, idx
                                     ));
                                 }
-                                if let Some(ans) = reason_detail
-                                    .and_then(|v| v.get("answer"))
+                                if let Some(key) = reason_detail
+                                    .and_then(|v| v.get("review_ref"))
+                                    .and_then(|v| v.get("key"))
                                     .and_then(|v| v.as_str())
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
                                 {
-                                    if !ans.trim().is_empty() {
-                                        q.push_str(
-                                            "\nReview feedback to incorporate in this plan:\n",
-                                        );
-                                        q.push_str(ans.trim());
-                                        q.push('\n');
+                                    if let Ok(bytes) = actx.storage.get_bytes(&key).await {
+                                        let txt = String::from_utf8_lossy(&bytes).to_string();
+                                        if !txt.trim().is_empty() {
+                                            q.push_str("\nReview feedback to incorporate in this plan:\n");
+                                            q.push_str(txt.trim());
+                                            q.push('\n');
+                                        }
                                     }
                                 }
                             }
@@ -2529,6 +2606,12 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 let mut plan = plan_opt.ok_or_else(|| {
                                     "plan json repair: no plan produced".to_string()
                                 })?;
+                                // Planning/repair must not emit evidence; the deterministic runner adds it later.
+                                for t in plan.tasks.iter_mut() {
+                                    for it in t.checklist.iter_mut() {
+                                        it.evidence.clear();
+                                    }
+                                }
                                 plan.status = crate::data_engineer::plan::PlanStatus::Draft;
                                 plan.plan_key =
                                     crate::data_engineer::plan::new_cleanse_plan_key(&actx);
@@ -2725,6 +2808,12 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 let mut plan = plan_opt.ok_or_else(|| {
                                     "plan json repair: no plan produced".to_string()
                                 })?;
+                                // Planning/repair must not emit evidence; the deterministic runner adds it later.
+                                for t in plan.tasks.iter_mut() {
+                                    for it in t.checklist.iter_mut() {
+                                        it.evidence.clear();
+                                    }
+                                }
                                 plan.status = crate::data_engineer::plan::PlanStatus::Draft;
                                 plan.plan_key =
                                     crate::data_engineer::plan::new_model_plan_key(&actx);
@@ -2914,7 +3003,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                     // and compute the exact next batch to execute (max 5).
                     let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         if is_cleanse {
-                            let mut plan = match crate::data_engineer::plan::load_cleanse_plan(
+                            let mut plan = match crate::data_engineer::plan::load_cleanse_plan_any(
                                 &actx,
                             )
                             .await
@@ -3042,6 +3131,59 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_cleanse_batch; force repair-mode guidance.
                             if guard.last_validate_failed && !guard.mutated_since_fail {
+                                // If schema contract work remains, ALWAYS prefer the schema batch tool even when
+                                // we are recovering from a failed validation. This prevents incorrect attempts to
+                                // "fix YAML contracts" by editing SQL files, which causes loops.
+                                if let Some((
+                                    crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
+                                    ids,
+                                )) = next_action.as_ref()
+                                {
+                                    let mut expected_paths: Vec<String> = Vec::new();
+                                    for ds in ids.iter() {
+                                        if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
+                                            if let Some(p) = t.expected_model_path.as_deref() {
+                                                if !p.trim().is_empty() {
+                                                    expected_paths.push(p.trim().to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    expected_paths.sort();
+                                    expected_paths.dedup();
+                                    let mut ctx = format!(
+                                        "Approved cleanse plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                        plan.plan_key,
+                                        ids.join("\n- "),
+                                        expected_paths.join("\n- "),
+                                    );
+                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                    (ctx, None)
+                                } else {
+                                    let pending_schema =
+                                        crate::data_engineer::plan::cleanse_pending_schema_contracts(&plan);
+                                    if !pending_schema.is_empty() {
+                                        let mut expected_paths: Vec<String> = Vec::new();
+                                        for ds in pending_schema.iter() {
+                                            if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
+                                                if let Some(p) = t.expected_model_path.as_deref() {
+                                                    if !p.trim().is_empty() {
+                                                        expected_paths.push(p.trim().to_string());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        expected_paths.sort();
+                                        expected_paths.dedup();
+                                        let mut ctx = format!(
+                                            "Approved cleanse plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                            plan.plan_key,
+                                            pending_schema.join("\n- "),
+                                            expected_paths.join("\n- "),
+                                        );
+                                        ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                        (ctx, None)
+                                    } else {
                                 let mut ctx = format!(
                                 "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
                                 plan.plan_key
@@ -3067,6 +3209,8 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
                                 }
                                 (ctx, None)
+                                    }
+                                }
                             } else if next.is_empty() {
                                 // If work-groups exist, interpret "no next SQL batch" as:
                                 // - either we're blocked on schema contract authoring, OR
@@ -3091,7 +3235,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     expected_paths.sort();
                                     expected_paths.dedup();
                                     let mut ctx = format!(
-                                        "Approved cleanse plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: patch schema YAML with dbt_files op=patch.\n- Prefer `models/staging/<model>.yml` entries where possible.\n- Or update `models/schema.yml` if that is your canonical schema file.\n\nExpected model SQL paths:\n- {}\n",
+                                        "Approved cleanse plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
                                         plan.plan_key,
                                         ids.join("\n- "),
                                         expected_paths.join("\n- "),
@@ -3171,7 +3315,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                             expected_paths.sort();
                                             expected_paths.dedup();
                                             let mut ctx = format!(
-                                                "Approved cleanse plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: patch schema YAML with dbt_files op=patch.\n\nExpected model SQL paths:\n- {}\n",
+                                                "Approved cleanse plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
                                                 plan.plan_key,
                                                 pending_schema.join("\n- "),
                                                 expected_paths.join("\n- "),
@@ -3205,7 +3349,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             )
                             }
                         } else {
-                            let mut plan = match crate::data_engineer::plan::load_model_plan(&actx)
+                            let mut plan = match crate::data_engineer::plan::load_model_plan_any(&actx)
                                 .await
                             {
                                 Some(p) => p,
@@ -3325,6 +3469,56 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_model_batch; force repair-mode guidance.
                             if guard.last_validate_failed && !guard.mutated_since_fail {
+                                if let Some((
+                                    crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
+                                    ids,
+                                )) = next_action.as_ref()
+                                {
+                                    let mut expected_paths: Vec<String> = Vec::new();
+                                    for n in ids.iter() {
+                                        if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
+                                            if let Some(p) = t.expected_model_path.as_deref() {
+                                                if !p.trim().is_empty() {
+                                                    expected_paths.push(p.trim().to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    expected_paths.sort();
+                                    expected_paths.dedup();
+                                    let mut ctx = format!(
+                                        "Approved model plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                        plan.plan_key,
+                                        ids.join("\n- "),
+                                        expected_paths.join("\n- "),
+                                    );
+                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                    (ctx, None)
+                                } else {
+                                    let pending_schema =
+                                        crate::data_engineer::plan::model_pending_schema_contracts(&plan);
+                                    if !pending_schema.is_empty() {
+                                        let mut expected_paths: Vec<String> = Vec::new();
+                                        for n in pending_schema.iter() {
+                                            if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
+                                                if let Some(p) = t.expected_model_path.as_deref() {
+                                                    if !p.trim().is_empty() {
+                                                        expected_paths.push(p.trim().to_string());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        expected_paths.sort();
+                                        expected_paths.dedup();
+                                        let mut ctx = format!(
+                                            "Approved model plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                            plan.plan_key,
+                                            pending_schema.join("\n- "),
+                                            expected_paths.join("\n- "),
+                                        );
+                                        ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                        (ctx, None)
+                                    } else {
                                 let mut ctx = format!(
                                 "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
                                 plan.plan_key
@@ -3350,12 +3544,83 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
                                 }
                                 (ctx, None)
+                                    }
+                                }
                             } else if next_names.is_empty() {
                                 if let Some((
                                     crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
                                     ids,
                                 )) = next_action.as_ref()
                                 {
+                                    // Deterministic pre-check: if models/schema.yml already contains model stanzas
+                                    // for these pending items, mark schema_contract done and re-run planning for the
+                                    // next action instead of thrashing the same file.
+                                    {
+                                        let key = crate::data_engineer::project_fs::join_storage_key(
+                                            &actx,
+                                            crate::data_engineer::project_files::MODELS_SCHEMA_YML,
+                                        );
+                                        if let Ok(bytes) = actx.storage.get_bytes(&key).await {
+                                            let content =
+                                                String::from_utf8_lossy(&bytes).to_string();
+                                            if let Ok(vy) =
+                                                serde_yaml::from_str::<serde_yaml::Value>(&content)
+                                            {
+                                                let mut names_in_schema: std::collections::HashSet<String> =
+                                                    std::collections::HashSet::new();
+                                                if let Some(models) = vy
+                                                    .get("models")
+                                                    .and_then(|m| m.as_sequence())
+                                                {
+                                                    for m in models.iter() {
+                                                        if let Some(nm) = m
+                                                            .get("name")
+                                                            .and_then(|n| n.as_str())
+                                                            .map(|s| s.trim().to_string())
+                                                            .filter(|s| !s.is_empty())
+                                                        {
+                                                            names_in_schema.insert(nm);
+                                                        }
+                                                    }
+                                                }
+                                                let mut changed = false;
+                                                for n in ids.iter() {
+                                                    if !names_in_schema.contains(n) {
+                                                        continue;
+                                                    }
+                                                    if let Some(t) =
+                                                        plan.tasks.iter().find(|t| t.name == *n)
+                                                    {
+                                                        let done = t
+                                                            .checklist
+                                                            .iter()
+                                                            .find(|it| it.checklist_item_id == "schema_contract")
+                                                            .map(|it| {
+                                                                it.status
+                                                                    == crate::data_engineer::plan::ChecklistItemStatus::Done
+                                                            })
+                                                            .unwrap_or(false);
+                                                        if !done {
+                                                            changed = true;
+                                                        }
+                                                    }
+                                                    crate::data_engineer::plan::model_schema_contract_mark_done(
+                                                        &mut plan,
+                                                        n,
+                                                    );
+                                                }
+                                                if changed {
+                                                    crate::data_engineer::plan::save_model_plan(
+                                                        &actx,
+                                                        &plan,
+                                                    )
+                                                    .await?;
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     let mut expected_paths: Vec<String> = Vec::new();
                                     for n in ids.iter() {
                                         if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
@@ -3369,7 +3634,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     expected_paths.sort();
                                     expected_paths.dedup();
                                     let mut ctx = format!(
-                                        "Approved model plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: patch schema YAML with dbt_files op=patch.\n\nExpected model SQL paths:\n- {}\n",
+                                        "Approved model plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
                                         plan.plan_key,
                                         ids.join("\n- "),
                                         expected_paths.join("\n- "),
@@ -3428,6 +3693,78 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                             &plan,
                                         );
                                     if !pending_schema.is_empty() {
+                                        // Deterministic pre-check: if models/schema.yml already contains these
+                                        // models, mark schema_contract done and restart.
+                                        {
+                                            let key =
+                                                crate::data_engineer::project_fs::join_storage_key(
+                                                    &actx,
+                                                    crate::data_engineer::project_files::MODELS_SCHEMA_YML,
+                                                );
+                                            if let Ok(bytes) = actx.storage.get_bytes(&key).await {
+                                                let content =
+                                                    String::from_utf8_lossy(&bytes).to_string();
+                                                if let Ok(vy) = serde_yaml::from_str::<
+                                                    serde_yaml::Value,
+                                                >(&content)
+                                                {
+                                                    let mut names_in_schema: std::collections::HashSet<String> =
+                                                        std::collections::HashSet::new();
+                                                    if let Some(models) = vy
+                                                        .get("models")
+                                                        .and_then(|m| m.as_sequence())
+                                                    {
+                                                        for m in models.iter() {
+                                                            if let Some(nm) = m
+                                                                .get("name")
+                                                                .and_then(|n| n.as_str())
+                                                                .map(|s| s.trim().to_string())
+                                                                .filter(|s| !s.is_empty())
+                                                            {
+                                                                names_in_schema.insert(nm);
+                                                            }
+                                                        }
+                                                    }
+                                                    let mut changed = false;
+                                                    for n in pending_schema.iter() {
+                                                        if !names_in_schema.contains(n) {
+                                                            continue;
+                                                        }
+                                                        if let Some(t) = plan
+                                                            .tasks
+                                                            .iter()
+                                                            .find(|t| t.name == *n)
+                                                        {
+                                                            let done = t
+                                                                .checklist
+                                                                .iter()
+                                                                .find(|it| it.checklist_item_id == "schema_contract")
+                                                                .map(|it| {
+                                                                    it.status
+                                                                        == crate::data_engineer::plan::ChecklistItemStatus::Done
+                                                                })
+                                                                .unwrap_or(false);
+                                                            if !done {
+                                                                changed = true;
+                                                            }
+                                                        }
+                                                        crate::data_engineer::plan::model_schema_contract_mark_done(
+                                                            &mut plan,
+                                                            n,
+                                                        );
+                                                    }
+                                                    if changed {
+                                                        crate::data_engineer::plan::save_model_plan(
+                                                            &actx,
+                                                            &plan,
+                                                        )
+                                                        .await?;
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         let mut expected_paths: Vec<String> = Vec::new();
                                         for n in pending_schema.iter() {
                                             if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
@@ -3441,7 +3778,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         expected_paths.sort();
                                         expected_paths.dedup();
                                         let mut ctx = format!(
-                                            "Approved model plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: patch schema YAML with dbt_files op=patch.\n\nExpected model SQL paths:\n- {}\n",
+                                            "Approved model plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
                                             plan.plan_key,
                                             pending_schema.join("\n- "),
                                             expected_paths.join("\n- "),
@@ -4215,18 +4552,29 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                     let run_ok = obs.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     if ok && compile_ok && run_ok {
                         // Mark the active plan completed only after validate passes.
+                        let latest_log = thread_store.get(thread_id).await.ok();
                         if phase == Phase::CleanseValidate {
                             if let Some(mut p) =
-                                crate::data_engineer::plan::load_cleanse_plan(&actx).await
+                                crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
                             {
+                                if let Some(ref l) = latest_log {
+                                    crate::data_engineer::plan::update_cleanse_progress_from_log(
+                                        &mut p, l,
+                                    );
+                                }
                                 p.status = crate::data_engineer::plan::PlanStatus::Completed;
                                 let _ =
                                     crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
                             }
                         } else {
                             if let Some(mut p) =
-                                crate::data_engineer::plan::load_model_plan(&actx).await
+                                crate::data_engineer::plan::load_model_plan_any(&actx).await
                             {
+                                if let Some(ref l) = latest_log {
+                                    crate::data_engineer::plan::update_model_progress_from_log(
+                                        &mut p, l,
+                                    );
+                                }
                                 p.status = crate::data_engineer::plan::PlanStatus::Completed;
                                 let _ =
                                     crate::data_engineer::plan::save_model_plan(&actx, &p).await;
@@ -4573,6 +4921,15 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         dataset_ids: vec![],
                         tier: "unknown".to_string(),
                     });
+                    // Extract review_ref (if present) from the trigger step so we can persist a stable pointer
+                    // without embedding the full review text in subsequent phase transitions.
+                    let review_ref = match &trigger_step {
+                        react_core::session::ThreadStep::Phase { reason_detail, .. } => reason_detail
+                            .as_ref()
+                            .and_then(|v| v.get("review_ref"))
+                            .cloned(),
+                        _ => None,
+                    };
                     out_frames.push(FlowFrame::Review {
                         text: answer.clone(),
                         meta: Some(serde_json::json!({
@@ -4604,9 +4961,8 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     "dataset_ids": meta.dataset_ids,
                                     "tier": meta.tier,
                                 },
-                                "answer": answer,
+                                "review_ref": review_ref,
                                 "trigger_step_idx": trigger_step_idx,
-                                "trigger_step": trigger_step,
                             })),
                         )
                         .await;
@@ -4634,9 +4990,8 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 "dataset_ids": meta.dataset_ids,
                                 "tier": meta.tier,
                             },
-                            "answer": answer,
+                            "review_ref": review_ref,
                             "trigger_step_idx": trigger_step_idx,
-                            "trigger_step": trigger_step,
                         })),
                     )
                     .await;
@@ -5024,7 +5379,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         );
                     } else {
                         prompt = format!(
-                            "Auto-remediation attempt {}: dbt_validate/build failed.\n\nError summary:\n{}\n\nAutomatically fix the DBT project:\n- Prefer calling `staging_model` to update staging/silver models (nested fields, cleansing, naming).\n- Use dbt_files or artifacts to inspect/edit existing files (preview_diff if helpful).\n- Re-run dbt_validate with build=true.\nRepeat until compile_ok=true AND run_ok=true.",
+                            "Auto-remediation attempt {}: dbt_validate/build failed.\n\nError summary:\n{}\n\nAutomatically fix the DBT project:\n- Prefer calling `staging_model` to update staging/silver models (nested fields, cleansing, naming).\n- Use dbt_files or artifacts to inspect/edit existing files.\n- Re-run dbt_validate with build=true.\nRepeat until compile_ok=true AND run_ok=true.",
                             attempt + 1,
                             brief
                         );

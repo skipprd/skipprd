@@ -163,17 +163,13 @@ fn is_mutation_step(step: &ThreadStep) -> bool {
             "approve_and_save_artifact"
             | "approve_and_save_artifact_batch"
             | "staging_model"
-            | "gold_model" => true,
+            | "gold_model"
+            // Deterministic authoring tools that mutate project files.
+            | "apply_next_cleanse_batch"
+            | "apply_next_cleanse_schema_batch"
+            | "apply_next_model_batch"
+            | "apply_next_model_schema_batch" => true,
             "dbt_files" => {
-                // preview_diff is explicitly non-mutating (no write occurs), so it should not
-                // be treated as a mutation attempt for any guard logic.
-                let preview = args
-                    .get("preview_diff")
-                    .and_then(|x| x.as_bool())
-                    .unwrap_or(false);
-                if preview {
-                    return false;
-                }
                 args.get("op")
                     .and_then(|v| v.as_str())
                     .map(|s| s == "patch")
@@ -209,15 +205,19 @@ fn is_effective_mutation_step(step: &ThreadStep) -> bool {
             .and_then(|v| v.as_array())
             .map(|a| !a.is_empty())
             .unwrap_or(false),
+        "apply_next_cleanse_batch" | "apply_next_cleanse_schema_batch" => observation
+            .extra
+            .get("succeeded_dataset_ids")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "apply_next_model_batch" | "apply_next_model_schema_batch" => observation
+            .extra
+            .get("succeeded_item_names")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
         "dbt_files" => {
-            // preview_diff means no write occurred; do not treat as a mutation.
-            let preview = args
-                .get("preview_diff")
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false);
-            if preview {
-                return false;
-            }
             if !observation.ok {
                 return false;
             }
@@ -394,16 +394,12 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
                 } = step
                 {
                     if name == "dbt_files" && observation.ok {
-                        let preview = args
-                            .get("preview_diff")
-                            .and_then(|x| x.as_bool())
-                            .unwrap_or(false);
                         let is_patch = args
                             .get("op")
                             .and_then(|v| v.as_str())
                             .map(|s| s == "patch")
                             .unwrap_or(false);
-                        if is_patch && !preview {
+                        if is_patch {
                             out.patched_since_fail = true;
                         }
                     }
@@ -411,7 +407,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
                 if is_effective_mutation_step(step) {
                     out.mutated_since_fail = true;
                 }
-                // ok-but-ineffective (preview/no-op) is intentionally NOT treated as a mutation or a failure.
+                // ok-but-ineffective (no-op) is intentionally NOT treated as a mutation or a failure.
             } else if !out.mutated_since_fail {
                 // Count only consecutive tool failures until we see a successful mutation.
                 out.mutation_failures_since_validate =
@@ -444,7 +440,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
 }
 
 /// Derive dbt `--select` terms for a fast, targeted validation pre-check based on the most recent
-/// successful `dbt_files op=patch` (non-preview) step in the thread.
+/// successful `dbt_files op=patch` step in the thread.
 ///
 /// Strategy:
 /// - Prefer manifest-based mapping from patched file path -> model name (when manifest is available)
@@ -452,7 +448,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
 /// - If the patch touched global-impact files (macros/, packages.yml, dbt_project.yml), return an
 ///   empty list to indicate we should skip targeted validation and do full validation instead.
 pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Vec<String> {
-    // Find the most recent successful dbt_files patch (non-preview).
+    // Find the most recent successful dbt_files patch.
     let mut patched_paths: Vec<String> = Vec::new();
     for step in log.steps.iter().rev() {
         let ThreadStep::ToolEnd {
@@ -465,13 +461,6 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
             continue;
         };
         if name != "dbt_files" || !observation.ok {
-            continue;
-        }
-        let preview = args
-            .get("preview_diff")
-            .and_then(|x| x.as_bool())
-            .unwrap_or(false);
-        if preview {
             continue;
         }
         let is_patch = args
@@ -766,6 +755,33 @@ impl DeterministicDbtValidateOnce {
                 &obj.get("logs").cloned().unwrap_or(Value::Null),
             );
             obj.insert("runtime_failures".to_string(), serde_json::json!(rf));
+            let ok = obj.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !ok {
+                let errors: Vec<String> = obj
+                    .get("errors")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let logs = obj.get("logs").cloned().unwrap_or(Value::Null);
+                if let Ok(sum) = crate::data_engineer::dbt_error::summarize_dbt_failure_llm(
+                    ctx.llm.as_ref(),
+                    &errors,
+                    &logs,
+                    &rf,
+                    2000,
+                ) {
+                    obj.insert("error_summary".to_string(), serde_json::json!(sum.summary));
+                    obj.insert("failing_nodes".to_string(), serde_json::json!(sum.failing_nodes));
+                    obj.insert(
+                        "suggested_next_files".to_string(),
+                        serde_json::json!(sum.suggested_next_files),
+                    );
+                }
+            }
             if let Some(ds) = dataset_ids {
                 obj.insert("dataset_ids".to_string(), serde_json::json!(ds));
             }
@@ -834,6 +850,33 @@ impl DeterministicDbtValidateTargetedOnce {
             );
             obj.insert("runtime_failures".to_string(), serde_json::json!(rf));
             obj.insert("select".to_string(), serde_json::json!(select_terms));
+            let ok = obj.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !ok {
+                let errors: Vec<String> = obj
+                    .get("errors")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let logs = obj.get("logs").cloned().unwrap_or(Value::Null);
+                if let Ok(sum) = crate::data_engineer::dbt_error::summarize_dbt_failure_llm(
+                    ctx.llm.as_ref(),
+                    &errors,
+                    &logs,
+                    &rf,
+                    2000,
+                ) {
+                    obj.insert("error_summary".to_string(), serde_json::json!(sum.summary));
+                    obj.insert("failing_nodes".to_string(), serde_json::json!(sum.failing_nodes));
+                    obj.insert(
+                        "suggested_next_files".to_string(),
+                        serde_json::json!(sum.suggested_next_files),
+                    );
+                }
+            }
         }
         Ok(v)
     }
@@ -1355,7 +1398,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_patch_failure_does_not_block_authoring_completion() {
+    fn patch_failure_blocks_authoring_completion() {
         let log = ThreadLog {
             steps: vec![
                 step(
@@ -1365,15 +1408,15 @@ mod tests {
                 ),
                 step(
                     "dbt_files",
-                    serde_json::json!({"op":"patch","preview_diff": true, "replace_file": {"path":"models/x.sql","new_text":"select 1\n"}}),
+                    serde_json::json!({"op":"patch","replace_file": {"path":"models/x.sql","new_text":"select 1\n"}}),
                     serde_json::json!({"ok": false, "errors":["invalid sql"]}),
                 ),
             ],
             ..Default::default()
         };
         match gate_authoring_completion(Some(&log), Phase::CleanseAuthor) {
-            AuthoringGate::Allow => {}
-            other => panic!("expected Allow, got {:?}", other),
+            AuthoringGate::Block { .. } => {}
+            other => panic!("expected Block, got {:?}", other),
         }
     }
 

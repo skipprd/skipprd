@@ -90,10 +90,9 @@ impl Tool for ApproveAndSaveArtifactTool {
         if content.trim().is_empty() {
             return Err("content required".to_string());
         }
-        let preview_diff = args
-            .get("preview_diff")
-            .and_then(|x| x.as_bool())
-            .unwrap_or(false);
+        if args.get("preview_diff").is_some() {
+            return Err("preview_diff is no longer supported; remove it from the request".to_string());
+        }
         let mut warnings: Vec<String> = Vec::new();
 
         // Refactor: dataset_id replaces legacy (pipeline, namespace).
@@ -249,62 +248,6 @@ impl Tool for ApproveAndSaveArtifactTool {
             Err(_) => None,
         };
 
-        if preview_diff {
-            let rel_path = current_key
-                .strip_prefix(
-                    &(ctx
-                        .keyspace
-                        .dbt_prefix(&ctx.scope)
-                        .trim_end_matches('/')
-                        .to_string()
-                        + "/"),
-                )
-                .unwrap_or(&current_key)
-                .to_string();
-            let outcome = crate::data_engineer::project_fs::apply_patch(
-                ctx,
-                None,
-                &rel_path,
-                &content_final,
-                None,
-                crate::data_engineer::project_fs::PatchApplyKind::FullOverwrite,
-            )
-            .await?;
-            // Log focus step for auditing which artifact is being considered
-            if let Some(tid) = ctx.thread_id.as_ref() {
-                let store = ctx
-                    .thread_store
-                    .as_ref()
-                    .ok_or_else(|| "thread_store not configured".to_string())?;
-                let agent = ctx
-                    .agent_name
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string());
-                let _ = store
-                    .append_step(
-                        tid,
-                        react_core::session::ThreadStep::ArtifactFocus {
-                            kind: kind.to_string(),
-                            name: name.to_string(),
-                            dataset_id: Some(dataset_id.clone()),
-                            exists: existing.is_some(),
-                            observation: react_core::session::Observation::ok(),
-                            ts: chrono::Utc::now().to_rfc3339(),
-                            agent,
-                        },
-                    )
-                    .await;
-            }
-            return Ok(serde_json::json!({
-                "ok": true,
-                "exists": existing.is_some(),
-                "key": current_key,
-                "diff": outcome.diff,
-                "dataset_id": dataset_id,
-                "kind": kind
-            }));
-        }
-
         // Ensure minimal dbt project scaffolding exists before first save
         let dbt = ctx
             .dbt
@@ -332,6 +275,7 @@ impl Tool for ApproveAndSaveArtifactTool {
             None,
             &rel_path,
             &content_final,
+            None,
             None,
             crate::data_engineer::project_fs::PatchApplyKind::FullOverwrite,
         )
