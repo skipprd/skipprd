@@ -125,6 +125,10 @@ Plan output rules (CRITICAL):
   }
 - Every batch MUST have at most 5 model names.
 - Gold models MUST ONLY read from existing silver/staging models (ref('stg_*')). Do NOT plan any source() usage.
+- Business value is a first-class requirement (CRITICAL):
+  - Each task.goal MUST state the business question it answers (1 sentence) and the primary consumer (e.g., finance/ops/growth).
+  - Each task.invariants MUST include concrete metric definitions + caveats grounded in available staging columns (e.g., what "revenue" means; inclusion/exclusion rules).
+  - If domain meaning is not explicit in available columns, record assumptions explicitly (as invariants) and add a validate checklist.details line describing the smallest probe to confirm/refute (null rate, distinctness, top values).
 - `work_groups` is the canonical ordered execution plan for the UI and the deterministic runner. It MUST be present and should encode the same ordering as `batches`.
 - Every work group MUST have at most 5 `items`.
 - For planning and repair: every checklist item's `evidence` MUST be an empty array `[]` (no strings, no objects). Evidence is added later by the deterministic runner.

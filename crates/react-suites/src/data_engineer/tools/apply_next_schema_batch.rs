@@ -83,6 +83,14 @@ fn schema_yml_sys_prompt_models_schema_yml() -> String {
         "- If allowed_columns is empty/unavailable for a model, you MAY update docs/descriptions, but you MUST NOT add tests for that model.",
         "- Keep output concise: only touch the specified model names; preserve existing content unrelated to those models.",
         "",
+        "Business-grade documentation (CRITICAL):",
+        "- For each touched model, the model description MUST include:",
+        "  - Grain (one sentence).",
+        "  - Business question / decision it supports (one sentence).",
+        "  - Time axis semantics if the model is time-based (what the date/timestamp means).",
+        "- For key metric columns, include a concrete definition + caveats (in plain English).",
+        "- Prefer a few high-signal tests (unique/not_null/relationships) only when grounded by allowed_columns; do not add speculative tests.",
+        "",
         crate::prompts::patch_contract::llm_patch_response_contract(),
     ]
     .join("\n")

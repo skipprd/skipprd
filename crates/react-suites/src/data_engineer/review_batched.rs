@@ -181,7 +181,10 @@ Output STRICT JSON only (exactly one object) with this schema:
 Rules:
 - Be pragmatic, not pedantic. Focus on business correctness and usability.
 - Do NOT suggest edits in-line; just describe risks/gaps.
-- Keep notes concise and high-signal."#
+- Keep notes concise and high-signal.
+- Insightfulness check (CRITICAL):
+  - Call out whether the current GOLD layer enables meaningful business decisions (not just technically-correct SQL).
+  - If GOLD is present but naive, list the top 2 missing “business semantics” gaps (definitions, time axis, entity meaning, join contracts) that block real analytics."#
         .to_string()
 }
 
@@ -206,6 +209,11 @@ Rules:
 - Prefer concrete feedback tied to specific models/columns when visible.
 - IMPORTANT: Do NOT suggest adding/selecting fields that are not present in the provided authoritative schema.
   If a desired field is missing from the schema, call that out as a gap and suggest the nearest available alternative.
+- Analyst-style critique (CRITICAL):
+  - For each item, include:
+    - What business question it answers today (1 sentence).
+    - What high-value question it fails to answer given current columns (1–2 bullets).
+    - Assumptions + evidence gaps: any semantic assumptions you see (e.g., meaning of created_at/order_status), and the smallest probe to validate them (null rate, distinctness, top values).
 - No tool calls and no file edits."#
         .to_string()
 }
@@ -229,7 +237,14 @@ META:{"actionable":true|false,"dataset_ids":[...],"tier":"silver"|"gold"|"unknow
 Then a blank line, then the human review body.
 
 Set actionable=true only for blocker/high issues or a small high-value fix worth doing now.
-If feedback is substantially unchanged from prior iteration, set actionable=false."#
+If feedback is substantially unchanged from prior iteration, set actionable=false.
+
+Unify requirements (CRITICAL):
+- Produce a concise, business-focused review that prioritizes decision usefulness.
+- Include a short “Insightfulness summary” section:
+  - What business decisions the current GOLD layer enables today.
+  - The top 2 missing business semantics gaps blocking higher-value analytics (definitions, time axis, entity meaning, join contracts).
+- Include an “Assumptions & evidence gaps” section listing the most important semantic assumptions and the smallest probes to validate them."#
         .to_string()
 }
 

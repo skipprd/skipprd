@@ -99,6 +99,16 @@ fn build_gold_sys_prompt(provider: &str, dialect: &str, max_items: usize) -> Str
          - CRITICAL: Do NOT select or reference any column not present in inputs[].schema_columns for that input.\n\
            If you need a field that does not exist in silver, put it in notes and do NOT guess.\n\
          - Use provided inputs[].schema_columns (from the warehouse/catalog) as ground truth for available columns + types.\n\
+\n\
+         Analyst mindset (CRITICAL — include these in `notes` BEFORE writing SQL):\n\
+         - Business question: one sentence describing the decision this model supports.\n\
+         - Entity definition: what the table represents (e.g., what counts as a “customer/order”), based ONLY on available columns.\n\
+         - Grain: one clear sentence. If you dedupe/aggregate, say exactly how and what you might lose.\n\
+         - Time axis: which timestamp/date drives analysis (and what it means). If no suitable time column exists, say so.\n\
+         - Metric definitions: list 2–4 metrics this table enables (definitions + caveats), grounded in available columns.\n\
+         - Assumptions + evidence gaps: list any semantic assumptions you made because the domain isn’t explicit in the data.\n\
+           For each gap, recommend the smallest validation probe (e.g., null rate, distinctness, top values) that would confirm/refute it.\n\
+\n\
          - IMPORTANT time handling (consistency):\n\
            - If an input column is already typed as timestamp/date/timestamptz/datetime, use it directly; do NOT re-cast it to the same type.\n\
            - Do NOT narrow time zones: never cast timestamptz -> timestamp.\n\
