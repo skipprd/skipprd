@@ -172,17 +172,12 @@ fn build_staging_sys_prompt(
            - Only use struct dereference (e.g. context.session.id) when schema_columns indicates a struct/row parent exists (e.g. context) AND there is no exact dotted column name.\n\
          - If a column name is reserved (e.g. timestamp), quote the identifier (\"timestamp\"). For literal dotted column names, quote the entire identifier (\"context.session.id\").\n\
          - Keep changes aligned with the user's instructions, even if they are unconventional.\n\
-         Output schema:\n\
-         {{\n\
-           \"notes\": [\"...\"],\n\
-           \"replace_file\": {{\"new_text\":\"...\"}} | null,\n\
-           \"replace_range\": {{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}} | null,\n\
-           \"replace_list\": {{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}]}} | null\n\
-         }}\n\
-         (Exactly ONE of replace_file/replace_range/replace_list must be provided; the others must be null.)\n\
+         {patch_contract}\n\
          Patch rules:\n\
          - The patch MUST modify ONLY the expected_model_path.\n\
          - Do NOT include a dbt config block; the suite injects schema/alias deterministically.\n"
+        ,
+        patch_contract = crate::prompts::patch_contract::llm_patch_response_contract()
     )
 }
 

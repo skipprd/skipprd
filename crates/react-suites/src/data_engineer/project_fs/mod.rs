@@ -130,9 +130,10 @@ pub fn apply_replace_range(
     if start_line == 0 {
         return Err("start_line must be >= 1".to_string());
     }
-    if end_line > n {
-        return Err(format!("end_line out of bounds: {} > {}", end_line, n));
-    }
+    // Treat `end_line > file_len` as "replace to EOF".
+    // This is a common pattern in LLM-authored patches (e.g., end_line=1000) and is safe to
+    // clamp since we already include `existing_line_count` in prompts/tool outputs.
+    let end_line = end_line.min(n);
     if start_line > n + 1 {
         return Err(format!(
             "start_line out of bounds: {} > {}",
@@ -278,7 +279,12 @@ pub async fn get_file(ctx: &AgentCtx, path: &str, max_chars: usize) -> Result<Va
                 "content": content
             }))
         }
-        Err(e) => Err(format!("not found or failed to fetch: {}", e)),
+        Err(e) => Ok(serde_json::json!({
+            "ok": false,
+            "path": rel,
+            "key": key,
+            "error": format!("not found or failed to fetch: {}", e),
+        })),
     }
 }
 
@@ -1774,6 +1780,20 @@ sources:
         let old = "b\nc\n";
         let out = apply_replace_range(old, 1, 0, "a").expect("insert");
         assert_eq!(out, "a\nb\nc\n");
+    }
+
+    #[test]
+    fn replace_range_clamps_end_line_to_eof() {
+        let old = "a\nb\nc\n";
+        let out = apply_replace_range(old, 2, 1000, "X").expect("replace");
+        assert_eq!(out, "a\nX\n");
+    }
+
+    #[test]
+    fn replace_range_allows_insert_at_eof_with_oversized_end_line() {
+        let old = "a\n";
+        let out = apply_replace_range(old, 2, 1000, "b").expect("insert");
+        assert_eq!(out, "a\nb\n");
     }
 
     #[tokio::test]

@@ -102,7 +102,7 @@ Hard rules:
 }
 
 pub fn cleanse_tool_card() -> String {
-    r#"Tools:
+    let mut s = String::from(r#"Tools:
 - artifacts(args:{op:"list", dataset_id?:string, type?:"model"|"metric", limit?:int} | {op:"get", dataset_id:string, type:"model"|"metric", name:string})
 - dbt_files(
     args:
@@ -132,17 +132,10 @@ Usage guidance:
 - Prefer batch scaffolding: use dbt_files op=patch to create dbt_project.yml, sources, and staging models in as few calls as possible.
 - Use `dbt_files op=patch` for ALL DBT project files, including model SQL under models/.
 - For `dbt_files op=patch`, provide EXACTLY ONE of: replace_file OR replace_range OR replace_list. The tool will compute and return `applied_patch_text` (canonical git-style diff) for audit.
-- dbt_files(op=patch) contract (MUST follow exactly):
-  - Call shape: {"action":"dbt_files","args":{...}}
-  - args.op MUST be "patch"
-  - args MUST include EXACTLY ONE of:
-    - replace_file: {path:string, new_text:string, expected_sha256?:string} | [{...}]
-    - replace_range: {path:string, start_line:int, end_line:int, new_text:string, expected_sha256?:string} | [{...}]
-    - replace_list: {path:string, edits:[{start_line:int, end_line:int, new_text:string}], expected_sha256?:string} | [{...}]
-  - If expected_sha256 is provided, it MUST match the current file content sha256.
-  - Only include fields shown above; the patch structs are strict and extra keys will fail parsing.
-  Example (replace_file):
-  {"action":"dbt_files","args":{"op":"patch","replace_file":{"path":"models/staging/stg_example.sql","new_text":"-- sql...","expected_sha256":"<sha256>"}}}
+");
+    s.push_str(crate::prompts::patch_contract::dbt_files_patch_contract());
+    s.push_str(
+        r#"
 - If you reference any package macros, ensure packages.yml includes the required packages and run dbt deps.
 - For staging_model: keep batches small (max 5 dataset_ids per call). If more are provided, the tool will only process the first 5 and return `deferred_dataset_ids` for follow-up calls.
 - After you have saved and validated, finalize with:
@@ -153,5 +146,8 @@ Usage guidance:
 - When schema is empty/unavailable, proceed with a minimal staging model selecting from the dataset_id. Do not stall.
 - For project scaffolding, aggregate the initial staging artifacts across top-K datasets and write them via dbt_files op=patch in as few calls as possible. If validation is unavailable, note it and proceed.
 - After any user clarification, call catalog_note to write a curated digest into the catalog (preview first if the change is material); then continue modeling.
-- Use vect_query scope:"artifact" to list any artifacts."#.to_string()
+- Use vect_query scope:"artifact" to list any artifacts.
+"#,
+    );
+    s
 }

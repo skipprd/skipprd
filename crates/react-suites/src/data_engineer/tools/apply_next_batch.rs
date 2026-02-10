@@ -8,6 +8,7 @@ use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
 use crate::data_engineer::dataset_truth;
+use crate::data_engineer::control_flow;
 use crate::data_engineer::plan;
 use crate::data_engineer::plan::{CleansePlan, ModelPlan};
 use crate::data_engineer::tools;
@@ -56,6 +57,33 @@ fn update_failure_counters(progress: &mut plan::PlanProgress, ok: bool) {
     progress.total_batch_failures = progress.total_batch_failures.saturating_add(1);
 }
 
+async fn maybe_advance_phase_on_done(
+    ctx: &AgentCtx,
+    from_phase: control_flow::Phase,
+    to_phase: control_flow::Phase,
+    reason_code: &'static str,
+    detail: Value,
+) {
+    let (Some(store), Some(tid)) = (ctx.thread_store.as_ref(), ctx.thread_id.as_deref()) else {
+        return;
+    };
+    let log = store.get(tid).await.ok();
+    let cur = control_flow::phase_from_log(log.as_ref());
+    if cur != from_phase {
+        return;
+    }
+    control_flow::append_phase_with_reason(
+        store,
+        tid,
+        Some("agent".to_string()),
+        Some(cur),
+        to_phase,
+        Some(reason_code),
+        Some(detail),
+    )
+    .await;
+}
+
 #[derive(Clone)]
 pub struct ApplyNextCleanseBatchTool {
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
@@ -88,11 +116,31 @@ impl Tool for ApplyNextCleanseBatchTool {
             }));
         }
 
-        let batch = plan::cleanse_next_batch(&plan);
+        // Keep batch selection consistent with the suite driver:
+        // prefer work-group driven selection when available, otherwise fall back to batch scanning.
+        let next_action = plan::cleanse_next_action(&plan);
+        let batch = match next_action.as_ref() {
+            Some((plan::WorkGroupKind::AuthorSql, ds)) => ds.clone(),
+            _ => plan::cleanse_next_batch(&plan),
+        };
         if batch.is_empty() {
+            let pending_schema = plan::cleanse_pending_schema_contracts(&plan);
+            let done = pending_schema.is_empty();
+            if done {
+                maybe_advance_phase_on_done(
+                    ctx,
+                    control_flow::Phase::CleanseAuthor,
+                    control_flow::Phase::CleanseValidate,
+                    "no_work_all_done",
+                    serde_json::json!({ "plan_key": plan.plan_key }),
+                )
+                .await;
+            }
             return Ok(serde_json::json!({
                 "ok": true,
                 "message": "no remaining cleanse tasks in next batch (all done)",
+                "done": done,
+                "pending_schema_contract_dataset_ids": pending_schema,
                 "attempted_dataset_ids": [],
                 "succeeded_dataset_ids": [],
                 "failed_dataset_ids": [],
@@ -259,11 +307,31 @@ impl Tool for ApplyNextModelBatchTool {
             }));
         }
 
-        let batch_names = plan::model_next_batch(&plan);
+        // Keep batch selection consistent with the suite driver:
+        // prefer work-group driven selection when available, otherwise fall back to batch scanning.
+        let next_action = plan::model_next_action(&plan);
+        let batch_names = match next_action.as_ref() {
+            Some((plan::WorkGroupKind::AuthorSql, names)) => names.clone(),
+            _ => plan::model_next_batch(&plan),
+        };
         if batch_names.is_empty() {
+            let pending_schema = plan::model_pending_schema_contracts(&plan);
+            let done = pending_schema.is_empty();
+            if done {
+                maybe_advance_phase_on_done(
+                    ctx,
+                    control_flow::Phase::ModelAuthor,
+                    control_flow::Phase::ModelValidate,
+                    "no_work_all_done",
+                    serde_json::json!({ "plan_key": plan.plan_key }),
+                )
+                .await;
+            }
             return Ok(serde_json::json!({
                 "ok": true,
                 "message": "no remaining model tasks in next batch (all done)",
+                "done": done,
+                "pending_schema_contract_item_names": pending_schema,
                 "attempted_item_names": [],
                 "succeeded_item_names": [],
                 "failed_item_names": [],

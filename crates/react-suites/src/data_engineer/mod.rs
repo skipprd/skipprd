@@ -25,6 +25,7 @@ pub mod patch_protocol;
 pub mod plan;
 pub mod project_files;
 pub mod project_fs;
+pub mod schema_policy;
 pub mod prompts;
 mod review_batched;
 pub mod tools;
@@ -1257,6 +1258,12 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         },
                     });
 
+                    // Keep targeted probes available: probe requirements can be asserted after runtime failures,
+                    // and those probes must be satisfiable even when the next step must be a mutation.
+                    reg.register(SqlRunTool {
+                        query: query.clone(),
+                    });
+
                     // Even in hard_mutation_only, schema batch tools are safe to expose because they are
                     // inherently mutating and can resolve common "YAML contract" failures without manual
                     // dbt_files patching.
@@ -1277,6 +1284,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                     }
                     tool_lines.extend_from_slice(&[
                         "- dbt_files(args:{op:\"patch\", replace_file?:{path:string,new_text:string,expected_sha256?:string}|[{...}], replace_range?:{path:string,start_line:int,end_line:int,new_text:string,expected_sha256?:string}|[{...}], replace_list?:{path:string,edits:[{start_line:int,end_line:int,new_text:string}],expected_sha256?:string}|[{...}], path?:string})",
+                        "- run_sql(args:{sql:string}) (targeted probes; required after runtime failures)",
                         "- ask_user(args:{prompt:string})",
                         "",
                         "Not available: read/explore tools, dbt_validate, publish_dbt_to_provider.",
@@ -4309,6 +4317,38 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         }
                     };
 
+                    // Cheap structural prechecks: fail fast on malformed/duplicated schema artifacts
+                    // instead of burning a full dbt_validate cycle.
+                    if let Err(e) = crate::data_engineer::schema_policy::prevalidate_dbt_schema_artifacts(&actx).await {
+                        let reason = format!("Pre-validation failed; fix DBT YAML artifacts before re-validating.\n\n{e}");
+                        let ts = chrono::Utc::now().to_rfc3339();
+                        let step = react_core::session::ThreadStep::GuardBlock {
+                            phase: phase.as_str().to_string(),
+                            kind: "precheck_failed".to_string(),
+                            reason: reason.clone(),
+                            observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                            ts,
+                            agent: "agent".to_string(),
+                        };
+                        let _ = thread_store.append_step(thread_id, step).await;
+                        let to_phase = if phase == Phase::CleanseValidate {
+                            Phase::CleanseAuthor
+                        } else {
+                            Phase::ModelAuthor
+                        };
+                        let _ = control_flow::append_phase_with_reason(
+                            &thread_store,
+                            thread_id,
+                            Some("agent".to_string()),
+                            Some(phase),
+                            to_phase,
+                            Some("precheck_failed"),
+                            Some(serde_json::json!({ "error": e })),
+                        )
+                        .await;
+                        continue;
+                    }
+
                     // Targeted pre-check (compile selected, then build selected) based on most recent patch.
                     // If it fails, we skip full validation and proceed with the standard failure handling.
                     let obs: serde_json::Value;
@@ -5724,7 +5764,7 @@ mod tests {
         assert!(reg
             .call("run_sql", serde_json::json!({"sql":"SELECT 1"}), &actx)
             .await
-            .is_err());
+            .is_ok());
 
         // dbt_files get should be blocked (put-only wrapper)
         assert!(reg

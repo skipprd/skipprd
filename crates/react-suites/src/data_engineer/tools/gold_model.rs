@@ -88,14 +88,7 @@ fn build_gold_sys_prompt(provider: &str, dialect: &str, max_items: usize) -> Str
          Output MUST be valid JSON only.\n\
          You MUST choose EXACTLY ONE patch primitive to modify the provided model_path.\n\
          Use structured primitives only (replace_file / replace_range / replace_list).\n\
-         Output schema:\n\
-         {{\n\
-           \"notes\": [\"...\"],\n\
-           \"replace_file\": {{\"new_text\":\"...\"}} | null,\n\
-           \"replace_range\": {{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}} | null,\n\
-           \"replace_list\": {{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}]}} | null\n\
-         }}\n\
-         (Exactly ONE of replace_file/replace_range/replace_list must be provided; the others must be null.)\n\
+         {patch_contract}\n\
          \n\
          CRITICAL gold rules:\n\
          - You MUST write a SELECT-based dbt model.\n\
@@ -117,6 +110,8 @@ fn build_gold_sys_prompt(provider: &str, dialect: &str, max_items: usize) -> Str
          Patch rules:\n\
          - The patch MUST modify ONLY the provided model_path.\n\
          \n"
+        ,
+        patch_contract = crate::prompts::patch_contract::llm_patch_response_contract()
     )
 }
 

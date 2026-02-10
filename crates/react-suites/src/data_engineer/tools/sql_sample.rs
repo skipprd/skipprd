@@ -20,7 +20,12 @@ impl Tool for SqlSampleTool {
         let field = args.get("field").and_then(|x| x.as_str()).unwrap_or("");
         let k = args.get("k").and_then(|x| x.as_u64()).unwrap_or(10);
         if table.is_empty() || field.is_empty() {
-            return Ok(serde_json::json!({"ok": false, "error": "missing table/field"}));
+            let hint = if !table.is_empty() && field.is_empty() {
+                Some("sql_sample requires args.field. Call sql_schema(args:{table}) first to list fields, then retry with a specific field. To sample rows, use run_sql with LIMIT.".to_string())
+            } else {
+                None
+            };
+            return Ok(serde_json::json!({"ok": false, "error": "missing table/field", "hint": hint}));
         }
         let sql = format!(
             "SELECT {f} AS value, COUNT(1) AS cnt FROM {t} GROUP BY {f} ORDER BY cnt DESC LIMIT {k}",

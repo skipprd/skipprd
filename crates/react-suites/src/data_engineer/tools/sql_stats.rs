@@ -30,7 +30,12 @@ impl Tool for SqlStatsTool {
             .trim()
             .to_string();
         if table.is_empty() || field.is_empty() {
-            return Ok(serde_json::json!({"ok": false, "error": "missing table/field"}));
+            let hint = if !table.is_empty() && field.is_empty() {
+                Some("sql_stats requires args.field. Call sql_schema(args:{table}) first to list fields, then retry with a specific field.".to_string())
+            } else {
+                None
+            };
+            return Ok(serde_json::json!({"ok": false, "error": "missing table/field", "hint": hint}));
         }
 
         // Try catalog first (acts as cache)

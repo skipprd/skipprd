@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde::de::Deserializer;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
@@ -22,6 +23,17 @@ fn sha256_hex(s: &str) -> String {
     hasher.update(s.as_bytes());
     let out = hasher.finalize();
     hex::encode(out)
+}
+
+fn deserialize_opt_nonempty_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v: Option<String> = Option::deserialize(deserializer)?;
+    Ok(v.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    }))
 }
 
 fn file_stem(rel_path: &str) -> Option<String> {
@@ -327,8 +339,62 @@ pub(crate) fn extract_final_select_output_columns(sql: &str) -> Result<BTreeSet<
             from_kw_start.ok_or_else(|| "unable to find FROM for final SELECT in staging SQL".to_string())?;
         let from_list_end =
             from_list_end.ok_or_else(|| "unable to find FROM for final SELECT in staging SQL".to_string())?;
+
+        fn strip_sql_line_comments_outside_quotes_full_text(s: &str) -> String {
+            // Remove `-- ...` line comments (outside quotes/backticks) from the full select-list
+            // slice *before* comma splitting. This prevents commas in comments from producing
+            // phantom select items.
+            let mut out = String::new();
+            for line in s.lines() {
+                let mut in_sq = false;
+                let mut in_dq = false;
+                let mut in_bt = false;
+                let mut prev = '\0';
+                let mut kept = String::new();
+                let mut chars = line.chars().peekable();
+                while let Some(ch) = chars.next() {
+                    match ch {
+                        '\'' if !in_dq && !in_bt && prev != '\\' => in_sq = !in_sq,
+                        '"' if !in_sq && !in_bt && prev != '\\' => in_dq = !in_dq,
+                        '`' if !in_sq && !in_dq => in_bt = !in_bt,
+                        '-' if !in_sq && !in_dq && !in_bt => {
+                            if let Some('-') = chars.peek().copied() {
+                                break; // comment start
+                            }
+                            kept.push(ch);
+                        }
+                        _ => kept.push(ch),
+                    }
+                    prev = ch;
+                }
+                out.push_str(&kept);
+                out.push('\n');
+            }
+            out
+        }
+
+        fn strip_sql_line_comments_outside_quotes_one_line(s: &str) -> String {
+            // Same logic as above, but for a single expression string.
+            strip_sql_line_comments_outside_quotes_full_text(s).replace('\n', " ")
+        }
+
+        fn is_conservative_identifier(name: &str) -> bool {
+            let mut it = name.chars();
+            let Some(first) = it.next() else { return false };
+            if !(first.is_ascii_alphabetic() || first == '_') {
+                return false;
+            }
+            for ch in it {
+                if !(ch.is_ascii_alphanumeric() || ch == '_') {
+                    return false;
+                }
+            }
+            true
+        }
+
         let list = &sql[after_sel..from_list_end];
-        let items = split_top_level_commas(list);
+        let list_sans_comments = strip_sql_line_comments_outside_quotes_full_text(list);
+        let items = split_top_level_commas(&list_sans_comments);
         if items.is_empty() {
             return Err("final SELECT list appears empty".to_string());
         }
@@ -386,42 +452,8 @@ pub(crate) fn extract_final_select_output_columns(sql: &str) -> Result<BTreeSet<
 
         let mut out: BTreeSet<String> = BTreeSet::new();
 
-        fn strip_sql_line_comments_outside_quotes(s: &str) -> String {
-            // Remove `-- ...` line comments (outside quotes/backticks) so comment text can't be
-            // misinterpreted as a column identifier.
-            let mut out_lines: Vec<String> = Vec::new();
-            for line in s.lines() {
-                let mut in_sq = false;
-                let mut in_dq = false;
-                let mut in_bt = false;
-                let mut prev = '\0';
-                let mut kept = String::new();
-                let mut chars = line.chars().peekable();
-                while let Some(ch) = chars.next() {
-                    match ch {
-                        '\'' if !in_dq && !in_bt && prev != '\\' => in_sq = !in_sq,
-                        '"' if !in_sq && !in_bt && prev != '\\' => in_dq = !in_dq,
-                        '`' if !in_sq && !in_dq => in_bt = !in_bt,
-                        '-' if !in_sq && !in_dq && !in_bt => {
-                            if let Some('-') = chars.peek().copied() {
-                                break; // comment start
-                            }
-                            kept.push(ch);
-                        }
-                        _ => kept.push(ch),
-                    }
-                    prev = ch;
-                }
-                let t = kept.trim();
-                if !t.is_empty() {
-                    out_lines.push(t.to_string());
-                }
-            }
-            out_lines.join(" ")
-        }
-
         for it in items {
-            let t = strip_sql_line_comments_outside_quotes(it.trim());
+            let t = strip_sql_line_comments_outside_quotes_one_line(it.trim());
             let t = t.trim();
             if t.is_empty() {
                 continue;
@@ -436,7 +468,7 @@ pub(crate) fn extract_final_select_output_columns(sql: &str) -> Result<BTreeSet<
             if let Some(as_pos) = tl.rfind(" as ") {
                 let alias = strip_ident_quotes(&t[as_pos + 4..]);
                 let a = alias.trim();
-                if !a.is_empty() {
+                if !a.is_empty() && is_conservative_identifier(a) {
                     out.insert(a.to_string());
                 }
                 continue;
@@ -444,7 +476,7 @@ pub(crate) fn extract_final_select_output_columns(sql: &str) -> Result<BTreeSet<
             // Bare identifier or quoted identifier.
             let ident = strip_ident_quotes(t);
             let name = ident.split('.').last().unwrap_or("").trim().to_string();
-            if !name.is_empty() {
+            if !name.is_empty() && is_conservative_identifier(&name) {
                 out.insert(name);
             }
         }
@@ -909,6 +941,7 @@ fn validate_patch_args_shape(args: &Value) -> Result<(), String> {
 struct ReplaceFileArgs {
     path: String,
     new_text: String,
+    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
     expected_sha256: Option<String>,
 }
 
@@ -919,6 +952,7 @@ struct ReplaceRangeArgs {
     start_line: usize,
     end_line: usize,
     new_text: String,
+    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
     expected_sha256: Option<String>,
 }
 
@@ -935,6 +969,7 @@ struct ReplaceListEditArgs {
 struct ReplaceListArgs {
     path: String,
     edits: Vec<ReplaceListEditArgs>,
+    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
     expected_sha256: Option<String>,
 }
 
@@ -1620,5 +1655,24 @@ from t
         let cols = extract_final_select_output_columns(sql).expect("should parse select list");
         let got = cols.into_iter().collect::<Vec<_>>();
         assert_eq!(got, vec!["customer_id", "email", "email_raw"]);
+    }
+
+    #[test]
+    fn extract_final_select_output_columns_ignores_commas_in_line_comments() {
+        let sql = r#"
+with t as (
+  select
+    1 as a,
+    2 as b
+  from some_table
+)
+select
+  a, -- harmless comment, with commas, should not split into phantom columns
+  b
+from t
+"#;
+        let cols = extract_final_select_output_columns(sql).expect("should parse select list");
+        let got = cols.into_iter().collect::<Vec<_>>();
+        assert_eq!(got, vec!["a", "b"]);
     }
 }
