@@ -839,6 +839,7 @@ mod tests {
             }],
             batches: vec![vec!["fct_orders".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: crate::data_engineer::plan::PlanProgress::default(),
         };
         crate::data_engineer::plan::save_model_plan(&ctx, &plan)

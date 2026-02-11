@@ -125,6 +125,30 @@ impl Default for PlanProgress {
     }
 }
 
+/// Audit trail for plan mutations (repairs, pruning, canonicalization).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlanMutation {
+    pub ts: String,
+    /// Machine-readable reason code, e.g. "plan_repair_semantic".
+    pub reason_code: String,
+    /// Additional structured detail (best-effort; keep small).
+    #[serde(default)]
+    pub detail: Value,
+}
+
+fn push_plan_mutation(muts: &mut Vec<PlanMutation>, reason_code: &str, detail: Value) {
+    muts.push(PlanMutation {
+        ts: chrono::Utc::now().to_rfc3339(),
+        reason_code: reason_code.to_string(),
+        detail,
+    });
+    // Keep bounded.
+    if muts.len() > 50 {
+        let keep = muts.split_off(muts.len().saturating_sub(50));
+        *muts = keep;
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChecklistOrigin {
@@ -231,6 +255,9 @@ pub struct CleansePlan {
     /// Ordered work groups (checklist-driven). This is the canonical execution plan for the UI.
     #[serde(default)]
     pub work_groups: Vec<PlanWorkGroup>,
+    /// Audit trail for deterministic + LLM-backed repairs.
+    #[serde(default)]
+    pub mutations: Vec<PlanMutation>,
     #[serde(default)]
     pub progress: PlanProgress,
 }
@@ -271,6 +298,9 @@ pub struct ModelPlan {
     /// Ordered work groups (checklist-driven). This is the canonical execution plan for the UI.
     #[serde(default)]
     pub work_groups: Vec<PlanWorkGroup>,
+    /// Audit trail for deterministic + LLM-backed repairs.
+    #[serde(default)]
+    pub mutations: Vec<PlanMutation>,
     #[serde(default)]
     pub progress: PlanProgress,
 }
@@ -597,6 +627,318 @@ pub async fn save_model_plan(ctx: &AgentCtx, plan: &ModelPlan) -> Result<(), Str
         .map_err(|e| e.to_string())
 }
 
+#[derive(Clone, Debug)]
+pub struct PlanSemanticValidation {
+    pub ok: bool,
+    pub errors: Vec<String>,
+}
+
+fn is_runnable_checklist_status(s: ChecklistItemStatus) -> bool {
+    matches!(
+        s,
+        ChecklistItemStatus::Pending | ChecklistItemStatus::InProgress | ChecklistItemStatus::NeedsUpdate
+    )
+}
+
+fn excerpt_for_prompt(s: &str, max_chars: usize) -> String {
+    let t = s.trim();
+    if max_chars == 0 || t.is_empty() {
+        return String::new();
+    }
+    if t.len() <= max_chars {
+        return t.to_string();
+    }
+    let mut end = 0usize;
+    for (i, ch) in t.char_indices() {
+        if i >= max_chars {
+            break;
+        }
+        end = i + ch.len_utf8();
+    }
+    if end == 0 {
+        return String::new();
+    }
+    let mut out = t[..end].to_string();
+    out.push_str("…[truncated]");
+    out
+}
+
+fn parse_json_object_lenient(text: &str) -> Result<Value, String> {
+    if let Ok(v) = serde_json::from_str::<Value>(text) {
+        return Ok(v);
+    }
+    let s = text.trim();
+    let st = s.find('{').ok_or_else(|| "no '{' found".to_string())?;
+    let en = s.rfind('}').ok_or_else(|| "no '}' found".to_string())?;
+    if en <= st {
+        return Err("invalid brace span".to_string());
+    }
+    serde_json::from_str::<Value>(&s[st..=en]).map_err(|e| e.to_string())
+}
+
+pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValidation {
+    let mut errors: Vec<String> = Vec::new();
+    if plan.plan_key.trim().is_empty() {
+        errors.push("plan_key is missing".to_string());
+    }
+    if plan.tasks.is_empty() {
+        errors.push("tasks is empty".to_string());
+    }
+    for (bi, b) in plan.batches.iter().enumerate() {
+        if b.len() > 5 {
+            errors.push(format!("batches[{bi}] has >5 items (len={})", b.len()));
+        }
+    }
+    for t in plan.tasks.iter() {
+        if t.dataset_id.trim().is_empty() {
+            errors.push("task.dataset_id is empty".to_string());
+            continue;
+        }
+        let sql_status = checklist_status(&t.checklist, CHECKLIST_SQL_MODEL);
+        if is_runnable_checklist_status(sql_status) {
+            let missing_path = t
+                .expected_model_path
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true);
+            if missing_path {
+                errors.push(format!(
+                    "{}: expected_model_path missing for runnable task",
+                    t.dataset_id
+                ));
+            }
+        }
+    }
+    // Batch references should exist in tasks.
+    for (bi, b) in plan.batches.iter().enumerate() {
+        for ds in b.iter() {
+            if plan.tasks.iter().find(|t| t.dataset_id == *ds).is_none() {
+                errors.push(format!(
+                    "batches[{bi}] references dataset_id not present in tasks: {ds}"
+                ));
+            }
+        }
+    }
+    // Work-group refs should exist in tasks.
+    for g in plan.work_groups.iter() {
+        for it in g.items.iter() {
+            if plan.tasks.iter().find(|t| t.dataset_id == it.task_id).is_none() {
+                errors.push(format!(
+                    "work_group {} references unknown dataset_id task_id={}",
+                    g.group_id, it.task_id
+                ));
+            }
+        }
+    }
+    PlanSemanticValidation {
+        ok: errors.is_empty(),
+        errors,
+    }
+}
+
+pub fn validate_model_plan_semantics(
+    plan: &ModelPlan,
+    allowed_staging_models: Option<&std::collections::BTreeSet<String>>,
+) -> PlanSemanticValidation {
+    let mut errors: Vec<String> = Vec::new();
+    if plan.plan_key.trim().is_empty() {
+        errors.push("plan_key is missing".to_string());
+    }
+    if plan.tasks.is_empty() {
+        errors.push("tasks is empty".to_string());
+    }
+    for (bi, b) in plan.batches.iter().enumerate() {
+        if b.len() > 5 {
+            errors.push(format!("batches[{bi}] has >5 items (len={})", b.len()));
+        }
+    }
+    for t in plan.tasks.iter() {
+        if t.name.trim().is_empty() {
+            errors.push("task.name is empty".to_string());
+            continue;
+        }
+        let sql_status = checklist_status(&t.checklist, CHECKLIST_SQL_MODEL);
+        if is_runnable_checklist_status(sql_status) {
+            if t.goal.trim().is_empty() {
+                errors.push(format!("{}: goal is empty for runnable task", t.name));
+            }
+            // Prevent the "missing inputs" executor failure.
+            let nonempty_inputs: Vec<String> = t
+                .inputs
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if nonempty_inputs.is_empty() {
+                errors.push(format!("{}: inputs is empty for runnable task", t.name));
+            }
+            if let Some(allowed) = allowed_staging_models {
+                for inp in nonempty_inputs.iter() {
+                    if !allowed.contains(inp) {
+                        // Soft validation: executor will gate this; but we surface early so repair can fix.
+                        errors.push(format!(
+                            "{}: input '{}' not grounded in models/staging/",
+                            t.name, inp
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // Batch references should exist in tasks.
+    for (bi, b) in plan.batches.iter().enumerate() {
+        for name in b.iter() {
+            if plan.tasks.iter().find(|t| t.name == *name).is_none() {
+                errors.push(format!(
+                    "batches[{bi}] references model name not present in tasks: {name}"
+                ));
+            }
+        }
+    }
+    // Work-group refs should exist in tasks.
+    for g in plan.work_groups.iter() {
+        for it in g.items.iter() {
+            if plan.tasks.iter().find(|t| t.name == it.task_id).is_none() {
+                errors.push(format!(
+                    "work_group {} references unknown model task_id={}",
+                    g.group_id, it.task_id
+                ));
+            }
+        }
+    }
+    PlanSemanticValidation {
+        ok: errors.is_empty(),
+        errors,
+    }
+}
+
+fn plan_repair_system_prompt(kind: &str) -> String {
+    // Keep this short and hard-constraint focused (JSON-only, no tools).
+    format!(
+        "You are a plan repair agent.\n\
+Your job is to repair a {kind} plan JSON so it satisfies server validation.\n\
+\n\
+Hard constraints:\n\
+- Your entire response MUST be STRICT JSON only (no markdown, no commentary).\n\
+- Output ONE JSON object that matches the plan schema.\n\
+- Preserve plan_key and status; preserve tasks/batches/work_groups unless required to fix validation.\n\
+- DO NOT add tool calls, do not ask questions.\n\
+- If a task cannot be repaired without guessing, mark it blocked by setting its sql_model checklist item to status=\"blocked\" and add a short details message.\n\
+\n\
+Goal: fix only what's needed so the plan can execute deterministically."
+    )
+}
+
+pub async fn repair_cleanse_plan_semantics_via_llm(
+    ctx: &AgentCtx,
+    plan: &CleansePlan,
+    validation_errors: &[String],
+) -> Result<CleansePlan, String> {
+    use react_core::llm::ChatMessage;
+    let sys = plan_repair_system_prompt("cleanse");
+    let plan_json = serde_json::to_string_pretty(plan).map_err(|e| e.to_string())?;
+    let errs = validation_errors.join("\n");
+    let user = format!(
+        "Validation errors:\n{errs}\n\nCurrent plan JSON (FULL):\n{}\n\nRe-emit the corrected plan JSON only.",
+        excerpt_for_prompt(&plan_json, 200_000)
+    );
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: sys,
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user,
+        },
+    ];
+    let raw = ctx.llm.chat(&messages).map_err(|e| e.to_string())?;
+    let v = parse_json_object_lenient(&raw)?;
+    serde_json::from_value::<CleansePlan>(v).map_err(|e| e.to_string())
+}
+
+pub async fn repair_model_plan_semantics_via_llm(
+    ctx: &AgentCtx,
+    plan: &ModelPlan,
+    validation_errors: &[String],
+    allowed_staging_models: &[String],
+) -> Result<ModelPlan, String> {
+    use react_core::llm::ChatMessage;
+    let sys = plan_repair_system_prompt("model");
+    let plan_json = serde_json::to_string_pretty(plan).map_err(|e| e.to_string())?;
+    let errs = validation_errors.join("\n");
+    let mut allowed = allowed_staging_models.to_vec();
+    allowed.sort();
+    allowed.dedup();
+    let user = format!(
+        "Validation errors:\n{errs}\n\nAllowed staging model inputs (values for task.inputs):\n{}\n\nCurrent plan JSON (FULL):\n{}\n\nRe-emit the corrected plan JSON only.",
+        serde_json::to_string_pretty(&allowed).unwrap_or_else(|_| "[]".to_string()),
+        excerpt_for_prompt(&plan_json, 200_000)
+    );
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: sys,
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user,
+        },
+    ];
+    let raw = ctx.llm.chat(&messages).map_err(|e| e.to_string())?;
+    let v = parse_json_object_lenient(&raw)?;
+    serde_json::from_value::<ModelPlan>(v).map_err(|e| e.to_string())
+}
+
+pub async fn ensure_cleanse_plan_semantically_valid_or_repaired(
+    ctx: &AgentCtx,
+    plan: &mut CleansePlan,
+) -> Result<PlanSemanticValidation, String> {
+    let v0 = validate_cleanse_plan_semantics(plan);
+    if v0.ok {
+        return Ok(v0);
+    }
+    // One repair attempt only (bounded).
+    let repaired = repair_cleanse_plan_semantics_via_llm(ctx, plan, &v0.errors).await?;
+    *plan = repaired;
+    let v1 = validate_cleanse_plan_semantics(plan);
+    if v1.ok {
+        push_plan_mutation(
+            &mut plan.mutations,
+            "plan_repair_semantic",
+            serde_json::json!({ "kind": "cleanse", "errors": v0.errors }),
+        );
+        let _ = save_cleanse_plan(ctx, plan).await;
+    }
+    Ok(v1)
+}
+
+pub async fn ensure_model_plan_semantically_valid_or_repaired(
+    ctx: &AgentCtx,
+    plan: &mut ModelPlan,
+    allowed_staging_models: &std::collections::BTreeSet<String>,
+) -> Result<PlanSemanticValidation, String> {
+    let v0 = validate_model_plan_semantics(plan, Some(allowed_staging_models));
+    if v0.ok {
+        return Ok(v0);
+    }
+    // One repair attempt only (bounded).
+    let allowed: Vec<String> = allowed_staging_models.iter().cloned().collect();
+    let repaired =
+        repair_model_plan_semantics_via_llm(ctx, plan, &v0.errors, &allowed).await?;
+    *plan = repaired;
+    let v1 = validate_model_plan_semantics(plan, Some(allowed_staging_models));
+    if v1.ok {
+        push_plan_mutation(
+            &mut plan.mutations,
+            "plan_repair_semantic",
+            serde_json::json!({ "kind": "model", "errors": v0.errors }),
+        );
+        let _ = save_model_plan(ctx, plan).await;
+    }
+    Ok(v1)
+}
+
 fn checklist_status(items: &[PlanChecklistItem], id: &str) -> ChecklistItemStatus {
     items
         .iter()
@@ -613,8 +955,8 @@ pub fn cleanse_next_batch(plan: &CleansePlan) -> Vec<String> {
                 // "Next batch" is defined as "next SQL authoring work", not "overall task not done".
                 // This avoids repeatedly scheduling a dataset when only schema/validate checklist
                 // items remain.
-                if checklist_status(&t.checklist, CHECKLIST_SQL_MODEL) != ChecklistItemStatus::Done
-                {
+                let st = checklist_status(&t.checklist, CHECKLIST_SQL_MODEL);
+                if st != ChecklistItemStatus::Done && is_runnable_checklist_status(st) {
                     out.push(ds.clone());
                 }
             } else {
@@ -637,8 +979,8 @@ pub fn model_next_batch(plan: &ModelPlan) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for name in batch.iter() {
             if let Some(t) = plan.tasks.iter().find(|t| t.name == *name) {
-                if checklist_status(&t.checklist, CHECKLIST_SQL_MODEL) != ChecklistItemStatus::Done
-                {
+                let st = checklist_status(&t.checklist, CHECKLIST_SQL_MODEL);
+                if st != ChecklistItemStatus::Done && is_runnable_checklist_status(st) {
                     out.push(name.clone());
                 }
             } else {
@@ -733,8 +1075,10 @@ pub fn cleanse_next_action(plan: &CleansePlan) -> Option<(WorkGroupKind, Vec<Str
         for it in g.items.iter() {
             let need = match plan.tasks.iter().find(|t| t.dataset_id == it.task_id) {
                 Some(t) => {
-                    checklist_status(&t.checklist, it.checklist_item_id.as_str())
-                        != ChecklistItemStatus::Done
+                    is_runnable_checklist_status(checklist_status(
+                        &t.checklist,
+                        it.checklist_item_id.as_str(),
+                    ))
                 }
                 None => true,
             };
@@ -791,8 +1135,10 @@ pub fn cleanse_next_work_item_ctx(plan: &CleansePlan) -> Option<NextWorkItemCtx>
         for it in g.items.iter() {
             let need = match plan.tasks.iter().find(|t| t.dataset_id == it.task_id) {
                 Some(t) => {
-                    checklist_status(&t.checklist, it.checklist_item_id.as_str())
-                        != ChecklistItemStatus::Done
+                    is_runnable_checklist_status(checklist_status(
+                        &t.checklist,
+                        it.checklist_item_id.as_str(),
+                    ))
                 }
                 None => true,
             };
@@ -841,8 +1187,10 @@ pub fn model_next_action(plan: &ModelPlan) -> Option<(WorkGroupKind, Vec<String>
         for it in g.items.iter() {
             let need = match plan.tasks.iter().find(|t| t.name == it.task_id) {
                 Some(t) => {
-                    checklist_status(&t.checklist, it.checklist_item_id.as_str())
-                        != ChecklistItemStatus::Done
+                    is_runnable_checklist_status(checklist_status(
+                        &t.checklist,
+                        it.checklist_item_id.as_str(),
+                    ))
                 }
                 None => true,
             };
@@ -887,8 +1235,10 @@ pub fn model_next_work_item_ctx(plan: &ModelPlan) -> Option<NextWorkItemCtx> {
         for it in g.items.iter() {
             let need = match plan.tasks.iter().find(|t| t.name == it.task_id) {
                 Some(t) => {
-                    checklist_status(&t.checklist, it.checklist_item_id.as_str())
-                        != ChecklistItemStatus::Done
+                    is_runnable_checklist_status(checklist_status(
+                        &t.checklist,
+                        it.checklist_item_id.as_str(),
+                    ))
                 }
                 None => true,
             };
@@ -2108,6 +2458,7 @@ mod tests {
             ],
             batches: vec![vec!["a.b.c".to_string()], vec!["d.e.f".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: PlanProgress::default(),
         };
 
@@ -2175,6 +2526,7 @@ mod tests {
             ],
             batches: vec![vec!["fct_a".to_string(), "dim_b".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: PlanProgress::default(),
         };
 
@@ -2233,6 +2585,7 @@ mod tests {
             ],
             batches: vec![vec!["dim_customers".to_string(), "dim_orders".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: PlanProgress::default(),
         };
 
@@ -2300,6 +2653,7 @@ sources:
                 "AwsDataCatalog.test_raw.raw_products".to_string(),
             ]],
             work_groups: vec![],
+            mutations: vec![],
             progress: PlanProgress::default(),
         };
         let mut allowed = std::collections::BTreeSet::new();
@@ -2348,6 +2702,7 @@ sources:
             ],
             batches: vec![vec!["fct_ok".to_string(), "fct_bad".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: PlanProgress::default(),
         };
         let mut allowed = std::collections::BTreeSet::new();
@@ -2389,6 +2744,7 @@ sources:
             }],
             batches: vec![vec!["dim_customers".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: PlanProgress {
                 // Critical: scope progress cursor beyond the historical log we already have.
                 last_applied_step_idx: log.steps.len(),
@@ -2416,6 +2772,7 @@ sources:
             }],
             batches: vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: PlanProgress::default(),
         };
         ensure_expected_model_paths_cleanse(None, &mut plan);
@@ -2440,6 +2797,7 @@ sources:
             }],
             batches: vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: PlanProgress::default(),
         };
         let changed = ensure_expected_model_paths_cleanse(None, &mut plan);
@@ -2467,6 +2825,7 @@ sources:
             }],
             batches: vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: PlanProgress {
                 consecutive_batch_failures: 3,
                 total_batch_failures: 3,
@@ -2517,6 +2876,7 @@ sources:
                 "AwsDataCatalog.test_raw.raw_customers".to_string(),
             ]],
             work_groups: vec![],
+            mutations: vec![],
             progress: PlanProgress::default(),
         };
 
@@ -2574,6 +2934,7 @@ sources:
                 "AwsDataCatalog.test_raw.raw_customers".to_string(),
             ]],
             work_groups: vec![],
+            mutations: vec![],
             progress: PlanProgress::default(),
         };
 

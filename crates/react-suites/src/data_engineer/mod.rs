@@ -361,6 +361,27 @@ Hard rules:\n\
             return Ok(true);
         }
 
+        // Auto-heal (semantic): ensure the approved plan is executable (or cancel so we can replan).
+        let v = crate::data_engineer::plan::ensure_cleanse_plan_semantically_valid_or_repaired(
+            actx, &mut p,
+        )
+        .await?;
+        if !v.ok {
+            p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+            let _ = crate::data_engineer::plan::save_cleanse_plan(actx, &p).await;
+            control_flow::append_phase_with_reason(
+                thread_store,
+                thread_id,
+                Some("agent".to_string()),
+                Some(phase),
+                phase,
+                Some("plan_semantic_invalid"),
+                Some(serde_json::json!({ "plan_key": p.plan_key, "errors": v.errors })),
+            )
+            .await?;
+            return Ok(true);
+        }
+
         p.status = crate::data_engineer::plan::PlanStatus::Approved;
         // Scope progress to *this* plan instance so old tool calls can't auto-complete a newly approved plan.
         p.progress.last_applied_step_idx = log_len;
@@ -414,6 +435,29 @@ Hard rules:\n\
                 phase,
                 Some("plan_pruned_empty"),
                 Some(serde_json::json!({ "plan_key": p.plan_key })),
+            )
+            .await?;
+            return Ok(true);
+        }
+
+        // Auto-heal (semantic): ensure the approved plan is executable (or cancel so we can replan).
+        let v = crate::data_engineer::plan::ensure_model_plan_semantically_valid_or_repaired(
+            actx,
+            &mut p,
+            &stg.allowed_models,
+        )
+        .await?;
+        if !v.ok {
+            p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+            let _ = crate::data_engineer::plan::save_model_plan(actx, &p).await;
+            control_flow::append_phase_with_reason(
+                thread_store,
+                thread_id,
+                Some("agent".to_string()),
+                Some(phase),
+                phase,
+                Some("plan_semantic_invalid"),
+                Some(serde_json::json!({ "plan_key": p.plan_key, "errors": v.errors })),
             )
             .await?;
             return Ok(true);
@@ -5923,6 +5967,7 @@ mod tests {
             }],
             batches: vec![vec![ds.clone()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: crate::data_engineer::plan::PlanProgress::default(),
         };
         crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
@@ -6016,6 +6061,7 @@ mod tests {
             }],
             batches: vec![vec!["fct_orders".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: crate::data_engineer::plan::PlanProgress::default(),
         };
         crate::data_engineer::plan::save_model_plan(&actx, &plan)

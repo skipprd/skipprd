@@ -57,6 +57,14 @@ fn update_failure_counters(progress: &mut plan::PlanProgress, ok: bool) {
     progress.total_batch_failures = progress.total_batch_failures.saturating_add(1);
 }
 
+fn sql_model_checklist_status(items: &[plan::PlanChecklistItem]) -> plan::ChecklistItemStatus {
+    items
+        .iter()
+        .find(|it| it.checklist_item_id == "sql_model")
+        .map(|it| it.status)
+        .unwrap_or(plan::ChecklistItemStatus::Pending)
+}
+
 async fn maybe_advance_phase_on_done(
     ctx: &AgentCtx,
     from_phase: control_flow::Phase,
@@ -106,6 +114,20 @@ impl Tool for ApplyNextCleanseBatchTool {
             ));
         }
 
+        // Plan auto-heal (semantic): validate + single repair attempt before executing.
+        let v = plan::ensure_cleanse_plan_semantically_valid_or_repaired(ctx, &mut plan).await?;
+        if !v.ok {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "kind": "plan_invalid",
+                "plan_key": plan.plan_key,
+                "errors": v.errors,
+                "attempted_dataset_ids": [],
+                "succeeded_dataset_ids": [],
+                "failed_dataset_ids": [],
+            }));
+        }
+
         if plan.progress.consecutive_batch_failures >= MAX_CONSECUTIVE_BATCH_FAILURES {
             return Ok(serde_json::json!({
                 "ok": false,
@@ -125,7 +147,18 @@ impl Tool for ApplyNextCleanseBatchTool {
         };
         if batch.is_empty() {
             let pending_schema = plan::cleanse_pending_schema_contracts(&plan);
-            let done = pending_schema.is_empty();
+            if !pending_schema.is_empty() {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "message": "no remaining cleanse SQL tasks; schema contracts pending",
+                    "done": false,
+                    "pending_schema_contract_dataset_ids": pending_schema,
+                    "attempted_dataset_ids": [],
+                    "succeeded_dataset_ids": [],
+                    "failed_dataset_ids": [],
+                }));
+            }
+            let done = plan::cleanse_all_done(&plan);
             if done {
                 maybe_advance_phase_on_done(
                     ctx,
@@ -135,6 +168,27 @@ impl Tool for ApplyNextCleanseBatchTool {
                     serde_json::json!({ "plan_key": plan.plan_key }),
                 )
                 .await;
+            }
+            if !done {
+                let mut blocked: Vec<String> = Vec::new();
+                for t in plan.tasks.iter() {
+                    let st = sql_model_checklist_status(&t.checklist);
+                    if matches!(st, plan::ChecklistItemStatus::Blocked) {
+                        blocked.push(t.dataset_id.clone());
+                    }
+                }
+                blocked.sort();
+                blocked.dedup();
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "kind": "plan_blocked",
+                    "plan_key": plan.plan_key,
+                    "message": "no runnable cleanse SQL tasks remain, but plan is not complete (blocked tasks exist)",
+                    "blocked_dataset_ids": blocked,
+                    "attempted_dataset_ids": [],
+                    "succeeded_dataset_ids": [],
+                    "failed_dataset_ids": [],
+                }));
             }
             return Ok(serde_json::json!({
                 "ok": true,
@@ -297,6 +351,21 @@ impl Tool for ApplyNextModelBatchTool {
             ));
         }
 
+        // Plan auto-heal (semantic): validate + single repair attempt before executing.
+        let stg = dataset_truth::discover_staging_models_from_storage(ctx).await;
+        let v = plan::ensure_model_plan_semantically_valid_or_repaired(ctx, &mut plan, &stg.allowed_models).await?;
+        if !v.ok {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "kind": "plan_invalid",
+                "plan_key": plan.plan_key,
+                "errors": v.errors,
+                "attempted_item_names": [],
+                "succeeded_item_names": [],
+                "failed_item_names": [],
+            }));
+        }
+
         if plan.progress.consecutive_batch_failures >= MAX_CONSECUTIVE_BATCH_FAILURES {
             return Ok(serde_json::json!({
                 "ok": false,
@@ -316,7 +385,18 @@ impl Tool for ApplyNextModelBatchTool {
         };
         if batch_names.is_empty() {
             let pending_schema = plan::model_pending_schema_contracts(&plan);
-            let done = pending_schema.is_empty();
+            if !pending_schema.is_empty() {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "message": "no remaining model SQL tasks; schema contracts pending",
+                    "done": false,
+                    "pending_schema_contract_item_names": pending_schema,
+                    "attempted_item_names": [],
+                    "succeeded_item_names": [],
+                    "failed_item_names": [],
+                }));
+            }
+            let done = plan::model_all_done(&plan);
             if done {
                 maybe_advance_phase_on_done(
                     ctx,
@@ -326,6 +406,27 @@ impl Tool for ApplyNextModelBatchTool {
                     serde_json::json!({ "plan_key": plan.plan_key }),
                 )
                 .await;
+            }
+            if !done {
+                let mut blocked: Vec<String> = Vec::new();
+                for t in plan.tasks.iter() {
+                    let st = sql_model_checklist_status(&t.checklist);
+                    if matches!(st, plan::ChecklistItemStatus::Blocked) {
+                        blocked.push(t.name.clone());
+                    }
+                }
+                blocked.sort();
+                blocked.dedup();
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "kind": "plan_blocked",
+                    "plan_key": plan.plan_key,
+                    "message": "no runnable model SQL tasks remain, but plan is not complete (blocked tasks exist)",
+                    "blocked_item_names": blocked,
+                    "attempted_item_names": [],
+                    "succeeded_item_names": [],
+                    "failed_item_names": [],
+                }));
             }
             return Ok(serde_json::json!({
                 "ok": true,
@@ -339,7 +440,6 @@ impl Tool for ApplyNextModelBatchTool {
         }
 
         // Truth gating: gold/model must only rely on existing staging models (silver).
-        let stg = dataset_truth::discover_staging_models_from_storage(ctx).await;
         let mut gating_errors: Vec<String> = Vec::new();
         for n in batch_names.iter() {
             if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {

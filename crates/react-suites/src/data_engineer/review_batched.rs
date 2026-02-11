@@ -1449,6 +1449,7 @@ mod tests {
             ],
             batches: vec![vec!["a.b.a".to_string()], vec!["a.b.b".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: de_plan::PlanProgress::default(),
         };
         // Persist plan under standard plans prefix so loader finds it.

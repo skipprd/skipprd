@@ -118,6 +118,20 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             ));
         }
 
+        // Plan auto-heal (semantic): validate + single repair attempt before executing.
+        let v = plan::ensure_cleanse_plan_semantically_valid_or_repaired(ctx, &mut plan).await?;
+        if !v.ok {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "kind": "plan_invalid",
+                "plan_key": plan.plan_key,
+                "errors": v.errors,
+                "attempted_dataset_ids": [],
+                "succeeded_dataset_ids": [],
+                "failed_dataset_ids": [],
+            }));
+        }
+
         let batch = plan::cleanse_pending_schema_contracts(&plan);
         if batch.is_empty() {
             return Ok(serde_json::json!({
@@ -260,6 +274,21 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 "model plan is not approved (status={:?}); return to plan phase",
                 plan.status
             ));
+        }
+
+        // Plan auto-heal (semantic): validate + single repair attempt before executing.
+        let stg = crate::data_engineer::dataset_truth::discover_staging_models_from_storage(ctx).await;
+        let v = plan::ensure_model_plan_semantically_valid_or_repaired(ctx, &mut plan, &stg.allowed_models).await?;
+        if !v.ok {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "kind": "plan_invalid",
+                "plan_key": plan.plan_key,
+                "errors": v.errors,
+                "attempted_item_names": [],
+                "succeeded_item_names": [],
+                "failed_item_names": [],
+            }));
         }
 
         let names = plan::model_pending_schema_contracts(&plan);
@@ -618,6 +647,7 @@ mod tests {
             }],
             batches: vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: plan::PlanProgress::default(),
         };
         plan::save_cleanse_plan(&ctx, &p).await.unwrap();
@@ -716,6 +746,7 @@ mod tests {
             }],
             batches: vec![vec!["dim_customers".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: plan::PlanProgress::default(),
         };
         plan::save_model_plan(&ctx, &p).await.unwrap();
@@ -818,6 +849,7 @@ mod tests {
             }],
             batches: vec![vec!["dim_customers".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: plan::PlanProgress::default(),
         };
         plan::save_model_plan(&ctx, &p).await.unwrap();
@@ -911,6 +943,7 @@ mod tests {
             }],
             batches: vec![vec!["dim_customers".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: plan::PlanProgress::default(),
         };
         plan::save_model_plan(&ctx, &p).await.unwrap();

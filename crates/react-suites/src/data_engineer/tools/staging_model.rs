@@ -1316,6 +1316,7 @@ mod tests {
             }],
             batches: vec![vec![ds.clone()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: crate::data_engineer::plan::PlanProgress::default(),
         };
         crate::data_engineer::plan::save_cleanse_plan(&ctx, &plan)
