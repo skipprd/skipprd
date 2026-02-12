@@ -4589,6 +4589,7 @@ mod tests {
             tasks: vec![],
             batches: vec![],
             work_groups: vec![],
+            mutations: vec![],
             progress: de_plan::PlanProgress::default(),
         };
         suite_ctx
@@ -4609,6 +4610,7 @@ mod tests {
             tasks: vec![],
             batches: vec![],
             work_groups: vec![],
+            mutations: vec![],
             progress: de_plan::PlanProgress::default(),
         };
         suite_ctx
@@ -4678,6 +4680,7 @@ mod tests {
             }],
             batches: vec![vec!["AwsDataCatalog.test_raw.raw_orders".to_string()]],
             work_groups: vec![],
+            mutations: vec![],
             progress: de_plan::PlanProgress::default(),
         };
         suite_ctx

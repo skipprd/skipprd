@@ -339,6 +339,17 @@ async fn llm_json(
         .map_err(|e| format!("review {}: expected JSON, got parse error: {}", name, e))
 }
 
+async fn load_global_semantic_context_json(
+    actx: &AgentCtx,
+    sctx: &SuiteCtx,
+) -> serde_json::Value {
+    let key = sctx.keyspace.semantic_key(
+        &sctx.scope,
+        react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
+    );
+    actx.storage.get_json(&key).await.ok().unwrap_or(Value::Null)
+}
+
 fn upsert_review_snapshot(obj: &mut serde_json::Map<String, Value>, patch: Value) {
     // Store under project_snapshot.review (bounded).
     let review = obj.entry("review").or_insert_with(|| serde_json::json!({}));
@@ -1073,11 +1084,16 @@ pub async fn run_batched_review(
         })
         .unwrap_or(Value::Null);
 
+    let global_ctx = load_global_semantic_context_json(&actx, sctx).await;
+    let global_ctx_txt =
+        serde_json::to_string_pretty(&global_ctx).unwrap_or_else(|_| "null".to_string());
+
     let review_context_brief = compact_review_context_for_summary(original_question_with_context);
     let summary_user = format!(
-        "Phase: {phase}\n\nOriginal goal + review context (brief):\n{q}\n\nProject skeleton files:\n{files}\n\nProject index:\n{idx}\n\nManifest metadata (minimal):\n{meta}\n",
+        "Phase: {phase}\n\nOriginal goal + review context (brief):\n{q}\n\nIMMUTABLE CONTEXT (global_semantic_context):\n{gctx}\n\nProject skeleton files:\n{files}\n\nProject index:\n{idx}\n\nManifest metadata (minimal):\n{meta}\n",
         phase = phase.as_str(),
         q = review_context_brief,
+        gctx = global_ctx_txt,
         files = render_files(&proj_files),
         idx = format!(
             "{}\n{}\n{}",
@@ -1194,11 +1210,12 @@ pub async fn run_batched_review(
         }
 
         let batch_user = format!(
-            "Phase: {phase}\nBatch {i}/{n}\n\nOriginal goal + review context:\n{q}\n\nBatch items:\n{items}\n\nBatch file contents (bounded):\n{files}\n",
+            "Phase: {phase}\nBatch {i}/{n}\n\nOriginal goal + review context:\n{q}\n\nIMMUTABLE CONTEXT (global_semantic_context):\n{gctx}\n\nBatch items:\n{items}\n\nBatch file contents (bounded):\n{files}\n",
             phase = phase.as_str(),
             i = bidx + 1,
             n = batches.len(),
             q = original_question_with_context,
+            gctx = global_ctx_txt,
             items = serde_json::to_string_pretty(&batch_detail).unwrap_or_else(|_| "[]".to_string()),
             files = render_files(&files),
         );
@@ -1237,9 +1254,10 @@ pub async fn run_batched_review(
 
     // 3) Final unify pass (META-compatible output).
     let unify_user = format!(
-        "Phase: {phase}\n\nOriginal goal + review context:\n{q}\n\nProject notes:\n{proj}\n\nBatch notes:\n{batches}\n",
+        "Phase: {phase}\n\nOriginal goal + review context:\n{q}\n\nIMMUTABLE CONTEXT (global_semantic_context):\n{gctx}\n\nProject notes:\n{proj}\n\nBatch notes:\n{batches}\n",
         phase = phase.as_str(),
         q = original_question_with_context,
+        gctx = global_ctx_txt,
         proj = serde_json::json!({"project_notes": project_notes, "project_risks": project_risks}),
         batches = serde_json::to_string_pretty(&all_batch_notes).unwrap_or_else(|_| "[]".to_string()),
     );

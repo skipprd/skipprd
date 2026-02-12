@@ -100,6 +100,7 @@ fn build_gold_sys_prompt(provider: &str, dialect: &str, max_items: usize) -> Str
            If you need a field that does not exist in silver, put it in notes and do NOT guess.\n\
          - Use provided inputs[].schema_columns (from the warehouse/catalog) as ground truth for available columns + types.\n\
 \n\
+         ANALYST_NOTES_CONTRACT_V1\n\
          Analyst mindset (CRITICAL — include these in `notes` BEFORE writing SQL):\n\
          - Business question: one sentence describing the decision this model supports.\n\
          - Entity definition: what the table represents (e.g., what counts as a “customer/order”), based ONLY on available columns.\n\
@@ -232,6 +233,17 @@ impl Tool for GoldModelTool {
         // Plan-first authoring: if there is an active model plan, use task invariants/notes as the
         // default authoring instructions (and merge with any explicit item.instructions overrides).
         let plan_opt = plan::load_model_plan(ctx).await;
+        let global_semantic_context = ctx
+            .storage
+            .get_json(
+                &ctx.keyspace.semantic_key(
+                    &ctx.scope,
+                    react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
+                ),
+            )
+            .await
+            .ok()
+            .unwrap_or(serde_json::Value::Null);
 
         let base = ctx
             .keyspace
@@ -392,6 +404,7 @@ impl Tool for GoldModelTool {
                 "model_name": name,
                 "model_path": rel_path,
                 "goal": goal,
+                "global_semantic_context": global_semantic_context,
                 "instructions": effective_instructions,
                 "plan_invariants": plan_invariants,
                 "plan_checklist": plan_checklist,
@@ -594,6 +607,17 @@ mod tests {
         }
     }
 
+    fn analyst_notes() -> serde_json::Value {
+        serde_json::json!([
+            "Business question: Provide an orders lens for operational/finance decisions.",
+            "Entity definition: One row represents a single order as defined by the available order identifier(s).",
+            "Grain: One row per order (no aggregation beyond order grain).",
+            "Time axis: Use the best available order timestamp/date column; if missing, note the gap.",
+            "Metric definitions: Order count; revenue/amount if a numeric amount column exists; status counts if status exists.",
+            "Assumptions & gaps: Column meanings are inferred from names; validate via null rate, distinctness, and top values for key fields."
+        ])
+    }
+
     #[tokio::test]
     async fn gold_model_writes_mart_and_injects_config() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
@@ -612,7 +636,7 @@ mod tests {
         let llm = Arc::new(MockLlm {
             resp: serde_json::json!({
                 "replace_file": { "path": "models/marts/fct_orders.sql", "new_text": "select * from {{ ref('stg_test_raw_raw_orders') }}" },
-                "notes": []
+                "notes": analyst_notes()
             })
             .to_string(),
         });
@@ -669,7 +693,7 @@ mod tests {
         let llm = Arc::new(MockLlm {
             resp: serde_json::json!({
                 "replace_file": { "path": "models/marts/fct_orders.sql", "new_text": "select * from {{ source('test_raw','raw_orders') }}" },
-                "notes": []
+                "notes": analyst_notes()
             })
             .to_string(),
         });
@@ -723,7 +747,7 @@ mod tests {
         let llm = Arc::new(MockLlm {
             resp: serde_json::json!({
                 "replace_file": { "path": "models/marts/fct_orders.sql", "new_text": "select * from {{ ref('stg_test_raw_raw_orders') }}" },
-                "notes": ["ok"]
+                "notes": analyst_notes()
             })
             .to_string(),
         });
@@ -802,7 +826,7 @@ mod tests {
         let llm = Arc::new(CapturingLlm {
             resp: serde_json::json!({
                 "replace_file": { "path": "models/marts/fct_orders.sql", "new_text": "select * from {{ ref('stg_test_raw_raw_orders') }}" },
-                "notes": []
+                "notes": analyst_notes()
             })
             .to_string(),
             captured_instructions: captured.clone(),

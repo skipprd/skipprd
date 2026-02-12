@@ -5,6 +5,136 @@ use tracing::debug;
 use super::types::{CatalogField, DataCatalog};
 use crate::llm::ChatMessage;
 
+const GLOBAL_CONTEXT_MIN_CONFIDENCE: f32 = 0.80;
+
+fn global_semantic_key(
+    keyspace: &Arc<dyn crate::providers::Keyspace>,
+    scope: &crate::providers::RequestScope,
+) -> String {
+    keyspace.semantic_key(scope, react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID)
+}
+
+async fn read_global_semantic_context(
+    storage: &Arc<dyn crate::adapters::storage::StorageAdapter>,
+    keyspace: &Arc<dyn crate::providers::Keyspace>,
+    scope: &crate::providers::RequestScope,
+) -> Option<react_core::providers::catalog::types::GlobalSemanticContext> {
+    let key = global_semantic_key(keyspace, scope);
+    let v = storage.get_json(&key).await.ok()?;
+    serde_json::from_value::<react_core::providers::catalog::types::GlobalSemanticContext>(v).ok()
+}
+
+async fn write_global_semantic_context(
+    storage: &Arc<dyn crate::adapters::storage::StorageAdapter>,
+    keyspace: &Arc<dyn crate::providers::Keyspace>,
+    scope: &crate::providers::RequestScope,
+    ctx: &react_core::providers::catalog::types::GlobalSemanticContext,
+) {
+    let key = global_semantic_key(keyspace, scope);
+    let yaml = serde_yaml::to_string(ctx).unwrap_or_else(|_| "".to_string());
+    let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
+    let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+    let _ = storage.put_json(&key, &json_equiv).await;
+}
+
+fn clamp_and_filter_global_context(
+    mut ctx: react_core::providers::catalog::types::GlobalSemanticContext,
+) -> react_core::providers::catalog::types::GlobalSemanticContext {
+    // Confidence gating (authoritative only).
+    ctx.audiences
+        .retain(|a| a.confidence >= GLOBAL_CONTEXT_MIN_CONFIDENCE && !a.audience.trim().is_empty());
+    ctx.context_bullets.retain(|b| {
+        b.confidence >= GLOBAL_CONTEXT_MIN_CONFIDENCE && !b.text.trim().is_empty()
+    });
+    ctx.dataset_groups.retain(|g| {
+        g.confidence >= GLOBAL_CONTEXT_MIN_CONFIDENCE
+            && !g.group_name.trim().is_empty()
+            && !g.dataset_ids.is_empty()
+    });
+    ctx.assumptions_and_gaps.retain(|a| {
+        a.confidence >= GLOBAL_CONTEXT_MIN_CONFIDENCE && !a.text.trim().is_empty()
+    });
+
+    // Bound sizes.
+    ctx.audiences.truncate(12);
+    ctx.context_bullets.truncate(24);
+    ctx.dataset_groups.truncate(40);
+    ctx.assumptions_and_gaps.truncate(24);
+
+    // Normalize simple dedup.
+    let mut seen = std::collections::HashSet::<String>::new();
+    ctx.audiences.retain(|a| seen.insert(a.audience.trim().to_string()));
+    let mut seen = std::collections::HashSet::<String>::new();
+    ctx.context_bullets
+        .retain(|b| seen.insert(b.text.trim().to_string()));
+    let mut seen = std::collections::HashSet::<String>::new();
+    ctx.dataset_groups
+        .retain(|g| seen.insert(g.group_name.trim().to_string()));
+    let mut seen = std::collections::HashSet::<String>::new();
+    ctx.assumptions_and_gaps
+        .retain(|a| seen.insert(a.text.trim().to_string()));
+
+    ctx
+}
+
+fn compact_catalog_for_global_context(
+    dataset_id: &str,
+    cat_json: &serde_json::Value,
+) -> serde_json::Value {
+    let desc = cat_json
+        .get("description")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let approx_rows = cat_json
+        .get("dataset_stats")
+        .and_then(|x| x.get("approx_total_rows"))
+        .and_then(|x| x.as_u64());
+    let fields = cat_json
+        .get("fields")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    // Keep bounded: take first N fields (catalog is already flattened; nested paths can be large).
+    let max_fields = 40usize;
+    let mut out_fields: Vec<serde_json::Value> = Vec::new();
+    for f in fields.into_iter().take(max_fields) {
+        let name = f.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if name.trim().is_empty() {
+            continue;
+        }
+        let ty = f.get("type").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let role = f.get("role").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let stats = f.get("stats").cloned().unwrap_or(serde_json::Value::Null);
+        // Stats can be heavy; keep only a small subset if present.
+        let stats = if let Some(obj) = stats.as_object() {
+            serde_json::json!({
+                "total": obj.get("total"),
+                "nulls": obj.get("nulls"),
+                "approx_distinct": obj.get("approx_distinct"),
+                "min_numeric": obj.get("min_numeric"),
+                "max_numeric": obj.get("max_numeric"),
+                "max_len": obj.get("max_len"),
+            })
+        } else {
+            serde_json::Value::Null
+        };
+        out_fields.push(serde_json::json!({
+            "name": name,
+            "type": ty,
+            "role": role,
+            "stats": stats
+        }));
+    }
+    serde_json::json!({
+        "dataset_id": dataset_id,
+        "description": desc,
+        "approx_total_rows": approx_rows,
+        "fields": out_fields
+    })
+}
+
 /// Run dataset-level and field-level LLM enrichment for a dataset_id.
 pub async fn enrich_dataset_with_llm(
     storage: Arc<dyn crate::adapters::storage::StorageAdapter>,
@@ -107,13 +237,27 @@ pub async fn enrich_dataset_with_llm(
             if !is_placeholder && ascii_ok && len_ok {
                 let key = keyspace.catalog_key(scope, dataset_id);
                 if let Ok(mut v) = storage.get_json(&key).await {
-                    v.as_object_mut().map(|obj| {
-                        obj.insert(
-                            "description".to_string(),
-                            serde_json::Value::String(summary_raw.clone()),
-                        )
-                    });
-                    let _ = storage.put_json(&key, &v).await;
+                    // Do NOT overwrite an existing human-edited description.
+                    let mut should_write = true;
+                    if let Some(obj) = v.as_object() {
+                        if obj
+                            .get("description")
+                            .and_then(|x| x.as_str())
+                            .map(|s| !s.trim().is_empty())
+                            .unwrap_or(false)
+                        {
+                            should_write = false;
+                        }
+                    }
+                    if should_write {
+                        v.as_object_mut().map(|obj| {
+                            obj.insert(
+                                "description".to_string(),
+                                serde_json::Value::String(summary_raw.clone()),
+                            )
+                        });
+                        let _ = storage.put_json(&key, &v).await;
+                    }
                 }
             }
         }
@@ -637,6 +781,175 @@ pub async fn run_llm_enrichment_all(
             llm_batch_size,
         )
         .await;
+    }
+}
+
+/// Enrich GLOBAL project-level context (business meaning + audiences) from all dataset catalogs.
+///
+/// This is intentionally global-only (no per-field additions). It runs in batches over *all* datasets
+/// so we don't assume which ones are important up front.
+pub async fn run_llm_global_context_enrichment_all(
+    storage: Arc<dyn crate::adapters::storage::StorageAdapter>,
+    keyspace: Arc<dyn crate::providers::Keyspace>,
+    llm: Arc<dyn crate::llm::LargeLanguageModel>,
+    scope: &crate::providers::RequestScope,
+    dataset_ids: &HashMap<String, crate::discover::Metadata>,
+    llm_timeout_secs: u64,
+) {
+    // Deterministic order.
+    let mut dss: Vec<String> = dataset_ids.keys().cloned().collect();
+    dss.sort();
+
+    // Load existing global context if any (model should update, not rewrite).
+    let mut global = read_global_semantic_context(&storage, &keyspace, scope)
+        .await
+        .unwrap_or_default();
+
+    // Chunk datasets by approximate character budget to keep prompts bounded.
+    let mut batch: Vec<serde_json::Value> = Vec::new();
+    let mut batch_chars: usize = 0;
+    let max_batch_chars: usize = 85_000; // conservative prompt budget; LLM backend dependent
+
+    let mut flush_batch = |batch: &mut Vec<serde_json::Value>,
+                           global: &mut react_core::providers::catalog::types::GlobalSemanticContext|
+     -> Option<String> {
+        if batch.is_empty() {
+            return None;
+        }
+        let existing = serde_json::to_string_pretty(global).unwrap_or_else(|_| "{}".to_string());
+        let input = serde_json::to_string_pretty(&batch).unwrap_or_else(|_| "[]".to_string());
+        batch.clear();
+        Some(format!(
+            "You are inferring project-level business context from datasets.\n\
+Return STRICT JSON only for this schema:\n\
+{{\n\
+  \"version\": 1,\n\
+  \"built_at_epoch_secs\": <optional int>,\n\
+  \"audiences\": [{{\"audience\": string, \"confidence\": number, \"evidence\": [string...]}}...],\n\
+  \"context_bullets\": [{{\"text\": string, \"confidence\": number, \"evidence\": [string...]}}...],\n\
+  \"dataset_groups\": [{{\"group_name\": string, \"dataset_ids\": [string...], \"confidence\": number, \"evidence\": [string...]}}...],\n\
+  \"assumptions_and_gaps\": [{{\"text\": string, \"confidence\": number, \"evidence\": [string...], \"suggested_probe\": string|null}}...]\n\
+}}\n\
+\n\
+Rules:\n\
+- Only include entries when confidence is genuinely high (>= {min_conf}).\n\
+- Evidence must cite dataset_id and concrete schema/stats clues (field names/types/stats).\n\
+- Do NOT invent company/domain specifics; prefer general-but-useful analytics context.\n\
+- Merge with existing context: keep good prior entries; add/adjust only when the new batch provides strong evidence.\n\
+\n\
+Existing global context JSON:\n\
+{existing}\n\
+\n\
+Dataset batch context (catalog summaries):\n\
+{input}\n\
+\n\
+Output JSON only:",
+            min_conf = GLOBAL_CONTEXT_MIN_CONFIDENCE,
+            existing = existing,
+            input = input
+        ))
+    };
+
+    for ds in dss.iter() {
+        let key = keyspace.catalog_key(scope, ds);
+        let Ok(cat_json) = storage.get_json(&key).await else {
+            continue;
+        };
+        let compact = compact_catalog_for_global_context(ds, &cat_json);
+        let add_chars = serde_json::to_string(&compact).map(|s| s.len()).unwrap_or(0);
+        if !batch.is_empty() && (batch_chars + add_chars) > max_batch_chars {
+            if let Some(prompt) = flush_batch(&mut batch, &mut global) {
+                let text_opt = if llm_timeout_secs == 0 {
+                    let llm0 = llm.clone();
+                    tokio::task::spawn_blocking(move || {
+                        llm0.chat(&[ChatMessage {
+                            role: "user".into(),
+                            content: prompt,
+                        }])
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                } else {
+                    let llm0 = llm.clone();
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(llm_timeout_secs),
+                        tokio::task::spawn_blocking(move || {
+                            llm0.chat(&[ChatMessage {
+                                role: "user".into(),
+                                content: prompt,
+                            }])
+                        }),
+                    )
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .and_then(|r| r.ok())
+                };
+                if let Some(text) = text_opt {
+                    if let Ok(v) = super_extract_json_value(&text) {
+                        if let Ok(parsed) = serde_json::from_value::<
+                            react_core::providers::catalog::types::GlobalSemanticContext,
+                        >(v)
+                        {
+                            global = clamp_and_filter_global_context(parsed);
+                            global.version = global.version.max(1);
+                            global.built_at_epoch_secs =
+                                Some((chrono::Utc::now().timestamp()).max(0) as u64);
+                            write_global_semantic_context(&storage, &keyspace, scope, &global).await;
+                        }
+                    }
+                }
+            }
+            batch_chars = 0;
+        }
+        batch_chars += add_chars;
+        batch.push(compact);
+    }
+
+    // Final flush.
+    if let Some(prompt) = flush_batch(&mut batch, &mut global) {
+        let text_opt = if llm_timeout_secs == 0 {
+            let llm0 = llm.clone();
+            tokio::task::spawn_blocking(move || {
+                llm0.chat(&[ChatMessage {
+                    role: "user".into(),
+                    content: prompt,
+                }])
+            })
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+        } else {
+            let llm0 = llm.clone();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(llm_timeout_secs),
+                tokio::task::spawn_blocking(move || {
+                    llm0.chat(&[ChatMessage {
+                        role: "user".into(),
+                        content: prompt,
+                    }])
+                }),
+            )
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .and_then(|r| r.ok())
+        };
+        if let Some(text) = text_opt {
+            if let Ok(v) = super_extract_json_value(&text) {
+                if let Ok(parsed) = serde_json::from_value::<
+                    react_core::providers::catalog::types::GlobalSemanticContext,
+                >(v)
+                {
+                    global = clamp_and_filter_global_context(parsed);
+                    global.version = global.version.max(1);
+                    global.built_at_epoch_secs =
+                        Some((chrono::Utc::now().timestamp()).max(0) as u64);
+                    write_global_semantic_context(&storage, &keyspace, scope, &global).await;
+                }
+            }
+        }
     }
 }
 

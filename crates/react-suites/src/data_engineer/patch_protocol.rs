@@ -42,6 +42,50 @@ fn excerpt_for_error(s: &str, max_chars: usize) -> String {
     out
 }
 
+fn has_required_analyst_notes(notes: &[String]) -> Result<(), String> {
+    // Contract: require these sections (case-insensitive) somewhere in notes as distinct entries.
+    // We enforce this only when the caller opts-in via a sys_prompt sentinel.
+    let mut need: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
+    need.insert("business question");
+    need.insert("entity definition");
+    need.insert("grain");
+    need.insert("time axis");
+    need.insert("metric definitions");
+    need.insert("assumptions");
+
+    for n in notes.iter() {
+        let t = n.trim().to_ascii_lowercase();
+        if t.starts_with("business question") {
+            need.remove("business question");
+        } else if t.starts_with("entity definition") {
+            need.remove("entity definition");
+        } else if t.starts_with("grain") {
+            need.remove("grain");
+        } else if t.starts_with("time axis") {
+            need.remove("time axis");
+        } else if t.starts_with("metric definitions") || t.starts_with("metrics") {
+            need.remove("metric definitions");
+        } else if t.starts_with("assumptions") {
+            need.remove("assumptions");
+        }
+    }
+    if need.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "missing required analyst-mindset notes sections: {}\n\
+\n\
+Include each as a separate notes entry prefixed like:\n\
+- Business question: ...\n\
+- Entity definition: ...\n\
+- Grain: ...\n\
+- Time axis: ...\n\
+- Metric definitions: ...\n\
+- Assumptions & gaps: ...",
+        need.into_iter().collect::<Vec<_>>().join(", ")
+    ))
+}
+
 fn split_lines_preserve_trailing_newline_for_prompt(s: &str) -> (Vec<String>, bool) {
     // Keep semantics aligned with project_fs::apply_replace_range.
     let had_trailing_newline = s.ends_with('\n');
@@ -281,6 +325,7 @@ pub async fn llm_patch_loop_single_file(
     max_iters: usize,
 ) -> Result<(project_fs::PatchOutcome, Vec<String>), String> {
     let max_iters = max_iters.max(1).min(6);
+    let enforce_analyst_notes_contract = sys_prompt.contains("ANALYST_NOTES_CONTRACT_V1");
 
     let base = ctx
         .keyspace
@@ -543,6 +588,37 @@ pub async fn llm_patch_loop_single_file(
                 excerpt_for_error(&resp_text, 2000)
             ));
         } else {
+            // Optional content contract gates (opt-in via sys_prompt sentinel).
+            let gate_err: Option<String> = if enforce_analyst_notes_contract {
+                has_required_analyst_notes(&parsed.notes).err()
+            } else {
+                None
+            };
+            if let Some(e) = gate_err {
+                // Skip patch application; let the existing repair loop prompt the model.
+                let err = e;
+                let repair = serde_json::json!({
+                    "attempt": attempt,
+                    "error": err,
+                    "expected_rel_path": expected_rel_path,
+                    "base_sha256": base_sha256,
+                    "base_exists": existed,
+                    "existing_line_count": existing_line_count,
+                    "existing_had_trailing_newline": existing_had_trailing_newline,
+                    "existing_content": existing,
+                    "existing_content_with_line_numbers": existing_content_with_line_numbers,
+                    "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
+                    "previous_response": parsed,
+                    "instruction": "Return ONLY corrected JSON. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. The patch MUST modify ONLY expected_rel_path. Prefer replace_file when possible. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
+                })
+                .to_string();
+                messages.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: repair,
+                });
+                continue;
+            }
+
             // Build the intended final file contents deterministically from the selected primitive.
             // We avoid unified diff application entirely for structured primitives (too flaky).
             let new_text_res: Result<String, String> = if let Some(rf) =
@@ -649,6 +725,11 @@ pub async fn llm_patch_loop_single_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::llm::LargeLanguageModel;
+    use react_core::scope::RequestScope;
+    use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn parse_llm_patch_response_accepts_single_element_replace_file_array() {
@@ -673,5 +754,135 @@ mod tests {
         }"#;
         let err = parse_llm_patch_response(txt).unwrap_err();
         assert!(err.to_ascii_lowercase().contains("single"));
+    }
+
+    fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {
+        Arc::new(crate::config::ReactResolvedConfig {
+            server: crate::config::ServerResolved { port: 1 },
+            storage: crate::config::StorageResolved {
+                bucket: "b".to_string(),
+            },
+            scope: RequestScope {
+                tenant: "t".to_string(),
+                workspace: "w".to_string(),
+                project_id: "p".to_string(),
+            },
+            llm: crate::config::LlmResolved::default(),
+            providers: crate::config::ProvidersResolved {
+                warehouse: crate::config::WarehouseResolved {
+                    kind: "athena".to_string(),
+                    container: "AwsDataCatalog".to_string(),
+                    namespace: "test_raw".to_string(),
+                    extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
+                },
+                catalog: crate::config::CatalogResolved {
+                    enabled: false,
+                    refresh_secs: 60,
+                    max_concurrency: 8,
+                },
+                dbt: crate::config::DbtResolved {
+                    enabled: true,
+                    profiles_dir: None,
+                    target: "athena".to_string(),
+                    naming: crate::config::DbtNamingResolved {
+                        target_schema: "test".to_string(),
+                        silver_suffix: "silver".to_string(),
+                        gold_suffix: "warehouse".to_string(),
+                    },
+                    runner: "host".to_string(),
+                    docker_image: None,
+                    docker_platform: None,
+                    docker_network: None,
+                    docker_mount_aws_dir: false,
+                },
+                vector: crate::config::VectorResolved { enabled: false },
+            },
+        })
+    }
+
+    #[derive(Default)]
+    struct ScriptedLlm {
+        replies: Mutex<Vec<String>>,
+    }
+    impl LargeLanguageModel for ScriptedLlm {
+        fn chat(&self, _messages: &[react_core::llm::ChatMessage]) -> Result<String, String> {
+            let mut g = self.replies.lock().map_err(|_| "mutex poisoned".to_string())?;
+            if g.is_empty() {
+                return Err("no more replies".to_string());
+            }
+            Ok(g.remove(0))
+        }
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn patch_loop_retries_when_analyst_notes_contract_missing() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
+            replies: Mutex::new(vec![
+                // First attempt: valid patch primitive, but missing required notes -> should trigger repair retry.
+                serde_json::json!({
+                    "replace_file": { "path": "models/schema.yml", "new_text": "version: 2\n\nmodels: []\n" },
+                    "notes": []
+                })
+                .to_string(),
+                // Second attempt: same patch, now with required notes -> should succeed.
+                serde_json::json!({
+                    "replace_file": { "path": "models/schema.yml", "new_text": "version: 2\n\nmodels: []\n" },
+                    "notes": [
+                        "Business question: x",
+                        "Entity definition: x",
+                        "Grain: x",
+                        "Time axis: x",
+                        "Metric definitions: x",
+                        "Assumptions & gaps: x"
+                    ]
+                })
+                .to_string(),
+            ]),
+        });
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 2,
+            thread_id: Some("tid".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(react_core::agent::DefaultPolicy),
+            llm,
+            storage: storage.clone(),
+            scope: scope.clone(),
+            keyspace,
+            query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            exec_ctx: None,
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+        };
+
+        let (outcome, notes) = llm_patch_loop_single_file(
+            &ctx,
+            None,
+            "ANALYST_NOTES_CONTRACT_V1".to_string(),
+            serde_json::json!({"x": 1}).to_string(),
+            "models/schema.yml",
+            4,
+        )
+        .await
+        .expect("ok");
+        assert!(outcome.content.contains("version: 2"));
+        assert!(notes.iter().any(|n| n.to_ascii_lowercase().starts_with("business question")));
     }
 }

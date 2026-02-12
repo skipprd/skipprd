@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+/// Reserved dataset_id for the global semantic context artifact.
+///
+/// This is NOT a real dataset/table; it is a project-scope semantic summary inferred during preflight.
+pub const GLOBAL_SEMANTIC_DATASET_ID: &str = "__global__";
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SemanticFieldRole {
     Id,
@@ -144,4 +149,66 @@ pub struct DataCatalog {
     /// Backwards compatible: older stored catalogs won't have this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub built_at_epoch_secs: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct GlobalSemanticContext {
+    /// Schema version for forward/back compat.
+    #[serde(default)]
+    pub version: u32,
+    /// Epoch seconds when this artifact was built/refreshed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built_at_epoch_secs: Option<u64>,
+    /// High-confidence likely audiences for this project/dataset collection.
+    #[serde(default)]
+    pub audiences: Vec<GlobalAudience>,
+    /// High-confidence business context bullets.
+    #[serde(default)]
+    pub context_bullets: Vec<GlobalContextBullet>,
+    /// Optional inferred logical groups of datasets and what they represent.
+    #[serde(default)]
+    pub dataset_groups: Vec<GlobalDatasetGroup>,
+    /// Important assumptions and evidence gaps + suggested smallest probes.
+    #[serde(default)]
+    pub assumptions_and_gaps: Vec<GlobalAssumptionGap>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct GlobalAudience {
+    pub audience: String,
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct GlobalContextBullet {
+    pub text: String,
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct GlobalDatasetGroup {
+    pub group_name: String,
+    #[serde(default)]
+    pub dataset_ids: Vec<String>,
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct GlobalAssumptionGap {
+    pub text: String,
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    #[serde(default)]
+    pub suggested_probe: Option<String>,
 }

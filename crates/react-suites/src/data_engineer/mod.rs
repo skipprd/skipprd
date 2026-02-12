@@ -1492,6 +1492,13 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
         // Detect whether any catalog entry already exists (sample a few datasets).
         let mut has_any = false;
         if let Ok(dss) = datasets.list_datasets().await {
+            // Also detect whether the global semantic context exists.
+            let global_key = sctx.keyspace.semantic_key(
+                &sctx.scope,
+                react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
+            );
+            let has_global = sctx.storage.get_json(&global_key).await.is_ok();
+
             for ds in dss.iter().take(5) {
                 let id = ds.fqn();
                 if let Ok(Some(_)) = cat.read_catalog(&sctx.scope, &id).await {
@@ -1499,14 +1506,26 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                     break;
                 }
             }
-            if !has_any {
+            if !has_any || !has_global {
                 tracing::info!("data_engineer: no existing catalog found; building catalogs/stats for all datasets");
                 let empty: HashMap<String, react_core::discover::Metadata> = HashMap::new();
-                if let Err(e) = cat
-                    .build_all_with_progress(&sctx.scope, datasets.as_ref(), &empty, None)
-                    .await
-                {
-                    tracing::warn!("data_engineer: catalog bootstrap failed: {}", e);
+                if !has_any {
+                    if let Err(e) = cat
+                        .build_all_with_progress(&sctx.scope, datasets.as_ref(), &empty, None)
+                        .await
+                    {
+                        tracing::warn!("data_engineer: catalog bootstrap failed: {}", e);
+                    }
+                }
+
+                // Best-effort LLM enrichment (dataset descriptions + global context).
+                // Use a stable dataset_id map so the provider can chunk deterministically.
+                let mut all: HashMap<String, react_core::discover::Metadata> = HashMap::new();
+                for ds in dss.iter() {
+                    all.insert(ds.fqn(), react_core::discover::Metadata::default());
+                }
+                if let Err(e) = cat.run_llm_enrichment_all(&sctx.scope, &all).await {
+                    tracing::warn!("data_engineer: catalog enrichment failed: {}", e);
                 }
             }
         }
@@ -2455,6 +2474,20 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             question
                         )
                     };
+
+                    // Inject global preflight semantic context/audiences (if available).
+                    let global_key = sctx.keyspace.semantic_key(
+                        &sctx.scope,
+                        react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
+                    );
+                    if let Ok(v) = sctx.storage.get_json(&global_key).await {
+                        q.push_str("\n\nIMMUTABLE CONTEXT (global_semantic_context):\n");
+                        q.push_str(
+                            &serde_json::to_string_pretty(&v)
+                                .unwrap_or_else(|_| "{}".to_string()),
+                        );
+                        q.push('\n');
+                    }
                     // If this plan phase was entered because review produced actionable feedback,
                     // include that feedback verbatim to ground the new plan.
                     if let Some(ref l) = log {

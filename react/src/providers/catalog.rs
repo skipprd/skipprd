@@ -151,6 +151,16 @@ impl CatalogProvider for DefaultCatalogProvider {
             self.llm_batch_size,
         )
         .await;
+        // Global context pass: infer cross-dataset meaning + likely audiences.
+        enrich::run_llm_global_context_enrichment_all(
+            self.storage.clone(),
+            self.keyspace.clone(),
+            self.llm.clone(),
+            scope,
+            dataset_ids,
+            self.llm_timeout_secs,
+        )
+        .await;
         Ok(())
     }
 }
