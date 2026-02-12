@@ -8,7 +8,6 @@ use react_core::tools::Tool;
 
 use crate::data_engineer::naming;
 use crate::data_engineer::plan;
-use crate::data_engineer::plan::CleansePlan;
 use crate::data_engineer::schema_policy;
 use crate::data_engineer::project_files;
 use crate::data_engineer::project_fs;
@@ -33,12 +32,6 @@ fn extract_string_arg(args: &Value, key: &str) -> Option<String> {
         .and_then(|x| x.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-fn mark_in_progress_cleanse_schema(plan: &mut CleansePlan, dataset_ids: &[String]) {
-    for ds in dataset_ids.iter() {
-        plan::cleanse_schema_contract_mark_in_progress(plan, ds);
-    }
 }
 
 fn update_failure_counters(progress: &mut plan::PlanProgress, ok: bool) {
@@ -108,6 +101,14 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
+        let checklist_item_id = ctx
+            .exec_ctx
+            .as_ref()
+            .and_then(|c| c.checklist_item_id.as_ref())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| plan::CHECKLIST_SCHEMA_CONTRACT.to_string());
+
         let mut plan = plan::load_cleanse_plan_any(ctx)
             .await
             .ok_or_else(|| "no active cleanse plan found".to_string())?;
@@ -132,11 +133,16 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             }));
         }
 
-        let batch = plan::cleanse_pending_schema_contracts(&plan);
+        let batch = plan::cleanse_pending_for_checklist(
+            &plan,
+            plan::CHECKLIST_SQL_MODEL,
+            &checklist_item_id,
+        );
         if batch.is_empty() {
             return Ok(serde_json::json!({
                 "ok": true,
-                "message": "no pending staging schema contract work (all done)",
+                "message": "no pending schema checklist work (all done)",
+                "checklist_item_id": checklist_item_id,
                 "attempted_dataset_ids": [],
                 "succeeded_dataset_ids": [],
                 "failed_dataset_ids": [],
@@ -147,7 +153,14 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             .or_else(|| extract_string_arg(&args, "user_instructions"))
             .unwrap_or_default();
 
-        mark_in_progress_cleanse_schema(&mut plan, &batch);
+        for ds in batch.iter() {
+            plan::cleanse_checklist_mark_status(
+                &mut plan,
+                ds,
+                &checklist_item_id,
+                plan::ChecklistItemStatus::InProgress,
+            );
+        }
         let _ = plan::save_cleanse_plan(ctx, &plan).await;
 
         let mut succeeded: Vec<String> = Vec::new();
@@ -236,16 +249,27 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
         }
 
         for ds in succeeded.iter() {
-            plan::cleanse_schema_contract_mark_done(&mut plan, ds);
+            plan::cleanse_checklist_mark_status(
+                &mut plan,
+                ds,
+                &checklist_item_id,
+                plan::ChecklistItemStatus::Done,
+            );
         }
         for ds in failed.iter() {
-            plan::cleanse_schema_contract_mark_needs_update(&mut plan, ds);
+            plan::cleanse_checklist_mark_status(
+                &mut plan,
+                ds,
+                &checklist_item_id,
+                plan::ChecklistItemStatus::NeedsUpdate,
+            );
         }
         update_failure_counters(&mut plan.progress, failed.is_empty());
         let _ = plan::save_cleanse_plan(ctx, &plan).await;
 
         Ok(serde_json::json!({
             "ok": failed.is_empty(),
+            "checklist_item_id": checklist_item_id,
             "attempted_dataset_ids": batch,
             "succeeded_dataset_ids": succeeded,
             "failed_dataset_ids": failed,
@@ -266,6 +290,14 @@ impl Tool for ApplyNextModelSchemaBatchTool {
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
+        let checklist_item_id = ctx
+            .exec_ctx
+            .as_ref()
+            .and_then(|c| c.checklist_item_id.as_ref())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| plan::CHECKLIST_SCHEMA_CONTRACT.to_string());
+
         let mut plan = plan::load_model_plan_any(ctx)
             .await
             .ok_or_else(|| "no active model plan found".to_string())?;
@@ -291,11 +323,16 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             }));
         }
 
-        let names = plan::model_pending_schema_contracts(&plan);
+        let names = plan::model_pending_for_checklist(
+            &plan,
+            plan::CHECKLIST_SQL_MODEL,
+            &checklist_item_id,
+        );
         if names.is_empty() {
             return Ok(serde_json::json!({
                 "ok": true,
-                "message": "no pending model schema contract work (all done)",
+                "message": "no pending schema checklist work (all done)",
+                "checklist_item_id": checklist_item_id,
                 "attempted_item_names": [],
                 "succeeded_item_names": [],
                 "failed_item_names": [],
@@ -307,7 +344,12 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             .unwrap_or_default();
 
         for n in names.iter() {
-            plan::model_schema_contract_mark_in_progress(&mut plan, n);
+            plan::model_checklist_mark_status(
+                &mut plan,
+                n,
+                &checklist_item_id,
+                plan::ChecklistItemStatus::InProgress,
+            );
         }
         let _ = plan::save_model_plan(ctx, &plan).await;
 
@@ -437,13 +479,19 @@ impl Tool for ApplyNextModelSchemaBatchTool {
         }
 
         for n in names.iter() {
-            plan::model_schema_contract_mark_done(&mut plan, n);
+            plan::model_checklist_mark_status(
+                &mut plan,
+                n,
+                &checklist_item_id,
+                plan::ChecklistItemStatus::Done,
+            );
         }
         update_failure_counters(&mut plan.progress, true);
         let _ = plan::save_model_plan(ctx, &plan).await;
 
         Ok(serde_json::json!({
             "ok": true,
+            "checklist_item_id": checklist_item_id,
             "attempted_item_names": attempted_names.clone(),
             "succeeded_item_names": attempted_names,
             "failed_item_names": [],
@@ -460,6 +508,7 @@ mod tests {
     use react_core::llm::ChatMessage;
     use react_core::llm::LargeLanguageModel;
     use react_core::scope::RequestScope;
+    use react_core::session::ExecutionContext;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
     use std::sync::Arc;
     use std::sync::{Mutex};
@@ -670,6 +719,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_next_cleanse_schema_batch_respects_exec_ctx_checklist_item_id() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
+            replies: Mutex::new(vec![serde_json::json!({
+                "replace_file": {
+                    "path": "models/staging/stg_test_raw_raw_customers.yml",
+                    "new_text": "version: 2\n\nmodels:\n  - name: stg_test_raw_raw_customers\n    columns:\n      - name: customer_id_raw\n      - name: email_raw\n"
+                }
+            })
+            .to_string()]),
+        });
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
+        let mut ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 2,
+            thread_id: Some("tid_ctx".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(react_core::agent::DefaultPolicy),
+            llm,
+            storage: storage.clone(),
+            scope: scope.clone(),
+            keyspace,
+            query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            exec_ctx: None,
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+        };
+
+        let plan_key = plan::new_cleanse_plan_key(&ctx);
+        ctx.exec_ctx = Some(ExecutionContext {
+            plan_kind: Some("cleanse".to_string()),
+            plan_key: Some(plan_key.clone()),
+            workgroup_id: Some("wg".to_string()),
+            task_id: Some("AwsDataCatalog.test_raw.raw_customers".to_string()),
+            checklist_item_id: Some("collision_id_contract".to_string()),
+        });
+
+        let p = plan::CleansePlan {
+            plan_key: plan_key.clone(),
+            status: plan::PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![plan::CleanseTask {
+                dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
+                expected_model_path: Some("models/staging/stg_test_raw_raw_customers.sql".to_string()),
+                invariants: vec![],
+                status: plan::TaskStatus::InProgress,
+                checklist: vec![
+                    plan::PlanChecklistItem {
+                        checklist_item_id: plan::CHECKLIST_SQL_MODEL.to_string(),
+                        label: "Author staging SQL model".to_string(),
+                        details: None,
+                        status: plan::ChecklistItemStatus::Done,
+                        origin: plan::ChecklistOrigin::Initial,
+                        origin_step_idx: None,
+                        evidence: vec![],
+                    },
+                    plan::PlanChecklistItem {
+                        checklist_item_id: "collision_id_contract".to_string(),
+                        label: "Collision id contract".to_string(),
+                        details: None,
+                        status: plan::ChecklistItemStatus::Pending,
+                        origin: plan::ChecklistOrigin::Initial,
+                        origin_step_idx: None,
+                        evidence: vec![],
+                    },
+                ],
+            }],
+            batches: vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: plan::PlanProgress::default(),
+        };
+        plan::save_cleanse_plan(&ctx, &p).await.unwrap();
+
+        // Seed canonical staging SQL with explicit final SELECT list (no '*').
+        let sql_rel = "models/staging/stg_test_raw_raw_customers.sql";
+        let sql_key = project_fs::join_storage_key(&ctx, sql_rel);
+        let sql = "with source as (\n  select * from {{ source('test_raw','raw_customers') }}\n)\nselect\n  customer_id_raw,\n  email_raw\nfrom source\n";
+        ctx.storage.put_bytes(&sql_key, sql.as_bytes(), "text/sql").await.unwrap();
+
+        let tool = ApplyNextCleanseSchemaBatchTool { datasets: None };
+        let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
+        assert!(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+
+        let got_plan = plan::load_cleanse_plan_by_key(&ctx, &plan_key).await.unwrap();
+        let t = got_plan
+            .tasks
+            .iter()
+            .find(|t| t.dataset_id == "AwsDataCatalog.test_raw.raw_customers")
+            .unwrap();
+        let st = t
+            .checklist
+            .iter()
+            .find(|it| it.checklist_item_id == "collision_id_contract")
+            .map(|it| it.status)
+            .unwrap();
+        assert_eq!(st, plan::ChecklistItemStatus::Done);
+    }
+
+    #[tokio::test]
     async fn apply_next_model_schema_batch_patches_models_schema_yml() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
@@ -759,6 +920,120 @@ mod tests {
         let got = ctx.storage.get_bytes(&key).await.unwrap();
         let got = String::from_utf8_lossy(&got).to_string();
         assert!(got.contains("dim_customers"));
+    }
+
+    #[tokio::test]
+    async fn apply_next_model_schema_batch_respects_exec_ctx_checklist_item_id() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
+            replies: Mutex::new(vec![serde_json::json!({
+                "replace_file": {
+                    "path": "models/schema.yml",
+                    "new_text": "version: 2\n\nmodels:\n  - name: dim_customers\n    columns: []\n"
+                }
+            })
+            .to_string()]),
+        });
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
+        let mut ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 2,
+            thread_id: Some("tid_model_ctx".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(react_core::agent::DefaultPolicy),
+            llm,
+            storage: storage.clone(),
+            scope: scope.clone(),
+            keyspace,
+            query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            exec_ctx: None,
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+        };
+
+        let plan_key = plan::new_model_plan_key(&ctx);
+        ctx.exec_ctx = Some(ExecutionContext {
+            plan_kind: Some("model".to_string()),
+            plan_key: Some(plan_key.clone()),
+            workgroup_id: Some("wg".to_string()),
+            task_id: Some("dim_customers".to_string()),
+            checklist_item_id: Some("collision_id_contract".to_string()),
+        });
+
+        // Seed model SQL so allowed_columns can be derived (best-effort).
+        let sql_rel = "models/marts/dim_customers.sql";
+        let sql_key = project_fs::join_storage_key(&ctx, sql_rel);
+        let sql = "with t as (\n  select 1 as customer_id, 'a@b.com' as email\n)\nselect\n  customer_id,\n  email\nfrom t\n";
+        ctx.storage
+            .put_bytes(&sql_key, sql.as_bytes(), "text/sql")
+            .await
+            .unwrap();
+
+        let p = plan::ModelPlan {
+            plan_key: plan_key.clone(),
+            status: plan::PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![plan::ModelTask {
+                name: "dim_customers".to_string(),
+                folder: "marts".to_string(),
+                goal: "g".to_string(),
+                inputs: vec!["stg_test_raw_raw_customers".to_string()],
+                expected_model_path: Some(sql_rel.to_string()),
+                invariants: vec![],
+                status: plan::TaskStatus::InProgress,
+                checklist: vec![
+                    plan::PlanChecklistItem {
+                        checklist_item_id: plan::CHECKLIST_SQL_MODEL.to_string(),
+                        label: "Author gold SQL model".to_string(),
+                        details: None,
+                        status: plan::ChecklistItemStatus::Done,
+                        origin: plan::ChecklistOrigin::Initial,
+                        origin_step_idx: None,
+                        evidence: vec![],
+                    },
+                    plan::PlanChecklistItem {
+                        checklist_item_id: "collision_id_contract".to_string(),
+                        label: "Collision id contract".to_string(),
+                        details: None,
+                        status: plan::ChecklistItemStatus::Pending,
+                        origin: plan::ChecklistOrigin::Initial,
+                        origin_step_idx: None,
+                        evidence: vec![],
+                    },
+                ],
+            }],
+            batches: vec![vec!["dim_customers".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: plan::PlanProgress::default(),
+        };
+        plan::save_model_plan(&ctx, &p).await.unwrap();
+
+        let tool = ApplyNextModelSchemaBatchTool { datasets: None };
+        let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
+        assert!(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+
+        let got_plan = plan::load_model_plan_by_key(&ctx, &plan_key).await.unwrap();
+        let t = got_plan.tasks.iter().find(|t| t.name == "dim_customers").unwrap();
+        let st = t
+            .checklist
+            .iter()
+            .find(|it| it.checklist_item_id == "collision_id_contract")
+            .map(|it| it.status)
+            .unwrap();
+        assert_eq!(st, plan::ChecklistItemStatus::Done);
     }
 
     #[tokio::test]

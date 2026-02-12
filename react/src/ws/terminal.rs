@@ -468,7 +468,37 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
             tv.last_update = Instant::now();
         }
         TerminalEvent::PlansChanged(ev) => {
-            let _ = ev;
+            // PlansChanged is emitted before the full Plans snapshot.
+            // Keep our view consistent by:
+            // - ensuring the thread exists/selected
+            // - clearing stale snapshots when the plan_key changed, so the next Plans event
+            //   repopulates with the correct hierarchy.
+            let tid = ev.thread_id.clone();
+            let tv = m.threads.entry(tid.clone()).or_insert_with(|| ThreadView {
+                thread_id: tid.clone(),
+                last_update: Instant::now(),
+                ..Default::default()
+            });
+            if let Some(ref new_key) = ev.cleanse_plan_key {
+                if tv
+                    .cleanse_plan
+                    .as_ref()
+                    .is_some_and(|p| p.plan_key.as_str() != new_key.as_str())
+                {
+                    tv.cleanse_plan = None;
+                }
+            }
+            if let Some(ref new_key) = ev.model_plan_key {
+                if tv
+                    .model_plan
+                    .as_ref()
+                    .is_some_and(|p| p.plan_key.as_str() != new_key.as_str())
+                {
+                    tv.model_plan = None;
+                }
+            }
+            tv.last_update = Instant::now();
+            ensure_selected(m, &tid);
         }
         TerminalEvent::Phase(ev) => {
             let tid = ev.thread_id.clone();
@@ -1542,6 +1572,11 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
         .unwrap_or_else(|| "preflight".to_string());
     let done: std::collections::HashSet<String> =
         t.completed_phases.iter().cloned().collect();
+    // Phases can be re-entered (e.g. actionable review -> cleanse_plan -> cleanse_author).
+    // Additionally, phases "after" the current one should not render as completed, even if
+    // they were completed in a prior loop. This avoids confusing UX where future phases
+    // look "done" while we're actively back in authoring/planning.
+    let cur_idx: Option<usize> = t.phases.iter().position(|p| p == &cur);
 
     // Plans are sticky to the planning phase where they originate (not the currently active phase).
     let anchor_cleanse: Option<String> = t
@@ -1637,36 +1672,48 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
         });
     }
 
-    for ph in t.phases.iter() {
+    for (idx, ph) in t.phases.iter().enumerate() {
         let key = format!("phase:{ph}");
-        let blocked = t
-            .items
-            .get(&key)
-            .map(|it| it.status == "blocked")
-            .unwrap_or(false);
+        let item_status: Option<&str> = t.items.get(&key).map(|it| it.status.as_str());
+        let blocked = item_status == Some("blocked");
+        let is_future = cur_idx.is_some_and(|ci| idx > ci);
         let g = if blocked {
             "[!]".magenta().to_string()
-        } else if done.contains(ph) {
-            "[✓]".green().to_string()
         } else if ph == &cur {
             "[~]".yellow().to_string()
+        } else if is_future {
+            // Future phases are always rendered as pending for the current loop.
+            "[ ]".dark_grey().to_string()
+        } else if item_status == Some("ok") || done.contains(ph) {
+            "[✓]".green().to_string()
         } else {
             "[ ]".dark_grey().to_string()
         };
 
-        let runtime = t.items.get(&key).and_then(|it| it.runtime_ms).map(fmt_ms);
+        let runtime = if is_future {
+            None
+        } else {
+            t.items.get(&key).and_then(|it| it.runtime_ms).map(fmt_ms)
+        };
         let mut phase_line = if let Some(r) = runtime {
             format!("{g} {}  {}", ph.as_str().white(), r.dark_grey())
         } else {
             format!("{g} {}", ph.as_str().white())
         };
 
-        // Collapse completed phases into a single parent line with a compact detail summary.
-        if done.contains(ph) {
+        // Attach a compact detail summary for:
+        // - the current phase (so users can see live plan/workgroup progress), and
+        // - completed (historical) phases.
+        if !is_future && (ph == &cur || item_status == Some("ok") || done.contains(ph)) {
             if let Some(detail) = phase_detail_summary(t, ph.as_str()) {
                 phase_line.push_str("  ");
                 phase_line.push_str(&detail.dark_grey().to_string());
             }
+        }
+
+        // Collapse completed phases into a single parent line; keep current phase expanded
+        // so workgroup details remain visible during re-entry loops.
+        if !is_future && ph != &cur && (item_status == Some("ok") || done.contains(ph)) {
             lines.push(phase_line);
             continue;
         }
@@ -1762,6 +1809,81 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strip_ansi(s: &str) -> String {
+        // Remove ANSI CSI SGR sequences: ESC [ ... m
+        let bytes = s.as_bytes();
+        let mut out = String::new();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'm' {
+                    i += 1;
+                }
+                if i < bytes.len() && bytes[i] == b'm' {
+                    i += 1;
+                }
+                continue;
+            }
+            // Copy one UTF-8 char.
+            let ch = match std::str::from_utf8(&bytes[i..])
+                .ok()
+                .and_then(|rest| rest.chars().next())
+            {
+                None => break,
+                Some(c) => c,
+            };
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+        out
+    }
+
+    #[test]
+    fn render_thread_detail_does_not_mark_future_phases_done() {
+        let mut tv = ThreadView::default();
+        tv.thread_id = "t".to_string();
+        tv.phases = vec![
+            "preflight".to_string(),
+            "cleanse_plan".to_string(),
+            "cleanse_author".to_string(),
+            "cleanse_validate".to_string(),
+            "cleanse_review".to_string(),
+        ];
+        tv.current_phase = Some("cleanse_author".to_string());
+
+        // Simulate historical completion of later phases.
+        tv.completed_phases = vec![
+            "preflight".to_string(),
+            "cleanse_plan".to_string(),
+            "cleanse_author".to_string(),
+            "cleanse_validate".to_string(),
+            "cleanse_review".to_string(),
+        ];
+        tv.items.insert(
+            "phase:cleanse_validate".to_string(),
+            api::ThreadStateItem::new(
+                "phase:cleanse_validate".to_string(),
+                "phase".to_string(),
+                "ok".to_string(),
+            ),
+        );
+        tv.items.insert(
+            "phase:cleanse_review".to_string(),
+            api::ThreadStateItem::new(
+                "phase:cleanse_review".to_string(),
+                "phase".to_string(),
+                "ok".to_string(),
+            ),
+        );
+
+        let rendered = strip_ansi(&render_thread_detail(&tv, 0).join("\n"));
+        // Even if validate/review completed previously, they are "future" relative to current author phase,
+        // so they must render as pending in the current loop.
+        assert!(rendered.contains("[ ] cleanse_validate"));
+        assert!(rendered.contains("[ ] cleanse_review"));
+    }
 
     #[test]
     fn render_plan_tree_includes_work_item_and_span() {

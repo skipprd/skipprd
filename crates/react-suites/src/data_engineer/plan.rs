@@ -721,12 +721,36 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
     }
     // Work-group refs should exist in tasks.
     for g in plan.work_groups.iter() {
+        if g.items.len() > 5 {
+            errors.push(format!(
+                "work_group {} has >5 items (len={})",
+                g.group_id,
+                g.items.len()
+            ));
+        }
         for it in g.items.iter() {
             if plan.tasks.iter().find(|t| t.dataset_id == it.task_id).is_none() {
                 errors.push(format!(
                     "work_group {} references unknown dataset_id task_id={}",
                     g.group_id, it.task_id
                 ));
+            }
+            let cid = it.checklist_item_id.trim();
+            if cid.is_empty() {
+                errors.push(format!(
+                    "work_group {} item for task_id={} is missing checklist_item_id",
+                    g.group_id, it.task_id
+                ));
+                continue;
+            }
+            if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == it.task_id) {
+                let exists = t.checklist.iter().any(|x| x.checklist_item_id == cid);
+                if !exists {
+                    errors.push(format!(
+                        "work_group {} references checklist_item_id '{}' not present in task checklist: {}",
+                        g.group_id, cid, it.task_id
+                    ));
+                }
             }
         }
     }
@@ -797,12 +821,36 @@ pub fn validate_model_plan_semantics(
     }
     // Work-group refs should exist in tasks.
     for g in plan.work_groups.iter() {
+        if g.items.len() > 5 {
+            errors.push(format!(
+                "work_group {} has >5 items (len={})",
+                g.group_id,
+                g.items.len()
+            ));
+        }
         for it in g.items.iter() {
             if plan.tasks.iter().find(|t| t.name == it.task_id).is_none() {
                 errors.push(format!(
                     "work_group {} references unknown model task_id={}",
                     g.group_id, it.task_id
                 ));
+            }
+            let cid = it.checklist_item_id.trim();
+            if cid.is_empty() {
+                errors.push(format!(
+                    "work_group {} item for task_id={} is missing checklist_item_id",
+                    g.group_id, it.task_id
+                ));
+                continue;
+            }
+            if let Some(t) = plan.tasks.iter().find(|t| t.name == it.task_id) {
+                let exists = t.checklist.iter().any(|x| x.checklist_item_id == cid);
+                if !exists {
+                    errors.push(format!(
+                        "work_group {} references checklist_item_id '{}' not present in task checklist: {}",
+                        g.group_id, cid, it.task_id
+                    ));
+                }
             }
         }
     }
@@ -997,9 +1045,9 @@ pub fn model_next_batch(plan: &ModelPlan) -> Vec<String> {
     vec![]
 }
 
-const CHECKLIST_SQL_MODEL: &str = "sql_model";
-const CHECKLIST_SCHEMA_CONTRACT: &str = "schema_contract";
-const CHECKLIST_VALIDATE: &str = "validate";
+pub const CHECKLIST_SQL_MODEL: &str = "sql_model";
+pub const CHECKLIST_SCHEMA_CONTRACT: &str = "schema_contract";
+pub const CHECKLIST_VALIDATE: &str = "validate";
 
 fn group_is_complete_cleanse(plan: &CleansePlan, g: &PlanWorkGroup) -> bool {
     if g.items.is_empty() {
@@ -1276,6 +1324,41 @@ pub fn cleanse_pending_schema_contracts(plan: &CleansePlan) -> Vec<String> {
     out
 }
 
+/// Pending work for an arbitrary checklist item (cleanse plan).
+///
+/// This is used by checklist-driven execution where `ExecutionContext.checklist_item_id`
+/// can be something other than the stable defaults.
+pub fn cleanse_pending_for_checklist(
+    plan: &CleansePlan,
+    prereq_checklist_item_id: &str,
+    target_checklist_item_id: &str,
+) -> Vec<String> {
+    let prereq = prereq_checklist_item_id.trim();
+    let target = target_checklist_item_id.trim();
+    if prereq.is_empty() || target.is_empty() {
+        return vec![];
+    }
+    let mut out: Vec<String> = Vec::new();
+    for batch in plan.batches.iter() {
+        for ds in batch.iter() {
+            let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) else {
+                continue;
+            };
+            if checklist_status(&t.checklist, prereq) != ChecklistItemStatus::Done {
+                continue;
+            }
+            let st = checklist_status(&t.checklist, target);
+            if st != ChecklistItemStatus::Done && is_runnable_checklist_status(st) {
+                out.push(ds.clone());
+                if out.len() >= 5 {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn model_pending_schema_contracts(plan: &ModelPlan) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for batch in plan.batches.iter() {
@@ -1287,6 +1370,38 @@ pub fn model_pending_schema_contracts(plan: &ModelPlan) -> Vec<String> {
                 && checklist_status(&t.checklist, CHECKLIST_SCHEMA_CONTRACT)
                     != ChecklistItemStatus::Done
             {
+                out.push(name.clone());
+                if out.len() >= 5 {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Pending work for an arbitrary checklist item (model plan).
+pub fn model_pending_for_checklist(
+    plan: &ModelPlan,
+    prereq_checklist_item_id: &str,
+    target_checklist_item_id: &str,
+) -> Vec<String> {
+    let prereq = prereq_checklist_item_id.trim();
+    let target = target_checklist_item_id.trim();
+    if prereq.is_empty() || target.is_empty() {
+        return vec![];
+    }
+    let mut out: Vec<String> = Vec::new();
+    for batch in plan.batches.iter() {
+        for name in batch.iter() {
+            let Some(t) = plan.tasks.iter().find(|t| t.name == *name) else {
+                continue;
+            };
+            if checklist_status(&t.checklist, prereq) != ChecklistItemStatus::Done {
+                continue;
+            }
+            let st = checklist_status(&t.checklist, target);
+            if st != ChecklistItemStatus::Done && is_runnable_checklist_status(st) {
                 out.push(name.clone());
                 if out.len() >= 5 {
                     return out;
@@ -1405,10 +1520,74 @@ pub fn cleanse_mark_done(plan: &mut CleansePlan, dataset_id: &str) {
     }
 }
 
+fn ensure_checklist_item_any<'a>(
+    items: &'a mut Vec<PlanChecklistItem>,
+    checklist_item_id: &str,
+) -> &'a mut PlanChecklistItem {
+    if let Some(i) = items
+        .iter()
+        .position(|it| it.checklist_item_id.trim() == checklist_item_id)
+    {
+        return &mut items[i];
+    }
+    items.push(PlanChecklistItem {
+        checklist_item_id: checklist_item_id.to_string(),
+        label: checklist_item_id.to_string(),
+        details: None,
+        status: ChecklistItemStatus::Pending,
+        origin: ChecklistOrigin::Initial,
+        origin_step_idx: None,
+        evidence: vec![],
+    });
+    let last = items.len().saturating_sub(1);
+    &mut items[last]
+}
+
+/// Mark an arbitrary cleanse checklist item status for a dataset.
+///
+/// This is used by deterministic tools that operate under a work-group/checklist execution
+/// context (e.g. `time_derivatives`, `style_and_contract_cleanup`) so those items can actually
+/// complete and the plan can advance.
+pub fn cleanse_checklist_mark_status(
+    plan: &mut CleansePlan,
+    dataset_id: &str,
+    checklist_item_id: &str,
+    status: ChecklistItemStatus,
+) {
+    if checklist_item_id.trim().is_empty() {
+        return;
+    }
+    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == dataset_id) {
+        let it = ensure_checklist_item_any(&mut t.checklist, checklist_item_id);
+        set_checklist_status(it, status, None);
+        recompute_cleanse_task_status(t);
+    }
+}
+
 pub fn model_mark_done(plan: &mut ModelPlan, name: &str) {
     if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == name) {
         let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author gold SQL");
         set_checklist_status(it, ChecklistItemStatus::Done, None);
+        recompute_model_task_status(t);
+    }
+}
+
+/// Mark an arbitrary model checklist item status for a gold model item.
+///
+/// This is used by deterministic tools that operate under a work-group/checklist execution
+/// context so secondary checklist items can complete and the plan can advance.
+pub fn model_checklist_mark_status(
+    plan: &mut ModelPlan,
+    name: &str,
+    checklist_item_id: &str,
+    status: ChecklistItemStatus,
+) {
+    if checklist_item_id.trim().is_empty() {
+        return;
+    }
+    if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == name) {
+        let it = ensure_checklist_item_any(&mut t.checklist, checklist_item_id);
+        set_checklist_status(it, status, None);
         recompute_model_task_status(t);
     }
 }
@@ -1536,6 +1715,7 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
             args,
             observation,
             ts,
+            ctx: step_ctx,
             ..
         } = step
         else {
@@ -1544,6 +1724,12 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
 
         // Preferred: derive from structured batch tool output.
         if name == "apply_next_cleanse_batch" {
+            let checklist_item_id = step_ctx
+                .as_ref()
+                .and_then(|c| c.checklist_item_id.as_deref())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| CHECKLIST_SQL_MODEL.to_string());
             let ok = observation.ok;
             let attempted: Vec<String> = observation
                 .extra
@@ -1574,11 +1760,15 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
 
             for ds in attempted.iter() {
                 if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-                    let it = ensure_checklist_item(
-                        &mut t.checklist,
-                        CHECKLIST_SQL_MODEL,
-                        "Author staging SQL",
-                    );
+                    let it = if checklist_item_id == CHECKLIST_SQL_MODEL {
+                        ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SQL_MODEL,
+                            "Author staging SQL",
+                        )
+                    } else {
+                        ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
+                    };
                     set_checklist_status(
                         it,
                         ChecklistItemStatus::InProgress,
@@ -1589,11 +1779,15 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
             }
             for ds in succeeded.iter() {
                 if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-                    let it = ensure_checklist_item(
-                        &mut t.checklist,
-                        CHECKLIST_SQL_MODEL,
-                        "Author staging SQL",
-                    );
+                    let it = if checklist_item_id == CHECKLIST_SQL_MODEL {
+                        ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SQL_MODEL,
+                            "Author staging SQL",
+                        )
+                    } else {
+                        ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
+                    };
                     set_checklist_status(
                         it,
                         ChecklistItemStatus::Done,
@@ -1605,15 +1799,124 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
             if !ok || !failed.is_empty() {
                 for ds in failed.iter() {
                     if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-                        let it = ensure_checklist_item(
-                            &mut t.checklist,
-                            CHECKLIST_SQL_MODEL,
-                            "Author staging SQL",
-                        );
+                        let it = if checklist_item_id == CHECKLIST_SQL_MODEL {
+                            ensure_checklist_item(
+                                &mut t.checklist,
+                                CHECKLIST_SQL_MODEL,
+                                "Author staging SQL",
+                            )
+                        } else {
+                            ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
+                        };
                         set_checklist_status(
                             it,
                             ChecklistItemStatus::NeedsUpdate,
                             Some(evidence_from_tool_end(idx, "tool_end_failed", name, tool_id, ts)),
+                        );
+                        recompute_cleanse_task_status(t);
+                    }
+                }
+            }
+            plan.progress.last_applied_step_idx = idx + 1;
+            continue;
+        }
+
+        if name == "apply_next_cleanse_schema_batch" {
+            let checklist_item_id = step_ctx
+                .as_ref()
+                .and_then(|c| c.checklist_item_id.as_deref())
+                .or_else(|| observation.extra.get("checklist_item_id").and_then(|v| v.as_str()))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| CHECKLIST_SCHEMA_CONTRACT.to_string());
+            let ok = observation.ok;
+            let attempted: Vec<String> = observation
+                .extra
+                .get("attempted_dataset_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let succeeded: Vec<String> = observation
+                .extra
+                .get("succeeded_dataset_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let succ_set: std::collections::HashSet<String> = succeeded.iter().cloned().collect();
+            let failed: Vec<String> = attempted
+                .iter()
+                .filter(|ds| !succ_set.contains(*ds))
+                .cloned()
+                .collect();
+
+            for ds in attempted.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                    let it = if checklist_item_id == CHECKLIST_SCHEMA_CONTRACT {
+                        ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SCHEMA_CONTRACT,
+                            "Author schema contract",
+                        )
+                    } else {
+                        ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
+                    };
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::InProgress,
+                        Some(evidence_from_tool_end(idx, "tool_end", name, tool_id, ts)),
+                    );
+                    recompute_cleanse_task_status(t);
+                }
+            }
+            for ds in succeeded.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                    let it = if checklist_item_id == CHECKLIST_SCHEMA_CONTRACT {
+                        ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SCHEMA_CONTRACT,
+                            "Author schema contract",
+                        )
+                    } else {
+                        ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
+                    };
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::Done,
+                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                    );
+                    recompute_cleanse_task_status(t);
+                }
+            }
+            if !ok || !failed.is_empty() {
+                for ds in failed.iter() {
+                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                        let it = if checklist_item_id == CHECKLIST_SCHEMA_CONTRACT {
+                            ensure_checklist_item(
+                                &mut t.checklist,
+                                CHECKLIST_SCHEMA_CONTRACT,
+                                "Author schema contract",
+                            )
+                        } else {
+                            ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
+                        };
+                        set_checklist_status(
+                            it,
+                            ChecklistItemStatus::NeedsUpdate,
+                            Some(evidence_from_tool_end(
+                                idx,
+                                "tool_end_failed",
+                                name,
+                                tool_id,
+                                ts,
+                            )),
                         );
                         recompute_cleanse_task_status(t);
                     }
@@ -1771,6 +2074,12 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                 let mut stems: Vec<String> = paths.iter().filter_map(|p| file_stem(p)).collect();
                 stems.sort();
                 stems.dedup();
+                let sql_checklist_item_id = step_ctx
+                    .as_ref()
+                    .and_then(|c| c.checklist_item_id.as_deref())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| CHECKLIST_SQL_MODEL.to_string());
                 if !stems.is_empty() {
                     for t in plan.tasks.iter_mut() {
                         let Some(p) = t.expected_model_path.as_deref() else {
@@ -1780,11 +2089,15 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                             continue;
                         };
                         if stems.iter().any(|s| s == &st) {
-                            let it = ensure_checklist_item(
-                                &mut t.checklist,
-                                CHECKLIST_SQL_MODEL,
-                                "Author staging SQL",
-                            );
+                            let it = if sql_checklist_item_id == CHECKLIST_SQL_MODEL {
+                                ensure_checklist_item(
+                                    &mut t.checklist,
+                                    CHECKLIST_SQL_MODEL,
+                                    "Author staging SQL",
+                                )
+                            } else {
+                                ensure_checklist_item_any(&mut t.checklist, &sql_checklist_item_id)
+                            };
                             let new_status = if ok {
                                 ChecklistItemStatus::InProgress
                             } else {
@@ -1810,6 +2123,15 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                             && !p.trim().contains("/_versions/"))
                 });
                 if touched_schema_yml {
+                    let Some(schema_checklist_item_id) = step_ctx
+                        .as_ref()
+                        .and_then(|c| c.checklist_item_id.as_deref())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                    else {
+                        plan.progress.last_applied_step_idx = idx + 1;
+                        continue;
+                    };
                     // Best-effort: match by expected_model_path stem.
                     for t in plan.tasks.iter_mut() {
                         let Some(p) = t.expected_model_path.as_deref() else {
@@ -1819,11 +2141,15 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                             continue;
                         };
                         if stems.is_empty() || stems.iter().any(|s| s == &st) || paths.iter().any(|pp| pp.trim() == "models/schema.yml") {
-                            let it = ensure_checklist_item(
-                                &mut t.checklist,
-                                CHECKLIST_SCHEMA_CONTRACT,
-                                "Author schema contract",
-                            );
+                            let it = if schema_checklist_item_id == CHECKLIST_SCHEMA_CONTRACT {
+                                ensure_checklist_item(
+                                    &mut t.checklist,
+                                    CHECKLIST_SCHEMA_CONTRACT,
+                                    "Author schema contract",
+                                )
+                            } else {
+                                ensure_checklist_item_any(&mut t.checklist, &schema_checklist_item_id)
+                            };
                             let ev_kind = if ok { "tool_end_ok" } else { "tool_end_failed" };
                             let new_status = if ok {
                                 ChecklistItemStatus::Done
@@ -1960,6 +2286,7 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
             args,
             observation,
             ts,
+            ctx: step_ctx,
             ..
         } = step
         else {
@@ -1968,6 +2295,12 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
 
         // Preferred: derive from structured batch tool output.
         if name == "apply_next_model_batch" {
+            let checklist_item_id = step_ctx
+                .as_ref()
+                .and_then(|c| c.checklist_item_id.as_deref())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| CHECKLIST_SQL_MODEL.to_string());
             let ok = observation.ok;
             let attempted: Vec<String> = observation
                 .extra
@@ -1998,11 +2331,11 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
 
             for n in attempted.iter() {
                 if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
-                    let it = ensure_checklist_item(
-                        &mut t.checklist,
-                        CHECKLIST_SQL_MODEL,
-                        "Author gold SQL",
-                    );
+                    let it = if checklist_item_id == CHECKLIST_SQL_MODEL {
+                        ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author gold SQL")
+                    } else {
+                        ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
+                    };
                     set_checklist_status(
                         it,
                         ChecklistItemStatus::InProgress,
@@ -2013,11 +2346,11 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
             }
             for n in succeeded.iter() {
                 if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
-                    let it = ensure_checklist_item(
-                        &mut t.checklist,
-                        CHECKLIST_SQL_MODEL,
-                        "Author gold SQL",
-                    );
+                    let it = if checklist_item_id == CHECKLIST_SQL_MODEL {
+                        ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author gold SQL")
+                    } else {
+                        ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
+                    };
                     set_checklist_status(
                         it,
                         ChecklistItemStatus::Done,
@@ -2029,11 +2362,116 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
             if !ok || !failed.is_empty() {
                 for n in failed.iter() {
                     if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
-                        let it = ensure_checklist_item(
-                            &mut t.checklist,
-                            CHECKLIST_SQL_MODEL,
-                            "Author gold SQL",
+                        let it = if checklist_item_id == CHECKLIST_SQL_MODEL {
+                            ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author gold SQL")
+                        } else {
+                            ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
+                        };
+                        set_checklist_status(
+                            it,
+                            ChecklistItemStatus::NeedsUpdate,
+                            Some(evidence_from_tool_end(
+                                idx,
+                                "tool_end_failed",
+                                name,
+                                tool_id,
+                                ts,
+                            )),
                         );
+                        recompute_model_task_status(t);
+                    }
+                }
+            }
+            plan.progress.last_applied_step_idx = idx + 1;
+            continue;
+        }
+
+        if name == "apply_next_model_schema_batch" {
+            let checklist_item_id = step_ctx
+                .as_ref()
+                .and_then(|c| c.checklist_item_id.as_deref())
+                .or_else(|| observation.extra.get("checklist_item_id").and_then(|v| v.as_str()))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| CHECKLIST_SCHEMA_CONTRACT.to_string());
+            let ok = observation.ok;
+            let attempted: Vec<String> = observation
+                .extra
+                .get("attempted_item_names")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let succeeded: Vec<String> = observation
+                .extra
+                .get("succeeded_item_names")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let succ_set: std::collections::HashSet<String> = succeeded.iter().cloned().collect();
+            let failed: Vec<String> = attempted
+                .iter()
+                .filter(|n| !succ_set.contains(*n))
+                .cloned()
+                .collect();
+
+            for n in attempted.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
+                    let it = if checklist_item_id == CHECKLIST_SCHEMA_CONTRACT {
+                        ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SCHEMA_CONTRACT,
+                            "Author schema contract",
+                        )
+                    } else {
+                        ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
+                    };
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::InProgress,
+                        Some(evidence_from_tool_end(idx, "tool_end", name, tool_id, ts)),
+                    );
+                    recompute_model_task_status(t);
+                }
+            }
+            for n in succeeded.iter() {
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
+                    let it = if checklist_item_id == CHECKLIST_SCHEMA_CONTRACT {
+                        ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SCHEMA_CONTRACT,
+                            "Author schema contract",
+                        )
+                    } else {
+                        ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
+                    };
+                    set_checklist_status(
+                        it,
+                        ChecklistItemStatus::Done,
+                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                    );
+                    recompute_model_task_status(t);
+                }
+            }
+            if !ok || !failed.is_empty() {
+                for n in failed.iter() {
+                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
+                        let it = if checklist_item_id == CHECKLIST_SCHEMA_CONTRACT {
+                            ensure_checklist_item(
+                                &mut t.checklist,
+                                CHECKLIST_SCHEMA_CONTRACT,
+                                "Author schema contract",
+                            )
+                        } else {
+                            ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
+                        };
                         set_checklist_status(
                             it,
                             ChecklistItemStatus::NeedsUpdate,
@@ -2234,6 +2672,15 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                     .iter()
                     .any(|p| p.trim().replace('\\', "/") == "models/schema.yml");
                 if ok && touched_models_schema_yml {
+                    let Some(schema_checklist_item_id) = step_ctx
+                        .as_ref()
+                        .and_then(|c| c.checklist_item_id.as_deref())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                    else {
+                        plan.progress.last_applied_step_idx = idx + 1;
+                        continue;
+                    };
                     // Best-effort: extract schema.yml new_text when provided via replace_file.
                     let mut schema_text: Option<String> = None;
                     if let Some(v) = args.get("replace_file") {
@@ -2263,13 +2710,38 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                         if let Ok(vy) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
                             if let Some(models) = vy.get("models").and_then(|m| m.as_sequence()) {
                                 for m in models.iter() {
-                                    let name = m
+                                    let model_name = m
                                         .get("name")
                                         .and_then(|n| n.as_str())
                                         .map(|s| s.trim().to_string())
                                         .filter(|s| !s.is_empty());
-                                    if let Some(nm) = name {
-                                        model_schema_contract_mark_done(plan, &nm);
+                                    if let Some(nm) = model_name {
+                                        if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == nm) {
+                                            let it = if schema_checklist_item_id == CHECKLIST_SCHEMA_CONTRACT {
+                                                ensure_checklist_item(
+                                                    &mut t.checklist,
+                                                    CHECKLIST_SCHEMA_CONTRACT,
+                                                    "Author schema contract",
+                                                )
+                                            } else {
+                                                ensure_checklist_item_any(
+                                                    &mut t.checklist,
+                                                    &schema_checklist_item_id,
+                                                )
+                                            };
+                                            set_checklist_status(
+                                                it,
+                                                ChecklistItemStatus::Done,
+                                                Some(evidence_from_tool_end(
+                                                    idx,
+                                                    "tool_end_ok",
+                                                    name,
+                                                    tool_id,
+                                                    ts,
+                                                )),
+                                            );
+                                            recompute_model_task_status(t);
+                                        }
                                     }
                                 }
                             }
@@ -2277,13 +2749,26 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                     }
                 }
 
+                let Some(schema_checklist_item_id) = step_ctx
+                    .as_ref()
+                    .and_then(|c| c.checklist_item_id.as_deref())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                else {
+                    plan.progress.last_applied_step_idx = idx + 1;
+                    continue;
+                };
                 for t in plan.tasks.iter_mut() {
                     if stems.iter().any(|s| s == &t.name) {
-                        let it = ensure_checklist_item(
-                            &mut t.checklist,
-                            CHECKLIST_SCHEMA_CONTRACT,
-                            "Author schema contract",
-                        );
+                        let it = if schema_checklist_item_id == CHECKLIST_SCHEMA_CONTRACT {
+                            ensure_checklist_item(
+                                &mut t.checklist,
+                                CHECKLIST_SCHEMA_CONTRACT,
+                                "Author schema contract",
+                            )
+                        } else {
+                            ensure_checklist_item_any(&mut t.checklist, &schema_checklist_item_id)
+                        };
                         if ok {
                             set_checklist_status(
                                 it,
@@ -2372,7 +2857,7 @@ pub fn parse_plan_json(answer: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use react_core::session::{ThreadLog, ThreadStep, ToolObservation};
+    use react_core::session::{ExecutionContext, ThreadLog, ThreadStep, ToolObservation};
 
     fn step(action: &str, args: Value, observation: Value) -> ThreadStep {
         let obs = ToolObservation::normalize(observation);
@@ -2388,6 +2873,31 @@ mod tests {
             },
             payload: None,
             ctx: None,
+            observation: obs,
+            ts: "t".to_string(),
+            agent: "test".to_string(),
+        }
+    }
+
+    fn step_with_ctx(
+        action: &str,
+        args: Value,
+        observation: Value,
+        ctx: Option<ExecutionContext>,
+    ) -> ThreadStep {
+        let obs = ToolObservation::normalize(observation);
+        ThreadStep::ToolEnd {
+            tool_id: "t".to_string(),
+            name: action.to_string(),
+            clean_name: action.to_string(),
+            args,
+            status: if obs.ok {
+                "ok".to_string()
+            } else {
+                "failed".to_string()
+            },
+            payload: None,
+            ctx,
             observation: obs,
             ts: "t".to_string(),
             agent: "test".to_string(),
@@ -2556,6 +3066,136 @@ mod tests {
     }
 
     #[test]
+    fn cleanse_progress_marks_custom_checklist_from_apply_next_cleanse_batch_ctx() {
+        let mut plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![CleanseTask {
+                dataset_id: "a.b.c".to_string(),
+                expected_model_path: None,
+                invariants: vec![],
+                status: TaskStatus::Pending,
+                checklist: vec![
+                    PlanChecklistItem {
+                        checklist_item_id: CHECKLIST_SQL_MODEL.to_string(),
+                        label: "Author staging SQL".to_string(),
+                        details: None,
+                        status: ChecklistItemStatus::Pending,
+                        origin: ChecklistOrigin::Initial,
+                        origin_step_idx: None,
+                        evidence: vec![],
+                    },
+                    PlanChecklistItem {
+                        checklist_item_id: "time_derivatives".to_string(),
+                        label: "Time derivatives".to_string(),
+                        details: None,
+                        status: ChecklistItemStatus::Pending,
+                        origin: ChecklistOrigin::Initial,
+                        origin_step_idx: None,
+                        evidence: vec![],
+                    },
+                ],
+            }],
+            batches: vec![vec!["a.b.c".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        let log = ThreadLog {
+            steps: vec![step_with_ctx(
+                "apply_next_cleanse_batch",
+                serde_json::json!({}),
+                serde_json::json!({
+                    "ok": true,
+                    "attempted_dataset_ids":["a.b.c"],
+                    "succeeded_dataset_ids":["a.b.c"]
+                }),
+                Some(ExecutionContext {
+                    plan_kind: Some("cleanse".to_string()),
+                    plan_key: Some("k".to_string()),
+                    workgroup_id: Some("wg".to_string()),
+                    task_id: Some("a.b.c".to_string()),
+                    checklist_item_id: Some("time_derivatives".to_string()),
+                }),
+            )],
+            ..Default::default()
+        };
+        update_cleanse_progress_from_log(&mut plan, &log);
+        assert_eq!(
+            status_of(&plan.tasks[0].checklist, "time_derivatives"),
+            ChecklistItemStatus::Done
+        );
+        assert_eq!(
+            status_of(&plan.tasks[0].checklist, CHECKLIST_SQL_MODEL),
+            ChecklistItemStatus::Pending
+        );
+    }
+
+    #[test]
+    fn cleanse_progress_marks_custom_schema_checklist_from_apply_next_cleanse_schema_batch_ctx() {
+        let mut plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![CleanseTask {
+                dataset_id: "a.b.c".to_string(),
+                expected_model_path: None,
+                invariants: vec![],
+                status: TaskStatus::Pending,
+                checklist: vec![
+                    PlanChecklistItem {
+                        checklist_item_id: CHECKLIST_SQL_MODEL.to_string(),
+                        label: "Author staging SQL".to_string(),
+                        details: None,
+                        status: ChecklistItemStatus::Done,
+                        origin: ChecklistOrigin::Initial,
+                        origin_step_idx: None,
+                        evidence: vec![],
+                    },
+                    PlanChecklistItem {
+                        checklist_item_id: "collision_id_contract".to_string(),
+                        label: "Collision id contract".to_string(),
+                        details: None,
+                        status: ChecklistItemStatus::Pending,
+                        origin: ChecklistOrigin::Initial,
+                        origin_step_idx: None,
+                        evidence: vec![],
+                    },
+                ],
+            }],
+            batches: vec![vec!["a.b.c".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        let log = ThreadLog {
+            steps: vec![step_with_ctx(
+                "apply_next_cleanse_schema_batch",
+                serde_json::json!({}),
+                serde_json::json!({
+                    "ok": true,
+                    "attempted_dataset_ids":["a.b.c"],
+                    "succeeded_dataset_ids":["a.b.c"]
+                }),
+                Some(ExecutionContext {
+                    plan_kind: Some("cleanse".to_string()),
+                    plan_key: Some("k".to_string()),
+                    workgroup_id: Some("wg".to_string()),
+                    task_id: Some("a.b.c".to_string()),
+                    checklist_item_id: Some("collision_id_contract".to_string()),
+                }),
+            )],
+            ..Default::default()
+        };
+        update_cleanse_progress_from_log(&mut plan, &log);
+        assert_eq!(
+            status_of(&plan.tasks[0].checklist, "collision_id_contract"),
+            ChecklistItemStatus::Done
+        );
+    }
+
+    #[test]
     fn model_progress_marks_schema_contract_done_from_models_schema_yml_patch() {
         let mut plan = ModelPlan {
             plan_key: "k".to_string(),
@@ -2604,13 +3244,20 @@ sources:
 "#;
 
         let log = ThreadLog {
-            steps: vec![step(
+            steps: vec![step_with_ctx(
                 "dbt_files",
                 serde_json::json!({
                     "op":"patch",
                     "replace_file": {"path":"models/schema.yml","new_text": schema_yml}
                 }),
                 serde_json::json!({"ok": true}),
+                Some(ExecutionContext {
+                    plan_kind: Some("model".to_string()),
+                    plan_key: Some("k".to_string()),
+                    workgroup_id: Some("wg".to_string()),
+                    task_id: Some("dim_customers".to_string()),
+                    checklist_item_id: Some(CHECKLIST_SCHEMA_CONTRACT.to_string()),
+                }),
             )],
             ..Default::default()
         };

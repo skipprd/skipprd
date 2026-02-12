@@ -3216,7 +3216,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_cleanse_batch; force repair-mode guidance.
                             if guard.last_validate_failed && !guard.mutated_since_fail {
-                                // If schema contract work remains, ALWAYS prefer the schema batch tool even when
+                                // If schema checklist work remains, ALWAYS prefer the schema batch tool even when
                                 // we are recovering from a failed validation. This prevents incorrect attempts to
                                 // "fix YAML contracts" by editing SQL files, which causes loops.
                                 if let Some((
@@ -3224,6 +3224,13 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     ids,
                                 )) = next_action.as_ref()
                                 {
+                                    let checklist_item_id = actx
+                                        .exec_ctx
+                                        .as_ref()
+                                        .and_then(|c| c.checklist_item_id.as_deref())
+                                        .unwrap_or(crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT)
+                                        .trim()
+                                        .to_string();
                                     let mut expected_paths: Vec<String> = Vec::new();
                                     for ds in ids.iter() {
                                         if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
@@ -3237,17 +3244,23 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     expected_paths.sort();
                                     expected_paths.dedup();
                                     let mut ctx = format!(
-                                        "Approved cleanse plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                        "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
                                         plan.plan_key,
+                                        checklist_item_id,
                                         ids.join("\n- "),
                                         expected_paths.join("\n- "),
                                     );
-                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema checklist work remains; that tool only authors SQL.\n");
                                     (ctx, None)
                                 } else {
                                     let pending_schema =
-                                        crate::data_engineer::plan::cleanse_pending_schema_contracts(&plan);
+                                        crate::data_engineer::plan::cleanse_pending_for_checklist(
+                                            &plan,
+                                            crate::data_engineer::plan::CHECKLIST_SQL_MODEL,
+                                            crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
+                                        );
                                     if !pending_schema.is_empty() {
+                                        let checklist_item_id = crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT;
                                         let mut expected_paths: Vec<String> = Vec::new();
                                         for ds in pending_schema.iter() {
                                             if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
@@ -3261,12 +3274,13 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         expected_paths.sort();
                                         expected_paths.dedup();
                                         let mut ctx = format!(
-                                            "Approved cleanse plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                            "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
                                             plan.plan_key,
+                                            checklist_item_id,
                                             pending_schema.join("\n- "),
                                             expected_paths.join("\n- "),
                                         );
-                                        ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                        ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema checklist work remains; that tool only authors SQL.\n");
                                         (ctx, None)
                                     } else {
                                 let mut ctx = format!(
@@ -3298,13 +3312,20 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 }
                             } else if next.is_empty() {
                                 // If work-groups exist, interpret "no next SQL batch" as:
-                                // - either we're blocked on schema contract authoring, OR
+                                // - either we're blocked on schema checklist authoring, OR
                                 // - we're ready to transition to validate.
                                 if let Some((
                                     crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
                                     ids,
                                 )) = next_action.as_ref()
                                 {
+                                    let checklist_item_id = actx
+                                        .exec_ctx
+                                        .as_ref()
+                                        .and_then(|c| c.checklist_item_id.as_deref())
+                                        .unwrap_or(crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT)
+                                        .trim()
+                                        .to_string();
                                     let mut expected_paths: Vec<String> = Vec::new();
                                     for ds in ids.iter() {
                                         if let Some(t) =
@@ -3320,12 +3341,13 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     expected_paths.sort();
                                     expected_paths.dedup();
                                     let mut ctx = format!(
-                                        "Approved cleanse plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                        "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
                                         plan.plan_key,
+                                        checklist_item_id,
                                         ids.join("\n- "),
                                         expected_paths.join("\n- "),
                                     );
-                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema checklist work remains; that tool only authors SQL.\n");
                                     (ctx, None)
                                 } else {
                                     if let Some((
@@ -3378,13 +3400,16 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                             None, // allow freeform dbt_files patching for targeted repair
                                         )
                                     } else {
-                                        // If schema contract work remains (legacy plans without work_groups),
+                                        // If schema checklist work remains (legacy plans without work_groups),
                                         // stay in authoring and request YAML patching.
                                         let pending_schema =
-                                            crate::data_engineer::plan::cleanse_pending_schema_contracts(
+                                            crate::data_engineer::plan::cleanse_pending_for_checklist(
                                                 &plan,
+                                                crate::data_engineer::plan::CHECKLIST_SQL_MODEL,
+                                                crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
                                             );
                                         if !pending_schema.is_empty() {
+                                            let checklist_item_id = crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT;
                                             let mut expected_paths: Vec<String> = Vec::new();
                                             for ds in pending_schema.iter() {
                                                 if let Some(t) =
@@ -3400,12 +3425,13 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                             expected_paths.sort();
                                             expected_paths.dedup();
                                             let mut ctx = format!(
-                                                "Approved cleanse plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                                "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
                                                 plan.plan_key,
+                                                checklist_item_id,
                                                 pending_schema.join("\n- "),
                                                 expected_paths.join("\n- "),
                                             );
-                                            ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                            ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema checklist work remains; that tool only authors SQL.\n");
                                             (ctx, None)
                                         } else {
                                             // All SQL + schema tasks are done; advance to validate.
@@ -3559,6 +3585,13 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     ids,
                                 )) = next_action.as_ref()
                                 {
+                                    let checklist_item_id = actx
+                                        .exec_ctx
+                                        .as_ref()
+                                        .and_then(|c| c.checklist_item_id.as_deref())
+                                        .unwrap_or(crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT)
+                                        .trim()
+                                        .to_string();
                                     let mut expected_paths: Vec<String> = Vec::new();
                                     for n in ids.iter() {
                                         if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
@@ -3572,17 +3605,23 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     expected_paths.sort();
                                     expected_paths.dedup();
                                     let mut ctx = format!(
-                                        "Approved model plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                        "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
                                         plan.plan_key,
+                                        checklist_item_id,
                                         ids.join("\n- "),
                                         expected_paths.join("\n- "),
                                     );
-                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema checklist work remains; that tool only authors SQL.\n");
                                     (ctx, None)
                                 } else {
                                     let pending_schema =
-                                        crate::data_engineer::plan::model_pending_schema_contracts(&plan);
+                                        crate::data_engineer::plan::model_pending_for_checklist(
+                                            &plan,
+                                            crate::data_engineer::plan::CHECKLIST_SQL_MODEL,
+                                            crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
+                                        );
                                     if !pending_schema.is_empty() {
+                                        let checklist_item_id = crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT;
                                         let mut expected_paths: Vec<String> = Vec::new();
                                         for n in pending_schema.iter() {
                                             if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
@@ -3596,12 +3635,13 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         expected_paths.sort();
                                         expected_paths.dedup();
                                         let mut ctx = format!(
-                                            "Approved model plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                            "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
                                             plan.plan_key,
+                                            checklist_item_id,
                                             pending_schema.join("\n- "),
                                             expected_paths.join("\n- "),
                                         );
-                                        ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                        ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema checklist work remains; that tool only authors SQL.\n");
                                         (ctx, None)
                                     } else {
                                 let mut ctx = format!(
@@ -3669,6 +3709,15 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                                     }
                                                 }
                                                 let mut changed = false;
+                                                let checklist_item_id = actx
+                                                    .exec_ctx
+                                                    .as_ref()
+                                                    .and_then(|c| c.checklist_item_id.as_deref())
+                                                    .unwrap_or(
+                                                        crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
+                                                    )
+                                                    .trim()
+                                                    .to_string();
                                                 for n in ids.iter() {
                                                     if !names_in_schema.contains(n) {
                                                         continue;
@@ -3679,7 +3728,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                                         let done = t
                                                             .checklist
                                                             .iter()
-                                                            .find(|it| it.checklist_item_id == "schema_contract")
+                                                            .find(|it| it.checklist_item_id == checklist_item_id)
                                                             .map(|it| {
                                                                 it.status
                                                                     == crate::data_engineer::plan::ChecklistItemStatus::Done
@@ -3689,9 +3738,11 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                                             changed = true;
                                                         }
                                                     }
-                                                    crate::data_engineer::plan::model_schema_contract_mark_done(
+                                                    crate::data_engineer::plan::model_checklist_mark_status(
                                                         &mut plan,
                                                         n,
+                                                        &checklist_item_id,
+                                                        crate::data_engineer::plan::ChecklistItemStatus::Done,
                                                     );
                                                 }
                                                 if changed {
@@ -3718,13 +3769,21 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     }
                                     expected_paths.sort();
                                     expected_paths.dedup();
+                                    let checklist_item_id = actx
+                                        .exec_ctx
+                                        .as_ref()
+                                        .and_then(|c| c.checklist_item_id.as_deref())
+                                        .unwrap_or(crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT)
+                                        .trim()
+                                        .to_string();
                                     let mut ctx = format!(
-                                        "Approved model plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                        "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
                                         plan.plan_key,
+                                        checklist_item_id,
                                         ids.join("\n- "),
                                         expected_paths.join("\n- "),
                                     );
-                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema checklist work remains; that tool only authors SQL.\n");
                                     (ctx, None)
                                 } else {
                                     if let Some((
@@ -3774,12 +3833,14 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     (ctx, None)
                                 } else {
                                     let pending_schema =
-                                        crate::data_engineer::plan::model_pending_schema_contracts(
+                                        crate::data_engineer::plan::model_pending_for_checklist(
                                             &plan,
+                                            crate::data_engineer::plan::CHECKLIST_SQL_MODEL,
+                                            crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
                                         );
                                     if !pending_schema.is_empty() {
                                         // Deterministic pre-check: if models/schema.yml already contains these
-                                        // models, mark schema_contract done and restart.
+                                        // models, mark the current schema checklist item done and restart.
                                         {
                                             let key =
                                                 crate::data_engineer::project_fs::join_storage_key(
@@ -3811,6 +3872,15 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                                         }
                                                     }
                                                     let mut changed = false;
+                                                    let checklist_item_id = actx
+                                                        .exec_ctx
+                                                        .as_ref()
+                                                        .and_then(|c| c.checklist_item_id.as_deref())
+                                                        .unwrap_or(
+                                                            crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
+                                                        )
+                                                        .trim()
+                                                        .to_string();
                                                     for n in pending_schema.iter() {
                                                         if !names_in_schema.contains(n) {
                                                             continue;
@@ -3823,7 +3893,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                                             let done = t
                                                                 .checklist
                                                                 .iter()
-                                                                .find(|it| it.checklist_item_id == "schema_contract")
+                                                                .find(|it| it.checklist_item_id == checklist_item_id)
                                                                 .map(|it| {
                                                                     it.status
                                                                         == crate::data_engineer::plan::ChecklistItemStatus::Done
@@ -3833,9 +3903,11 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                                                 changed = true;
                                                             }
                                                         }
-                                                        crate::data_engineer::plan::model_schema_contract_mark_done(
+                                                        crate::data_engineer::plan::model_checklist_mark_status(
                                                             &mut plan,
                                                             n,
+                                                            &checklist_item_id,
+                                                            crate::data_engineer::plan::ChecklistItemStatus::Done,
                                                         );
                                                     }
                                                     if changed {
@@ -3862,13 +3934,21 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         }
                                         expected_paths.sort();
                                         expected_paths.dedup();
+                                        let checklist_item_id = actx
+                                            .exec_ctx
+                                            .as_ref()
+                                            .and_then(|c| c.checklist_item_id.as_deref())
+                                            .unwrap_or(crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT)
+                                            .trim()
+                                            .to_string();
                                         let mut ctx = format!(
-                                            "Approved model plan (stored at: {}).\nPending schema contract work (max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                            "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
                                             plan.plan_key,
+                                            checklist_item_id,
                                             pending_schema.join("\n- "),
                                             expected_paths.join("\n- "),
                                         );
-                                        ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema_contract work remains; that tool only authors SQL.\n");
+                                        ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema checklist work remains; that tool only authors SQL.\n");
                                         (ctx, None)
                                     } else {
                                         control_flow::append_phase_with_reason(

@@ -47,6 +47,7 @@ Plan output rules (CRITICAL):
   - sql_model
   - schema_contract
   - validate
+- CRITICAL consistency rule: for every `work_groups[].items[].checklist_item_id` you reference, the referenced task's `checklist` MUST contain a matching checklist item with the same `checklist_item_id` (status `pending` unless you have concrete evidence otherwise). The deterministic runner executes strictly by `ExecutionContext.checklist_item_id` and will not infer missing checklist items.
 - If you exclude a dataset, you MUST omit it from tasks/batches/work_groups (do not add prose about it).
 - Silver semantics (CRITICAL):
   - Silver/staging is a **row-preserving cleanse layer**. Do NOT plan any grain enforcement, deduplication, or row filtering to satisfy keys/tests.
@@ -136,6 +137,7 @@ Plan output rules (CRITICAL):
   - sql_model
   - schema_contract
   - validate
+- CRITICAL consistency rule: for every `work_groups[].items[].checklist_item_id` you reference, the referenced task's `checklist` MUST contain a matching checklist item with the same `checklist_item_id` (status `pending` unless you have concrete evidence otherwise). The deterministic runner executes strictly by `ExecutionContext.checklist_item_id` and will not infer missing checklist items.
 
 Discovery requirements (CRITICAL - do these before finalizing the plan):
 - You MUST call dbt_files at least once to inventory existing staging models under models/staging/ and any existing marts/core models.
