@@ -36,6 +36,9 @@ crossterm = "0.27"
 react-core = { path = "../crates/react-core" }
 react-suites = { path = "../crates/react-suites" }
 
+# BigQuery (bronze/raw + query) - gcp-bigquery-client avoids arrow/chrono conflicts
+gcp-bigquery-client = "0.27"
+
 # AWS (Athena/Glue provider + S3 storage)
 aws-config = "1.5.1"
 aws-sdk-athena = "1.30.0"

@@ -4,6 +4,7 @@
 //! storage, secrets, LLM, and optional query/catalog/vector/state providers.
 
 pub mod athena_query;
+pub mod bigquery;
 pub mod catalog;
 pub mod dataset_catalog_provider;
 pub mod dbt;
@@ -22,6 +23,7 @@ pub use react_core::providers::{
 pub use react_core::scope::RequestScope;
 
 pub use athena_query::{AthenaQueryProvider, AthenaSettings};
+pub use bigquery::{BigQueryProvider, BigQuerySettings};
 pub use dbt::DbtProjectProvider;
 pub use keyspace::{DefaultKeyspace, Keyspace, LocalKeyspace}; // runtime impl of core Keyspace
 pub use postgres::{PostgresProvider, PostgresSettings};

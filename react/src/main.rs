@@ -8,7 +8,10 @@ use react::adapters::storage::{LocalFileStorageAdapter, S3StorageAdapter};
 use react::llm;
 use react::providers::catalog::DefaultCatalogProvider;
 use react::providers::dbt::DbtRunnerConfig;
-use react::providers::{AthenaQueryProvider, AthenaSettings, PostgresProvider, PostgresSettings};
+use react::providers::{
+    AthenaQueryProvider, AthenaSettings, BigQueryProvider, BigQuerySettings, PostgresProvider,
+    PostgresSettings,
+};
 use react::providers::{
     DbtProjectProvider, DefaultKeyspace, EnvSecretsProvider, LanceVectorStore, LocalKeyspace,
 };
@@ -440,6 +443,49 @@ async fn main() {
                 suite_ctx.warehouse = pg.clone();
                 suite_ctx.query = Some(pg.clone());
                 suite_ctx.datasets = Some(pg.clone());
+            } else if wh_kind == "bigquery" {
+                let project = cfg.providers.warehouse.container.clone();
+                let dataset = cfg.providers.warehouse.namespace.clone();
+                let location = cfg
+                    .providers
+                    .warehouse
+                    .extras
+                    .get("location")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let max_conc = cfg
+                    .providers
+                    .warehouse
+                    .extras
+                    .get("max_concurrency")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(15);
+                let ttl_secs = cfg
+                    .providers
+                    .warehouse
+                    .extras
+                    .get("discovery_cache_ttl_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(120);
+                let bq = Arc::new(
+                    BigQueryProvider::from_settings(BigQuerySettings {
+                        project,
+                        dataset,
+                        location,
+                        max_concurrency: max_conc,
+                        discovery_cache_ttl_secs: ttl_secs,
+                    })
+                    .await
+                    .map_err(|e| {
+                        eprintln!("ERROR: BigQuery provider init failed: {}", e);
+                        std::process::exit(1);
+                    })
+                    .unwrap(),
+                );
+                suite_ctx.warehouse = bq.clone();
+                suite_ctx.query = Some(bq.clone());
+                suite_ctx.datasets = Some(bq.clone());
             } else {
                 eprintln!(
                     "ERROR: unsupported providers.warehouse.kind '{}'",
@@ -712,6 +758,49 @@ async fn main() {
                 suite_ctx.warehouse = pg.clone();
                 suite_ctx.query = Some(pg.clone());
                 suite_ctx.datasets = Some(pg.clone());
+            } else if wh_kind == "bigquery" {
+                let project = cfg.providers.warehouse.container.clone();
+                let dataset = cfg.providers.warehouse.namespace.clone();
+                let location = cfg
+                    .providers
+                    .warehouse
+                    .extras
+                    .get("location")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let max_conc = cfg
+                    .providers
+                    .warehouse
+                    .extras
+                    .get("max_concurrency")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or(15);
+                let ttl_secs = cfg
+                    .providers
+                    .warehouse
+                    .extras
+                    .get("discovery_cache_ttl_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(120);
+                let bq = Arc::new(
+                    BigQueryProvider::from_settings(BigQuerySettings {
+                        project,
+                        dataset,
+                        location,
+                        max_concurrency: max_conc,
+                        discovery_cache_ttl_secs: ttl_secs,
+                    })
+                    .await
+                    .map_err(|e| {
+                        eprintln!("ERROR: BigQuery provider init failed: {}", e);
+                        std::process::exit(1);
+                    })
+                    .unwrap(),
+                );
+                suite_ctx.warehouse = bq.clone();
+                suite_ctx.query = Some(bq.clone());
+                suite_ctx.datasets = Some(bq.clone());
             } else {
                 eprintln!(
                     "ERROR: unsupported providers.warehouse.kind '{}'",

@@ -189,6 +189,8 @@ pub enum WarehouseFile {
         project: Option<String>,
         dataset: Option<String>,
         location: Option<String>,
+        max_concurrency: Option<usize>,
+        discovery_cache_ttl_secs: Option<u64>,
     },
 }
 
@@ -521,11 +523,17 @@ impl ReactResolvedConfig {
                     project,
                     dataset,
                     location,
+                    max_concurrency,
+                    discovery_cache_ttl_secs,
                 } => WarehouseResolved {
                     kind: "bigquery".to_string(),
                     container: project,
                     namespace: dataset,
-                    extras: serde_json::json!({ "location": location }),
+                    extras: serde_json::json!({
+                        "location": location,
+                        "max_concurrency": max_concurrency,
+                        "discovery_cache_ttl_secs": discovery_cache_ttl_secs,
+                    }),
                 },
             }
         }

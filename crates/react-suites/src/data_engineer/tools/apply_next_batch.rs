@@ -28,9 +28,21 @@ fn mark_in_progress_cleanse(plan: &mut CleansePlan, dataset_ids: &[String]) {
     }
 }
 
+fn mark_in_progress_cleanse_checklist(plan: &mut CleansePlan, dataset_ids: &[String], checklist: &str) {
+    for ds in dataset_ids.iter() {
+        plan::cleanse_checklist_mark_status(plan, ds, checklist, plan::ChecklistItemStatus::InProgress);
+    }
+}
+
 fn mark_in_progress_model(plan: &mut ModelPlan, names: &[String]) {
     for n in names.iter() {
         plan::model_mark_in_progress(plan, n);
+    }
+}
+
+fn mark_in_progress_model_checklist(plan: &mut ModelPlan, names: &[String], checklist: &str) {
+    for n in names.iter() {
+        plan::model_checklist_mark_status(plan, n, checklist, plan::ChecklistItemStatus::InProgress);
     }
 }
 
@@ -234,8 +246,22 @@ impl Tool for ApplyNextCleanseBatchTool {
         let instructions = extract_string_arg(&args, "instructions")
             .or_else(|| extract_string_arg(&args, "user_instructions"));
 
+        // Use explicit exec context (workgroup/checklist) when present so we can mark the correct
+        // checklist item complete and avoid infinite loops on secondary SQL checklist items.
+        let checklist_item_id = ctx
+            .exec_ctx
+            .as_ref()
+            .and_then(|c| c.checklist_item_id.as_ref())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| plan::CHECKLIST_SQL_MODEL.to_string());
+
         // Mark batch in progress before running (so plan snapshot reflects active remediation).
-        mark_in_progress_cleanse(&mut plan, &batch);
+        if checklist_item_id == plan::CHECKLIST_SQL_MODEL {
+            mark_in_progress_cleanse(&mut plan, &batch);
+        } else {
+            mark_in_progress_cleanse_checklist(&mut plan, &batch, &checklist_item_id);
+        }
         let _ = plan::save_cleanse_plan(ctx, &plan).await;
 
         let mut inner_args = serde_json::json!({ "dataset_ids": batch.clone() });
@@ -291,7 +317,16 @@ impl Tool for ApplyNextCleanseBatchTool {
 
         // Update task statuses.
         for ds in succeeded.iter() {
-            plan::cleanse_mark_done(&mut plan, ds);
+            if checklist_item_id == plan::CHECKLIST_SQL_MODEL {
+                plan::cleanse_mark_done(&mut plan, ds);
+            } else {
+                plan::cleanse_checklist_mark_status(
+                    &mut plan,
+                    ds,
+                    &checklist_item_id,
+                    plan::ChecklistItemStatus::Done,
+                );
+            }
         }
         if !failed.is_empty() || !ok {
             let err = res
@@ -301,7 +336,19 @@ impl Tool for ApplyNextCleanseBatchTool {
                 .and_then(|v| v.as_str())
                 .unwrap_or("batch failed");
             let note = format!("apply_next_cleanse_batch failed: {}", err.trim());
-            mark_needs_update_cleanse(&mut plan, &failed, &note);
+            let _ = note;
+            for ds in failed.iter() {
+                if checklist_item_id == plan::CHECKLIST_SQL_MODEL {
+                    plan::cleanse_mark_needs_update(&mut plan, ds);
+                } else {
+                    plan::cleanse_checklist_mark_status(
+                        &mut plan,
+                        ds,
+                        &checklist_item_id,
+                        plan::ChecklistItemStatus::NeedsUpdate,
+                    );
+                }
+            }
         }
         update_failure_counters(&mut plan.progress, ok && failed.is_empty());
         let _ = plan::save_cleanse_plan(ctx, &plan).await;
@@ -480,7 +527,21 @@ impl Tool for ApplyNextModelBatchTool {
         let instructions = extract_string_arg(&args, "instructions")
             .or_else(|| extract_string_arg(&args, "user_instructions"));
 
-        mark_in_progress_model(&mut plan, &batch_names);
+        // Use explicit exec context (workgroup/checklist) when present so we can mark the correct
+        // checklist item complete and avoid infinite loops on secondary SQL checklist items.
+        let checklist_item_id = ctx
+            .exec_ctx
+            .as_ref()
+            .and_then(|c| c.checklist_item_id.as_ref())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| plan::CHECKLIST_SQL_MODEL.to_string());
+
+        if checklist_item_id == plan::CHECKLIST_SQL_MODEL {
+            mark_in_progress_model(&mut plan, &batch_names);
+        } else {
+            mark_in_progress_model_checklist(&mut plan, &batch_names, &checklist_item_id);
+        }
         let _ = plan::save_model_plan(ctx, &plan).await;
 
         // Build gold_model items deterministically from the plan.
@@ -542,7 +603,16 @@ impl Tool for ApplyNextModelBatchTool {
             .collect();
 
         for n in succeeded.iter() {
-            plan::model_mark_done(&mut plan, n);
+            if checklist_item_id == plan::CHECKLIST_SQL_MODEL {
+                plan::model_mark_done(&mut plan, n);
+            } else {
+                plan::model_checklist_mark_status(
+                    &mut plan,
+                    n,
+                    &checklist_item_id,
+                    plan::ChecklistItemStatus::Done,
+                );
+            }
         }
         if !failed.is_empty() || !ok {
             let err = res
@@ -551,11 +621,19 @@ impl Tool for ApplyNextModelBatchTool {
                 .and_then(|a| a.first())
                 .and_then(|v| v.as_str())
                 .unwrap_or("batch failed");
-            mark_needs_update_model(
-                &mut plan,
-                &failed,
-                &format!("apply_next_model_batch failed: {}", err),
-            );
+            let _ = err;
+            for n in failed.iter() {
+                if checklist_item_id == plan::CHECKLIST_SQL_MODEL {
+                    plan::model_mark_needs_update(&mut plan, n);
+                } else {
+                    plan::model_checklist_mark_status(
+                        &mut plan,
+                        n,
+                        &checklist_item_id,
+                        plan::ChecklistItemStatus::NeedsUpdate,
+                    );
+                }
+            }
         }
 
         update_failure_counters(&mut plan.progress, ok && failed.is_empty());
