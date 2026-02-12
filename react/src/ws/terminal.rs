@@ -471,7 +471,47 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
             let _ = ev;
         }
         TerminalEvent::Phase(ev) => {
-            let _ = ev;
+            let tid = ev.thread_id.clone();
+            let tv = m.threads.entry(tid.clone()).or_insert_with(|| ThreadView {
+                thread_id: tid.clone(),
+                last_update: Instant::now(),
+                ..Default::default()
+            });
+            // Mark from_phase as completed (phase we're exiting).
+            if let Some(ref from) = ev.from_phase {
+                let from = from.trim();
+                if !from.is_empty() {
+                    if !tv.completed_phases.iter().any(|p| p == from) {
+                        tv.completed_phases.push(from.to_string());
+                    }
+                    let key = format!("phase:{}", from);
+                    let mut item = api::ThreadStateItem::new(
+                        key.clone(),
+                        "phase".to_string(),
+                        "ok".to_string(),
+                    );
+                    item.finished_at = Some(ev.ts.clone());
+                    item.runtime_ms = ev.from_phase_total_runtime_ms;
+                    tv.items.insert(key, item);
+                }
+            }
+            // Set current phase (phase we're entering).
+            tv.current_phase = Some(ev.phase.clone());
+            let key = format!("phase:{}", ev.phase);
+            let mut item = api::ThreadStateItem::new(key.clone(), "phase".to_string(), "running".to_string());
+            item.started_at = Some(ev.ts.clone());
+            item.runtime_ms = if ev.runs.is_empty() {
+                None
+            } else {
+                Some(ev.total_runtime_ms)
+            };
+            tv.items.insert(key, item);
+            // Ensure phase is in phases list.
+            if !tv.phases.iter().any(|p| p == &ev.phase) {
+                tv.phases.push(ev.phase.clone());
+            }
+            tv.last_update = Instant::now();
+            ensure_selected(m, &tid);
         }
         TerminalEvent::ToolStart(ev) => {
             let tid = ev.thread_id.clone();

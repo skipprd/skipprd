@@ -169,7 +169,7 @@ fn ws_thread_state_snapshot_from_core(
         .current_phase
         .clone()
         .unwrap_or_else(|| "preflight".to_string());
-    let completed_phases = derive_completed_phases(&phases, &current_phase);
+    let completed_phases = derive_completed_phases(&phases, &current_phase, &st.items);
 
     // Durable, bounded timeline events (post reconnect tool timeline).
     fn map_ctx(c: &react_core::session::ExecutionContext) -> api::ExecutionContext {
@@ -1889,7 +1889,11 @@ fn phase_at_step_idx(steps: &[ThreadStep], idx: usize) -> Option<String> {
     Some(derive_current_phase_from_steps(&steps[..=end]))
 }
 
-fn derive_completed_phases(order: &[String], current: &str) -> Vec<String> {
+fn derive_completed_phases(
+    order: &[String],
+    current: &str,
+    items: &std::collections::BTreeMap<String, CoreThreadItemState>,
+) -> Vec<String> {
     let mut completed: Vec<String> = Vec::new();
     if order.is_empty() {
         return completed;
@@ -1904,6 +1908,15 @@ fn derive_completed_phases(order: &[String], current: &str) -> Vec<String> {
     let upto = idx.unwrap_or(0);
     for p in order.iter().take(upto) {
         completed.push(p.clone());
+    }
+    // When returning to an earlier phase (e.g. review_actionable_true -> cleanse_plan),
+    // include phases that have status "ok" in items, even if they are "after" current in order.
+    for (key, it) in items.iter() {
+        if let Some(phase_name) = key.strip_prefix("phase:") {
+            if it.status == "ok" && !completed.iter().any(|p| p == phase_name) {
+                completed.push(phase_name.to_string());
+            }
+        }
     }
     completed
 }
@@ -3178,6 +3191,8 @@ async fn run_agent_with_processing_suite(
 
     // Emit strongly-consistent materialized thread_state while running.
     let mut last_state_sent: Option<api::ThreadStateSnapshot> = None;
+    let mut last_sent_phase: Option<String> = None;
+    let mut last_sent_step_count: Option<i32> = None;
     let mut state_tick = tokio::time::interval(std::time::Duration::from_millis(250));
     state_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -3332,6 +3347,24 @@ async fn run_agent_with_processing_suite(
                                 t.emit(TerminalEvent::Phase(ev.clone()));
                             }
                             emit_ws(state, write, api::ServerMessage::Phase(ev)).await;
+                            // Force ThreadState emission after phase transitions so terminal
+                            // reflects the new current_phase immediately when returning to phases.
+                            if let Ok(st) = store.get_thread_state(thread_id).await {
+                                let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+                                if let Some(t) = state.term() {
+                                    t.emit(TerminalEvent::ThreadState(snap.clone()));
+                                }
+                                let mut resp = api::ThreadStateResponse::new(
+                                    1,
+                                    m::thread_state_response::Type::ThreadState,
+                                    now_iso(),
+                                    state.next_seq(),
+                                    thread_id.to_string(),
+                                    snap,
+                                );
+                                resp.for_cid = Some(cid.to_string());
+                                emit_ws(state, write, api::ServerMessage::ThreadState(resp)).await;
+                            }
                         }
                         ThreadStep::ToolStart { tool_id, name, clean_name, status, payload, ctx, .. } => {
                             let st = match status.as_str() {
@@ -3506,10 +3539,15 @@ async fn run_agent_with_processing_suite(
                     Err(_) => continue,
                 };
                 let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
-                if last_state_sent.as_ref() == Some(&snap) {
+                let phase_changed = snap.current_phase.as_ref() != last_sent_phase.as_ref();
+                let step_count_changed = Some(snap.last_materialized_step_count) != last_sent_step_count;
+                let snapshot_changed = last_state_sent.as_ref() != Some(&snap);
+                if !phase_changed && !step_count_changed && !snapshot_changed {
                     continue;
                 }
                 last_state_sent = Some(snap.clone());
+                last_sent_phase = snap.current_phase.clone();
+                last_sent_step_count = Some(snap.last_materialized_step_count);
                 if let Some(t) = state.term() {
                     t.emit(TerminalEvent::ThreadState(snap.clone()));
                 }
@@ -3574,6 +3612,29 @@ async fn run_agent_with_processing_suite(
                                 .as_ref()
                                 .and_then(|m| serde_json::to_value(m).ok());
                             emit_ws(state, write, api::ServerMessage::Review(resp)).await;
+
+                            // Review often precedes a phase transition (e.g. review_actionable_true -> cleanse_plan).
+                            // Emit ThreadState now so the terminal reflects the new current_phase immediately,
+                            // instead of waiting for the next tool_tick (which may not run until the suite returns).
+                            {
+                                let store = state.thread_store();
+                                if let Ok(st) = store.get_thread_state(thread_id).await {
+                                    let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+                                    if let Some(t) = state.term() {
+                                        t.emit(TerminalEvent::ThreadState(snap.clone()));
+                                    }
+                                    let mut ts_resp = api::ThreadStateResponse::new(
+                                        1,
+                                        m::thread_state_response::Type::ThreadState,
+                                        now_iso(),
+                                        state.next_seq(),
+                                        thread_id.to_string(),
+                                        snap,
+                                    );
+                                    ts_resp.for_cid = Some(cid.to_string());
+                                    emit_ws(state, write, api::ServerMessage::ThreadState(ts_resp)).await;
+                                }
+                            }
 
                             // Persist as its own step so history can show reviewer output.
                             {
