@@ -244,10 +244,6 @@ fn refresh_stdout(
     let max_lines = h.max(3) as usize;
     let mut new_lines: Vec<String> = new_lines.into_iter().map(|l| fit_line(&l, w)).collect();
 
-    // Always repaint from top-left to avoid drift/duplication when the terminal scrolls
-    // or when output exceeds the visible viewport.
-    crossterm::execute!(stdout, MoveTo(0, 0), Clear(ClearType::FromCursorDown))?;
-
     // Bound render to the viewport. If it doesn't fit, truncate and add an ellipsis line.
     if new_lines.len() > max_lines {
         new_lines.truncate(max_lines);
@@ -256,14 +252,47 @@ fn refresh_stdout(
         }
     }
 
-    for (i, line) in new_lines.iter().enumerate() {
-        crossterm::execute!(stdout, Clear(ClearType::CurrentLine), MoveToColumn(0))?;
-        write!(stdout, "{line}")?;
-        // Avoid scrolling: don't emit a trailing newline on the last painted line.
-        if i + 1 < new_lines.len() {
-            writeln!(stdout)?;
-        }
+    // Skip all terminal writes when the frame is byte-for-byte identical.
+    if *prev_lines == new_lines {
+        return Ok(());
     }
+
+    // Initial paint: clear the viewport region once so stale shell content disappears.
+    if prev_lines.is_empty() {
+        crossterm::execute!(stdout, MoveTo(0, 0), Clear(ClearType::FromCursorDown))?;
+    }
+
+    // Diff repaint: update only changed rows, and clear any rows that were removed.
+    let common = prev_lines.len().min(new_lines.len());
+    for row in 0..common {
+        if prev_lines[row] == new_lines[row] {
+            continue;
+        }
+        crossterm::execute!(
+            stdout,
+            MoveTo(0, row as u16),
+            Clear(ClearType::CurrentLine),
+            MoveToColumn(0)
+        )?;
+        write!(stdout, "{}", new_lines[row])?;
+    }
+
+    // Paint appended rows.
+    for row in common..new_lines.len() {
+        crossterm::execute!(
+            stdout,
+            MoveTo(0, row as u16),
+            Clear(ClearType::CurrentLine),
+            MoveToColumn(0)
+        )?;
+        write!(stdout, "{}", new_lines[row])?;
+    }
+
+    // Clear rows that no longer exist in the new frame.
+    for row in new_lines.len()..prev_lines.len() {
+        crossterm::execute!(stdout, MoveTo(0, row as u16), Clear(ClearType::CurrentLine))?;
+    }
+
     stdout.flush()?;
 
     *prev_lines = new_lines;
