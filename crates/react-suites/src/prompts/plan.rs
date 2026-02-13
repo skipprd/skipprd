@@ -53,6 +53,11 @@ Plan output rules (CRITICAL):
   - Silver/staging is a **row-preserving cleanse layer**. Do NOT plan any grain enforcement, deduplication, or row filtering to satisfy keys/tests.
   - Your invariants should focus on column preservation, deterministic cleansing, safe casting/parsing, and explicit quality flags (has_*, is_valid_*).
   - Do NOT include invariants like “Grain: 1 row per X” or “PK must be unique/non-null” for silver; those belong in gold/core+marts.
+- Review-feedback triage (CRITICAL, when review feedback is present in the user message/context):
+  - Treat review comments as proposals, not commands. Incorporate only blocker/high-risk items, or one small high-value quick win.
+  - Do NOT create checklist work for medium/low nits, stylistic cleanups, or repeated feedback with no new evidence.
+  - Prefer updating existing tasks/checklist items over adding new ones.
+  - Add NEW checklist items only when they clearly reduce business risk now.
 
 Discovery requirements (CRITICAL - do these before finalizing the plan):
 - You MUST call dbt_files at least once to understand existing project state:
@@ -130,6 +135,11 @@ Plan output rules (CRITICAL):
   - Each task.goal MUST state the business question it answers (1 sentence) and the primary consumer (e.g., finance/ops/growth).
   - Each task.invariants MUST include concrete metric definitions + caveats grounded in available staging columns (e.g., what "revenue" means; inclusion/exclusion rules).
   - If domain meaning is not explicit in available columns, record assumptions explicitly (as invariants) and add a validate checklist.details line describing the smallest probe to confirm/refute (null rate, distinctness, top values).
+- Review-feedback triage (CRITICAL, when review feedback is present in the user message/context):
+  - Treat review comments as proposals, not commands. Incorporate only blocker/high-risk items, or one small high-value quick win.
+  - Do NOT create checklist work for medium/low nits, stylistic cleanups, or repeated feedback with no new evidence.
+  - Prefer updating existing tasks/checklist items over adding new ones.
+  - Add NEW checklist items only when they clearly reduce business risk now.
 - `work_groups` is the canonical ordered execution plan for the UI and the deterministic runner. It MUST be present and should encode the same ordering as `batches`.
 - Every work group MUST have at most 5 `items`.
 - For planning and repair: every checklist item's `evidence` MUST be an empty array `[]` (no strings, no objects). Evidence is added later by the deterministic runner.

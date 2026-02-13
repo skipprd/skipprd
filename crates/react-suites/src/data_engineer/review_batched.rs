@@ -238,16 +238,20 @@ Output STRICT JSON only (exactly one object) with this schema:
 }
 
 Rules:
-- Coverage: you MUST cover every batch item explicitly (even if "looks OK").
+- High-signal only: do NOT cover every batch item. Report only blocker/high business-risk findings or one small, clearly high-value quick win.
+- If no high-value findings exist for this batch, return:
+  - "notes": []
+  - "actionable_hints": []
+- Hard cap: at most 3 findings in "notes" total.
+- Keep "actionable_hints" tightly scoped to the findings: at most 1 hint per finding (max 3 total).
 - Prefer concrete feedback tied to specific models/columns when visible.
 - IMPORTANT: Do NOT suggest adding/selecting fields that are not present in the provided authoritative schema.
   If a desired field is missing from the schema, call that out as a gap and suggest the nearest available alternative.
 - Tier focus (CRITICAL): this is a SILVER/staging (cleanse) review. Do NOT critique missing GOLD/marts models.
-- Analyst-style critique (CRITICAL):
-  - For each item, include:
-    - What operational/analytical question the cleaned table supports today (1 sentence).
-    - What high-value question it fails to answer given current columns (1–2 bullets).
-    - Assumptions + evidence gaps: any semantic assumptions you see (e.g. meaning of timestamps/status codes), and the smallest probe to validate them (null rate, distinctness, top values).
+- Each finding must be decision-oriented and include:
+  - Impacted metric/decision.
+  - Concrete evidence from provided SQL/schema.
+  - Smallest next action to reduce risk.
 - No tool calls and no file edits."#
             .to_string();
     }
@@ -267,15 +271,19 @@ Output STRICT JSON only (exactly one object) with this schema:
 }
 
 Rules:
-- Coverage: you MUST cover every batch item explicitly (even if \"looks OK\").
+- High-signal only: do NOT cover every batch item. Report only blocker/high business-risk findings or one small, clearly high-value quick win.
+- If no high-value findings exist for this batch, return:
+  - "notes": []
+  - "actionable_hints": []
+- Hard cap: at most 3 findings in "notes" total.
+- Keep "actionable_hints" tightly scoped to the findings: at most 1 hint per finding (max 3 total).
 - Prefer concrete feedback tied to specific models/columns when visible.
 - IMPORTANT: Do NOT suggest adding/selecting fields that are not present in the provided authoritative schema.
   If a desired field is missing from the schema, call that out as a gap and suggest the nearest available alternative.
-- Analyst-style critique (CRITICAL):
-  - For each item, include:
-    - What business question it answers today (1 sentence).
-    - What high-value question it fails to answer given current columns (1–2 bullets).
-    - Assumptions + evidence gaps: any semantic assumptions you see (e.g., meaning of created_at/order_status), and the smallest probe to validate them (null rate, distinctness, top values).
+- Each finding must be decision-oriented and include:
+  - Impacted metric/decision.
+  - Concrete evidence from provided SQL/schema.
+  - Smallest next action to reduce risk.
 - No tool calls and no file edits."#
         .to_string()
 }
@@ -305,6 +313,9 @@ If feedback is substantially unchanged from prior iteration, set actionable=fals
 Unify requirements (CRITICAL):
 - Produce a concise, business-focused review that prioritizes decision usefulness.
 - Tier focus (CRITICAL): this is a SILVER/staging (cleanse) review. Do NOT penalize missing GOLD/marts models.
+- Delta-first output: include only net-new or still-unresolved high-value issues since prior review context. Suppress repeated advice that has no meaningful change in evidence or priority.
+- If no net-new/still-unresolved blocker/high items exist, set actionable=false and keep the body brief.
+- Hard cap: list at most 5 issues total across the final review body.
 - Include a short “Insightfulness summary” section:
   - What operational/analytical use-cases the SILVER layer supports today.
   - The top 2 missing semantics gaps (definitions, time axis meaning, entity meaning, join contracts, quality flags) blocking higher-value analysis even at SILVER.
@@ -333,6 +344,9 @@ If feedback is substantially unchanged from prior iteration, set actionable=fals
 
 Unify requirements (CRITICAL):
 - Produce a concise, business-focused review that prioritizes decision usefulness.
+- Delta-first output: include only net-new or still-unresolved high-value issues since prior review context. Suppress repeated advice that has no meaningful change in evidence or priority.
+- If no net-new/still-unresolved blocker/high items exist, set actionable=false and keep the body brief.
+- Hard cap: list at most 5 issues total across the final review body.
 - Include a short “Insightfulness summary” section:
   - What business decisions the current GOLD layer enables today.
   - The top 2 missing business semantics gaps blocking higher-value analytics (definitions, time axis, entity meaning, join contracts).
