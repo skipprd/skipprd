@@ -10,6 +10,7 @@ use std::io::Write as _;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::OnceCell;
+use serde_json::Value;
 
 use crate::ws::api_gen::src::models as api;
 
@@ -141,6 +142,9 @@ struct ThreadView {
     focus_by_kind: HashMap<String, WorkItemKey>,
     // Sticky expansion: once a checklist work item is focused, keep its checklist line visible.
     expanded_work_items: std::collections::HashSet<WorkItemKey>,
+    // Latest transition metadata for each entered phase.
+    phase_reason_code: HashMap<String, String>,
+    phase_reason_detail: HashMap<String, Value>,
     last_update: Instant,
 }
 
@@ -163,6 +167,8 @@ impl Default for ThreadView {
             llm_spans: HashMap::new(),
             focus_by_kind: HashMap::new(),
             expanded_work_items: std::collections::HashSet::new(),
+            phase_reason_code: HashMap::new(),
+            phase_reason_detail: HashMap::new(),
             last_update: Instant::now(),
         }
     }
@@ -527,6 +533,17 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
             }
             // Set current phase (phase we're entering).
             tv.current_phase = Some(ev.phase.clone());
+            if let Some(rc) = ev.reason_code.clone() {
+                tv.phase_reason_code.insert(ev.phase.clone(), rc);
+            }
+            if let Some(rd) = ev.reason_detail.clone() {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in rd {
+                    obj.insert(k, v);
+                }
+                tv.phase_reason_detail
+                    .insert(ev.phase.clone(), Value::Object(obj));
+            }
             let key = format!("phase:{}", ev.phase);
             let mut item = api::ThreadStateItem::new(key.clone(), "phase".to_string(), "running".to_string());
             item.started_at = Some(ev.ts.clone());
@@ -604,7 +621,7 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ctx.checklist_item_id.clone(),
                 ) {
                     let k = key_from_ctx(&Some(ctx.clone()));
-                    tv.focus_by_kind.insert(pk, k.clone());
+                    update_focus_with_stickiness(tv, pk, k.clone());
                     tv.expanded_work_items.insert(k);
                 }
             }
@@ -685,7 +702,7 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ctx.checklist_item_id.clone(),
                 ) {
                     let k = key_from_ctx(&Some(ctx.clone()));
-                    tv.focus_by_kind.insert(pk, k.clone());
+                    update_focus_with_stickiness(tv, pk, k.clone());
                     tv.expanded_work_items.insert(k);
                 }
             }
@@ -722,7 +739,7 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ctx.checklist_item_id.clone(),
                 ) {
                     let k = key_from_ctx(&Some(ctx.clone()));
-                    tv.focus_by_kind.insert(pk, k.clone());
+                    update_focus_with_stickiness(tv, pk, k.clone());
                     tv.expanded_work_items.insert(k);
                 }
             }
@@ -771,7 +788,7 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ctx.checklist_item_id.clone(),
                 ) {
                     let k = key_from_ctx(&Some(ctx.clone()));
-                    tv.focus_by_kind.insert(pk, k.clone());
+                    update_focus_with_stickiness(tv, pk, k.clone());
                     tv.expanded_work_items.insert(k);
                 }
             }
@@ -786,6 +803,25 @@ fn clear_spans_for_phase(tv: &mut ThreadView, phase: &str) {
         .retain(|_, s| s.phase.as_deref() != Some(phase));
     tv.llm_spans
         .retain(|_, s| s.phase.as_deref() != Some(phase));
+}
+
+fn has_running_span_for_key(tv: &ThreadView, k: &WorkItemKey) -> bool {
+    tv.tool_spans
+        .values()
+        .chain(tv.llm_spans.values())
+        .any(|s| s.status == SpanStatus::Running && key_from_ctx(&s.ctx) == *k)
+}
+
+fn update_focus_with_stickiness(tv: &mut ThreadView, plan_kind: String, next_key: WorkItemKey) {
+    // Keep focus stable while the currently focused item still has active spans.
+    // This prevents rapid UI hopping across work items in noisy phases.
+    let should_update = match tv.focus_by_kind.get(&plan_kind) {
+        Some(prev_key) if prev_key != &next_key => !has_running_span_for_key(tv, prev_key),
+        _ => true,
+    };
+    if should_update {
+        tv.focus_by_kind.insert(plan_kind, next_key);
+    }
 }
 
 fn ensure_selected(m: &mut Model, tid: &str) {
@@ -1165,6 +1201,7 @@ fn pick_focus_key(
     }
     // Prefer an in-flight (running) work item for this plan kind.
     // Fallback: the work item with the largest observed duration.
+    // Tie-break deterministically by WorkItemKey so focus does not flap.
     let mut best_running: Option<(WorkItemKey, Duration)> = None;
     let mut best_any: Option<(WorkItemKey, Duration)> = None;
     for (k, spans) in span_buckets.iter() {
@@ -1182,11 +1219,19 @@ fn pick_focus_key(
             }
         }
         if has_running {
-            if best_running.as_ref().map(|(_, d)| max_d > *d).unwrap_or(true) {
+            let replace = match best_running.as_ref() {
+                None => true,
+                Some((bk, bd)) => max_d > *bd || (max_d == *bd && k < bk),
+            };
+            if replace {
                 best_running = Some((k.clone(), max_d));
             }
         }
-        if best_any.as_ref().map(|(_, d)| max_d > *d).unwrap_or(true) {
+        let replace = match best_any.as_ref() {
+            None => true,
+            Some((bk, bd)) => max_d > *bd || (max_d == *bd && k < bk),
+        };
+        if replace {
             best_any = Some((k.clone(), max_d));
         }
     }
@@ -1356,6 +1401,61 @@ fn phase_detail_summary(t: &ThreadView, ph: &str) -> Option<String> {
     }
 }
 
+fn phase_reason_summary(t: &ThreadView, ph: &str) -> Option<String> {
+    let rc = t.phase_reason_code.get(ph).map(|s| s.as_str()).unwrap_or("");
+    let rd = t.phase_reason_detail.get(ph);
+    match rc {
+        "review_actionable_true" => {
+            let review_phase = rd
+                .and_then(|v| v.get("review_phase"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("review");
+            let tier = rd
+                .and_then(|v| v.get("meta"))
+                .and_then(|v| v.get("tier"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let targets = rd
+                .and_then(|v| v.get("meta"))
+                .and_then(|v| v.get("dataset_ids"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0usize);
+            Some(format!(
+                "replan from {review_phase} ({tier}, {targets} targets)"
+            ))
+        }
+        "plan_auto_approved" | "plan_approved" | "plan_already_approved" => {
+            let counts = rd
+                .and_then(|v| v.get("plan_update_summary"))
+                .and_then(|v| v.get("counts"));
+            let touched = counts
+                .and_then(|v| v.get("touched_tasks"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let added = counts
+                .and_then(|v| v.get("added_tasks"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let removed = counts
+                .and_then(|v| v.get("removed_tasks"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let review_items = counts
+                .and_then(|v| v.get("review_items"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if touched == 0 && added == 0 && removed == 0 && review_items == 0 {
+                return None;
+            }
+            Some(format!(
+                "plan update: {touched} touched, +{added}/-{removed}, {review_items} review items"
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn pick_focus_key_filtered(
     kind: &str,
     span_buckets: &HashMap<WorkItemKey, Vec<SpanAgg>>,
@@ -1372,6 +1472,7 @@ fn pick_focus_key_filtered(
         }
     }
     // Prefer in-flight work items within the allowed workgroups.
+    // Tie-break deterministically by WorkItemKey so focus does not flap.
     let mut best_running: Option<(WorkItemKey, Duration)> = None;
     let mut best_any: Option<(WorkItemKey, Duration)> = None;
     for (k, spans) in span_buckets.iter() {
@@ -1396,11 +1497,19 @@ fn pick_focus_key_filtered(
             }
         }
         if has_running {
-            if best_running.as_ref().map(|(_, d)| max_d > *d).unwrap_or(true) {
+            let replace = match best_running.as_ref() {
+                None => true,
+                Some((bk, bd)) => max_d > *bd || (max_d == *bd && k < bk),
+            };
+            if replace {
                 best_running = Some((k.clone(), max_d));
             }
         }
-        if best_any.as_ref().map(|(_, d)| max_d > *d).unwrap_or(true) {
+        let replace = match best_any.as_ref() {
+            None => true,
+            Some((bk, bd)) => max_d > *bd || (max_d == *bd && k < bk),
+        };
+        if replace {
             best_any = Some((k.clone(), max_d));
         }
     }
@@ -1701,13 +1810,20 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
             format!("{g} {}", ph.as_str().white())
         };
 
-        // Attach a compact detail summary for:
-        // - the current phase (so users can see live plan/workgroup progress), and
+        // Attach compact detail summaries for:
+        // - the current phase (live progress/reasoning), and
         // - completed (historical) phases.
         if !is_future && (ph == &cur || item_status == Some("ok") || done.contains(ph)) {
+            let mut parts: Vec<String> = Vec::new();
             if let Some(detail) = phase_detail_summary(t, ph.as_str()) {
+                parts.push(detail);
+            }
+            if let Some(reason) = phase_reason_summary(t, ph.as_str()) {
+                parts.push(reason);
+            }
+            if !parts.is_empty() {
                 phase_line.push_str("  ");
-                phase_line.push_str(&detail.dark_grey().to_string());
+                phase_line.push_str(&parts.join(" | ").dark_grey().to_string());
             }
         }
 

@@ -670,6 +670,291 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
         }
     }
 
+    fn normalize_string_vec(xs: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = xs
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn same_opt_text(a: &Option<String>, b: &Option<String>) -> bool {
+        let aa = a.as_deref().unwrap_or("").trim();
+        let bb = b.as_deref().unwrap_or("").trim();
+        aa == bb
+    }
+
+    fn plan_update_summary_cleanse(
+        prev: Option<&crate::data_engineer::plan::CleansePlan>,
+        next: &crate::data_engineer::plan::CleansePlan,
+        review_entry_step_idx: Option<usize>,
+    ) -> serde_json::Value {
+        use crate::data_engineer::plan::ChecklistOrigin;
+        let mut prev_by_id: std::collections::BTreeMap<
+            String,
+            &crate::data_engineer::plan::CleanseTask,
+        > = std::collections::BTreeMap::new();
+        if let Some(p) = prev {
+            for t in p.tasks.iter() {
+                prev_by_id.insert(t.dataset_id.clone(), t);
+            }
+        }
+        let mut next_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut added_tasks = 0usize;
+        let mut removed_tasks = 0usize;
+        let mut touched_tasks = 0usize;
+        let mut review_items_total = 0usize;
+        let mut top_items: Vec<serde_json::Value> = Vec::new();
+
+        for t in next.tasks.iter() {
+            next_ids.insert(t.dataset_id.clone());
+            let prev_task = prev_by_id.get(&t.dataset_id).copied();
+            let mut parts: Vec<String> = Vec::new();
+            if prev_task.is_none() {
+                added_tasks += 1;
+                parts.push("new task".to_string());
+            }
+            if let Some(pt) = prev_task {
+                if Self::normalize_string_vec(&pt.invariants) != Self::normalize_string_vec(&t.invariants) {
+                    parts.push("invariants".to_string());
+                }
+                let mut prev_ci: std::collections::BTreeMap<
+                    String,
+                    &crate::data_engineer::plan::PlanChecklistItem,
+                > = std::collections::BTreeMap::new();
+                for it in pt.checklist.iter() {
+                    prev_ci.insert(it.checklist_item_id.clone(), it);
+                }
+                let mut next_ci_ids: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                let mut added_ci: Vec<String> = Vec::new();
+                let mut changed_ci: Vec<String> = Vec::new();
+                for it in t.checklist.iter() {
+                    next_ci_ids.insert(it.checklist_item_id.clone());
+                    match prev_ci.get(&it.checklist_item_id) {
+                        None => added_ci.push(it.checklist_item_id.clone()),
+                        Some(prev_it) => {
+                            if prev_it.label.trim() != it.label.trim()
+                                || !Self::same_opt_text(&prev_it.details, &it.details)
+                            {
+                                changed_ci.push(it.checklist_item_id.clone());
+                            }
+                        }
+                    }
+                }
+                let mut removed_ci: Vec<String> = Vec::new();
+                for k in prev_ci.keys() {
+                    if !next_ci_ids.contains(k) {
+                        removed_ci.push(k.clone());
+                    }
+                }
+                if !added_ci.is_empty() {
+                    added_ci.sort();
+                    parts.push(format!("+{}", added_ci.join(",")));
+                }
+                if !changed_ci.is_empty() {
+                    changed_ci.sort();
+                    parts.push(format!("~{}", changed_ci.join(",")));
+                }
+                if !removed_ci.is_empty() {
+                    removed_ci.sort();
+                    parts.push(format!("-{}", removed_ci.join(",")));
+                }
+            }
+
+            let mut review_items: Vec<String> = t
+                .checklist
+                .iter()
+                .filter(|it| it.origin == ChecklistOrigin::ReviewActionable)
+                .filter(|it| {
+                    if let Some(idx) = review_entry_step_idx {
+                        it.origin_step_idx == Some(idx)
+                    } else {
+                        true
+                    }
+                })
+                .map(|it| it.checklist_item_id.clone())
+                .collect();
+            review_items.sort();
+            review_items.dedup();
+            review_items_total += review_items.len();
+            if !review_items.is_empty() {
+                parts.push(format!("review:{}", review_items.join(",")));
+            }
+
+            if !parts.is_empty() {
+                touched_tasks += 1;
+                if top_items.len() < 5 {
+                    top_items.push(serde_json::json!({
+                        "task_id": t.dataset_id,
+                        "summary": parts.join(", ")
+                    }));
+                }
+            }
+        }
+
+        if let Some(p) = prev {
+            for t in p.tasks.iter() {
+                if !next_ids.contains(&t.dataset_id) {
+                    removed_tasks += 1;
+                }
+            }
+        }
+
+        serde_json::json!({
+            "kind": "cleanse",
+            "from_plan_key": prev.map(|p| p.plan_key.clone()),
+            "to_plan_key": next.plan_key,
+            "counts": {
+                "added_tasks": added_tasks,
+                "removed_tasks": removed_tasks,
+                "touched_tasks": touched_tasks,
+                "review_items": review_items_total
+            },
+            "top_items": top_items
+        })
+    }
+
+    fn plan_update_summary_model(
+        prev: Option<&crate::data_engineer::plan::ModelPlan>,
+        next: &crate::data_engineer::plan::ModelPlan,
+        review_entry_step_idx: Option<usize>,
+    ) -> serde_json::Value {
+        use crate::data_engineer::plan::ChecklistOrigin;
+        let mut prev_by_id: std::collections::BTreeMap<
+            String,
+            &crate::data_engineer::plan::ModelTask,
+        > = std::collections::BTreeMap::new();
+        if let Some(p) = prev {
+            for t in p.tasks.iter() {
+                prev_by_id.insert(t.name.clone(), t);
+            }
+        }
+        let mut next_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut added_tasks = 0usize;
+        let mut removed_tasks = 0usize;
+        let mut touched_tasks = 0usize;
+        let mut review_items_total = 0usize;
+        let mut top_items: Vec<serde_json::Value> = Vec::new();
+
+        for t in next.tasks.iter() {
+            next_ids.insert(t.name.clone());
+            let prev_task = prev_by_id.get(&t.name).copied();
+            let mut parts: Vec<String> = Vec::new();
+            if prev_task.is_none() {
+                added_tasks += 1;
+                parts.push("new task".to_string());
+            }
+            if let Some(pt) = prev_task {
+                if pt.goal.trim() != t.goal.trim() {
+                    parts.push("goal".to_string());
+                }
+                if Self::normalize_string_vec(&pt.inputs) != Self::normalize_string_vec(&t.inputs) {
+                    parts.push("inputs".to_string());
+                }
+                if Self::normalize_string_vec(&pt.invariants) != Self::normalize_string_vec(&t.invariants) {
+                    parts.push("invariants".to_string());
+                }
+                let mut prev_ci: std::collections::BTreeMap<
+                    String,
+                    &crate::data_engineer::plan::PlanChecklistItem,
+                > = std::collections::BTreeMap::new();
+                for it in pt.checklist.iter() {
+                    prev_ci.insert(it.checklist_item_id.clone(), it);
+                }
+                let mut next_ci_ids: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                let mut added_ci: Vec<String> = Vec::new();
+                let mut changed_ci: Vec<String> = Vec::new();
+                for it in t.checklist.iter() {
+                    next_ci_ids.insert(it.checklist_item_id.clone());
+                    match prev_ci.get(&it.checklist_item_id) {
+                        None => added_ci.push(it.checklist_item_id.clone()),
+                        Some(prev_it) => {
+                            if prev_it.label.trim() != it.label.trim()
+                                || !Self::same_opt_text(&prev_it.details, &it.details)
+                            {
+                                changed_ci.push(it.checklist_item_id.clone());
+                            }
+                        }
+                    }
+                }
+                let mut removed_ci: Vec<String> = Vec::new();
+                for k in prev_ci.keys() {
+                    if !next_ci_ids.contains(k) {
+                        removed_ci.push(k.clone());
+                    }
+                }
+                if !added_ci.is_empty() {
+                    added_ci.sort();
+                    parts.push(format!("+{}", added_ci.join(",")));
+                }
+                if !changed_ci.is_empty() {
+                    changed_ci.sort();
+                    parts.push(format!("~{}", changed_ci.join(",")));
+                }
+                if !removed_ci.is_empty() {
+                    removed_ci.sort();
+                    parts.push(format!("-{}", removed_ci.join(",")));
+                }
+            }
+
+            let mut review_items: Vec<String> = t
+                .checklist
+                .iter()
+                .filter(|it| it.origin == ChecklistOrigin::ReviewActionable)
+                .filter(|it| {
+                    if let Some(idx) = review_entry_step_idx {
+                        it.origin_step_idx == Some(idx)
+                    } else {
+                        true
+                    }
+                })
+                .map(|it| it.checklist_item_id.clone())
+                .collect();
+            review_items.sort();
+            review_items.dedup();
+            review_items_total += review_items.len();
+            if !review_items.is_empty() {
+                parts.push(format!("review:{}", review_items.join(",")));
+            }
+
+            if !parts.is_empty() {
+                touched_tasks += 1;
+                if top_items.len() < 5 {
+                    top_items.push(serde_json::json!({
+                        "task_id": t.name,
+                        "summary": parts.join(", ")
+                    }));
+                }
+            }
+        }
+
+        if let Some(p) = prev {
+            for t in p.tasks.iter() {
+                if !next_ids.contains(&t.name) {
+                    removed_tasks += 1;
+                }
+            }
+        }
+
+        serde_json::json!({
+            "kind": "model",
+            "from_plan_key": prev.map(|p| p.plan_key.clone()),
+            "to_plan_key": next.plan_key,
+            "counts": {
+                "added_tasks": added_tasks,
+                "removed_tasks": removed_tasks,
+                "touched_tasks": touched_tasks,
+                "review_items": review_items_total
+            },
+            "top_items": top_items
+        })
+    }
+
     fn is_mutation_step_for_review(step: &react_core::session::ThreadStep) -> bool {
         match step {
             react_core::session::ThreadStep::ArtifactSaved { .. } => true,
@@ -2015,6 +2300,18 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         Self::actionable_review_entry_step_idx(log.as_ref(), phase);
                     let entered_from_actionable_review =
                         actionable_review_entry_step_idx.is_some();
+                    let prior_cleanse_plan_for_update = if entered_from_actionable_review && is_cleanse
+                    {
+                        crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
+                    } else {
+                        None
+                    };
+                    let prior_model_plan_for_update = if entered_from_actionable_review && !is_cleanse
+                    {
+                        crate::data_engineer::plan::load_model_plan_any(&actx).await
+                    } else {
+                        None
+                    };
 
                     // If the user already approved an existing draft, mark it approved and proceed.
                     if let Some(ref l) = log {
@@ -2222,6 +2519,11 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         "plan_key": p.plan_key,
                                         "entry_reason_code": "review_actionable_true"
                                     });
+                                    let plan_update = Self::plan_update_summary_cleanse(
+                                        prior_cleanse_plan_for_update.as_ref(),
+                                        &p,
+                                        actionable_review_entry_step_idx,
+                                    );
                                     if let Some(idx) = actionable_review_entry_step_idx {
                                         if let Some(obj) = detail.as_object_mut() {
                                             obj.insert(
@@ -2229,6 +2531,9 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                                 serde_json::json!(idx),
                                             );
                                         }
+                                    }
+                                    if let Some(obj) = detail.as_object_mut() {
+                                        obj.insert("plan_update_summary".to_string(), plan_update);
                                     }
                                     let advanced = Self::approve_cleanse_plan_draft_and_advance(
                                         &thread_store,
@@ -2260,6 +2565,11 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         "plan_key": p.plan_key,
                                         "entry_reason_code": "review_actionable_true"
                                     });
+                                    let plan_update = Self::plan_update_summary_model(
+                                        prior_model_plan_for_update.as_ref(),
+                                        &p,
+                                        actionable_review_entry_step_idx,
+                                    );
                                     if let Some(idx) = actionable_review_entry_step_idx {
                                         if let Some(obj) = detail.as_object_mut() {
                                             obj.insert(
@@ -2267,6 +2577,9 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                                 serde_json::json!(idx),
                                             );
                                         }
+                                    }
+                                    if let Some(obj) = detail.as_object_mut() {
+                                        obj.insert("plan_update_summary".to_string(), plan_update);
                                     }
                                     let advanced = Self::approve_model_plan_draft_and_advance(
                                         &thread_store,
@@ -2812,6 +3125,11 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         "plan_key": plan.plan_key,
                                         "entry_reason_code": "review_actionable_true"
                                     });
+                                    let plan_update = Self::plan_update_summary_cleanse(
+                                        prior_cleanse_plan_for_update.as_ref(),
+                                        &plan,
+                                        actionable_review_entry_step_idx,
+                                    );
                                     if let Some(idx) = actionable_review_entry_step_idx {
                                         if let Some(obj) = detail.as_object_mut() {
                                             obj.insert(
@@ -2819,6 +3137,9 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                                 serde_json::json!(idx),
                                             );
                                         }
+                                    }
+                                    if let Some(obj) = detail.as_object_mut() {
+                                        obj.insert("plan_update_summary".to_string(), plan_update);
                                     }
                                     let advanced = Self::approve_cleanse_plan_draft_and_advance(
                                         &thread_store,
@@ -2995,6 +3316,11 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                         "plan_key": plan.plan_key,
                                         "entry_reason_code": "review_actionable_true"
                                     });
+                                    let plan_update = Self::plan_update_summary_model(
+                                        prior_model_plan_for_update.as_ref(),
+                                        &plan,
+                                        actionable_review_entry_step_idx,
+                                    );
                                     if let Some(idx) = actionable_review_entry_step_idx {
                                         if let Some(obj) = detail.as_object_mut() {
                                             obj.insert(
@@ -3002,6 +3328,9 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                                 serde_json::json!(idx),
                                             );
                                         }
+                                    }
+                                    if let Some(obj) = detail.as_object_mut() {
+                                        obj.insert("plan_update_summary".to_string(), plan_update);
                                     }
                                     let advanced = Self::approve_model_plan_draft_and_advance(
                                         &thread_store,
