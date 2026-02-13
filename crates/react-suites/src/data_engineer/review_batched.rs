@@ -32,6 +32,15 @@ fn utc_ts() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+fn phase_plan_kind(phase: Phase) -> &'static str {
+    match phase {
+        Phase::CleanseReview => "cleanse",
+        Phase::ModelReview => "model",
+        Phase::PostPublishReview => "unknown",
+        _ => "unknown",
+    }
+}
+
 fn clamp_lines(mut lines: Vec<String>, max: usize) -> Vec<String> {
     if lines.len() > max {
         lines.truncate(max);
@@ -165,7 +174,30 @@ async fn append_review_step(
         .await;
 }
 
-fn system_prompt_for_summary() -> String {
+fn system_prompt_for_summary(plan_kind: &str) -> String {
+    if plan_kind == "cleanse" {
+        return r#"You are a read-only reviewer for a DBT analytics project.
+
+You will be given:
+- The original goal and review context (brief)
+- A small, deterministic project snapshot (dbt_project.yml, sources list, model file index, and minimal manifest metadata)
+
+Output STRICT JSON only (exactly one object) with this schema:
+{
+  "project_notes": [string, ...],
+  "project_risks": [string, ...]
+}
+
+Rules:
+- Be pragmatic, not pedantic. Focus on business correctness and usability.
+- Do NOT suggest edits in-line; just describe risks/gaps.
+- Keep notes concise and high-signal.
+- Tier focus (CRITICAL): this is a SILVER/staging (cleanse) review. Do NOT penalize missing GOLD/marts models.
+- Insightfulness check (CRITICAL):
+  - Call out whether the SILVER layer is usable as a stable, row-preserving cleanse foundation (explicit fields, safe casting, quality flags, stable naming).
+  - If you mention GOLD at all, frame it as an optional future improvement, not a blocker."#
+            .to_string();
+    }
     r#"You are a read-only reviewer for a DBT analytics project.
 
 You will be given:
@@ -188,8 +220,9 @@ Rules:
         .to_string()
 }
 
-fn system_prompt_for_batch() -> String {
-    r#"You are a read-only reviewer for a DBT analytics project.
+fn system_prompt_for_batch(plan_kind: &str) -> String {
+    if plan_kind == "cleanse" {
+        return r#"You are a read-only reviewer for a DBT analytics project.
 
 You will be given:
 - The original goal and review context
@@ -209,6 +242,35 @@ Rules:
 - Prefer concrete feedback tied to specific models/columns when visible.
 - IMPORTANT: Do NOT suggest adding/selecting fields that are not present in the provided authoritative schema.
   If a desired field is missing from the schema, call that out as a gap and suggest the nearest available alternative.
+- Tier focus (CRITICAL): this is a SILVER/staging (cleanse) review. Do NOT critique missing GOLD/marts models.
+- Analyst-style critique (CRITICAL):
+  - For each item, include:
+    - What operational/analytical question the cleaned table supports today (1 sentence).
+    - What high-value question it fails to answer given current columns (1–2 bullets).
+    - Assumptions + evidence gaps: any semantic assumptions you see (e.g. meaning of timestamps/status codes), and the smallest probe to validate them (null rate, distinctness, top values).
+- No tool calls and no file edits."#
+            .to_string();
+    }
+    r#"You are a read-only reviewer for a DBT analytics project.
+
+You will be given:
+- The original goal and review context
+- A batch of items (datasets or model names)
+- The expected model file paths and their contents (bounded)
+- Any invariants/notes from planning
+- The authoritative schema (columns/types) for each dataset in the batch (when available)
+
+Output STRICT JSON only (exactly one object) with this schema:
+{
+  "notes": [string, ...],
+  "actionable_hints": [string, ...]
+}
+
+Rules:
+- Coverage: you MUST cover every batch item explicitly (even if \"looks OK\").
+- Prefer concrete feedback tied to specific models/columns when visible.
+- IMPORTANT: Do NOT suggest adding/selecting fields that are not present in the provided authoritative schema.
+  If a desired field is missing from the schema, call that out as a gap and suggest the nearest available alternative.
 - Analyst-style critique (CRITICAL):
   - For each item, include:
     - What business question it answers today (1 sentence).
@@ -218,8 +280,9 @@ Rules:
         .to_string()
 }
 
-fn system_prompt_for_unify() -> String {
-    r#"You are a read-only reviewer for a DBT analytics project.
+fn system_prompt_for_unify(plan_kind: &str) -> String {
+    if plan_kind == "cleanse" {
+        return r#"You are a read-only reviewer for a DBT analytics project.
 
 You will be given:
 - The original goal and review context
@@ -233,6 +296,35 @@ You must output STRICT JSON only (exactly one object) with this schema:
 
 The final_review_text MUST start with:
 META:{"actionable":true|false,"dataset_ids":[...],"tier":"silver"|"gold"|"unknown"}
+
+Then a blank line, then the human review body.
+
+Set actionable=true only for blocker/high issues or a small high-value fix worth doing now.
+If feedback is substantially unchanged from prior iteration, set actionable=false.
+
+Unify requirements (CRITICAL):
+- Produce a concise, business-focused review that prioritizes decision usefulness.
+- Tier focus (CRITICAL): this is a SILVER/staging (cleanse) review. Do NOT penalize missing GOLD/marts models.
+- Include a short “Insightfulness summary” section:
+  - What operational/analytical use-cases the SILVER layer supports today.
+  - The top 2 missing semantics gaps (definitions, time axis meaning, entity meaning, join contracts, quality flags) blocking higher-value analysis even at SILVER.
+- Include an “Assumptions & evidence gaps” section listing the most important semantic assumptions and the smallest probes to validate them."#
+            .to_string();
+    }
+    r#"You are a read-only reviewer for a DBT analytics project.
+
+You will be given:
+- The original goal and review context
+- Project-level notes/risks
+- Notes from ALL review batches
+
+You must output STRICT JSON only (exactly one object) with this schema:
+{
+  "final_review_text": string
+}
+
+The final_review_text MUST start with:
+META:{\"actionable\":true|false,\"dataset_ids\":[...],\"tier\":\"silver\"|\"gold\"|\"unknown\"}
 
 Then a blank line, then the human review body.
 
@@ -260,9 +352,9 @@ async fn llm_json(
         ChatMessage {
             role: "system".to_string(),
             content: match name {
-                "summary" => system_prompt_for_summary(),
-                "batch" => system_prompt_for_batch(),
-                _ => system_prompt_for_unify(),
+                "summary" => system_prompt_for_summary(&phase_plan_kind(phase)),
+                "batch" => system_prompt_for_batch(&phase_plan_kind(phase)),
+                _ => system_prompt_for_unify(&phase_plan_kind(phase)),
             },
         },
         ChatMessage {
