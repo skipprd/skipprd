@@ -463,6 +463,126 @@ impl WarehouseNaming for AthenaQueryProvider {
     fn quote_ident(&self, ident: &str) -> String {
         format!("\"{}\"", ident.replace('"', "\"\""))
     }
+
+    fn sql_prompt_rules(&self) -> Vec<&'static str> {
+        vec![
+            "If Provider is athena (Trino SQL), DO NOT use initcap() (it is not registered). Avoid title-casing strings.",
+            "If Provider is athena (Trino SQL), never reference a SELECT-list alias inside another expression in the same SELECT list. If one derived field depends on another, split into CTE/subquery + outer SELECT.",
+        ]
+    }
+
+    fn sql_remediation_rules(&self) -> Vec<&'static str> {
+        vec![
+            "Trino/Athena rule: you cannot reference a SELECT-list alias in another expression in the same SELECT list. If one derived field depends on another, compute base fields in a CTE/subquery and use an outer SELECT.",
+        ]
+    }
+
+    fn unsupported_sql_reason(&self, sql: &str) -> Option<String> {
+        let s = sql.to_ascii_lowercase();
+        if s.contains("initcap(") {
+            return Some(
+                "initcap() is not supported on Athena/Trino; remove it (use trim/lower/upper, or leave casing unchanged)."
+                    .to_string(),
+            );
+        }
+        if has_obvious_same_select_alias_reuse(sql) {
+            return Some("Athena/Trino cannot reference a SELECT-list alias inside another expression in the same SELECT list; move the dependent expression to an outer SELECT/CTE.".to_string());
+        }
+        None
+    }
+}
+
+fn has_obvious_same_select_alias_reuse(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    let Some(select_pos) = lower.find("select") else {
+        return false;
+    };
+    let from_search_start = select_pos + "select".len();
+    let Some(from_rel) = lower[from_search_start..].find(" from ") else {
+        return false;
+    };
+    let select_end = from_search_start + from_rel;
+    let select_list = &lower[from_search_start..select_end];
+    let mut idx = 0usize;
+    while let Some(as_rel) = select_list[idx..].find(" as ") {
+        let as_pos = idx + as_rel;
+        let alias_start = as_pos + 4;
+        let Some((alias_name, consumed)) = parse_alias_token(&select_list[alias_start..]) else {
+            idx = alias_start;
+            continue;
+        };
+        if alias_name.is_empty() {
+            idx = alias_start + consumed;
+            continue;
+        }
+        let rest = &select_list[alias_start + consumed..];
+        if contains_identifier_reference(rest, &alias_name) {
+            return true;
+        }
+        idx = alias_start + consumed;
+    }
+    false
+}
+
+fn parse_alias_token(s: &str) -> Option<(String, usize)> {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    let q = bytes[i];
+    if q == b'`' || q == b'"' {
+        let mut j = i + 1;
+        while j < bytes.len() && bytes[j] != q {
+            j += 1;
+        }
+        if j >= bytes.len() {
+            return None;
+        }
+        return Some((s[i + 1..j].to_string(), j + 1));
+    }
+    let start = i;
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    Some((s[start..i].to_string(), i))
+}
+
+fn contains_identifier_reference(haystack: &str, ident: &str) -> bool {
+    if ident.trim().is_empty() {
+        return false;
+    }
+    if haystack.contains(&format!("`{}`", ident)) || haystack.contains(&format!("\"{}\"", ident)) {
+        return true;
+    }
+    let mut start = 0usize;
+    while let Some(rel) = haystack[start..].find(ident) {
+        let pos = start + rel;
+        let end = pos + ident.len();
+        let prev = if pos == 0 {
+            None
+        } else {
+            haystack.as_bytes().get(pos - 1).copied()
+        };
+        let next = haystack.as_bytes().get(end).copied();
+        let prev_is_ident = prev
+            .map(|b| b.is_ascii_alphanumeric() || b == b'_')
+            .unwrap_or(false);
+        let next_is_ident = next
+            .map(|b| b.is_ascii_alphanumeric() || b == b'_')
+            .unwrap_or(false);
+        if !prev_is_ident && !next_is_ident {
+            return true;
+        }
+        start = end;
+    }
+    false
 }
 
 #[async_trait]

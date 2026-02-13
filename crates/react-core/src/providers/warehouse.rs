@@ -27,6 +27,22 @@ pub trait WarehouseNaming: Send + Sync {
             self.quote_ident(&id.table)
         )
     }
+
+    /// Provider-owned SQL authoring rules for LLM prompts.
+    fn sql_prompt_rules(&self) -> Vec<&'static str> {
+        vec![]
+    }
+
+    /// Provider-owned SQL remediation rules for repair prompts.
+    fn sql_remediation_rules(&self) -> Vec<&'static str> {
+        vec![]
+    }
+
+    /// Optional provider-owned deterministic SQL guardrail.
+    /// Return a human-readable reason when SQL should be rejected.
+    fn unsupported_sql_reason(&self, _sql: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Full warehouse capability: query + dataset catalog + naming helpers.

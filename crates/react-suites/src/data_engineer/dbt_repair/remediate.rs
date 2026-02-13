@@ -1488,9 +1488,18 @@ pub async fn remediate_unresolved_columns_with_llm(
     }
 
     // Strict JSON-only contract. LLM returns structured patch primitives; we apply patches deterministically.
+    let provider_dialect_rules = {
+        let mut out = String::new();
+        for rule in ctx.warehouse.sql_remediation_rules().into_iter() {
+            out.push_str("         - ");
+            out.push_str(rule);
+            out.push('\n');
+        }
+        out
+    };
     let sys = format!(
         "You are a meticulous dbt SQL auto-remediation assistant.\n\
-         Task: fix unresolved column errors from Trino/Athena like: Column 'x' cannot be resolved.\n\
+         Task: fix unresolved column errors (e.g. Trino/Athena: Column 'x' cannot be resolved; BigQuery: Unrecognized name: x).\n\
          Dialect: {dialect}\n\
          Constraints:\n\
          - Only fix the unresolved column reference form; do not change business logic.\n\
@@ -1498,13 +1507,15 @@ pub async fn remediate_unresolved_columns_with_llm(
          - If `ref_models[].schema_columns` is present for a ref()'d model, treat it as authoritative.\n\
          - If the unresolved column token contains dots and schema_columns contains an EXACT matching column name, treat it as a literal column name and quote it as a single identifier (e.g. \\\"context.session.id\\\").\n\
          - Only use struct dereference (e.g. context.session.id) when schema_columns indicate a struct/row parent exists AND there is no exact dotted column name.\n\
+{provider_dialect_rules}\
          - Return ONLY valid JSON (no markdown, no commentary).\n\
         Output schema:\n\
          {{\"changes\":[{{\"key\":\"...\",\"replace_file\":{{\"new_text\":\"...\",\"expected_sha256\":\"...\"}}|null,\"replace_range\":{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\",\"expected_sha256\":\"...\"}}|null,\"replace_list\":{{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}],\"expected_sha256\":\"...\"}}|null,\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
          Rules:\n\
          - For each change, choose EXACTLY ONE of replace_file / replace_range / replace_list (the others must be null).\n\
          - expected_sha256 MUST match the sha256 of the provided file content for that key.\n\
-         Only include a file in changes if you actually modify it.\n"
+         Only include a file in changes if you actually modify it.\n",
+        provider_dialect_rules = provider_dialect_rules
     );
 
     let user = serde_json::json!({

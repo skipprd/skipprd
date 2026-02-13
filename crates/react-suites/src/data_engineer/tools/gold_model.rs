@@ -46,18 +46,6 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-fn contains_unsupported_sql_for_provider(provider: &str, sql: &str) -> Option<&'static str> {
-    // Keep this intentionally conservative: only block known, repeat offender functions.
-    let p = provider.trim().to_lowercase();
-    if p == "athena" || p == "trino" {
-        let s = sql.to_ascii_lowercase();
-        if s.contains("initcap(") {
-            return Some("initcap() is not supported on Athena/Trino; remove it (avoid title-casing strings).");
-        }
-    }
-    None
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GoldModelItem {
     name: String,
@@ -79,7 +67,12 @@ struct GoldModelArgs {
     items: Vec<GoldModelItem>,
 }
 
-fn build_gold_sys_prompt(provider: &str, dialect: &str, max_items: usize) -> String {
+fn build_gold_sys_prompt(
+    provider: &str,
+    dialect: &str,
+    max_items: usize,
+    provider_rules: &str,
+) -> String {
     format!(
         "You are an expert analytics engineer.\n\
          Task: author dbt GOLD mart model(s) for a warehouse project.\n\
@@ -115,14 +108,15 @@ fn build_gold_sys_prompt(provider: &str, dialect: &str, max_items: usize) -> Str
            - Do NOT narrow time zones: never cast timestamptz -> timestamp.\n\
            - If you need parsed timestamps but the input only has string-ish fields, do NOT try_cast in gold; instead note that silver should add a cleaned timestamp column.\n\
          - Dialect/provider compatibility:\n\
-           - If Provider is athena (Trino SQL), DO NOT use initcap() (it is not registered).\n\
+{provider_rules}\
          - Batch throughput: you will be asked to create up to {max_items} models per call.\n\
          - Do NOT include a dbt config block; the suite injects schema/alias deterministically.\n\
          Patch rules:\n\
          - The patch MUST modify ONLY the provided model_path.\n\
          \n"
         ,
-        patch_contract = crate::prompts::patch_contract::llm_patch_response_contract()
+        patch_contract = crate::prompts::patch_contract::llm_patch_response_contract(),
+        provider_rules = provider_rules
     )
 }
 
@@ -228,7 +222,16 @@ impl Tool for GoldModelTool {
         let provider_name = crate::config::resolved_config_from_ctx(ctx)
             .map(|cfg| cfg.providers.warehouse.kind.as_str())
             .unwrap_or("unknown");
-        let sys = build_gold_sys_prompt(provider_name, &dialect, max_items);
+        let provider_prompt_rules = {
+            let mut out = String::new();
+            for rule in ctx.warehouse.sql_prompt_rules().into_iter() {
+                out.push_str("           - ");
+                out.push_str(rule);
+                out.push('\n');
+            }
+            out
+        };
+        let sys = build_gold_sys_prompt(provider_name, &dialect, max_items, &provider_prompt_rules);
 
         // Plan-first authoring: if there is an active model plan, use task invariants/notes as the
         // default authoring instructions (and merge with any explicit item.instructions overrides).
@@ -449,9 +452,7 @@ impl Tool for GoldModelTool {
                 ));
                 continue;
             }
-            if let Some(msg) =
-                contains_unsupported_sql_for_provider(provider_name, &outcome.content)
-            {
+            if let Some(msg) = ctx.warehouse.unsupported_sql_reason(&outcome.content) {
                 errors.push(format!(
                     "{name}: unsupported SQL for provider '{provider_name}': {msg}"
                 ));
@@ -616,6 +617,18 @@ mod tests {
             "Metric definitions: Order count; revenue/amount if a numeric amount column exists; status counts if status exists.",
             "Assumptions & gaps: Column meanings are inferred from names; validate via null rate, distinctness, and top values for key fields."
         ])
+    }
+
+    #[test]
+    fn gold_sys_prompt_includes_bigquery_alias_scope_rule() {
+        let sys = build_gold_sys_prompt(
+            "bigquery",
+            "Google BigQuery (Standard SQL)",
+            3,
+            "           - If Provider is bigquery (Google BigQuery Standard SQL), never reference a SELECT-list alias inside another expression in the same SELECT list. If one derived field depends on another, split into CTE/subquery + outer SELECT.\n           - If Provider is bigquery, use SAFE_CAST(...) for tolerant casts (not try_cast).\n",
+        );
+        assert!(sys.contains("never reference a SELECT-list alias"));
+        assert!(sys.contains("SAFE_CAST"));
     }
 
     #[tokio::test]

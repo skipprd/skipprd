@@ -109,24 +109,12 @@ fn matching_staging_rel_paths_by_source(
         .collect()
 }
 
-fn contains_unsupported_sql_for_provider(provider: &str, sql: &str) -> Option<&'static str> {
-    // Keep this intentionally conservative: only block known, repeat offender functions.
-    // Expand gradually as we observe real failures in dbt_validate for the active provider.
-    let p = provider.trim().to_lowercase();
-    if p == "athena" || p == "trino" {
-        let s = sql.to_ascii_lowercase();
-        if s.contains("initcap(") {
-            return Some("initcap() is not supported on Athena/Trino; remove it (use trim/lower/upper, or leave casing unchanged).");
-        }
-    }
-    None
-}
-
 fn build_staging_sys_prompt(
     provider: &str,
     dialect: &str,
     expected_db: &str,
     expected_table: &str,
+    provider_rules: &str,
 ) -> String {
     format!(
         "You are an expert analytics engineer.\n\
@@ -141,7 +129,7 @@ fn build_staging_sys_prompt(
          - This is SILVER: include sensible cleansing/normalization and stable column naming.\n\
          - IMPORTANT: The user payload may include plan invariants/notes; invariants are hard requirements.\n\
          - Dialect/provider compatibility:\n\
-           - If Provider is athena (Trino SQL), DO NOT use initcap() (it is not registered). Avoid title-casing strings.\n\
+{provider_rules}\
          - Use the provided schema_columns types to guide casting and cleansing. Do NOT guess types from names.\n\
          - CRITICAL: Do NOT select or reference any column that is not present in schema_columns.\n\
            If the desired field is missing, note it and proceed with the closest available alternative.\n\
@@ -177,7 +165,8 @@ fn build_staging_sys_prompt(
          - The patch MUST modify ONLY the expected_model_path.\n\
          - Do NOT include a dbt config block; the suite injects schema/alias deterministically.\n"
         ,
-        patch_contract = crate::prompts::patch_contract::llm_patch_response_contract()
+        patch_contract = crate::prompts::patch_contract::llm_patch_response_contract(),
+        provider_rules = provider_rules
     )
 }
 
@@ -473,6 +462,15 @@ impl Tool for StagingModelTool {
         let provider_name = crate::config::resolved_config_from_ctx(ctx)
             .map(|cfg| cfg.providers.warehouse.kind.as_str())
             .unwrap_or("unknown");
+        let provider_prompt_rules = {
+            let mut out = String::new();
+            for rule in ctx.warehouse.sql_prompt_rules().into_iter() {
+                out.push_str("           - ");
+                out.push_str(rule);
+                out.push('\n');
+            }
+            out
+        };
 
         // Discover existing staging model files so we can update by semantic identity (source()),
         // not by filename (prevents duplicate staging models for the same dataset).
@@ -677,8 +675,13 @@ impl Tool for StagingModelTool {
                 .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
                 .collect();
 
-            let sys =
-                build_staging_sys_prompt(provider_name, &dialect, &expected_db, &expected_table);
+            let sys = build_staging_sys_prompt(
+                provider_name,
+                &dialect,
+                &expected_db,
+                &expected_table,
+                &provider_prompt_rules,
+            );
 
             let existing_sql = ctx
                 .storage
@@ -733,9 +736,7 @@ impl Tool for StagingModelTool {
                 ));
                 continue;
             }
-            if let Some(msg) =
-                contains_unsupported_sql_for_provider(provider_name, &outcome.content)
-            {
+            if let Some(msg) = ctx.warehouse.unsupported_sql_reason(&outcome.content) {
                 errors.push(format!(
                     "{ds}: unsupported SQL for provider '{provider_name}': {msg}"
                 ));
@@ -873,10 +874,24 @@ mod tests {
             "Amazon Athena (engine v3 / Trino SQL)",
             "picnic",
             "track_app_opened",
+            "           - If Provider is athena (Trino SQL), DO NOT use initcap() (it is not registered). Avoid title-casing strings.\n",
         );
         assert!(!sys.contains("DO NOT quote the whole path"));
         assert!(sys.contains("schema_columns as ground truth"));
         assert!(sys.contains("quote the entire identifier"));
+    }
+
+    #[test]
+    fn staging_sys_prompt_includes_bigquery_alias_scope_rule() {
+        let sys = build_staging_sys_prompt(
+            "bigquery",
+            "Google BigQuery (Standard SQL)",
+            "newyork",
+            "collisions",
+            "           - If Provider is bigquery (Google BigQuery Standard SQL), never reference a SELECT-list alias inside another expression in the same SELECT list. If one derived field depends on another, split into CTE/subquery + outer SELECT.\n           - If Provider is bigquery, use SAFE_CAST(...) for tolerant casts (not try_cast).\n",
+        );
+        assert!(sys.contains("never reference a SELECT-list alias"));
+        assert!(sys.contains("SAFE_CAST"));
     }
 
     #[test]
