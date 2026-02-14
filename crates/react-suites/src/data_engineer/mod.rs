@@ -8,6 +8,7 @@ use crate::flow_frame::FlowFrame;
 use crate::preflight::PreflightProvider;
 use crate::suite::{Suite, SuiteCtx};
 use react_core::agent::{Agent, AgentCtx, AgentPolicy, Interrupt, RunOutcome};
+use react_core::llm::LlmCallOptions;
 use react_core::session::ThreadStore;
 use react_core::tools::{Tool, ToolRegistry};
 use std::collections::{HashMap, HashSet};
@@ -29,6 +30,61 @@ pub mod schema_policy;
 pub mod prompts;
 mod review_batched;
 pub mod tools;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ValidateFailureClass {
+    SqlOrRuntime,
+    SchemaOrPrecheck,
+    Unknown,
+}
+
+fn classify_validate_failure(
+    entered_from_precheck_failed: bool,
+    last_validate_brief: Option<&str>,
+    last_guard_reason: Option<&str>,
+) -> ValidateFailureClass {
+    if entered_from_precheck_failed {
+        return ValidateFailureClass::SchemaOrPrecheck;
+    }
+    let mut hay = String::new();
+    if let Some(b) = last_validate_brief {
+        hay.push_str(b);
+        hay.push('\n');
+    }
+    if let Some(r) = last_guard_reason {
+        hay.push_str(r);
+    }
+    let t = hay.to_ascii_lowercase();
+    // Schema/precheck-style failures.
+    if t.contains("precheck_failed")
+        || t.contains("schema.yml")
+        || t.contains(".yml")
+        || t.contains(".yaml")
+        || t.contains("yaml")
+        || t.contains("schema contract")
+        || t.contains("duplicate definition")
+        || t.contains("duplicate definitions")
+    {
+        return ValidateFailureClass::SchemaOrPrecheck;
+    }
+    // SQL compile/runtime-style failures.
+    if t.contains("compilation error")
+        || t.contains("database error")
+        || t.contains("runtime error")
+        || t.contains("column_not_found")
+        || t.contains("unresolved column")
+        || t.contains("syntax error")
+        || t.contains("parse error")
+    {
+        return ValidateFailureClass::SqlOrRuntime;
+    }
+    if t.trim().is_empty() {
+        ValidateFailureClass::Unknown
+    } else {
+        // Default to SQL/runtime: when dbt fails, prefer fixing the failing SQL targets before new work.
+        ValidateFailureClass::SqlOrRuntime
+    }
+}
 
 fn lock_prompt_for_plan(
     kind: &str,
@@ -541,7 +597,13 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
         // No tools for repair: any tool call should fail and force a retry.
         let registry = ToolRegistry::new();
         let tools_card = "";
-        match Agent::run_until_block(&registry, actx, &sys, tools_card, &q).await {
+        let llm_options = Some(LlmCallOptions {
+            // Strict JSON repair emitter: keep variance minimal.
+            temperature: Some(0.0),
+            top_p: Some(1.0),
+            max_output_tokens: Some(1400),
+        });
+        match Agent::run_until_block(&registry, actx, &sys, tools_card, &q, llm_options).await {
             Ok(RunOutcome::Final {
                 thread_id: _tid,
                 result,
@@ -1967,7 +2029,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                 .map(|c| c as Arc<dyn std::any::Any + Send + Sync>),
         };
 
-        match Agent::run_until_block(&registry, &actx, &sys, &tools_card, question).await {
+        match Agent::run_until_block(&registry, &actx, &sys, &tools_card, question, None).await {
             Ok(RunOutcome::Final {
                 thread_id: _tid,
                 result,
@@ -2031,7 +2093,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
         };
 
         let prompt = Self::inject_review_question(question);
-        match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &prompt).await {
+        match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &prompt, None).await {
             Ok(RunOutcome::Final {
                 thread_id: _tid,
                 result,
@@ -2789,17 +2851,21 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                     };
 
                     // Inject global preflight semantic context/audiences (if available).
-                    let global_key = sctx.keyspace.semantic_key(
-                        &sctx.scope,
-                        react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
-                    );
-                    if let Ok(v) = sctx.storage.get_json(&global_key).await {
-                        q.push_str("\n\nIMMUTABLE CONTEXT (global_semantic_context):\n");
-                        q.push_str(
-                            &serde_json::to_string_pretty(&v)
-                                .unwrap_or_else(|_| "{}".to_string()),
+                    // CRITICAL: global_semantic_context is intended for GOLD model planning only,
+                    // not for SILVER/cleanse planning.
+                    if !is_cleanse {
+                        let global_key = sctx.keyspace.semantic_key(
+                            &sctx.scope,
+                            react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
                         );
-                        q.push('\n');
+                        if let Ok(v) = sctx.storage.get_json(&global_key).await {
+                            q.push_str("\n\nIMMUTABLE CONTEXT (global_semantic_context):\n");
+                            q.push_str(
+                                &serde_json::to_string_pretty(&v)
+                                    .unwrap_or_else(|_| "{}".to_string()),
+                            );
+                            q.push('\n');
+                        }
                     }
                     // If this plan phase was entered because review produced actionable feedback,
                     // include that feedback verbatim to ground the new plan.
@@ -2874,7 +2940,20 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         }
                     }
 
-                    match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q).await {
+                    let llm_options = if is_cleanse {
+                        Some(LlmCallOptions {
+                            temperature: Some(0.20),
+                            top_p: Some(1.0),
+                            max_output_tokens: Some(2200),
+                        })
+                    } else {
+                        Some(LlmCallOptions {
+                            temperature: Some(0.55),
+                            top_p: Some(0.95),
+                            max_output_tokens: Some(2800),
+                        })
+                    };
+                    match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q, llm_options).await {
                         Ok(RunOutcome::Final {
                             thread_id: _tid,
                             result,
@@ -3397,6 +3476,21 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                     }
                     let hard_mutation_repair_mode =
                         phase_guard.last_validate_failed && !phase_guard.mutated_since_fail;
+                    let last_guard_reason = log.as_ref().and_then(|l| {
+                        l.steps.iter().rev().find_map(|s| match s {
+                            react_core::session::ThreadStep::GuardBlock { reason, .. } => {
+                                Some(reason.as_str())
+                            }
+                            _ => None,
+                        })
+                    });
+                    let failure_class = classify_validate_failure(
+                        entered_from_precheck_failed,
+                        last_validate_brief.as_deref(),
+                        last_guard_reason,
+                    );
+                    let prefer_schema_repairs =
+                        matches!(failure_class, ValidateFailureClass::SchemaOrPrecheck);
                     let sys = crate::util::time_context::with_time_context(if is_cleanse {
                         prompts::cleanse_system_prompt()
                     } else {
@@ -3563,10 +3657,37 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_cleanse_batch; force repair-mode guidance.
-                            if hard_mutation_repair_mode {
-                                // If schema checklist work remains, ALWAYS prefer the schema batch tool even when
-                                // we are recovering from a failed validation. This prevents incorrect attempts to
-                                // "fix YAML contracts" by editing SQL files, which causes loops.
+                            if hard_mutation_repair_mode && !prefer_schema_repairs {
+                                // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
+                                // Even if schema checklist work remains, fix failing SQL targets first.
+                                let mut ctx = format!(
+                                    "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call dbt_files op=patch (replace_file/replace_range/replace_list) to fix the failing SQL target(s) below. Keep changes minimal.\n\nRepair targets:\n",
+                                    plan.plan_key
+                                );
+                                if !last_validate_failed_models.is_empty() {
+                                    for fm in last_validate_failed_models.iter().take(6) {
+                                        let name = fm
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown_model");
+                                        let file = fm
+                                            .get("file")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("(unknown file)");
+                                        ctx.push_str(&format!("- {} ({})\n", name, file));
+                                    }
+                                } else if let Some(ref brief) = last_validate_brief {
+                                    ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
+                                    ctx.push_str("\nLast dbt_validate summary:\n");
+                                    ctx.push_str(brief);
+                                    ctx.push('\n');
+                                } else {
+                                    ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
+                                }
+                                ctx.push_str("\nIMPORTANT: Defer any new checklist expansion or schema contract work until dbt_validate passes.\n");
+                                (ctx, None)
+                            } else if hard_mutation_repair_mode {
+                                // Schema/precheck failures: prefer schema batch tools when schema checklist work remains.
                                 if let Some((
                                     crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
                                     ids,
@@ -3927,7 +4048,36 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_model_batch; force repair-mode guidance.
-                            if hard_mutation_repair_mode {
+                            if hard_mutation_repair_mode && !prefer_schema_repairs {
+                                // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
+                                // Even if schema checklist work remains, fix failing SQL targets first.
+                                let mut ctx = format!(
+                                    "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call dbt_files op=patch (replace_file/replace_range/replace_list) to fix the failing SQL target(s) below. Keep changes minimal.\n\nRepair targets:\n",
+                                    plan.plan_key
+                                );
+                                if !last_validate_failed_models.is_empty() {
+                                    for fm in last_validate_failed_models.iter().take(6) {
+                                        let name = fm
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown_model");
+                                        let file = fm
+                                            .get("file")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("(unknown file)");
+                                        ctx.push_str(&format!("- {} ({})\n", name, file));
+                                    }
+                                } else if let Some(ref brief) = last_validate_brief {
+                                    ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
+                                    ctx.push_str("\nLast dbt_validate summary:\n");
+                                    ctx.push_str(brief);
+                                    ctx.push('\n');
+                                } else {
+                                    ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
+                                }
+                                ctx.push_str("\nIMPORTANT: Defer any new checklist expansion or schema contract work until dbt_validate passes.\n");
+                                (ctx, None)
+                            } else if hard_mutation_repair_mode {
                                 if let Some((
                                     crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
                                     ids,
@@ -4582,7 +4732,20 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         q.push_str("\n\nIMPORTANT: invariant failed: there are no DBT model SQL files yet. Your first task is to create at least one staging model under models/ using staging_model or dbt_files op=patch.");
                     }
 
-                    match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q).await {
+                    let llm_options = if is_cleanse {
+                        Some(LlmCallOptions {
+                            temperature: Some(0.05),
+                            top_p: Some(1.0),
+                            max_output_tokens: Some(1800),
+                        })
+                    } else {
+                        Some(LlmCallOptions {
+                            temperature: Some(0.12),
+                            top_p: Some(1.0),
+                            max_output_tokens: Some(2200),
+                        })
+                    };
+                    match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q, llm_options).await {
                         Ok(RunOutcome::Final { .. }) => {
                             // Update plan progress based on newly recorded tool steps.
                             if let Ok(latest) = thread_store.get(thread_id).await {
@@ -5813,8 +5976,21 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
             AuthoringKind::Model => Self::inject_model_question(question),
         };
 
+        let llm_options = match kind {
+            AuthoringKind::Cleanse => Some(LlmCallOptions {
+                temperature: Some(0.05),
+                top_p: Some(1.0),
+                max_output_tokens: Some(1800),
+            }),
+            AuthoringKind::Model => Some(LlmCallOptions {
+                temperature: Some(0.12),
+                top_p: Some(1.0),
+                max_output_tokens: Some(2200),
+            }),
+        };
+
         for attempt in 0..10 {
-            match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &prompt).await {
+            match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &prompt, llm_options).await {
                 Ok(RunOutcome::Final {
                     thread_id: _tid,
                     result,
@@ -6812,6 +6988,25 @@ mod tests {
                 .and_then(|v| v.get("patched_since_fail"))
                 .and_then(|v| v.as_bool()),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn classify_validate_failure_prefers_schema_for_precheck_and_yaml() {
+        // Explicit precheck failure should be schema-class.
+        assert_eq!(
+            classify_validate_failure(true, None, None),
+            ValidateFailureClass::SchemaOrPrecheck
+        );
+        // YAML/schema hints should be schema-class.
+        assert_eq!(
+            classify_validate_failure(false, Some("Error in models/schema.yml: duplicate definitions"), None),
+            ValidateFailureClass::SchemaOrPrecheck
+        );
+        // Compilation errors should be SQL/runtime-class.
+        assert_eq!(
+            classify_validate_failure(false, Some("Compilation Error: syntax error near FROM"), None),
+            ValidateFailureClass::SqlOrRuntime
         );
     }
 }

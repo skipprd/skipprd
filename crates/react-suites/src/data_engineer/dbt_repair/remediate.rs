@@ -1,6 +1,7 @@
 use crate::config::ReactResolvedConfig;
 use react_core::agent::AgentCtx;
 use react_core::llm::ChatMessage;
+use react_core::llm::LlmCallOptions;
 use react_core::llm_observability::{self, PartInput};
 use react_core::providers::{DatasetCatalogProvider, DatasetId};
 use react_core::session::{Observation, ThreadStep};
@@ -423,7 +424,12 @@ pub fn llm_should_remediate_sql(
             text: user.clone(),
         },
     ];
-    let resp_text = match ctx.llm.chat(&messages) {
+    let call_opts = LlmCallOptions {
+        temperature: Some(0.0),
+        top_p: Some(1.0),
+        max_output_tokens: Some(1400),
+    };
+    let resp_text = match ctx.llm.chat_with_options(&messages, Some(&call_opts)) {
         Ok(t) => {
             record_llm_call_observability(ctx, phase, "unknown", &messages, &parts, &t, true);
             t
@@ -592,7 +598,12 @@ pub async fn remediate_dbt_sql_keys_with_llm(
                     .unwrap_or_else(|_| "[]".to_string()),
             },
         ];
-        let resp_text = match ctx.llm.chat(&messages) {
+        let call_opts = LlmCallOptions {
+            temperature: Some(0.0),
+            top_p: Some(1.0),
+            max_output_tokens: Some(1400),
+        };
+        let resp_text = match ctx.llm.chat_with_options(&messages, Some(&call_opts)) {
             Ok(t) => {
                 record_llm_call_observability_async(
                     ctx, phase, "unknown", &messages, &parts, &t, true,
@@ -1143,7 +1154,12 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
             text: serde_json::to_string_pretty(&ref_models).unwrap_or_else(|_| "[]".to_string()),
         },
     ];
-    let resp_text = match ctx.llm.chat(&messages) {
+    let call_opts = LlmCallOptions {
+        temperature: Some(0.0),
+        top_p: Some(1.0),
+        max_output_tokens: Some(1400),
+    };
+    let resp_text = match ctx.llm.chat_with_options(&messages, Some(&call_opts)) {
         Ok(t) => {
             record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &t, true)
                 .await;
@@ -1564,7 +1580,12 @@ pub async fn remediate_unresolved_columns_with_llm(
             text: serde_json::to_string_pretty(&ref_models).unwrap_or_else(|_| "[]".to_string()),
         },
     ];
-    let resp_text = match ctx.llm.chat(&messages) {
+    let call_opts = LlmCallOptions {
+        temperature: Some(0.0),
+        top_p: Some(1.0),
+        max_output_tokens: Some(1400),
+    };
+    let resp_text = match ctx.llm.chat_with_options(&messages, Some(&call_opts)) {
         Ok(t) => {
             record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &t, true)
                 .await;

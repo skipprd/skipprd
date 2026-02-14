@@ -11,6 +11,7 @@ use crate::data_engineer::plan;
 use crate::data_engineer::project_files;
 use crate::data_engineer::project_fs;
 use react_core::agent::AgentCtx;
+use react_core::llm::LlmCallOptions;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
@@ -718,7 +719,17 @@ impl Tool for StagingModelTool {
             .to_string();
 
             let (outcome, llm_notes) = match patch_protocol::llm_patch_loop_single_file(
-                ctx, None, sys, user, &rel_path, 4,
+                ctx,
+                None,
+                sys,
+                user,
+                &rel_path,
+                4,
+                Some(LlmCallOptions {
+                    temperature: Some(0.05),
+                    top_p: Some(1.0),
+                    max_output_tokens: Some(1800),
+                }),
             )
             .await
             {

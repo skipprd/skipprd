@@ -6,6 +6,7 @@ use tokio::task::JoinSet;
 use tracing::info;
 
 use react_core::agent::AgentCtx;
+use react_core::llm::LlmCallOptions;
 use react_core::tools::Tool;
 
 use crate::data_engineer::dbt_repair::remediate::active_provider_dialect;
@@ -430,6 +431,11 @@ impl Tool for GoldModelTool {
                 user,
                 &rel_path,
                 4,
+                Some(LlmCallOptions {
+                    temperature: Some(0.12),
+                    top_p: Some(1.0),
+                    max_output_tokens: Some(2200),
+                }),
             )
             .await
             {

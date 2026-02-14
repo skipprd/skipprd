@@ -4,10 +4,10 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::keyspace::Keyspace;
-use crate::llm::ChatMessage;
+use crate::llm::{ChatMessage, LlmCallOptions};
 use crate::llm_observability::PartInput;
 use crate::providers::{
-    DbtProvider, NullWarehouseProvider, QueryProvider, VectorStore, WarehouseProvider,
+    DbtProvider, QueryProvider, VectorStore, WarehouseProvider,
 };
 use crate::scope::RequestScope;
 use crate::session::{ExecutionContext, Observation, ThreadResult, ThreadStep, ThreadStore, ToolObservation};
@@ -385,7 +385,11 @@ impl Agent {
         out
     }
 
-    async fn llm_chat_once(ctx: &AgentCtx, prompt: String) -> Result<String, String> {
+    async fn llm_chat_once(
+        ctx: &AgentCtx,
+        prompt: String,
+        llm_options: Option<LlmCallOptions>,
+    ) -> Result<String, String> {
         let model = ctx.llm.clone();
 
         let thread_id_opt = ctx.thread_id.clone();
@@ -489,7 +493,8 @@ impl Agent {
                 .await;
         }
 
-        let res = tokio::task::spawn_blocking(move || model.chat(&messages))
+        let res =
+            tokio::task::spawn_blocking(move || model.chat_with_options(&messages, llm_options.as_ref()))
             .await
             .map_err(|e| format!("LLM execution failed: {}", e))?
             .map_err(|e| format!("LLM request failed: {}", e));
@@ -745,6 +750,7 @@ impl Agent {
         system_prompt: &str,
         tools_card: &str,
         question: &str,
+        llm_options: Option<LlmCallOptions>,
     ) -> Result<RunOutcome, String> {
         let tid = ctx.thread_id.clone().unwrap_or_else(Self::gen_uuid);
         let store = ctx.thread_store.as_ref();
@@ -783,7 +789,7 @@ impl Agent {
 
             // Ask model for next action.
             let prompt = transcript.join("\n");
-            let mut raw = Self::llm_chat_once(ctx, prompt).await?;
+            let mut raw = Self::llm_chat_once(ctx, prompt, llm_options).await?;
             let mut action = match Self::parse_action(&raw) {
                 Ok(v) => v,
                 Err(e) => {
@@ -824,7 +830,7 @@ impl Agent {
                     keep.extend(transcript.iter().skip(transcript.len().saturating_sub(tail_n)).cloned());
                     keep.push("User: IMPORTANT: Return ONLY a single JSON object (no markdown, no code fences).".to_string());
                     let retry_prompt = keep.join("\n");
-                    raw = Self::llm_chat_once(ctx, retry_prompt).await?;
+                    raw = Self::llm_chat_once(ctx, retry_prompt, llm_options).await?;
                     match Self::parse_action(&raw) {
                         Ok(v) => v,
                         Err(e2) => {
@@ -841,7 +847,7 @@ impl Agent {
                             }
                             keep2.push("User: Return ONLY JSON: either {\"action\":\"<tool>\",\"args\":{...}} or {\"final\":{...}}.".to_string());
                             let retry_prompt2 = keep2.join("\n");
-                            raw = Self::llm_chat_once(ctx, retry_prompt2).await?;
+                            raw = Self::llm_chat_once(ctx, retry_prompt2, llm_options).await?;
                             Self::parse_action(&raw)?
                         }
                     }
@@ -1064,6 +1070,39 @@ mod tests {
         }
     }
 
+    struct CapturingOptionsModel {
+        replies: Arc<Mutex<Vec<String>>>,
+        last_opts: Arc<Mutex<Option<crate::llm::LlmCallOptions>>>,
+    }
+
+    impl crate::llm::LargeLanguageModel for CapturingOptionsModel {
+        fn chat(&self, _messages: &[crate::llm::ChatMessage]) -> Result<String, String> {
+            let mut g = self
+                .replies
+                .lock()
+                .map_err(|_| "mutex poisoned".to_string())?;
+            if g.is_empty() {
+                return Err("no more replies".to_string());
+            }
+            Ok(g.remove(0))
+        }
+
+        fn chat_with_options(
+            &self,
+            messages: &[crate::llm::ChatMessage],
+            options: Option<&crate::llm::LlmCallOptions>,
+        ) -> Result<String, String> {
+            if let Ok(mut g) = self.last_opts.lock() {
+                *g = options.copied();
+            }
+            self.chat(messages)
+        }
+
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(vec![])
+        }
+    }
+
     struct TimeoutPolicy {
         inner: DefaultPolicy,
         secs: u64,
@@ -1149,7 +1188,7 @@ mod tests {
             runtime: None,
         };
 
-        let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q")
+        let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q", None)
             .await
             .expect("ok");
         match out {
@@ -1162,6 +1201,60 @@ mod tests {
             }
             _ => panic!("expected final outcome"),
         }
+    }
+
+    #[tokio::test]
+    async fn run_until_block_passes_llm_call_options_through() {
+        let last_opts: Arc<Mutex<Option<crate::llm::LlmCallOptions>>> =
+            Arc::new(Mutex::new(None));
+        let llm = Arc::new(CapturingOptionsModel {
+            replies: Arc::new(Mutex::new(vec![
+                "{\"final\":{\"kind\":\"generic\",\"payload\":{\"text\":\"ok\"}}}".to_string(),
+            ])),
+            last_opts: last_opts.clone(),
+        });
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let reg = ToolRegistry::new();
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 2,
+            thread_id: Some("tid".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(DefaultPolicy),
+            llm,
+            storage,
+            scope,
+            keyspace,
+            query: None,
+            warehouse: Arc::new(NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            exec_ctx: None,
+            runtime: None,
+        };
+        let opts = crate::llm::LlmCallOptions {
+            temperature: Some(0.9),
+            top_p: Some(0.8),
+            max_output_tokens: Some(1234),
+        };
+        let _out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q", Some(opts))
+            .await
+            .expect("ok");
+        let got = last_opts.lock().ok().and_then(|g| *g).expect("opts");
+        assert_eq!(got.temperature, Some(0.9));
+        assert_eq!(got.top_p, Some(0.8));
+        assert_eq!(got.max_output_tokens, Some(1234));
     }
 
     #[tokio::test]
@@ -1203,7 +1296,7 @@ mod tests {
             runtime: None,
         };
 
-        let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q")
+        let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q", None)
             .await
             .expect("ok");
         match out {
@@ -1294,6 +1387,7 @@ mod tests {
             "sys",
             "tools",
             "q",
+            None,
         )
         .await
         .expect("run should succeed after retry");

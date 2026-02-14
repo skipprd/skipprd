@@ -883,6 +883,7 @@ pub async fn repair_cleanse_plan_semantics_via_llm(
     validation_errors: &[String],
 ) -> Result<CleansePlan, String> {
     use react_core::llm::ChatMessage;
+    use react_core::llm::LlmCallOptions;
     let sys = plan_repair_system_prompt("cleanse");
     let plan_json = serde_json::to_string_pretty(plan).map_err(|e| e.to_string())?;
     let errs = validation_errors.join("\n");
@@ -900,7 +901,15 @@ pub async fn repair_cleanse_plan_semantics_via_llm(
             content: user,
         },
     ];
-    let raw = ctx.llm.chat(&messages).map_err(|e| e.to_string())?;
+    let call_opts = LlmCallOptions {
+        temperature: Some(0.0),
+        top_p: Some(1.0),
+        max_output_tokens: Some(1400),
+    };
+    let raw = ctx
+        .llm
+        .chat_with_options(&messages, Some(&call_opts))
+        .map_err(|e| e.to_string())?;
     let v = parse_json_object_lenient(&raw)?;
     serde_json::from_value::<CleansePlan>(v).map_err(|e| e.to_string())
 }
@@ -912,6 +921,7 @@ pub async fn repair_model_plan_semantics_via_llm(
     allowed_staging_models: &[String],
 ) -> Result<ModelPlan, String> {
     use react_core::llm::ChatMessage;
+    use react_core::llm::LlmCallOptions;
     let sys = plan_repair_system_prompt("model");
     let plan_json = serde_json::to_string_pretty(plan).map_err(|e| e.to_string())?;
     let errs = validation_errors.join("\n");
@@ -933,7 +943,15 @@ pub async fn repair_model_plan_semantics_via_llm(
             content: user,
         },
     ];
-    let raw = ctx.llm.chat(&messages).map_err(|e| e.to_string())?;
+    let call_opts = LlmCallOptions {
+        temperature: Some(0.0),
+        top_p: Some(1.0),
+        max_output_tokens: Some(1400),
+    };
+    let raw = ctx
+        .llm
+        .chat_with_options(&messages, Some(&call_opts))
+        .map_err(|e| e.to_string())?;
     let v = parse_json_object_lenient(&raw)?;
     serde_json::from_value::<ModelPlan>(v).map_err(|e| e.to_string())
 }

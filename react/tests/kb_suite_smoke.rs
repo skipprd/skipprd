@@ -108,7 +108,7 @@ async fn agent_default_policy_accepts_typed_final() {
         runtime: None,
     };
     let reg = ToolRegistry::new();
-    let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q")
+    let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q", None)
         .await
         .expect("run");
     match out {
@@ -156,7 +156,7 @@ async fn agent_does_not_special_case_ask_user_tool_name() {
     };
     let mut reg = ToolRegistry::new();
     reg.register(AskUserTool);
-    let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q")
+    let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q", None)
         .await
         .expect("run");
     match out {
@@ -202,7 +202,7 @@ async fn agent_interrupts_only_when_policy_requests_it() {
     };
     let mut reg = ToolRegistry::new();
     reg.register(AskUserTool);
-    let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q")
+    let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q", None)
         .await
         .expect("run");
     match out {

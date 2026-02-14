@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
+use react_core::llm::LlmCallOptions;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
@@ -215,6 +216,12 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                 user_payload,
                 &yml_rel,
                 4,
+                Some(LlmCallOptions {
+                    temperature: Some(0.05),
+                    top_p: Some(1.0),
+                    // Schema YAML patches can be large; avoid truncation mid-`new_text`.
+                    max_output_tokens: Some(3200),
+                }),
             )
             .await {
                 Ok(v) => v,
@@ -417,6 +424,12 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             user_payload,
             expected_rel,
             4,
+            Some(LlmCallOptions {
+                temperature: Some(0.05),
+                top_p: Some(1.0),
+                // Schema YAML patches can be large; avoid truncation mid-`new_text`.
+                max_output_tokens: Some(3200),
+            }),
         )
         .await {
             Ok(v) => v,

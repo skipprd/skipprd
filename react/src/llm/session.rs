@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::llm::router::LlmRouter;
 use crate::llm::thread_ctx;
 use crate::llm::{create_llm, ChatMessage, LargeLanguageModel, LlmConfig};
+use react_core::llm::LlmCallOptions;
 
 /// Lightweight session wrapper around the configured LLM.
 /// For local llama.cpp this will reuse the shared model underneath; for HTTP it reuses the HTTP client.
@@ -43,6 +44,14 @@ impl RouterModel {
 
 impl LargeLanguageModel for RouterModel {
     fn chat(&self, messages: &[ChatMessage]) -> Result<String, String> {
+        self.chat_with_options(messages, None)
+    }
+
+    fn chat_with_options(
+        &self,
+        messages: &[ChatMessage],
+        options: Option<&LlmCallOptions>,
+    ) -> Result<String, String> {
         let model = crate::helpers::configuration::Config::llm_chat_model()
             .unwrap_or_else(|| "gpt-4o-mini".to_string());
         // Heuristic: when the caller is asking for machine-readable JSON, enforce JSON output at the
@@ -66,6 +75,25 @@ impl LargeLanguageModel for RouterModel {
             }
         }
 
+        let default_max_output_tokens = crate::helpers::configuration::Config::getenv(
+            "LLM_MAX_TOKENS",
+            "1024",
+        )
+        .parse()
+        .ok();
+        let default_temperature = crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2")
+            .parse()
+            .ok();
+        let default_top_p = crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0")
+            .parse()
+            .ok();
+
+        let max_output_tokens = options
+            .and_then(|o| o.max_output_tokens)
+            .or(default_max_output_tokens);
+        let temperature = options.and_then(|o| o.temperature).or(default_temperature);
+        let top_p = options.and_then(|o| o.top_p).or(default_top_p);
+
         let req = crate::llm::types::ChatRequest {
             model,
             messages: messages
@@ -75,18 +103,9 @@ impl LargeLanguageModel for RouterModel {
                     content: m.content.clone(),
                 })
                 .collect(),
-            max_output_tokens: crate::helpers::configuration::Config::getenv(
-                "LLM_MAX_TOKENS",
-                "1024",
-            )
-            .parse()
-            .ok(),
-            temperature: crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2")
-                .parse()
-                .ok(),
-            top_p: crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0")
-                .parse()
-                .ok(),
+            max_output_tokens,
+            temperature,
+            top_p,
             response_format: if wants_json {
                 Some(serde_json::json!({"type":"json_object"}))
             } else {

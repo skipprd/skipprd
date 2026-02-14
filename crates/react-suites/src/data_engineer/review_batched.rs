@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
-use react_core::llm::ChatMessage;
+use react_core::llm::{ChatMessage, LlmCallOptions};
 use react_core::session::{Observation, ThreadStep, ThreadStore};
 use react_core::tools::Tool;
 
@@ -362,6 +362,25 @@ async fn llm_json(
     name: &str,
     user: String,
 ) -> Result<Value, String> {
+    let llm_options = match phase {
+        Phase::CleanseReview => Some(LlmCallOptions {
+            temperature: Some(0.15),
+            top_p: Some(1.0),
+            max_output_tokens: Some(1600),
+        }),
+        Phase::ModelReview => Some(LlmCallOptions {
+            temperature: Some(0.25),
+            top_p: Some(1.0),
+            max_output_tokens: Some(1800),
+        }),
+        Phase::PostPublishReview => Some(LlmCallOptions {
+            temperature: Some(0.20),
+            top_p: Some(1.0),
+            max_output_tokens: Some(1400),
+        }),
+        _ => None,
+    };
+
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
@@ -398,7 +417,7 @@ async fn llm_json(
         );
 
         // We append the llm_call step after we have response_text below.
-        let res = ctx.llm.chat(&messages);
+        let res = ctx.llm.chat_with_options(&messages, llm_options.as_ref());
         let (ok, raw) = match &res {
             Ok(t) => (true, t.clone()),
             Err(e) => (false, format!("LLM_ERROR: {}", e)),
@@ -440,7 +459,10 @@ async fn llm_json(
             .map_err(|e| format!("review {}: expected JSON, got parse error: {}", name, e));
     }
 
-    let raw = ctx.llm.chat(&messages).map_err(|e| e.to_string())?;
+    let raw = ctx
+        .llm
+        .chat_with_options(&messages, llm_options.as_ref())
+        .map_err(|e| e.to_string())?;
     serde_json::from_str::<Value>(&raw)
         .map_err(|e| format!("review {}: expected JSON, got parse error: {}", name, e))
 }
@@ -454,6 +476,12 @@ async fn load_global_semantic_context_json(
         react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
     );
     actx.storage.get_json(&key).await.ok().unwrap_or(Value::Null)
+}
+
+fn include_global_semantic_context(phase: Phase) -> bool {
+    // Global semantic context is intended for GOLD model planning/review and post-publish review only.
+    // It must not be injected into cleanse (silver/staging) prompts.
+    matches!(phase, Phase::ModelReview | Phase::PostPublishReview)
 }
 
 fn upsert_review_snapshot(obj: &mut serde_json::Map<String, Value>, patch: Value) {
@@ -1190,16 +1218,27 @@ pub async fn run_batched_review(
         })
         .unwrap_or(Value::Null);
 
-    let global_ctx = load_global_semantic_context_json(&actx, sctx).await;
-    let global_ctx_txt =
-        serde_json::to_string_pretty(&global_ctx).unwrap_or_else(|_| "null".to_string());
+    let global_ctx_txt = if include_global_semantic_context(phase) {
+        let global_ctx = load_global_semantic_context_json(&actx, sctx).await;
+        serde_json::to_string_pretty(&global_ctx).unwrap_or_else(|_| "null".to_string())
+    } else {
+        String::new()
+    };
+    let global_ctx_block = if include_global_semantic_context(phase) {
+        format!(
+            "IMMUTABLE CONTEXT (global_semantic_context):\n{gctx}\n\n",
+            gctx = global_ctx_txt
+        )
+    } else {
+        String::new()
+    };
 
     let review_context_brief = compact_review_context_for_summary(original_question_with_context);
     let summary_user = format!(
-        "Phase: {phase}\n\nOriginal goal + review context (brief):\n{q}\n\nIMMUTABLE CONTEXT (global_semantic_context):\n{gctx}\n\nProject skeleton files:\n{files}\n\nProject index:\n{idx}\n\nManifest metadata (minimal):\n{meta}\n",
+        "Phase: {phase}\n\nOriginal goal + review context (brief):\n{q}\n\n{gctx_block}Project skeleton files:\n{files}\n\nProject index:\n{idx}\n\nManifest metadata (minimal):\n{meta}\n",
         phase = phase.as_str(),
         q = review_context_brief,
-        gctx = global_ctx_txt,
+        gctx_block = global_ctx_block,
         files = render_files(&proj_files),
         idx = format!(
             "{}\n{}\n{}",
@@ -1316,12 +1355,12 @@ pub async fn run_batched_review(
         }
 
         let batch_user = format!(
-            "Phase: {phase}\nBatch {i}/{n}\n\nOriginal goal + review context:\n{q}\n\nIMMUTABLE CONTEXT (global_semantic_context):\n{gctx}\n\nBatch items:\n{items}\n\nBatch file contents (bounded):\n{files}\n",
+            "Phase: {phase}\nBatch {i}/{n}\n\nOriginal goal + review context:\n{q}\n\n{gctx_block}Batch items:\n{items}\n\nBatch file contents (bounded):\n{files}\n",
             phase = phase.as_str(),
             i = bidx + 1,
             n = batches.len(),
             q = original_question_with_context,
-            gctx = global_ctx_txt,
+            gctx_block = global_ctx_block,
             items = serde_json::to_string_pretty(&batch_detail).unwrap_or_else(|_| "[]".to_string()),
             files = render_files(&files),
         );
@@ -1360,10 +1399,10 @@ pub async fn run_batched_review(
 
     // 3) Final unify pass (META-compatible output).
     let unify_user = format!(
-        "Phase: {phase}\n\nOriginal goal + review context:\n{q}\n\nIMMUTABLE CONTEXT (global_semantic_context):\n{gctx}\n\nProject notes:\n{proj}\n\nBatch notes:\n{batches}\n",
+        "Phase: {phase}\n\nOriginal goal + review context:\n{q}\n\n{gctx_block}Project notes:\n{proj}\n\nBatch notes:\n{batches}\n",
         phase = phase.as_str(),
         q = original_question_with_context,
-        gctx = global_ctx_txt,
+        gctx_block = global_ctx_block,
         proj = serde_json::json!({"project_notes": project_notes, "project_risks": project_risks}),
         batches = serde_json::to_string_pretty(&all_batch_notes).unwrap_or_else(|_| "[]".to_string()),
     );
@@ -1453,6 +1492,33 @@ mod tests {
 
     impl react_core::llm::LargeLanguageModel for ScriptedModel {
         fn chat(&self, _messages: &[react_core::llm::ChatMessage]) -> Result<String, String> {
+            let mut g = self
+                .replies
+                .lock()
+                .map_err(|_| "mutex poisoned".to_string())?;
+            if g.is_empty() {
+                return Err("no more replies".to_string());
+            }
+            Ok(g.remove(0))
+        }
+
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(vec![])
+        }
+    }
+
+    struct CapturingModel {
+        replies: Arc<Mutex<Vec<String>>>,
+        captured_user_prompts: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl react_core::llm::LargeLanguageModel for CapturingModel {
+        fn chat(&self, messages: &[react_core::llm::ChatMessage]) -> Result<String, String> {
+            if let Some(u) = messages.iter().find(|m| m.role == "user") {
+                if let Ok(mut g) = self.captured_user_prompts.lock() {
+                    g.push(u.content.clone());
+                }
+            }
             let mut g = self
                 .replies
                 .lock()
@@ -1622,5 +1688,101 @@ mod tests {
                 >= 2
         );
         assert!(review.get("final").is_some());
+    }
+
+    #[tokio::test]
+    async fn global_semantic_context_is_not_injected_for_cleanse_review_but_is_for_model_review() {
+        let storage: Arc<dyn react_core::storage::StorageAdapter> =
+            Arc::new(InMemoryStorageAdapter::default());
+
+        // Seed global semantic context.
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let gkey = keyspace.semantic_key(
+            &scope,
+            react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
+        );
+        storage
+            .put_bytes(
+                &gkey,
+                serde_json::json!({"domain":"should_not_leak_to_cleanse"}).to_string().as_bytes(),
+                "application/json",
+            )
+            .await
+            .unwrap();
+
+        // Seed minimal dbt files expected by project snapshot.
+        let base = keyspace
+            .dbt_prefix(&scope)
+            .trim_end_matches('/')
+            .to_string();
+        storage
+            .put_bytes(&format!("{}/dbt_project.yml", base), "name: x\n".as_bytes(), "text/plain")
+            .await
+            .unwrap();
+        storage
+            .put_bytes(
+                &format!("{}/models/schema.yml", base),
+                "version: 2\n".as_bytes(),
+                "text/plain",
+            )
+            .await
+            .unwrap();
+
+        // Cleanse review should NOT include global_semantic_context in any prompt.
+        let captured_cleanse: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let llm_cleanse = Arc::new(CapturingModel {
+            captured_user_prompts: captured_cleanse.clone(),
+            replies: Arc::new(Mutex::new(vec![
+                serde_json::json!({"project_notes":[],"project_risks":[]}).to_string(), // summary
+                serde_json::json!({"final_review_text":"META:{\"actionable\":false,\"dataset_ids\":[],\"tier\":\"unknown\"}\n\nok"}).to_string(), // unify
+            ])),
+        });
+        let sctx_cleanse = SuiteCtx::new(
+            storage.clone(),
+            Arc::new(react_core::providers::NullSecretsProvider::default()),
+            llm_cleanse,
+            scope.clone(),
+            keyspace.clone(),
+        );
+        let _ = run_batched_review("tid1", "goal", Phase::CleanseReview, &sctx_cleanse)
+            .await
+            .expect("ok");
+        let prompts = captured_cleanse.lock().unwrap().clone();
+        assert!(!prompts.is_empty());
+        for p in prompts.iter() {
+            assert!(!p.contains("IMMUTABLE CONTEXT (global_semantic_context)"));
+            assert!(!p.contains("should_not_leak_to_cleanse"));
+        }
+
+        // Model review SHOULD include global_semantic_context.
+        let captured_model: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let llm_model = Arc::new(CapturingModel {
+            captured_user_prompts: captured_model.clone(),
+            replies: Arc::new(Mutex::new(vec![
+                serde_json::json!({"project_notes":[],"project_risks":[]}).to_string(), // summary
+                serde_json::json!({"final_review_text":"META:{\"actionable\":false,\"dataset_ids\":[],\"tier\":\"unknown\"}\n\nok"}).to_string(), // unify
+            ])),
+        });
+        let sctx_model = SuiteCtx::new(
+            storage.clone(),
+            Arc::new(react_core::providers::NullSecretsProvider::default()),
+            llm_model,
+            scope.clone(),
+            keyspace.clone(),
+        );
+        let _ = run_batched_review("tid2", "goal", Phase::ModelReview, &sctx_model)
+            .await
+            .expect("ok");
+        let prompts = captured_model.lock().unwrap().clone();
+        assert!(!prompts.is_empty());
+        assert!(prompts
+            .iter()
+            .any(|p| p.contains("IMMUTABLE CONTEXT (global_semantic_context)")));
+        assert!(prompts.iter().any(|p| p.contains("should_not_leak_to_cleanse")));
     }
 }

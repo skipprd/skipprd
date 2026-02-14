@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
 use react_core::llm::ChatMessage;
+use react_core::llm::LlmCallOptions;
 use react_core::llm_observability::{self, PartInput};
 use react_core::providers::DatasetCatalogProvider;
 use react_core::session::{Observation, ThreadStep};
@@ -323,6 +324,7 @@ pub async fn llm_patch_loop_single_file(
     user_payload_json: String,
     expected_rel_path: &str,
     max_iters: usize,
+    llm_options: Option<LlmCallOptions>,
 ) -> Result<(project_fs::PatchOutcome, Vec<String>), String> {
     let max_iters = max_iters.max(1).min(6);
     let enforce_analyst_notes_contract = sys_prompt.contains("ANALYST_NOTES_CONTRACT_V1");
@@ -376,7 +378,7 @@ pub async fn llm_patch_loop_single_file(
 
     let mut last_err: Option<String> = None;
     for attempt in 1..=max_iters {
-        let resp = ctx.llm.chat(&messages);
+        let resp = ctx.llm.chat_with_options(&messages, llm_options.as_ref());
         let resp_text = match resp {
             Ok(t) => t,
             Err(e) => {
@@ -879,6 +881,7 @@ mod tests {
             serde_json::json!({"x": 1}).to_string(),
             "models/schema.yml",
             4,
+            None,
         )
         .await
         .expect("ok");

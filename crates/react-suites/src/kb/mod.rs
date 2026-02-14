@@ -73,7 +73,7 @@ impl KbSuite {
             runtime: None,
         };
 
-        match Agent::run_until_block(&registry, &actx, sys, tools_card, question).await {
+        match Agent::run_until_block(&registry, &actx, sys, tools_card, question, None).await {
             Ok(RunOutcome::Final {
                 thread_id: _tid,
                 result,
