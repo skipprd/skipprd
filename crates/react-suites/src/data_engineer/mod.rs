@@ -3378,6 +3378,25 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
 
                 Phase::CleanseAuthor | Phase::ModelAuthor => {
                     let is_cleanse = phase == Phase::CleanseAuthor;
+                    // Treat schema precheck failures as "validate failed" for authoring guard behavior.
+                    // Otherwise we can bounce Author->Validate->Author without requiring a mutation.
+                    let entered_from_precheck_failed = log.as_ref().and_then(|l| {
+                        l.steps.iter().rev().find_map(|s| match s {
+                            react_core::session::ThreadStep::Phase {
+                                phase: p,
+                                reason_code,
+                                ..
+                            } if p == phase.as_str() => reason_code.as_deref(),
+                            _ => None,
+                        })
+                    }) == Some("precheck_failed");
+                    let mut phase_guard = guard.clone();
+                    if entered_from_precheck_failed {
+                        phase_guard.last_validate_failed = true;
+                        phase_guard.mutated_since_fail = false;
+                    }
+                    let hard_mutation_repair_mode =
+                        phase_guard.last_validate_failed && !phase_guard.mutated_since_fail;
                     let sys = crate::util::time_context::with_time_context(if is_cleanse {
                         prompts::cleanse_system_prompt()
                     } else {
@@ -3544,7 +3563,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_cleanse_batch; force repair-mode guidance.
-                            if guard.last_validate_failed && !guard.mutated_since_fail {
+                            if hard_mutation_repair_mode {
                                 // If schema checklist work remains, ALWAYS prefer the schema batch tool even when
                                 // we are recovering from a failed validation. This prevents incorrect attempts to
                                 // "fix YAML contracts" by editing SQL files, which causes loops.
@@ -3908,7 +3927,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_model_batch; force repair-mode guidance.
-                            if guard.last_validate_failed && !guard.mutated_since_fail {
+                            if hard_mutation_repair_mode {
                                 if let Some((
                                     crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
                                     ids,
@@ -4322,7 +4341,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
 
                     let (registry, tools_card) = Self::build_tools_for_phase(
                         phase,
-                        &guard,
+                        &phase_guard,
                         allow_ask_approval,
                         sctx,
                         allowed_batch.clone(),
@@ -4503,9 +4522,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
 
                     // When the suite is in hard_mutation_only, dbt_files is patch-only (no op=get),
                     // so we MUST include the raw file content for at least the primary failing target.
-                    if guard.last_validate_failed
-                        && !guard.mutated_since_fail
-                        && !last_validate_failed_models.is_empty()
+                    if hard_mutation_repair_mode && !last_validate_failed_models.is_empty()
                     {
                         if let Some(file) = last_validate_failed_models[0]
                             .get("file")
@@ -4550,10 +4567,10 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             }
                         }
                     }
-                    if guard.last_validate_failed && !guard.mutated_since_fail {
+                    if hard_mutation_repair_mode {
                         q.push_str("\n\nConstraint: your next steps must APPLY A MUTATING FIX before attempting dbt_validate again.");
                     }
-                    if guard.probe_required && !guard.probe_satisfied {
+                    if phase_guard.probe_required && !phase_guard.probe_satisfied {
                         q.push_str("\n\nConstraint: runtime validation failed after compile; you MUST run meaningful run_sql probes (not SELECT 1) to diagnose data before re-validating.");
                     }
 
