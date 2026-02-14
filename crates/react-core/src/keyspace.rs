@@ -5,6 +5,9 @@ pub trait Keyspace: Send + Sync {
     fn thread_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String>;
     fn thread_state_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String>;
 
+    fn logs_prefix(&self, scope: &RequestScope) -> String;
+    fn thread_log_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String>;
+
     fn catalog_key(&self, scope: &RequestScope, dataset_id: &str) -> String;
     fn semantic_key(&self, scope: &RequestScope, dataset_id: &str) -> String;
     fn stats_key(&self, scope: &RequestScope, dataset_id: &str) -> String;
@@ -86,6 +89,24 @@ impl Keyspace for DefaultKeyspace {
         Self::ensure_safe_segment(thread_id)?;
         Ok(format!(
             "{}/{}/{}/threads/{}.state.json",
+            scope.tenant, scope.workspace, scope.project_id, thread_id
+        ))
+    }
+
+    fn logs_prefix(&self, scope: &RequestScope) -> String {
+        format!(
+            "{}/{}/{}/logs",
+            scope.tenant, scope.workspace, scope.project_id
+        )
+    }
+
+    fn thread_log_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String> {
+        Self::ensure_safe_segment(&scope.tenant)?;
+        Self::ensure_safe_segment(&scope.workspace)?;
+        Self::ensure_safe_segment(&scope.project_id)?;
+        Self::ensure_safe_segment(thread_id)?;
+        Ok(format!(
+            "{}/{}/{}/logs/{}.log",
             scope.tenant, scope.workspace, scope.project_id, thread_id
         ))
     }
@@ -193,6 +214,14 @@ impl Keyspace for LocalKeyspace {
         DefaultKeyspace { bucket: "".to_string() }.thread_state_key(scope, thread_id)
     }
 
+    fn logs_prefix(&self, scope: &RequestScope) -> String {
+        DefaultKeyspace { bucket: "".to_string() }.logs_prefix(scope)
+    }
+
+    fn thread_log_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String> {
+        DefaultKeyspace { bucket: "".to_string() }.thread_log_key(scope, thread_id)
+    }
+
     fn catalog_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
         DefaultKeyspace { bucket: "".to_string() }.catalog_key(scope, dataset_id)
     }
@@ -281,5 +310,17 @@ mod tests {
         };
         let k = ks.thread_state_key(&scope, "123").unwrap();
         assert_eq!(k, "t/w/p/threads/123.state.json");
+    }
+
+    #[test]
+    fn keyspace_builds_thread_log_key() {
+        let ks = DefaultKeyspace::new("b".to_string());
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let k = ks.thread_log_key(&scope, "123").unwrap();
+        assert_eq!(k, "t/w/p/logs/123.log");
     }
 }

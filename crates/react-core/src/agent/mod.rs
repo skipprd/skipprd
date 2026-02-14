@@ -1042,6 +1042,7 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::keyspace::DefaultKeyspace;
+    use crate::providers::NullWarehouseProvider;
     use crate::scope::RequestScope;
     use crate::storage::InMemoryStorageAdapter;
     use crate::tools::ToolRegistry;

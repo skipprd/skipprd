@@ -17,6 +17,7 @@ use react::providers::{
 };
 use react_suites::SuiteCtx;
 use tracing_subscriber::prelude::*;
+use tokio::sync::mpsc;
 
 #[derive(Parser, Debug)]
 #[command(name = "react")]
@@ -191,7 +192,16 @@ fn resolve_log_dir(cfg: &react::config::ReactResolvedConfig) -> PathBuf {
     PathBuf::from("./.react/logs")
 }
 
-fn init_tracing(log_dir: &Path, enable_console: bool) -> tracing_appender::non_blocking::WorkerGuard {
+struct TracingGuards {
+    _file: tracing_appender::non_blocking::WorkerGuard,
+    _run: Option<tracing_appender::non_blocking::WorkerGuard>,
+}
+
+fn init_tracing(
+    log_dir: &Path,
+    enable_console: bool,
+    run_writer: Option<react::thread_logs::RunThreadLogWriter>,
+) -> TracingGuards {
     let _ = std::fs::create_dir_all(log_dir);
     let appender = tracing_appender::rolling::daily(log_dir, "react.log");
     let (nb, guard) = tracing_appender::non_blocking(appender);
@@ -199,24 +209,46 @@ fn init_tracing(log_dir: &Path, enable_console: bool) -> tracing_appender::non_b
     let file_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .with_writer(nb)
-        .with_target(true);
+        .with_target(true)
+        .with_filter(tracing_subscriber::EnvFilter::from_default_env());
 
-    if enable_console {
-        let console_layer = tracing_subscriber::fmt::layer()
-            .with_ansi(true)
-            .with_target(true);
-        let _ = tracing_subscriber::registry()
-            .with(tracing_subscriber::EnvFilter::from_default_env())
-            .with(file_layer)
-            .with(console_layer)
-            .try_init();
+    let (run_layer_opt, run_guard) = if let Some(w) = run_writer {
+        let (run_nb, run_guard) = tracing_appender::non_blocking(w);
+        let run_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(run_nb)
+            .with_target(true)
+            // Per-thread run logs should include LLM request/response observability
+            // even when the default env filter is `info`.
+            .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+        (Some(run_layer), Some(run_guard))
     } else {
-        let _ = tracing_subscriber::registry()
-            .with(tracing_subscriber::EnvFilter::from_default_env())
-            .with(file_layer)
-            .try_init();
+        (None, None)
+    };
+
+    let console_layer_opt = if enable_console {
+        Some(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(true)
+                .with_target(true)
+                .with_filter(tracing_subscriber::EnvFilter::from_default_env()),
+        )
+    } else {
+        None
+    };
+
+    // Note: `Option<Layer>` itself implements `Layer`, so conditional layers can be
+    // applied without changing subscriber types.
+    let _ = tracing_subscriber::registry()
+        .with(file_layer)
+        .with(run_layer_opt)
+        .with(console_layer_opt)
+        .try_init();
+
+    TracingGuards {
+        _file: guard,
+        _run: run_guard,
     }
-    guard
 }
 
 #[tokio::main]
@@ -263,7 +295,7 @@ async fn main() {
 
             let log_dir = resolve_log_dir(&cfg);
             let enable_console = cli.log.is_some() && !cli.terminal;
-            let _guard = init_tracing(&log_dir, enable_console);
+            let _guards = init_tracing(&log_dir, enable_console, None);
 
             if cli.terminal {
                 // Terminal mode is intended to be fully headless: auto-answer any `await_user` prompts.
@@ -581,7 +613,45 @@ async fn main() {
             let terminal_default = true;
             let terminal_enabled = terminal_default && cli.log.is_none();
             let enable_console = cli.log.is_some() && !terminal_enabled;
-            let _guard = init_tracing(&log_dir, enable_console);
+
+            // Ensure LLM request/response observability is enabled for terminal runs.
+            // (The actual log lines are emitted at DEBUG level.)
+            if terminal_enabled {
+                if std::env::var("REACT_LOG_LLM_CALLS")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+                    .is_none()
+                {
+                    std::env::set_var("REACT_LOG_LLM_CALLS", "1");
+                }
+                if std::env::var("REACT_LOG_LLM_RESPONSE_TEXT")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+                    .is_none()
+                {
+                    std::env::set_var("REACT_LOG_LLM_RESPONSE_TEXT", "1");
+                }
+            }
+
+            // When running in terminal mode, also persist a per-thread run log:
+            // - local: stream to a temp file under `<root>/<scope>/logs/` and rename once thread_id is known
+            // - non-local: stream to a temp file and upload at end
+            let run_logs = if terminal_enabled {
+                if cfg.storage.mode == "local" {
+                    if let Some(root) = cfg.storage.path.as_ref() {
+                        react::thread_logs::RunThreadLogs::new_local(root.clone(), cfg.scope.clone())
+                            .ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    react::thread_logs::RunThreadLogs::new_buffered(cfg.scope.clone()).ok()
+                }
+            } else {
+                None
+            };
+            let run_writer = run_logs.as_ref().map(|l| l.make_writer());
+            let guards = init_tracing(&log_dir, enable_console, run_writer);
 
             // Headless mode is always on for `run`.
             if std::env::var("REACT_HEADLESS")
@@ -842,22 +912,88 @@ async fn main() {
                 )));
             }
 
+            let requested_thread_id = thread_id.clone();
+
+            // If user requested a specific thread_id, we already know it; bind immediately so the
+            // run log is written to `logs/{thread_id}.log` throughout the run (local mode rename).
+            if let (Some(ref tid), Some(ref logs)) = (thread_id.as_ref(), run_logs.as_ref()) {
+                let _ = logs.bind_thread_id(keyspace.as_ref(), tid);
+            }
+
+            // Clone before moving `suite_ctx` into the run future.
+            let storage_for_logs = suite_ctx.storage.clone();
+            let keyspace_for_logs = suite_ctx.keyspace.clone();
+
+            // Bind the run log to the real thread_id as soon as it is observed so the
+            // file appears as `logs/{thread_id}.log` during the run (local mode rename).
+            let (thread_id_tx, tid_rx) =
+                if run_logs.is_some() && requested_thread_id.is_none() {
+                    let (tx, rx) = mpsc::unbounded_channel::<String>();
+                    (Some(tx), Some(rx))
+                } else {
+                    (None, None)
+                };
+
+            if let (Some(mut rx), Some(logs)) = (tid_rx, run_logs.clone()) {
+                let ks = keyspace.clone();
+                tokio::spawn(async move {
+                    if let Some(tid) = rx.recv().await {
+                        let _ = logs.bind_thread_id(ks.as_ref(), &tid);
+                    }
+                });
+            }
+
             let run_fut = react::run::headless::run_headless(
                 suite_ctx,
                 react::run::headless::RunOpts {
                     thread_id,
                     suite_id,
                     agent,
+                    thread_id_tx,
                 },
             );
 
-            let exit_code = tokio::select! {
-                r = run_fut => r.unwrap_or_else(|e| { eprintln!("ERROR: {}", e); 1 }),
+            let mut thread_id_for_logs: Option<String> = None;
+            let exit_code: i32 = tokio::select! {
+                r = run_fut => {
+                    match r {
+                        Ok((code, tid)) => {
+                            thread_id_for_logs = Some(tid);
+                            code
+                        }
+                        Err(e) => {
+                            eprintln!("ERROR: {}", e);
+                            1
+                        }
+                    }
+                },
                 _ = tokio::signal::ctrl_c() => 130,
             };
             // Ensure the terminal is restored before exiting.
             if terminal_enabled {
                 react::ws::terminal::shutdown();
+            }
+
+            // Flush tracing before we read/upload log bytes.
+            drop(guards);
+
+            // Finalize per-thread logs.
+            if let Some(logs) = run_logs.as_ref() {
+                let tid = thread_id_for_logs
+                    .clone()
+                    .or_else(|| requested_thread_id.clone());
+                if let Some(tid) = tid {
+                    // Local mode: bind_thread_id renames temp file into place.
+                    let _ = logs.bind_thread_id(keyspace.as_ref(), &tid);
+                    // Non-local: upload temp file to storage key.
+                    let _ = logs
+                        .upload_if_needed(
+                            storage_for_logs.clone(),
+                            keyspace_for_logs.clone(),
+                            &tid,
+                        )
+                        .await;
+                }
             }
             std::process::exit(exit_code);
         }

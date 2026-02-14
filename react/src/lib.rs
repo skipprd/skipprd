@@ -10,6 +10,7 @@ pub mod models;
 pub mod providers;
 pub mod ws;
 pub mod run;
+pub mod thread_logs;
 
 // Concrete implementations and utilities used by runtime wiring.
 pub mod discover;
