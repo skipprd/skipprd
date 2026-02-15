@@ -81,6 +81,7 @@ impl KbSuite {
             question,
             react_core::llm::LlmCallOptions {
                 expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                reasoning_effort: Some(react_core::llm::ReasoningEffort::Medium),
                 ..Default::default()
             },
         )

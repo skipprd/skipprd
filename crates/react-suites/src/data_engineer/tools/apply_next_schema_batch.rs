@@ -306,6 +306,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                     top_p: Some(1.0),
                     // Schema YAML patches can be large; avoid truncation mid-`new_text`.
                     max_output_tokens: Some(3200),
+                    reasoning_effort: None,
                 }),
             )
             .await {
@@ -532,6 +533,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 top_p: Some(1.0),
                 // Schema YAML patches can be large; avoid truncation mid-`new_text`.
                 max_output_tokens: Some(3200),
+                reasoning_effort: None,
             }),
         )
         .await {

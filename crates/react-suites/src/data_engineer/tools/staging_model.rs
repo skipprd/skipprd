@@ -732,6 +732,7 @@ impl Tool for StagingModelTool {
                     temperature: Some(0.05),
                     top_p: Some(1.0),
                     max_output_tokens: Some(1800),
+                    reasoning_effort: None,
                 }),
             )
             .await

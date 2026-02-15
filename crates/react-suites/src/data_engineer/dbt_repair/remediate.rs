@@ -429,6 +429,7 @@ pub fn llm_should_remediate_sql(
         temperature: Some(0.0),
         top_p: Some(1.0),
         max_output_tokens: Some(1400),
+        reasoning_effort: None,
     };
     let resp_text = match ctx.llm.chat(&messages, &call_opts) {
         Ok(t) => {
@@ -604,6 +605,7 @@ pub async fn remediate_dbt_sql_keys_with_llm(
             temperature: Some(0.0),
             top_p: Some(1.0),
             max_output_tokens: Some(1400),
+            reasoning_effort: None,
         };
         let resp_text = match ctx.llm.chat(&messages, &call_opts) {
             Ok(t) => {
@@ -1161,6 +1163,7 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         temperature: Some(0.0),
         top_p: Some(1.0),
         max_output_tokens: Some(1400),
+        reasoning_effort: None,
     };
     let resp_text = match ctx.llm.chat(&messages, &call_opts) {
         Ok(t) => {
@@ -1588,6 +1591,7 @@ pub async fn remediate_unresolved_columns_with_llm(
         temperature: Some(0.0),
         top_p: Some(1.0),
         max_output_tokens: Some(1400),
+        reasoning_effort: None,
     };
     let resp_text = match ctx.llm.chat(&messages, &call_opts) {
         Ok(t) => {

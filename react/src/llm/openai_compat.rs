@@ -171,6 +171,10 @@ impl LargeLanguageModel for OpenAICompatModel {
                 content: Vec<RespPart>,
             }
             #[derive(serde::Serialize)]
+            struct RespReasoning {
+                effort: String, // none|low|medium|high
+            }
+            #[derive(serde::Serialize)]
             struct RespReq {
                 model: String,
                 // Use 'input' per Responses API, with typed content parts ('input_text')
@@ -181,6 +185,8 @@ impl LargeLanguageModel for OpenAICompatModel {
                 response_format: Option<serde_json::Value>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 max_output_tokens: Option<i32>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                reasoning: Option<RespReasoning>,
             }
             #[derive(serde::Deserialize)]
             struct RespResp {
@@ -244,6 +250,18 @@ impl LargeLanguageModel for OpenAICompatModel {
                     }
                 })),
                 max_output_tokens: Some(max_tokens),
+                reasoning: Some(RespReasoning {
+                    effort: match options
+                        .reasoning_effort
+                        .unwrap_or(react_core::llm::ReasoningEffort::Low)
+                    {
+                        react_core::llm::ReasoningEffort::None => "none",
+                        react_core::llm::ReasoningEffort::Low => "low",
+                        react_core::llm::ReasoningEffort::Medium => "medium",
+                        react_core::llm::ReasoningEffort::High => "high",
+                    }
+                    .to_string(),
+                }),
             };
             let mut req = self
                 .agent

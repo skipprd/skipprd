@@ -1056,6 +1056,7 @@ pub async fn repair_cleanse_plan_semantics_via_llm(
         temperature: Some(0.0),
         top_p: Some(1.0),
         max_output_tokens: Some(1400),
+        reasoning_effort: None,
     };
     let raw = ctx
         .llm
@@ -1099,6 +1100,7 @@ pub async fn repair_model_plan_semantics_via_llm(
         temperature: Some(0.0),
         top_p: Some(1.0),
         max_output_tokens: Some(1400),
+        reasoning_effort: None,
     };
     let raw = ctx
         .llm

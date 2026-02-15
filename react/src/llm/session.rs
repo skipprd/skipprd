@@ -4,7 +4,7 @@ use crate::llm::router::LlmRouter;
 use crate::llm::thread_ctx;
 use crate::llm::types::ChatResponseFormat;
 use crate::llm::{create_llm, ChatMessage, LargeLanguageModel, LlmConfig};
-use react_core::llm::{LlmCallOptions, LlmExpectedFormat};
+use react_core::llm::{LlmCallOptions, LlmExpectedFormat, ReasoningEffort};
 
 /// Lightweight session wrapper around the configured LLM.
 /// For local llama.cpp this will reuse the shared model underneath; for HTTP it reuses the HTTP client.
@@ -70,6 +70,12 @@ impl LargeLanguageModel for RouterModel {
         let max_output_tokens = options.max_output_tokens.or(default_max_output_tokens);
         let temperature = options.temperature.or(default_temperature);
         let top_p = options.top_p.or(default_top_p);
+        let reasoning_effort = match options.reasoning_effort.unwrap_or(ReasoningEffort::Low) {
+            ReasoningEffort::None => Some("none".to_string()),
+            ReasoningEffort::Low => Some("low".to_string()),
+            ReasoningEffort::Medium => Some("medium".to_string()),
+            ReasoningEffort::High => Some("high".to_string()),
+        };
 
         let req = crate::llm::types::ChatRequest {
             model,
@@ -88,6 +94,7 @@ impl LargeLanguageModel for RouterModel {
             } else {
                 None
             },
+            reasoning_effort,
             thread_id: thread_ctx::current_thread_id(),
         };
         let r = self.router.chat(&req)?;

@@ -391,6 +391,7 @@ Rules:
             temperature: Some(0.15),
             top_p: Some(1.0),
             max_output_tokens: Some(1200),
+            reasoning_effort: Some(react_core::llm::ReasoningEffort::Medium),
         };
         let raw = sctx.llm.chat(&messages, &opts).map_err(|e| e.to_string())?;
         let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
@@ -778,6 +779,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
             temperature: Some(0.0),
             top_p: Some(1.0),
             max_output_tokens: Some(1400),
+            reasoning_effort: None,
         };
         match Agent::run_until_block(&registry, actx, &sys, tools_card, &q, llm_options).await {
             Ok(RunOutcome::Final {
@@ -3192,6 +3194,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             temperature: Some(0.20),
                             top_p: Some(1.0),
                             max_output_tokens: Some(2200),
+                            reasoning_effort: Some(react_core::llm::ReasoningEffort::High),
                         }
                     } else {
                         LlmCallOptions {
@@ -3199,6 +3202,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             temperature: Some(0.55),
                             top_p: Some(0.95),
                             max_output_tokens: Some(2800),
+                            reasoning_effort: Some(react_core::llm::ReasoningEffort::High),
                         }
                     };
                     match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q, llm_options).await {
@@ -5290,6 +5294,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             temperature: Some(0.05),
                             top_p: Some(1.0),
                             max_output_tokens: Some(1800),
+                            reasoning_effort: None,
                         }
                     } else {
                         LlmCallOptions {
@@ -5297,6 +5302,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             temperature: Some(0.12),
                             top_p: Some(1.0),
                             max_output_tokens: Some(2200),
+                            reasoning_effort: None,
                         }
                     };
                     match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q, llm_options).await {
@@ -6536,12 +6542,14 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                 temperature: Some(0.05),
                 top_p: Some(1.0),
                 max_output_tokens: Some(1800),
+                reasoning_effort: None,
             },
             AuthoringKind::Model => LlmCallOptions {
                 expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                 temperature: Some(0.12),
                 top_p: Some(1.0),
                 max_output_tokens: Some(2200),
+                reasoning_effort: None,
             },
         };
 

@@ -28,6 +28,13 @@ struct RespReq {
     text: Option<RespText>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<i32>,
+    /// Optional reasoning effort hint (Responses API).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<RespReasoning>,
+}
+#[derive(Serialize)]
+struct RespReasoning {
+    effort: String, // none|low|medium|high
 }
 #[derive(Serialize)]
 struct RespText {
@@ -112,6 +119,10 @@ impl Adapter for OpenAIResponsesAdapter {
             input: msgs,
             text: Some(RespText { format }),
             max_output_tokens: req.max_output_tokens.map(|v| v as i32),
+            reasoning: req
+                .reasoning_effort
+                .as_ref()
+                .map(|s| RespReasoning { effort: s.clone() }),
         };
         Ok(ProviderHttpRequest {
             method: "POST".to_string(),
@@ -183,6 +194,7 @@ mod tests {
             temperature: None,
             top_p: None,
             response_format: Some(ChatResponseFormat::JsonObject),
+            reasoning_effort: None,
             thread_id: None,
         };
         let http = ad.build_chat_http(&req).expect("build");
@@ -210,6 +222,7 @@ mod tests {
             temperature: None,
             top_p: None,
             response_format: None,
+            reasoning_effort: None,
             thread_id: None,
         };
         let http = ad.build_chat_http(&req).expect("build");

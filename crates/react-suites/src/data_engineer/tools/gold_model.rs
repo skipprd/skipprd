@@ -438,6 +438,7 @@ impl Tool for GoldModelTool {
                     temperature: Some(0.12),
                     top_p: Some(1.0),
                     max_output_tokens: Some(2200),
+                    reasoning_effort: None,
                 }),
             )
             .await

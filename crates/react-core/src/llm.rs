@@ -10,6 +10,17 @@ pub enum LlmExpectedFormat {
     JsonObject,
 }
 
+/// OpenAI-style reasoning effort hint.
+///
+/// Not all providers support this; unsupported providers should ignore it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReasoningEffort {
+    None,
+    Low,
+    Medium,
+    High,
+}
+
 impl Default for LlmExpectedFormat {
     fn default() -> Self {
         LlmExpectedFormat::Text
@@ -26,6 +37,10 @@ pub struct LlmCallOptions {
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    /// Optional provider hint for additional deliberation.
+    ///
+    /// Callers should assume the runtime default is `Low` unless overridden.
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl Default for LlmCallOptions {
@@ -35,6 +50,7 @@ impl Default for LlmCallOptions {
             max_output_tokens: None,
             temperature: None,
             top_p: None,
+            reasoning_effort: None,
         }
     }
 }

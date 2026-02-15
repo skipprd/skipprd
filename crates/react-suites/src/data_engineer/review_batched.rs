@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
-use react_core::llm::{ChatMessage, LlmCallOptions, LlmExpectedFormat};
+use react_core::llm::{ChatMessage, LlmCallOptions, LlmExpectedFormat, ReasoningEffort};
 use react_core::session::{Observation, ThreadStep, ThreadStore};
 use react_core::tools::Tool;
 
@@ -426,18 +426,21 @@ async fn llm_json(
             temperature: Some(0.15),
             top_p: Some(1.0),
             max_output_tokens: Some(if name == "unify" { 2800 } else { 1600 }),
+            reasoning_effort: Some(ReasoningEffort::Medium),
         }),
         Phase::ModelReview => Some(LlmCallOptions {
             expected_format: LlmExpectedFormat::JsonObject,
             temperature: Some(0.25),
             top_p: Some(1.0),
             max_output_tokens: Some(if name == "unify" { 3200 } else { 1800 }),
+            reasoning_effort: Some(ReasoningEffort::Medium),
         }),
         Phase::PostPublishReview => Some(LlmCallOptions {
             expected_format: LlmExpectedFormat::JsonObject,
             temperature: Some(0.20),
             top_p: Some(1.0),
             max_output_tokens: Some(if name == "unify" { 2600 } else { 1400 }),
+            reasoning_effort: Some(ReasoningEffort::Medium),
         }),
         _ => None,
     };

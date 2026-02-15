@@ -588,8 +588,11 @@ impl ThreadStore {
 
     pub async fn append_step(&self, thread_id: &str, step: ThreadStep) -> Result<(), String> {
         let key = self.key(thread_id);
+        // Cache is process-global; include storage identity to avoid collisions in tests
+        // (and in any multi-tenant multi-store deployments).
+        let cache_key = format!("{:p}|{}", Arc::as_ptr(&self.storage), key);
         // Try cache first to avoid extra GETs
-        let mut log = if let Some(entry) = cache().get(thread_id) {
+        let mut log = if let Some(entry) = cache().get(&cache_key) {
             entry.log.clone()
         } else if let Ok(v) = self.storage.get_json(&key).await {
             serde_json::from_value::<ThreadLog>(v)
@@ -609,7 +612,7 @@ impl ThreadStore {
         self.storage.put_json(&key, &val).await?;
         // Update cache
         cache().insert(
-            thread_id.to_string(),
+            cache_key,
             CacheEntry {
                 log,
                 ts: Instant::now(),
@@ -666,8 +669,9 @@ impl ThreadStore {
 
     pub async fn get(&self, thread_id: &str) -> Result<ThreadLog, String> {
         let key = self.key(thread_id);
+        let cache_key = format!("{:p}|{}", Arc::as_ptr(&self.storage), key);
         // Serve from cache if fresh (5 seconds)
-        if let Some(entry) = cache().get(thread_id) {
+        if let Some(entry) = cache().get(&cache_key) {
             if entry.ts.elapsed().as_secs() < 5 {
                 return Ok(entry.log.clone());
             }
@@ -686,7 +690,7 @@ impl ThreadStore {
             ));
         }
         cache().insert(
-            thread_id.to_string(),
+            cache_key,
             CacheEntry {
                 log: log.clone(),
                 ts: Instant::now(),
@@ -725,7 +729,8 @@ impl ThreadStore {
 
     pub async fn set_title_if_absent(&self, thread_id: &str, title: &str) -> Result<(), String> {
         let key = self.key(thread_id);
-        let mut log = match cache().get(thread_id) {
+        let cache_key = format!("{:p}|{}", Arc::as_ptr(&self.storage), key);
+        let mut log = match cache().get(&cache_key) {
             Some(e) => e.log.clone(),
             None => {
                 let v = self
@@ -748,7 +753,7 @@ impl ThreadStore {
             let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
             self.storage.put_json(&key, &val).await?;
             cache().insert(
-                thread_id.to_string(),
+                cache_key,
                 CacheEntry {
                     log,
                     ts: Instant::now(),
@@ -760,7 +765,8 @@ impl ThreadStore {
 
     pub async fn finalize_title(&self, thread_id: &str, title: &str) -> Result<(), String> {
         let key = self.key(thread_id);
-        let mut log = match cache().get(thread_id) {
+        let cache_key = format!("{:p}|{}", Arc::as_ptr(&self.storage), key);
+        let mut log = match cache().get(&cache_key) {
             Some(e) => e.log.clone(),
             None => {
                 let v = self
@@ -784,7 +790,7 @@ impl ThreadStore {
             let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
             self.storage.put_json(&key, &val).await?;
             cache().insert(
-                thread_id.to_string(),
+                cache_key,
                 CacheEntry {
                     log,
                     ts: Instant::now(),
