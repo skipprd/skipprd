@@ -127,6 +127,7 @@ impl Default for PlanProgress {
 
 /// Audit trail for plan mutations (repairs, pruning, canonicalization).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanMutation {
     pub ts: String,
     /// Machine-readable reason code, e.g. "plan_repair_semantic".
@@ -173,6 +174,7 @@ impl Default for ChecklistItemStatus {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChecklistEvidence {
     pub kind: String,
     #[serde(default)]
@@ -185,6 +187,7 @@ pub struct ChecklistEvidence {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanChecklistItem {
     pub checklist_item_id: String,
     pub label: String,
@@ -208,12 +211,14 @@ pub enum WorkGroupKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkGroupItemRef {
     pub task_id: String,
     pub checklist_item_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanWorkGroup {
     pub group_id: String,
     pub label: String,
@@ -224,6 +229,7 @@ pub struct PlanWorkGroup {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CleanseTask {
     pub dataset_id: String,
     /// Expected DBT model file path for this dataset (project-relative).
@@ -241,6 +247,7 @@ pub struct CleanseTask {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CleansePlan {
     /// Storage key where this plan is persisted.
     #[serde(default)]
@@ -263,6 +270,7 @@ pub struct CleansePlan {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelTask {
     pub name: String,
     #[serde(default)]
@@ -284,6 +292,7 @@ pub struct ModelTask {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelPlan {
     /// Storage key where this plan is persisted.
     #[serde(default)]
@@ -902,13 +911,14 @@ pub async fn repair_cleanse_plan_semantics_via_llm(
         },
     ];
     let call_opts = LlmCallOptions {
+        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
         temperature: Some(0.0),
         top_p: Some(1.0),
         max_output_tokens: Some(1400),
     };
     let raw = ctx
         .llm
-        .chat_with_options(&messages, Some(&call_opts))
+        .chat(&messages, &call_opts)
         .map_err(|e| e.to_string())?;
     let v = parse_json_object_lenient(&raw)?;
     serde_json::from_value::<CleansePlan>(v).map_err(|e| e.to_string())
@@ -944,13 +954,14 @@ pub async fn repair_model_plan_semantics_via_llm(
         },
     ];
     let call_opts = LlmCallOptions {
+        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
         temperature: Some(0.0),
         top_p: Some(1.0),
         max_output_tokens: Some(1400),
     };
     let raw = ctx
         .llm
-        .chat_with_options(&messages, Some(&call_opts))
+        .chat(&messages, &call_opts)
         .map_err(|e| e.to_string())?;
     let v = parse_json_object_lenient(&raw)?;
     serde_json::from_value::<ModelPlan>(v).map_err(|e| e.to_string())

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::keyspace::Keyspace;
-use crate::llm::{ChatMessage, LlmCallOptions};
+use crate::llm::{ChatMessage, LlmCallOptions, LlmExpectedFormat};
 use crate::llm_observability::PartInput;
 use crate::providers::{
     DbtProvider, QueryProvider, VectorStore, WarehouseProvider,
@@ -388,7 +388,7 @@ impl Agent {
     async fn llm_chat_once(
         ctx: &AgentCtx,
         prompt: String,
-        llm_options: Option<LlmCallOptions>,
+        llm_options: LlmCallOptions,
     ) -> Result<String, String> {
         let model = ctx.llm.clone();
 
@@ -493,8 +493,7 @@ impl Agent {
                 .await;
         }
 
-        let res =
-            tokio::task::spawn_blocking(move || model.chat_with_options(&messages, llm_options.as_ref()))
+        let res = tokio::task::spawn_blocking(move || model.chat(&messages, &llm_options))
             .await
             .map_err(|e| format!("LLM execution failed: {}", e))?
             .map_err(|e| format!("LLM request failed: {}", e));
@@ -750,8 +749,12 @@ impl Agent {
         system_prompt: &str,
         tools_card: &str,
         question: &str,
-        llm_options: Option<LlmCallOptions>,
+        llm_options: LlmCallOptions,
     ) -> Result<RunOutcome, String> {
+        // Agent action/final envelopes are a strict JSON contract: always enforce provider JSON mode.
+        let mut llm_options = llm_options;
+        llm_options.expected_format = LlmExpectedFormat::JsonObject;
+
         let tid = ctx.thread_id.clone().unwrap_or_else(Self::gen_uuid);
         let store = ctx.thread_store.as_ref();
 
@@ -855,23 +858,116 @@ impl Agent {
             };
             action = Self::coerce_args_only_action(action);
 
+            // Deterministic repair: some models mistakenly emit the patch-protocol JSON (replace_file /
+            // replace_range / replace_list) directly, instead of wrapping it in an {"action": "...", "args": {...}}
+            // tool envelope. When we are in a checklist-driven execution context, we can safely treat that object
+            // as a `dbt_files` patch request by adding op="patch" and stripping non-tool fields like `notes`.
+            //
+            // This prevents brittle structural failures during author/review phases without introducing retries.
+            if action.get("action").is_none() && action.get("final").is_none() {
+                if ctx.exec_ctx.is_some() {
+                    if let Some(obj) = action.as_object() {
+                        let has_rf = obj.contains_key("replace_file");
+                        let has_rr = obj.contains_key("replace_range");
+                        let has_rl = obj.contains_key("replace_list");
+                        let provided = (has_rf as usize) + (has_rr as usize) + (has_rl as usize);
+                        if provided == 1 {
+                            let mut args_map = serde_json::Map::new();
+                            args_map.insert("op".to_string(), Value::String("patch".to_string()));
+                            if has_rf {
+                                if let Some(v) = obj.get("replace_file") {
+                                    args_map.insert("replace_file".to_string(), v.clone());
+                                }
+                            } else if has_rr {
+                                if let Some(v) = obj.get("replace_range") {
+                                    args_map.insert("replace_range".to_string(), v.clone());
+                                }
+                            } else if has_rl {
+                                if let Some(v) = obj.get("replace_list") {
+                                    args_map.insert("replace_list".to_string(), v.clone());
+                                }
+                            }
+                            action = serde_json::json!({
+                                "action": "dbt_files",
+                                "args": Value::Object(args_map),
+                            });
+                        }
+                    }
+                }
+            }
+
             if let Some(final_obj) = action.get("final") {
                 let env = match serde_json::from_value::<FinalEnvelope>(final_obj.clone()) {
                     Ok(env) => env,
                     Err(e) => {
-                        warn!("model emitted invalid final envelope: {}", e);
-                        Self::transcript_add(
-                            &mut transcript,
-                            format!(
-                                "Observation: {}",
-                                serde_json::json!({
-                                    "ok": false,
-                                    "errors": [format!("invalid final envelope: {e}")]
-                                })
-                            ),
-                            &ctx.trace_tx,
-                        );
-                        continue;
+                        // Some providers/models occasionally mis-nest plan payload keys into the final envelope,
+                        // e.g. {"final":{"kind":"...","payload":{...},"tasks":[...],...},"display":"..."}.
+                        // This is a structural error, but we can repair it deterministically without retrying.
+                        fn normalize_final_envelope_value(
+                            outer_action: &Value,
+                            final_obj: &Value,
+                        ) -> Option<Value> {
+                            let final_map = final_obj.as_object()?;
+
+                            let kind = final_map.get("kind")?.as_str()?.to_string();
+
+                            let display = final_map
+                                .get("display")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .or_else(|| {
+                                    outer_action
+                                        .get("display")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                });
+
+                            let mut payload = match final_map.get("payload") {
+                                Some(Value::Object(m)) => Value::Object(m.clone()),
+                                Some(_) => return None,
+                                None => Value::Object(serde_json::Map::new()),
+                            };
+
+                            // Move any extra keys under `final` into payload.
+                            if let Value::Object(ref mut payload_map) = payload {
+                                for (k, v) in final_map.iter() {
+                                    if k == "kind" || k == "payload" || k == "display" {
+                                        continue;
+                                    }
+                                    // Preserve: payload wins if already present.
+                                    payload_map.entry(k.clone()).or_insert_with(|| v.clone());
+                                }
+                            }
+
+                            let mut out = serde_json::Map::new();
+                            out.insert("kind".to_string(), Value::String(kind));
+                            out.insert("payload".to_string(), payload);
+                            if let Some(d) = display {
+                                out.insert("display".to_string(), Value::String(d));
+                            }
+                            Some(Value::Object(out))
+                        }
+
+                        if let Some(fixed) = normalize_final_envelope_value(&action, final_obj) {
+                            if let Ok(env) = serde_json::from_value::<FinalEnvelope>(fixed) {
+                                env
+                            } else {
+                                warn!("model emitted invalid final envelope: {}", e);
+                                let resp_hash = crate::llm_observability::sha256_hex_str(&raw);
+                                return Err(format!(
+                                    "structural_error: invalid final envelope (response_hash={}): {}",
+                                    resp_hash, e
+                                ));
+                            }
+                        } else {
+                            warn!("model emitted invalid final envelope: {}", e);
+                            // Strict JSON channel: structural final-envelope parse failures should not churn retries.
+                            let resp_hash = crate::llm_observability::sha256_hex_str(&raw);
+                            return Err(format!(
+                                "structural_error: invalid final envelope (response_hash={}): {}",
+                                resp_hash, e
+                            ));
+                        }
                     }
                 };
 
@@ -888,12 +984,14 @@ impl Agent {
 
             let Some(action_name) = action.get("action").and_then(|x| x.as_str()) else {
                 warn!("model output missing action/final");
-                Self::transcript_add(
-                    &mut transcript,
-                    "Observation: {\"ok\":false,\"errors\":[\"missing action\"]}".to_string(),
-                    &ctx.trace_tx,
-                );
-                continue;
+                // Strict JSON channel: structural envelope failures should not churn retries.
+                let resp_hash = crate::llm_observability::sha256_hex_str(&raw);
+                let snippet: String = raw.chars().take(400).collect();
+                return Err(format!(
+                    "structural_error: expected JSON object with `action` or `final` (response_hash={}, snippet={})",
+                    resp_hash,
+                    snippet
+                ));
             };
             let args = action
                 .get("args")
@@ -1055,7 +1153,11 @@ mod tests {
     }
 
     impl crate::llm::LargeLanguageModel for ScriptedModel {
-        fn chat(&self, _messages: &[crate::llm::ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            _messages: &[crate::llm::ChatMessage],
+            _options: &crate::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             let mut g = self
                 .replies
                 .lock()
@@ -1077,7 +1179,14 @@ mod tests {
     }
 
     impl crate::llm::LargeLanguageModel for CapturingOptionsModel {
-        fn chat(&self, _messages: &[crate::llm::ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            _messages: &[crate::llm::ChatMessage],
+            options: &crate::llm::LlmCallOptions,
+        ) -> Result<String, String> {
+            if let Ok(mut g) = self.last_opts.lock() {
+                *g = Some(*options);
+            }
             let mut g = self
                 .replies
                 .lock()
@@ -1086,17 +1195,6 @@ mod tests {
                 return Err("no more replies".to_string());
             }
             Ok(g.remove(0))
-        }
-
-        fn chat_with_options(
-            &self,
-            messages: &[crate::llm::ChatMessage],
-            options: Option<&crate::llm::LlmCallOptions>,
-        ) -> Result<String, String> {
-            if let Ok(mut g) = self.last_opts.lock() {
-                *g = options.copied();
-            }
-            self.chat(messages)
         }
 
         fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
@@ -1189,7 +1287,17 @@ mod tests {
             runtime: None,
         };
 
-        let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q", None)
+        let out = Agent::run_until_block(
+            &reg,
+            &ctx,
+            "sys",
+            "tools",
+            "q",
+            crate::llm::LlmCallOptions {
+                expected_format: crate::llm::LlmExpectedFormat::JsonObject,
+                ..Default::default()
+            },
+        )
             .await
             .expect("ok");
         match out {
@@ -1245,11 +1353,12 @@ mod tests {
             runtime: None,
         };
         let opts = crate::llm::LlmCallOptions {
+            expected_format: crate::llm::LlmExpectedFormat::JsonObject,
             temperature: Some(0.9),
             top_p: Some(0.8),
             max_output_tokens: Some(1234),
         };
-        let _out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q", Some(opts))
+        let _out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q", opts)
             .await
             .expect("ok");
         let got = last_opts.lock().ok().and_then(|g| *g).expect("opts");
@@ -1297,7 +1406,17 @@ mod tests {
             runtime: None,
         };
 
-        let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q", None)
+        let out = Agent::run_until_block(
+            &reg,
+            &ctx,
+            "sys",
+            "tools",
+            "q",
+            crate::llm::LlmCallOptions {
+                expected_format: crate::llm::LlmExpectedFormat::JsonObject,
+                ..Default::default()
+            },
+        )
             .await
             .expect("ok");
         match out {
@@ -1388,7 +1507,10 @@ mod tests {
             "sys",
             "tools",
             "q",
-            None,
+            crate::llm::LlmCallOptions {
+                expected_format: crate::llm::LlmExpectedFormat::JsonObject,
+                ..Default::default()
+            },
         )
         .await
         .expect("run should succeed after retry");
@@ -1396,6 +1518,128 @@ mod tests {
         match out {
             RunOutcome::Final { thread_id, .. } => {
                 assert_eq!(thread_id, "tid".to_string());
+            }
+            _ => panic!("expected final outcome"),
+        }
+    }
+
+    struct CapturingDbtFilesPatchTool {
+        saw_patch: Arc<Mutex<bool>>,
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for CapturingDbtFilesPatchTool {
+        fn name(&self) -> &'static str {
+            "dbt_files"
+        }
+
+        async fn call(&self, args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
+            let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            if op != "patch" {
+                return Err(format!("expected op=patch, got op={}", op));
+            }
+            let has_rf = args.get("replace_file").is_some();
+            let has_rr = args.get("replace_range").is_some();
+            let has_rl = args.get("replace_list").is_some();
+            let provided = (has_rf as usize) + (has_rr as usize) + (has_rl as usize);
+            if provided != 1 {
+                return Err("expected exactly one patch primitive".to_string());
+            }
+            if let Ok(mut g) = self.saw_patch.lock() {
+                *g = true;
+            }
+            Ok(serde_json::json!({"ok": true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn patch_protocol_response_is_wrapped_as_dbt_files_patch_action() {
+        let llm = Arc::new(ScriptedModel {
+            replies: Arc::new(Mutex::new(vec![
+                // Model mistakenly emits patch-protocol response object (no action/final envelope).
+                serde_json::json!({
+                    "notes": ["example"],
+                    "replace_range": {
+                        "path": "models/staging/stg_x.yml",
+                        "start_line": 1,
+                        "end_line": 10,
+                        "new_text": "version: 2\n"
+                    }
+                })
+                .to_string(),
+                // Then finish.
+                "{\"final\":{\"kind\":\"generic\",\"payload\":{\"text\":\"ok\"}}}".to_string(),
+            ])),
+        });
+
+        let saw_patch: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+
+        let mut reg = ToolRegistry::new();
+        reg.register(CapturingDbtFilesPatchTool {
+            saw_patch: saw_patch.clone(),
+        });
+
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 4,
+            thread_id: Some("tid".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(DefaultPolicy),
+            llm,
+            storage,
+            scope,
+            keyspace,
+            query: None,
+            warehouse: Arc::new(NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            // Critical: only wrap patch-protocol objects when exec_ctx exists.
+            exec_ctx: Some(ExecutionContext {
+                plan_kind: Some("cleanse".to_string()),
+                plan_key: Some("k".to_string()),
+                workgroup_id: Some("wg".to_string()),
+                task_id: Some("t".to_string()),
+                checklist_item_id: Some("schema_contract".to_string()),
+            }),
+            runtime: None,
+        };
+
+        let out = Agent::run_until_block(
+            &reg,
+            &ctx,
+            "sys",
+            "tools",
+            "q",
+            crate::llm::LlmCallOptions {
+                expected_format: crate::llm::LlmExpectedFormat::JsonObject,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("ok");
+
+        let saw = match saw_patch.lock() {
+            Ok(g) => *g,
+            Err(_) => false,
+        };
+        assert!(saw, "expected dbt_files patch tool to be invoked");
+
+        match out {
+            RunOutcome::Final { result, .. } => {
+                assert_eq!(result.kind, "generic");
             }
             _ => panic!("expected final outcome"),
         }

@@ -200,7 +200,11 @@ mod tests {
         chat_responses: Mutex<Vec<String>>,
     }
     impl react_core::llm::LargeLanguageModel for MockLlm {
-        fn chat(&self, _messages: &[react_core::llm::ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            _messages: &[react_core::llm::ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             let mut q = self.chat_responses.lock().unwrap();
             if q.is_empty() {
                 return Err("no mock responses remaining".to_string());

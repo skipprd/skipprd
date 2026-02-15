@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
-use react_core::llm::{ChatMessage, LlmCallOptions};
+use react_core::llm::{ChatMessage, LlmCallOptions, LlmExpectedFormat};
 use react_core::session::{Observation, ThreadStep, ThreadStore};
 use react_core::tools::Tool;
 
@@ -80,6 +80,62 @@ fn take_head_tail(text: &str, max_chars: usize) -> String {
         tail = tail,
         total = text.len()
     )
+}
+
+/// Conservative JSON repair: escape raw control characters inside string literals.
+///
+/// Some providers occasionally emit JSON-like output containing literal newlines/tabs inside string
+/// values, which is invalid JSON. This function repairs only those cases; it does not attempt to
+/// fix truncation (EOF) or other structural issues.
+fn escape_control_chars_in_json_strings(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut in_str = false;
+    let mut esc = false;
+    for ch in s.chars() {
+        if in_str {
+            if esc {
+                out.push(ch);
+                esc = false;
+                continue;
+            }
+            if ch == '\\' {
+                out.push(ch);
+                esc = true;
+                continue;
+            }
+            match ch {
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                '\u{08}' => out.push_str("\\b"),
+                '\u{0C}' => out.push_str("\\f"),
+                '"' => {
+                    out.push(ch);
+                    in_str = false;
+                }
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                _ => out.push(ch),
+            }
+            continue;
+        }
+        if esc {
+            out.push(ch);
+            esc = false;
+            continue;
+        }
+        match ch {
+            '"' => {
+                out.push(ch);
+                in_str = true;
+            }
+            '\\' => {
+                out.push(ch);
+                esc = true;
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 async fn read_project_file(actx: &AgentCtx, path: &str, max_chars: usize) -> Option<ProjectFile> {
@@ -362,21 +418,26 @@ async fn llm_json(
     name: &str,
     user: String,
 ) -> Result<Value, String> {
+    // Tune output budgets by (phase, call kind). Unify frequently needs a bit more headroom because it
+    // returns a single `final_review_text` field which can be longer than the per-batch notes.
     let llm_options = match phase {
         Phase::CleanseReview => Some(LlmCallOptions {
+            expected_format: LlmExpectedFormat::JsonObject,
             temperature: Some(0.15),
             top_p: Some(1.0),
-            max_output_tokens: Some(1600),
+            max_output_tokens: Some(if name == "unify" { 2800 } else { 1600 }),
         }),
         Phase::ModelReview => Some(LlmCallOptions {
+            expected_format: LlmExpectedFormat::JsonObject,
             temperature: Some(0.25),
             top_p: Some(1.0),
-            max_output_tokens: Some(1800),
+            max_output_tokens: Some(if name == "unify" { 3200 } else { 1800 }),
         }),
         Phase::PostPublishReview => Some(LlmCallOptions {
+            expected_format: LlmExpectedFormat::JsonObject,
             temperature: Some(0.20),
             top_p: Some(1.0),
-            max_output_tokens: Some(1400),
+            max_output_tokens: Some(if name == "unify" { 2600 } else { 1400 }),
         }),
         _ => None,
     };
@@ -417,7 +478,9 @@ async fn llm_json(
         );
 
         // We append the llm_call step after we have response_text below.
-        let res = ctx.llm.chat_with_options(&messages, llm_options.as_ref());
+        let mut opts = llm_options.unwrap_or_default();
+        opts.expected_format = LlmExpectedFormat::JsonObject;
+        let res = ctx.llm.chat(&messages, &opts);
         let (ok, raw) = match &res {
             Ok(t) => (true, t.clone()),
             Err(e) => (false, format!("LLM_ERROR: {}", e)),
@@ -455,16 +518,73 @@ async fn llm_json(
         if !ok {
             return Err(raw);
         }
-        return serde_json::from_str::<Value>(&raw)
-            .map_err(|e| format!("review {}: expected JSON, got parse error: {}", name, e));
+        // Be robust to rare truncation/control-char issues: try a conservative repair and a single retry
+        // with a tighter "JSON only" reminder + higher max_output_tokens (for unify).
+        match serde_json::from_str::<Value>(&raw) {
+            Ok(v) => return Ok(v),
+            Err(e1) => {
+                let repaired = escape_control_chars_in_json_strings(&raw);
+                if let Ok(v) = serde_json::from_str::<Value>(&repaired) {
+                    return Ok(v);
+                }
+
+                let mut retry_messages = messages.clone();
+                retry_messages.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: "IMPORTANT: Return ONLY a single JSON object. Keep all strings concise; if `final_review_text` would be long, summarize and cap it. No markdown, no code fences.".to_string(),
+                });
+                let mut retry_opts = opts;
+                if name == "unify" {
+                    retry_opts.max_output_tokens =
+                        Some(retry_opts.max_output_tokens.unwrap_or(0).max(3600));
+                }
+                let raw2 = ctx
+                    .llm
+                    .chat(&retry_messages, &retry_opts)
+                    .map_err(|e| e.to_string())?;
+                return serde_json::from_str::<Value>(&raw2).map_err(|e2| {
+                    format!(
+                        "review {}: expected JSON, got parse error: {} (first_error: {})",
+                        name, e2, e1
+                    )
+                })
+            }
+        }
     }
 
-    let raw = ctx
-        .llm
-        .chat_with_options(&messages, llm_options.as_ref())
-        .map_err(|e| e.to_string())?;
-    serde_json::from_str::<Value>(&raw)
-        .map_err(|e| format!("review {}: expected JSON, got parse error: {}", name, e))
+    let mut opts = llm_options.unwrap_or_default();
+    opts.expected_format = LlmExpectedFormat::JsonObject;
+    let raw = ctx.llm.chat(&messages, &opts).map_err(|e| e.to_string())?;
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(v) => Ok(v),
+        Err(e1) => {
+            let repaired = escape_control_chars_in_json_strings(&raw);
+            if let Ok(v) = serde_json::from_str::<Value>(&repaired) {
+                return Ok(v);
+            }
+            // One retry (same idea as observability branch, minus logging).
+            let mut retry_messages = messages.clone();
+            retry_messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: "IMPORTANT: Return ONLY a single JSON object. Keep all strings concise. No markdown, no code fences.".to_string(),
+            });
+            let mut retry_opts = opts;
+            if name == "unify" {
+                retry_opts.max_output_tokens =
+                    Some(retry_opts.max_output_tokens.unwrap_or(0).max(3600));
+            }
+            let raw2 = ctx
+                .llm
+                .chat(&retry_messages, &retry_opts)
+                .map_err(|e| e.to_string())?;
+            serde_json::from_str::<Value>(&raw2).map_err(|e2| {
+                format!(
+                    "review {}: expected JSON, got parse error: {} (first_error: {})",
+                    name, e2, e1
+                )
+            })
+        }
+    }
 }
 
 async fn load_global_semantic_context_json(
@@ -1398,13 +1518,33 @@ pub async fn run_batched_review(
     }
 
     // 3) Final unify pass (META-compatible output).
+    // Keep unify input bounded: it is easy for pretty-printed batch detail to grow large, which
+    // increases the risk of truncated JSON responses.
+    let mut unify_batches = all_batch_notes.clone();
+    if unify_batches.len() > 20 {
+        unify_batches = unify_batches[unify_batches.len() - 20..].to_vec();
+    }
+    // Strip to the minimal fields the unifier needs.
+    let unify_batches = unify_batches
+        .into_iter()
+        .map(|v| {
+            let batch_items = v.get("batch_items").cloned().unwrap_or(Value::Null);
+            let notes = v.get("notes").cloned().unwrap_or(Value::Null);
+            let actionable_hints = v.get("actionable_hints").cloned().unwrap_or(Value::Null);
+            serde_json::json!({
+                "batch_items": batch_items,
+                "notes": notes,
+                "actionable_hints": actionable_hints
+            })
+        })
+        .collect::<Vec<_>>();
     let unify_user = format!(
         "Phase: {phase}\n\nOriginal goal + review context:\n{q}\n\n{gctx_block}Project notes:\n{proj}\n\nBatch notes:\n{batches}\n",
         phase = phase.as_str(),
         q = original_question_with_context,
         gctx_block = global_ctx_block,
         proj = serde_json::json!({"project_notes": project_notes, "project_risks": project_risks}),
-        batches = serde_json::to_string_pretty(&all_batch_notes).unwrap_or_else(|_| "[]".to_string()),
+        batches = serde_json::to_string_pretty(&unify_batches).unwrap_or_else(|_| "[]".to_string()),
     );
     let unify_v = llm_json(sctx, &actx, thread_id, phase, "unify", unify_user).await?;
     let final_review_text = unify_v
@@ -1491,7 +1631,11 @@ mod tests {
     }
 
     impl react_core::llm::LargeLanguageModel for ScriptedModel {
-        fn chat(&self, _messages: &[react_core::llm::ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            _messages: &[react_core::llm::ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             let mut g = self
                 .replies
                 .lock()
@@ -1513,7 +1657,11 @@ mod tests {
     }
 
     impl react_core::llm::LargeLanguageModel for CapturingModel {
-        fn chat(&self, messages: &[react_core::llm::ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            messages: &[react_core::llm::ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             if let Some(u) = messages.iter().find(|m| m.role == "user") {
                 if let Ok(mut g) = self.captured_user_prompts.lock() {
                     g.push(u.content.clone());

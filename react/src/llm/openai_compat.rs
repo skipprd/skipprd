@@ -35,10 +35,16 @@ mod tests {
         };
         let llm = OpenAICompatModel::new(cfg);
         let out = llm
-            .chat(&[ChatMessage {
-                role: "user".into(),
-                content: "hello".into(),
-            }])
+            .chat(
+                &[ChatMessage {
+                    role: "user".into(),
+                    content: "hello".into(),
+                }],
+                &react_core::llm::LlmCallOptions {
+                    expected_format: react_core::llm::LlmExpectedFormat::Text,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(out.contains("hi"));
         let emb = llm.embed(&vec!["a".into(), "b".into()]).unwrap();
@@ -136,7 +142,11 @@ impl OpenAICompatModel {
 }
 
 impl LargeLanguageModel for OpenAICompatModel {
-    fn chat(&self, messages: &[ChatMessage]) -> Result<String, String> {
+    fn chat(
+        &self,
+        messages: &[ChatMessage],
+        options: &react_core::llm::LlmCallOptions,
+    ) -> Result<String, String> {
         let base = self
             .cfg
             .base_url
@@ -180,10 +190,14 @@ impl LargeLanguageModel for OpenAICompatModel {
                 output: Vec<serde_json::Value>,
             }
             let url = format!("{}/v1/responses", base.trim_end_matches('/'));
-            let max_tokens: i32 =
+            let max_tokens_env: i32 =
                 crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "8192")
                     .parse()
                     .unwrap_or(8192);
+            let max_tokens: i32 = options
+                .max_output_tokens
+                .map(|v| v as i32)
+                .unwrap_or(max_tokens_env);
             // Map messages to Responses 'input' with typed content parts
             let mut msgs: Vec<RespMsg> = Vec::new();
             for m in messages.iter() {
@@ -223,7 +237,12 @@ impl LargeLanguageModel for OpenAICompatModel {
                 model: model.clone(),
                 input: msgs,
                 modalities: Some(vec!["text".to_string()]),
-                response_format: Some(serde_json::json!({"type": "text"})),
+                response_format: Some(serde_json::json!({
+                    "type": match options.expected_format {
+                        react_core::llm::LlmExpectedFormat::Text => "text",
+                        react_core::llm::LlmExpectedFormat::JsonObject => "json_object",
+                    }
+                })),
                 max_output_tokens: Some(max_tokens),
             };
             let mut req = self

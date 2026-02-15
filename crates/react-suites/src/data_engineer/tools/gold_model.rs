@@ -432,6 +432,7 @@ impl Tool for GoldModelTool {
                 &rel_path,
                 4,
                 Some(LlmCallOptions {
+                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                     temperature: Some(0.12),
                     top_p: Some(1.0),
                     max_output_tokens: Some(2200),
@@ -531,7 +532,11 @@ mod tests {
     }
 
     impl LargeLanguageModel for MockLlm {
-        fn chat(&self, _messages: &[ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             Ok(self.resp.clone())
         }
         fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
@@ -809,7 +814,11 @@ mod tests {
             captured_instructions: Arc<Mutex<Option<String>>>,
         }
         impl LargeLanguageModel for CapturingLlm {
-            fn chat(&self, messages: &[ChatMessage]) -> Result<String, String> {
+            fn chat(
+                &self,
+                messages: &[ChatMessage],
+                _options: &react_core::llm::LlmCallOptions,
+            ) -> Result<String, String> {
                 let user = messages
                     .iter()
                     .find(|m| m.role == "user")

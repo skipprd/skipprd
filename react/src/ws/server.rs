@@ -1982,10 +1982,16 @@ async fn synthesize_title(llm: &react_core::llm::DynLlm, question: &str, answer:
         let llm2 = llm.clone();
         let p = prompt.clone();
         move || {
-            llm2.chat(&[crate::llm::ChatMessage {
-                role: "user".into(),
-                content: p,
-            }])
+            llm2.chat(
+                &[crate::llm::ChatMessage {
+                    role: "user".into(),
+                    content: p,
+                }],
+                &react_core::llm::LlmCallOptions {
+                    expected_format: react_core::llm::LlmExpectedFormat::Text,
+                    ..Default::default()
+                },
+            )
         }
     })
     .await;

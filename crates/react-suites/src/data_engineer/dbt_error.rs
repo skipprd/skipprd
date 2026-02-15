@@ -491,13 +491,19 @@ pub fn summarize_dbt_failure_llm(
         })
         .to_string(),
     };
-    let resp = llm.chat(&[
+    let resp = llm.chat(
+        &[
         react_core::llm::ChatMessage {
             role: "system".to_string(),
             content: sys.to_string(),
         },
         msg,
-    ])?;
+        ],
+        &react_core::llm::LlmCallOptions {
+            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+            ..Default::default()
+        },
+    )?;
 
     let mut parsed: DbtFailureSummary =
         serde_json::from_str(resp.trim()).map_err(|e| format!("failed to parse LLM JSON: {e}"))?;
@@ -518,7 +524,11 @@ mod tests {
         pub responses: std::sync::Mutex<Vec<String>>,
     }
     impl react_core::llm::LargeLanguageModel for MockLlm {
-        fn chat(&self, _messages: &[react_core::llm::ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            _messages: &[react_core::llm::ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             let mut q = self.responses.lock().unwrap();
             if q.is_empty() {
                 return Err("no mock responses remaining".to_string());

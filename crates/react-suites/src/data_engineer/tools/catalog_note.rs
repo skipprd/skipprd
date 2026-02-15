@@ -134,7 +134,13 @@ impl Tool for CatalogNoteTool {
                 content: prompt.clone(),
             },
         ];
-        let resp = llm.chat(&messages);
+        let resp = llm.chat(
+            &messages,
+            &react_core::llm::LlmCallOptions {
+                expected_format: react_core::llm::LlmExpectedFormat::Text,
+                ..Default::default()
+            },
+        );
         let bullets_text = match resp.as_ref() {
             Ok(s) => s.clone(),
             Err(_) => text.clone(),

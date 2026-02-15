@@ -546,6 +546,58 @@ Hard rules:\n\
         err: &str,
         attempt: usize,
     ) -> Result<react_core::session::ThreadResult, String> {
+        fn compact_json_for_prompt(v: &serde_json::Value, depth: usize) -> serde_json::Value {
+            // Keep this conservative: preserve structure, but truncate long strings/arrays to
+            // reduce prompt bloat (especially in repeated repair loops).
+            const MAX_DEPTH: usize = 10;
+            const MAX_STRING_CHARS: usize = 600;
+            const MAX_ARRAY_ITEMS: usize = 50;
+
+            if depth >= MAX_DEPTH {
+                return serde_json::Value::String("...(truncated: max_depth reached)".to_string());
+            }
+
+            match v {
+                serde_json::Value::Null => serde_json::Value::Null,
+                serde_json::Value::Bool(b) => serde_json::Value::Bool(*b),
+                serde_json::Value::Number(n) => serde_json::Value::Number(n.clone()),
+                serde_json::Value::String(s) => {
+                    let t = s.trim();
+                    if t.chars().count() <= MAX_STRING_CHARS {
+                        serde_json::Value::String(s.clone())
+                    } else {
+                        let prefix: String = t.chars().take(MAX_STRING_CHARS).collect();
+                        serde_json::Value::String(format!(
+                            "{} …(truncated; original_chars={})",
+                            prefix,
+                            t.chars().count()
+                        ))
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    let mut out: Vec<serde_json::Value> = arr
+                        .iter()
+                        .take(MAX_ARRAY_ITEMS)
+                        .map(|x| compact_json_for_prompt(x, depth + 1))
+                        .collect();
+                    if arr.len() > MAX_ARRAY_ITEMS {
+                        out.push(serde_json::Value::String(format!(
+                            "...(truncated {} items)",
+                            arr.len().saturating_sub(MAX_ARRAY_ITEMS)
+                        )));
+                    }
+                    serde_json::Value::Array(out)
+                }
+                serde_json::Value::Object(map) => {
+                    let mut out = serde_json::Map::new();
+                    for (k, val) in map.iter() {
+                        out.insert(k.clone(), compact_json_for_prompt(val, depth + 1));
+                    }
+                    serde_json::Value::Object(out)
+                }
+            }
+        }
+
         // Record an explicit guard step so the UI can surface "plan was invalid and is being repaired".
         let ts = chrono::Utc::now().to_rfc3339();
         let reason = format!(
@@ -576,14 +628,34 @@ Hard rules:\n\
         )
         .await?;
 
-        // Build a repair-only prompt: include the FULL invalid payload and the parse error.
-        let payload_str =
+        // Build a repair-only prompt: include the invalid payload and the parse error.
+        //
+        // If the payload is enormous, compact it so retries don't amplify prompt bloat.
+        const MAX_REPAIR_PAYLOAD_CHARS: usize = 30_000;
+        let full_payload_str =
             serde_json::to_string_pretty(bad_payload).unwrap_or_else(|_| bad_payload.to_string());
+        let (payload_label, payload_str, payload_note) = if full_payload_str.len()
+            <= MAX_REPAIR_PAYLOAD_CHARS
+        {
+            ("FULL", full_payload_str, String::new())
+        } else {
+            let compact = compact_json_for_prompt(bad_payload, 0);
+            let compact_str =
+                serde_json::to_string_pretty(&compact).unwrap_or_else(|_| compact.to_string());
+            (
+                "COMPACTED",
+                compact_str,
+                format!(
+                    "\nNOTE: The invalid payload JSON was compacted to reduce prompt size. \
+Long strings were truncated and long arrays were truncated. Preserve the overall structure and required fields.\n"
+                ),
+            )
+        };
         let q = format!(
             "Your previous plan JSON payload was invalid and could not be parsed by the server.\n\
 You MUST fix it and re-emit the plan.\n\n\
 Validation error:\n{err}\n\n\
-Invalid payload JSON (FULL, do not omit content):\n{payload_str}\n\n\
+Invalid payload JSON ({payload_label}):\n{payload_str}\n{payload_note}\n\
 Hard constraints:\n\
 - The entire response must be STRICT JSON only.\n\
 - Every checklist item's `evidence` must be an empty array `[]` (no strings, no objects).\n\n\
@@ -597,12 +669,13 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
         // No tools for repair: any tool call should fail and force a retry.
         let registry = ToolRegistry::new();
         let tools_card = "";
-        let llm_options = Some(LlmCallOptions {
+        let llm_options = LlmCallOptions {
+            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
             // Strict JSON repair emitter: keep variance minimal.
             temperature: Some(0.0),
             top_p: Some(1.0),
             max_output_tokens: Some(1400),
-        });
+        };
         match Agent::run_until_block(&registry, actx, &sys, tools_card, &q, llm_options).await {
             Ok(RunOutcome::Final {
                 thread_id: _tid,
@@ -2029,7 +2102,19 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                 .map(|c| c as Arc<dyn std::any::Any + Send + Sync>),
         };
 
-        match Agent::run_until_block(&registry, &actx, &sys, &tools_card, question, None).await {
+        match Agent::run_until_block(
+            &registry,
+            &actx,
+            &sys,
+            &tools_card,
+            question,
+            LlmCallOptions {
+                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                ..Default::default()
+            },
+        )
+        .await
+        {
             Ok(RunOutcome::Final {
                 thread_id: _tid,
                 result,
@@ -2093,7 +2178,19 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
         };
 
         let prompt = Self::inject_review_question(question);
-        match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &prompt, None).await {
+        match Agent::run_until_block(
+            &registry,
+            &actx,
+            &sys,
+            &tools_card,
+            &prompt,
+            LlmCallOptions {
+                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                ..Default::default()
+            },
+        )
+        .await
+        {
             Ok(RunOutcome::Final {
                 thread_id: _tid,
                 result,
@@ -2941,17 +3038,19 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                     }
 
                     let llm_options = if is_cleanse {
-                        Some(LlmCallOptions {
+                        LlmCallOptions {
+                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                             temperature: Some(0.20),
                             top_p: Some(1.0),
                             max_output_tokens: Some(2200),
-                        })
+                        }
                     } else {
-                        Some(LlmCallOptions {
+                        LlmCallOptions {
+                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                             temperature: Some(0.55),
                             top_p: Some(0.95),
                             max_output_tokens: Some(2800),
-                        })
+                        }
                     };
                     match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q, llm_options).await {
                         Ok(RunOutcome::Final {
@@ -4733,17 +4832,19 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                     }
 
                     let llm_options = if is_cleanse {
-                        Some(LlmCallOptions {
+                        LlmCallOptions {
+                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                             temperature: Some(0.05),
                             top_p: Some(1.0),
                             max_output_tokens: Some(1800),
-                        })
+                        }
                     } else {
-                        Some(LlmCallOptions {
+                        LlmCallOptions {
+                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                             temperature: Some(0.12),
                             top_p: Some(1.0),
                             max_output_tokens: Some(2200),
-                        })
+                        }
                     };
                     match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q, llm_options).await {
                         Ok(RunOutcome::Final { .. }) => {
@@ -5977,16 +6078,18 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
         };
 
         let llm_options = match kind {
-            AuthoringKind::Cleanse => Some(LlmCallOptions {
+            AuthoringKind::Cleanse => LlmCallOptions {
+                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                 temperature: Some(0.05),
                 top_p: Some(1.0),
                 max_output_tokens: Some(1800),
-            }),
-            AuthoringKind::Model => Some(LlmCallOptions {
+            },
+            AuthoringKind::Model => LlmCallOptions {
+                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                 temperature: Some(0.12),
                 top_p: Some(1.0),
                 max_output_tokens: Some(2200),
-            }),
+            },
         };
 
         for attempt in 0..10 {
@@ -7007,6 +7110,117 @@ mod tests {
         assert_eq!(
             classify_validate_failure(false, Some("Compilation Error: syntax error near FROM"), None),
             ValidateFailureClass::SqlOrRuntime
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_json_repair_prompt_compacts_huge_payload_and_requests_json_mode() {
+        use crate::data_engineer::control_flow::Phase;
+        use react_core::agent::DefaultPolicy;
+        use react_core::keyspace::DefaultKeyspace;
+        use react_core::llm::{ChatMessage, LargeLanguageModel, LlmCallOptions, LlmExpectedFormat};
+        use react_core::scope::RequestScope;
+        use react_core::storage::InMemoryStorageAdapter;
+
+        #[derive(Clone)]
+        struct CapturingLlm {
+            reply: String,
+            captured: Arc<std::sync::Mutex<Vec<(String, LlmCallOptions)>>>,
+        }
+        impl LargeLanguageModel for CapturingLlm {
+            fn chat(
+                &self,
+                messages: &[ChatMessage],
+                options: &LlmCallOptions,
+            ) -> Result<String, String> {
+                let prompt = messages
+                    .iter()
+                    .find(|m| m.role.eq_ignore_ascii_case("user"))
+                    .map(|m| m.content.clone())
+                    .unwrap_or_default();
+                if let Ok(mut g) = self.captured.lock() {
+                    g.push((prompt, *options));
+                }
+                Ok(self.reply.clone())
+            }
+            fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+                Ok(vec![])
+            }
+        }
+
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
+        let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
+
+        let captured: Arc<std::sync::Mutex<Vec<(String, LlmCallOptions)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let llm: Arc<dyn LargeLanguageModel> = Arc::new(CapturingLlm {
+            reply: r#"{"final":{"kind":"model_plan","payload":{}}}"#.to_string(),
+            captured: captured.clone(),
+        });
+
+        let actx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 10,
+            max_steps: 1,
+            thread_id: Some("tid".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("agent".to_string()),
+            policy: Arc::new(DefaultPolicy),
+            llm,
+            storage: storage.clone(),
+            scope: scope.clone(),
+            keyspace: keyspace.clone(),
+            query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: Some(store.clone()),
+            exec_ctx: None,
+            runtime: None,
+        };
+
+        let huge = "x".repeat(120_000);
+        let bad_payload = serde_json::json!({
+            "status": "draft",
+            "project_snapshot": {"notes": huge},
+            "tasks": [],
+            "batches": [],
+            "work_groups": [],
+            "progress": {"last_applied_step_idx": 0}
+        });
+
+        let _ = DataEngineerSuite::repair_plan_json_payload_via_llm(
+            &store,
+            "tid",
+            &actx,
+            Phase::ModelPlan,
+            "model_plan",
+            &bad_payload,
+            "bad json",
+            1,
+        )
+        .await
+        .expect("repair should return final");
+
+        let got = captured.lock().unwrap();
+        assert!(!got.is_empty(), "expected at least one llm call");
+        let (prompt, opts) = &got[0];
+        assert_eq!(opts.expected_format, LlmExpectedFormat::JsonObject);
+        assert!(
+            prompt.contains("Invalid payload JSON (COMPACTED)"),
+            "expected compaction label in prompt"
+        );
+        assert!(
+            prompt.contains("NOTE: The invalid payload JSON was compacted"),
+            "expected compaction note in prompt"
         );
     }
 }

@@ -73,7 +73,19 @@ impl KbSuite {
             runtime: None,
         };
 
-        match Agent::run_until_block(&registry, &actx, sys, tools_card, question, None).await {
+        match Agent::run_until_block(
+            &registry,
+            &actx,
+            sys,
+            tools_card,
+            question,
+            react_core::llm::LlmCallOptions {
+                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                ..Default::default()
+            },
+        )
+        .await
+        {
             Ok(RunOutcome::Final {
                 thread_id: _tid,
                 result,

@@ -102,10 +102,10 @@ impl Adapter for OpenAIResponsesAdapter {
 
         // Default to plain text, but allow callers to request structured output via `response_format`.
         // This maps directly to the Responses API `text.format` object.
-        let format = req
-            .response_format
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({"type":"text"}));
+        let format = match req.response_format {
+            None | Some(ChatResponseFormat::Text) => serde_json::json!({"type":"text"}),
+            Some(ChatResponseFormat::JsonObject) => serde_json::json!({"type":"json_object"}),
+        };
 
         let body = RespReq {
             model: req.model.clone(),
@@ -182,7 +182,7 @@ mod tests {
             max_output_tokens: None,
             temperature: None,
             top_p: None,
-            response_format: Some(serde_json::json!({"type":"json_object"})),
+            response_format: Some(ChatResponseFormat::JsonObject),
             thread_id: None,
         };
         let http = ad.build_chat_http(&req).expect("build");

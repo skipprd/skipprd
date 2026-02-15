@@ -176,10 +176,16 @@ pub async fn enrich_dataset_with_llm(
         let text_opt = if llm_timeout_secs == 0 {
             let llm0 = llm.clone();
             match tokio::task::spawn_blocking(move || {
-                llm0.chat(&[ChatMessage {
-                    role: "user".into(),
-                    content: prompt_clone,
-                }])
+                llm0.chat(
+                    &[ChatMessage {
+                        role: "user".into(),
+                        content: prompt_clone,
+                    }],
+                    &react_core::llm::LlmCallOptions {
+                        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                        ..Default::default()
+                    },
+                )
             })
             .await
             {
@@ -191,10 +197,16 @@ pub async fn enrich_dataset_with_llm(
             match tokio::time::timeout(
                 std::time::Duration::from_secs(llm_timeout_secs),
                 tokio::task::spawn_blocking(move || {
-                    llm0.chat(&[ChatMessage {
-                        role: "user".into(),
-                        content: prompt,
-                    }])
+                    llm0.chat(
+                        &[ChatMessage {
+                            role: "user".into(),
+                            content: prompt,
+                        }],
+                        &react_core::llm::LlmCallOptions {
+                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                            ..Default::default()
+                        },
+                    )
                 }),
             )
             .await
@@ -496,10 +508,16 @@ pub async fn enrich_dataset_with_llm(
                 let llm0 = llm.clone();
                 let p = prompt_desc.clone();
                 move || {
-                    llm0.chat(&[ChatMessage {
-                        role: "user".into(),
-                        content: p,
-                    }])
+                    llm0.chat(
+                        &[ChatMessage {
+                            role: "user".into(),
+                            content: p,
+                        }],
+                        &react_core::llm::LlmCallOptions {
+                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                            ..Default::default()
+                        },
+                    )
                 }
             })
             .await
@@ -563,10 +581,16 @@ pub async fn enrich_dataset_with_llm(
                         let llm0 = llm.clone();
                         let p = single_prompt.clone();
                         move || {
-                            llm0.chat(&[ChatMessage {
-                                role: "user".into(),
-                                content: p,
-                            }])
+                            llm0.chat(
+                                &[ChatMessage {
+                                    role: "user".into(),
+                                    content: p,
+                                }],
+                                &react_core::llm::LlmCallOptions {
+                                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                                    ..Default::default()
+                                },
+                            )
                         }
                     })
                     .await
@@ -604,10 +628,16 @@ pub async fn enrich_dataset_with_llm(
                 let llm0 = llm.clone();
                 let p = prompt_syn.clone();
                 move || {
-                    llm0.chat(&[ChatMessage {
-                        role: "user".into(),
-                        content: p,
-                    }])
+                    llm0.chat(
+                        &[ChatMessage {
+                            role: "user".into(),
+                            content: p,
+                        }],
+                        &react_core::llm::LlmCallOptions {
+                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                            ..Default::default()
+                        },
+                    )
                 }
             })
             .await
@@ -667,10 +697,16 @@ pub async fn enrich_dataset_with_llm(
                 let llm0 = llm.clone();
                 let p = prompt_pu.clone();
                 move || {
-                    llm0.chat(&[ChatMessage {
-                        role: "user".into(),
-                        content: p,
-                    }])
+                    llm0.chat(
+                        &[ChatMessage {
+                            role: "user".into(),
+                            content: p,
+                        }],
+                        &react_core::llm::LlmCallOptions {
+                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                            ..Default::default()
+                        },
+                    )
                 }
             })
             .await
@@ -862,10 +898,16 @@ Output JSON only:",
                 let text_opt = if llm_timeout_secs == 0 {
                     let llm0 = llm.clone();
                     tokio::task::spawn_blocking(move || {
-                        llm0.chat(&[ChatMessage {
-                            role: "user".into(),
-                            content: prompt,
-                        }])
+                        llm0.chat(
+                            &[ChatMessage {
+                                role: "user".into(),
+                                content: prompt,
+                            }],
+                            &react_core::llm::LlmCallOptions {
+                                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                                ..Default::default()
+                            },
+                        )
                     })
                     .await
                     .ok()
@@ -875,10 +917,16 @@ Output JSON only:",
                     tokio::time::timeout(
                         std::time::Duration::from_secs(llm_timeout_secs),
                         tokio::task::spawn_blocking(move || {
-                            llm0.chat(&[ChatMessage {
-                                role: "user".into(),
-                                content: prompt,
-                            }])
+                            llm0.chat(
+                                &[ChatMessage {
+                                    role: "user".into(),
+                                    content: prompt,
+                                }],
+                                &react_core::llm::LlmCallOptions {
+                                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                                    ..Default::default()
+                                },
+                            )
                         }),
                     )
                     .await
@@ -912,10 +960,16 @@ Output JSON only:",
         let text_opt = if llm_timeout_secs == 0 {
             let llm0 = llm.clone();
             tokio::task::spawn_blocking(move || {
-                llm0.chat(&[ChatMessage {
-                    role: "user".into(),
-                    content: prompt,
-                }])
+                llm0.chat(
+                    &[ChatMessage {
+                        role: "user".into(),
+                        content: prompt,
+                    }],
+                    &react_core::llm::LlmCallOptions {
+                        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                        ..Default::default()
+                    },
+                )
             })
             .await
             .ok()
@@ -925,10 +979,16 @@ Output JSON only:",
             tokio::time::timeout(
                 std::time::Duration::from_secs(llm_timeout_secs),
                 tokio::task::spawn_blocking(move || {
-                    llm0.chat(&[ChatMessage {
-                        role: "user".into(),
-                        content: prompt,
-                    }])
+                    llm0.chat(
+                        &[ChatMessage {
+                            role: "user".into(),
+                            content: prompt,
+                        }],
+                        &react_core::llm::LlmCallOptions {
+                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                            ..Default::default()
+                        },
+                    )
                 }),
             )
             .await

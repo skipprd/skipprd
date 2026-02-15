@@ -10,7 +10,9 @@ use tracing::debug;
 
 use super::adapter::Adapter;
 use super::registry::{pick_adapter_from_config, pick_openai_adapter_for_model};
-use super::types::{ChatRequest, ChatResponse, EmbedRequest, EmbedResponse, ProviderHttpResponse};
+use super::types::{
+    ChatRequest, ChatResponse, ChatResponseFormat, EmbedRequest, EmbedResponse, ProviderHttpResponse,
+};
 use crate::llm::LargeLanguageModel;
 use react_core::llm::ChatMessage as CoreChatMessage;
 use react_core::llm_observability::{self, PartInput};
@@ -113,7 +115,16 @@ impl LlmRouter {
                     content: m.content.clone(),
                 })
                 .collect();
-            let text = model.chat(&msgs)?;
+            let expected_format = matches!(req.response_format, Some(ChatResponseFormat::JsonObject));
+            let opts = react_core::llm::LlmCallOptions {
+                expected_format: if expected_format {
+                    react_core::llm::LlmExpectedFormat::JsonObject
+                } else {
+                    react_core::llm::LlmExpectedFormat::Text
+                },
+                ..Default::default()
+            };
+            let text = model.chat(&msgs, &opts)?;
             return Ok(ChatResponse { text, raw: None });
         }
         // Log request (pretty JSON and readable message text)

@@ -1370,7 +1370,11 @@ mod tests {
     struct DummyLlm;
 
     impl LargeLanguageModel for DummyLlm {
-        fn chat(&self, _messages: &[ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             Err("not used".to_string())
         }
         fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {

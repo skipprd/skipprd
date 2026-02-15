@@ -870,29 +870,9 @@ fn parse_one_or_many<T: DeserializeOwned>(args: &Value, key: &str) -> Result<Vec
 
 fn patch_contract_error(msg: &str) -> String {
     format!(
-        "dbt_files op=patch contract violation: {}\n\n\
-Allowed shape:\n\
-- args.op = \"patch\"\n\
-- Provide EXACTLY ONE of:\n\
-  - replace_file: {{path,new_text,expected_sha256?}} or array\n\
-  - replace_range: {{path,start_line,end_line,new_text,expected_sha256?}} or array\n\
-  - replace_list: {{path,edits:[{{start_line,end_line,new_text}}...],expected_sha256?}} or array\n\
-\n\
-Common errors:\n\
-- preview_diff is no longer supported (remove it entirely)\n\
-- replace_file must be an object/array (not a string)\n\
-- path and new_text are required\n\
-- expected_sha256 is optional. If provided, it must match the current file sha256.\n\
-\n\
-Examples:\n\
-- replace_file:\n\
-  {{\"action\":\"dbt_files\",\"args\":{{\"op\":\"patch\",\"replace_file\":{{\"path\":\"models/schema.yml\",\"new_text\":\"version: 2\\n...\"}}}}}}\n\
-- replace_range:\n\
-  {{\"action\":\"dbt_files\",\"args\":{{\"op\":\"patch\",\"replace_range\":{{\"path\":\"models/schema.yml\",\"start_line\":1,\"end_line\":3,\"new_text\":\"...\"}}}}}}\n\
-- replace_list:\n\
-  {{\"action\":\"dbt_files\",\"args\":{{\"op\":\"patch\",\"replace_list\":{{\"path\":\"models/schema.yml\",\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}]}}}}}}\n\
-",
-        msg
+        "dbt_files op=patch contract violation: {}\n\n{}",
+        msg,
+        crate::prompts::patch_contract::dbt_files_patch_contract()
     )
 }
 

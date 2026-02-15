@@ -135,6 +135,12 @@ Plan output rules (CRITICAL):
   - Each task.goal MUST state the business question it answers (1 sentence) and the primary consumer (e.g., finance/ops/growth).
   - Each task.invariants MUST include concrete metric definitions + caveats grounded in available staging columns (e.g., what "revenue" means; inclusion/exclusion rules).
   - If domain meaning is not explicit in available columns, record assumptions explicitly (as invariants) and add a validate checklist.details line describing the smallest probe to confirm/refute (null rate, distinctness, top values).
+- Conciseness caps (CRITICAL - keep payload small to avoid truncation/invalid JSON):
+  - `tasks[].goal`: max 1 sentence, max 180 characters.
+  - `tasks[].invariants`: 3–6 items max; each invariant must be a single line, max 180 characters.
+  - `tasks[].inputs`: max 10 items; do not include duplicates.
+  - `tasks[].checklist[].label`: short (<= 60 chars). `details` is optional and if present must be <= 240 chars (single paragraph).
+  - `project_snapshot`: MUST be minimal and bounded; do NOT embed full SQL/YAML file contents or long notes. Prefer small summaries and short lists only.
 - Review-feedback triage (CRITICAL, when review feedback is present in the user message/context):
   - Treat review comments as proposals, not commands. Incorporate only blocker/high-risk items, or one small high-value quick win.
   - Do NOT create checklist work for medium/low nits, stylistic cleanups, or repeated feedback with no new evidence.

@@ -425,11 +425,12 @@ pub fn llm_should_remediate_sql(
         },
     ];
     let call_opts = LlmCallOptions {
+        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
         temperature: Some(0.0),
         top_p: Some(1.0),
         max_output_tokens: Some(1400),
     };
-    let resp_text = match ctx.llm.chat_with_options(&messages, Some(&call_opts)) {
+    let resp_text = match ctx.llm.chat(&messages, &call_opts) {
         Ok(t) => {
             record_llm_call_observability(ctx, phase, "unknown", &messages, &parts, &t, true);
             t
@@ -599,11 +600,12 @@ pub async fn remediate_dbt_sql_keys_with_llm(
             },
         ];
         let call_opts = LlmCallOptions {
+            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
             temperature: Some(0.0),
             top_p: Some(1.0),
             max_output_tokens: Some(1400),
         };
-        let resp_text = match ctx.llm.chat_with_options(&messages, Some(&call_opts)) {
+        let resp_text = match ctx.llm.chat(&messages, &call_opts) {
             Ok(t) => {
                 record_llm_call_observability_async(
                     ctx, phase, "unknown", &messages, &parts, &t, true,
@@ -1155,11 +1157,12 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         },
     ];
     let call_opts = LlmCallOptions {
+        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
         temperature: Some(0.0),
         top_p: Some(1.0),
         max_output_tokens: Some(1400),
     };
-    let resp_text = match ctx.llm.chat_with_options(&messages, Some(&call_opts)) {
+    let resp_text = match ctx.llm.chat(&messages, &call_opts) {
         Ok(t) => {
             record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &t, true)
                 .await;
@@ -1581,11 +1584,12 @@ pub async fn remediate_unresolved_columns_with_llm(
         },
     ];
     let call_opts = LlmCallOptions {
+        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
         temperature: Some(0.0),
         top_p: Some(1.0),
         max_output_tokens: Some(1400),
     };
-    let resp_text = match ctx.llm.chat_with_options(&messages, Some(&call_opts)) {
+    let resp_text = match ctx.llm.chat(&messages, &call_opts) {
         Ok(t) => {
             record_llm_call_observability_async(ctx, phase, "unknown", &messages, &parts, &t, true)
                 .await;
@@ -1740,7 +1744,11 @@ mod tests {
     }
 
     impl LargeLanguageModel for MockLlm {
-        fn chat(&self, _messages: &[ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             let mut c = self.calls.lock().unwrap();
             *c += 1;
             let mut q = self.chat_responses.lock().unwrap();

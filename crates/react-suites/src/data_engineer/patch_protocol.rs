@@ -376,9 +376,12 @@ pub async fn llm_patch_loop_single_file(
         },
     ];
 
+    let mut call_opts = llm_options.unwrap_or_default();
+    call_opts.expected_format = react_core::llm::LlmExpectedFormat::JsonObject;
+
     let mut last_err: Option<String> = None;
     for attempt in 1..=max_iters {
-        let resp = ctx.llm.chat_with_options(&messages, llm_options.as_ref());
+        let resp = ctx.llm.chat(&messages, &call_opts);
         let resp_text = match resp {
             Ok(t) => t,
             Err(e) => {
@@ -807,7 +810,11 @@ mod tests {
         replies: Mutex<Vec<String>>,
     }
     impl LargeLanguageModel for ScriptedLlm {
-        fn chat(&self, _messages: &[react_core::llm::ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            _messages: &[react_core::llm::ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             let mut g = self.replies.lock().map_err(|_| "mutex poisoned".to_string())?;
             if g.is_empty() {
                 return Err("no more replies".to_string());

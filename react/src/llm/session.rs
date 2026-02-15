@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use crate::llm::router::LlmRouter;
 use crate::llm::thread_ctx;
+use crate::llm::types::ChatResponseFormat;
 use crate::llm::{create_llm, ChatMessage, LargeLanguageModel, LlmConfig};
-use react_core::llm::LlmCallOptions;
+use react_core::llm::{LlmCallOptions, LlmExpectedFormat};
 
 /// Lightweight session wrapper around the configured LLM.
 /// For local llama.cpp this will reuse the shared model underneath; for HTTP it reuses the HTTP client.
@@ -22,10 +23,16 @@ impl LlmSession {
     /// Run a strict JSON prompt with a conservative token cap enforced in the backend.
     /// Returns the raw model text; callers should parse JSON strictly.
     pub fn chat_strict(&self, prompt: &str) -> Result<String, String> {
-        self.llm.chat(&[ChatMessage {
+        self.llm.chat(
+            &[ChatMessage {
             role: "user".into(),
             content: prompt.into(),
-        }])
+        }],
+            &LlmCallOptions {
+                expected_format: LlmExpectedFormat::JsonObject,
+                ..Default::default()
+            },
+        )
     }
 }
 
@@ -43,37 +50,9 @@ impl RouterModel {
 }
 
 impl LargeLanguageModel for RouterModel {
-    fn chat(&self, messages: &[ChatMessage]) -> Result<String, String> {
-        self.chat_with_options(messages, None)
-    }
-
-    fn chat_with_options(
-        &self,
-        messages: &[ChatMessage],
-        options: Option<&LlmCallOptions>,
-    ) -> Result<String, String> {
+    fn chat(&self, messages: &[ChatMessage], options: &LlmCallOptions) -> Result<String, String> {
         let model = crate::helpers::configuration::Config::llm_chat_model()
             .unwrap_or_else(|| "gpt-4o-mini".to_string());
-        // Heuristic: when the caller is asking for machine-readable JSON, enforce JSON output at the
-        // provider level (OpenAI Responses supports `text.format.type = json_object`).
-        //
-        // This prevents occasional invalid "JSON-looking" text like literal newlines inside JSON strings.
-        let mut wants_json = false;
-        for m in messages.iter() {
-            // Only inspect user/system text; assistant messages may contain previous JSON.
-            if !m.role.eq_ignore_ascii_case("user") && !m.role.eq_ignore_ascii_case("system") {
-                continue;
-            }
-            let t = m.content.to_lowercase();
-            if t.contains("respond with strict json")
-                || t.contains("respond with json only")
-                || t.contains("respond with json")
-                || t.contains("strict json only")
-            {
-                wants_json = true;
-                break;
-            }
-        }
 
         let default_max_output_tokens = crate::helpers::configuration::Config::getenv(
             "LLM_MAX_TOKENS",
@@ -88,11 +67,9 @@ impl LargeLanguageModel for RouterModel {
             .parse()
             .ok();
 
-        let max_output_tokens = options
-            .and_then(|o| o.max_output_tokens)
-            .or(default_max_output_tokens);
-        let temperature = options.and_then(|o| o.temperature).or(default_temperature);
-        let top_p = options.and_then(|o| o.top_p).or(default_top_p);
+        let max_output_tokens = options.max_output_tokens.or(default_max_output_tokens);
+        let temperature = options.temperature.or(default_temperature);
+        let top_p = options.top_p.or(default_top_p);
 
         let req = crate::llm::types::ChatRequest {
             model,
@@ -106,8 +83,8 @@ impl LargeLanguageModel for RouterModel {
             max_output_tokens,
             temperature,
             top_p,
-            response_format: if wants_json {
-                Some(serde_json::json!({"type":"json_object"}))
+            response_format: if options.expected_format == LlmExpectedFormat::JsonObject {
+                Some(ChatResponseFormat::JsonObject)
             } else {
                 None
             },

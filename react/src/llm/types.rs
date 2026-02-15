@@ -6,6 +6,12 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChatResponseFormat {
+    Text,
+    JsonObject,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ChatRequest {
     pub model: String,
@@ -13,7 +19,7 @@ pub struct ChatRequest {
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
-    pub response_format: Option<serde_json::Value>,
+    pub response_format: Option<ChatResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
 }

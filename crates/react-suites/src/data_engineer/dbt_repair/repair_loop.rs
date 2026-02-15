@@ -498,7 +498,11 @@ mod tests {
     }
 
     impl LargeLanguageModel for MockLlm {
-        fn chat(&self, _messages: &[ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             let mut q = self.chat_responses.lock().unwrap();
             if q.is_empty() {
                 return Err("no mock responses remaining".to_string());

@@ -89,7 +89,11 @@ async fn global_semantic_context_is_written_under_semantic_global_key() {
         replies: std::sync::Mutex<Vec<String>>,
     }
     impl LargeLanguageModel for ScriptedLlm {
-        fn chat(&self, _messages: &[react_core::llm::ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            _messages: &[react_core::llm::ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             let mut g = self.replies.lock().map_err(|_| "mutex poisoned".to_string())?;
             if g.is_empty() {
                 return Err("no more replies".to_string());

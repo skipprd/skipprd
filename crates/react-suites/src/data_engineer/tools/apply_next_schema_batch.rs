@@ -14,6 +14,90 @@ use crate::data_engineer::project_files;
 use crate::data_engineer::project_fs;
 use crate::data_engineer::tools::dbt_files;
 
+fn escape_yaml_doc_preamble(s: String) -> String {
+    // serde_yaml may emit a leading `---\n`; keep stored files clean and consistent.
+    s.trim_start_matches("---\n").to_string()
+}
+
+fn strip_where_keys(v: &mut serde_yaml::Value) {
+    // Deterministic sanitization: remove `where:` keys anywhere in the YAML subtree.
+    // This avoids schema-yml validation failures due to referencing *_raw columns that are not present
+    // in the sibling staging SQL output. (Tests are optional; correctness > strictness here.)
+    match v {
+        serde_yaml::Value::Mapping(m) => {
+            m.remove(&serde_yaml::Value::String("where".to_string()));
+            for (_k, vv) in m.iter_mut() {
+                strip_where_keys(vv);
+            }
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for vv in seq.iter_mut() {
+                strip_where_keys(vv);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sanitize_staging_schema_yml_to_allowed_columns(
+    yml_text: &str,
+    model_name: &str,
+    allowed_columns: &[String],
+) -> Result<String, String> {
+    let allowed: std::collections::HashSet<String> =
+        allowed_columns.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let mut root: serde_yaml::Value =
+        serde_yaml::from_str(yml_text).map_err(|e| format!("invalid YAML: {}", e))?;
+
+    // Remove problematic `where:` keys (tests) first.
+    strip_where_keys(&mut root);
+
+    // Filter models[].columns[].name to allowed set for the specific model.
+    let Some(root_map) = root.as_mapping_mut() else {
+        return Ok(yml_text.to_string());
+    };
+    let Some(models) = root_map
+        .get_mut(&serde_yaml::Value::String("models".to_string()))
+        .and_then(|v| v.as_sequence_mut())
+    else {
+        return Ok(yml_text.to_string());
+    };
+
+    for m in models.iter_mut() {
+        let Some(mm) = m.as_mapping_mut() else { continue };
+        let name = mm
+            .get(&serde_yaml::Value::String("name".to_string()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if name != model_name {
+            continue;
+        }
+        let Some(cols) = mm
+            .get_mut(&serde_yaml::Value::String("columns".to_string()))
+            .and_then(|v| v.as_sequence_mut())
+        else {
+            continue;
+        };
+        cols.retain(|c| {
+            let Some(cm) = c.as_mapping() else { return true };
+            let col = cm
+                .get(&serde_yaml::Value::String("name".to_string()))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if col.is_empty() {
+                return false;
+            }
+            allowed.contains(col)
+        });
+    }
+
+    serde_yaml::to_string(&root)
+        .map(escape_yaml_doc_preamble)
+        .map_err(|e| format!("failed to re-serialize YAML: {}", e))
+}
+
 fn parse_dataset_id_3(s: &str) -> Option<(String, String, String)> {
     let parts: Vec<&str> = s.trim().split('.').collect();
     if parts.len() != 3 {
@@ -217,6 +301,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                 &yml_rel,
                 4,
                 Some(LlmCallOptions {
+                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                     temperature: Some(0.05),
                     top_p: Some(1.0),
                     // Schema YAML patches can be large; avoid truncation mid-`new_text`.
@@ -231,6 +316,23 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                     continue;
                 }
             };
+
+            // Deterministic safety net: even with `allowed_columns` grounding, models sometimes invent
+            // column names (e.g. *_norm) that are not actually produced by the sibling SQL. Rather than
+            // failing the whole batch repeatedly, sanitize the YAML to only allowed columns and retry validation.
+            let mut outcome = outcome;
+            if outcome.rel_path.starts_with("models/staging/") && outcome.rel_path.ends_with(".yml") {
+                match sanitize_staging_schema_yml_to_allowed_columns(
+                    &outcome.content,
+                    &model_name,
+                    &allowed_cols,
+                ) {
+                    Ok(s) => outcome.content = s,
+                    Err(_) => {
+                        // If sanitization fails (e.g. invalid YAML), validation will surface the error.
+                    }
+                }
+            }
 
             // Validate schema contract against sibling SQL output columns.
             if let Err(e) =
@@ -425,6 +527,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             expected_rel,
             4,
             Some(LlmCallOptions {
+                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                 temperature: Some(0.05),
                 top_p: Some(1.0),
                 // Schema YAML patches can be large; avoid truncation mid-`new_text`.
@@ -532,7 +635,11 @@ mod tests {
     }
 
     impl LargeLanguageModel for ScriptedLlm {
-        fn chat(&self, _messages: &[ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             let mut g = self.replies.lock().map_err(|_| "mutex poisoned".to_string())?;
             if g.is_empty() {
                 return Err("no more replies".to_string());
@@ -550,7 +657,11 @@ mod tests {
     }
 
     impl LargeLanguageModel for InspectingLlm {
-        fn chat(&self, messages: &[ChatMessage]) -> Result<String, String> {
+        fn chat(
+            &self,
+            messages: &[ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
             // Find the last user message (patch_protocol sends JSON payload as user content).
             let user = messages
                 .iter()
