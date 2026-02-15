@@ -294,6 +294,15 @@ Output STRICT JSON only (exactly one object) with this schema:
 }
 
 Rules:
+- CRITICAL: The planning artifacts you receive (invariants/notes and any implementation_spec) are the authoritative design contract for this phase.
+  - Your primary job is CONFORMANCE REVIEW: does the SQL/YAML implement the provided implementation_spec and obey prohibited_ops?
+  - Do NOT propose changing the contract as part of review. If you believe the contract itself is wrong/ambiguous, record it as a "requires plan change" note (see below) but DO NOT propose an implementation change that deviates from the contract.
+- Conformance-first ordering:
+  1) Identify any plan/spec conformance violations (blockers). These are always high-signal.
+  2) Then (optionally) include at most one additional high-value business-risk observation that does NOT require changing the plan/spec.
+- If you think a finding requires changing the plan/spec, label it explicitly with prefix:
+  - "REQUIRES PLAN CHANGE: ..."
+  and do NOT include an implementation hint for it.
 - High-signal only: do NOT cover every batch item. Report only blocker/high business-risk findings or one small, clearly high-value quick win.
 - If no high-value findings exist for this batch, return:
   - "notes": []
@@ -327,6 +336,15 @@ Output STRICT JSON only (exactly one object) with this schema:
 }
 
 Rules:
+- CRITICAL: The planning artifacts you receive (invariants/notes and any implementation_spec) are the authoritative design contract for this phase.
+  - Your primary job is CONFORMANCE REVIEW: does the SQL/YAML implement the provided implementation_spec and obey prohibited_ops?
+  - Do NOT propose changing the contract as part of review. If you believe the contract itself is wrong/ambiguous, record it as a "requires plan change" note (see below) but DO NOT propose an implementation change that deviates from the contract.
+- Conformance-first ordering:
+  1) Identify any plan/spec conformance violations (blockers). These are always high-signal.
+  2) Then (optionally) include at most one additional high-value business-risk observation that does NOT require changing the plan/spec.
+- If you think a finding requires changing the plan/spec, label it explicitly with prefix:
+  - "REQUIRES PLAN CHANGE: ..."
+  and do NOT include an implementation hint for it.
 - High-signal only: do NOT cover every batch item. Report only blocker/high business-risk findings or one small, clearly high-value quick win.
 - If no high-value findings exist for this batch, return:
   - "notes": []
@@ -359,11 +377,18 @@ You must output STRICT JSON only (exactly one object) with this schema:
 }
 
 The final_review_text MUST start with:
-META:{"actionable":true|false,"dataset_ids":[...],"tier":"silver"|"gold"|"unknown"}
+META:{"actionable":true|false,"requires_plan_change":true|false,"dataset_ids":[...],"tier":"silver"|"gold"|"unknown"}
 
 Then a blank line, then the human review body.
 
-Set actionable=true only for blocker/high issues or a small high-value fix worth doing now.
+Interpretation rules (CRITICAL):
+- actionable=true means: "a concrete implementation change is required NOW to match the approved plan/spec or fix a critical correctness issue."
+  - If actionable=true, requires_plan_change MUST be false unless you are explicitly saying the plan/spec itself must change.
+- requires_plan_change=true means: "the plan/spec is wrong/ambiguous and must be revised before implementation can proceed safely."
+  - If requires_plan_change=true, the review body MUST be limited to describing the plan defect and the smallest fix to the plan.
+  - Do NOT propose implementation edits that deviate from the current plan/spec.
+
+Set actionable=true only for conformance violations (implementation does not match plan/spec) or a small high-value fix that does NOT require changing the plan/spec.
 If feedback is substantially unchanged from prior iteration, set actionable=false.
 
 Unify requirements (CRITICAL):
@@ -391,11 +416,18 @@ You must output STRICT JSON only (exactly one object) with this schema:
 }
 
 The final_review_text MUST start with:
-META:{\"actionable\":true|false,\"dataset_ids\":[...],\"tier\":\"silver\"|\"gold\"|\"unknown\"}
+META:{\"actionable\":true|false,\"requires_plan_change\":true|false,\"dataset_ids\":[...],\"tier\":\"silver\"|\"gold\"|\"unknown\"}
 
 Then a blank line, then the human review body.
 
-Set actionable=true only for blocker/high issues or a small high-value fix worth doing now.
+Interpretation rules (CRITICAL):
+- actionable=true means: "a concrete implementation change is required NOW to match the approved plan/spec or fix a critical correctness issue."
+  - If actionable=true, requires_plan_change MUST be false unless you are explicitly saying the plan/spec itself must change.
+- requires_plan_change=true means: "the plan/spec is wrong/ambiguous and must be revised before implementation can proceed safely."
+  - If requires_plan_change=true, the review body MUST be limited to describing the plan defect and the smallest fix to the plan.
+  - Do NOT propose implementation edits that deviate from the current plan/spec.
+
+Set actionable=true only for conformance violations (implementation does not match plan/spec) or a small high-value fix that does NOT require changing the plan/spec.
 If feedback is substantially unchanged from prior iteration, set actionable=false.
 
 Unify requirements (CRITICAL):
@@ -748,6 +780,7 @@ async fn persist_review_final_to_plan(
     plan_kind: &str,
     plan_key: &str,
     actionable: bool,
+    requires_plan_change: bool,
     tier: String,
     dataset_ids: Vec<String>,
     text: String,
@@ -772,6 +805,7 @@ async fn persist_review_final_to_plan(
                     "final".to_string(),
                     serde_json::json!({
                         "actionable": actionable,
+                        "requires_plan_change": requires_plan_change,
                         "tier": tier,
                         "dataset_ids": dataset_ids,
                         "text": text,
@@ -800,6 +834,7 @@ async fn persist_review_final_to_plan(
                     "final".to_string(),
                     serde_json::json!({
                         "actionable": actionable,
+                        "requires_plan_change": requires_plan_change,
                         "tier": tier,
                         "dataset_ids": dataset_ids,
                         "text": text,
@@ -812,17 +847,21 @@ async fn persist_review_final_to_plan(
     }
 }
 
-fn parse_review_meta_line(text: &str) -> (bool, String, Vec<String>) {
+fn parse_review_meta_line(text: &str) -> (bool, bool, String, Vec<String>) {
     let first = text.lines().next().unwrap_or("").trim();
     if !first.starts_with("META:") {
-        return (false, "unknown".to_string(), vec![]);
+        return (false, false, "unknown".to_string(), vec![]);
     }
     let json_text = first.trim_start_matches("META:").trim();
     let Ok(v) = serde_json::from_str::<Value>(json_text) else {
-        return (false, "unknown".to_string(), vec![]);
+        return (false, false, "unknown".to_string(), vec![]);
     };
     let actionable = v
         .get("actionable")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let requires_plan_change = v
+        .get("requires_plan_change")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
     let tier = v
@@ -839,7 +878,7 @@ fn parse_review_meta_line(text: &str) -> (bool, String, Vec<String>) {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    (actionable, tier, dataset_ids)
+    (actionable, requires_plan_change, tier, dataset_ids)
 }
 
 fn resolve_cleanse_batch_paths(
@@ -1603,7 +1642,8 @@ pub async fn run_batched_review(
     }
 
     // Persist full review text to storage; keep thread steps small (store only a reference).
-    let (actionable, tier, dataset_ids) = parse_review_meta_line(&final_review_text);
+    let (actionable, requires_plan_change, tier, dataset_ids) =
+        parse_review_meta_line(&final_review_text);
     let review_sha256 = react_core::llm_observability::sha256_hex_str(&final_review_text);
     let review_bytes = final_review_text.as_bytes().len() as u64;
     let review_key = {
@@ -1650,6 +1690,7 @@ pub async fn run_batched_review(
             pk,
             plan_key,
             actionable,
+            requires_plan_change,
             tier,
             dataset_ids,
             final_review_text.clone(),

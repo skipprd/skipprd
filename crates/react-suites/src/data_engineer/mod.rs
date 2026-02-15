@@ -246,6 +246,8 @@ struct ReviewMeta {
     #[serde(default)]
     actionable: bool,
     #[serde(default)]
+    requires_plan_change: bool,
+    #[serde(default)]
     dataset_ids: Vec<String>,
     #[serde(default)]
     tier: String, // "silver"|"gold"|"unknown"
@@ -1337,7 +1339,12 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
             react_core::session::ThreadStep::Phase {
                 reason_code: Some(rc),
                 ..
-            } => rc == "review_actionable_true" || rc == "review_actionable_false",
+            } => {
+                rc == "review_actionable_true"
+                    || rc == "review_actionable_false"
+                    || rc == "review_fix_required"
+                    || rc == "review_requires_plan_change_true"
+            }
             _ => false,
         }) {
             let rd = match step {
@@ -3069,7 +3076,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             q.push('\n');
                         }
                     }
-                    // If this plan phase was entered because review produced actionable feedback,
+                    // If this plan phase was entered because review explicitly required a plan change,
                     // include that feedback verbatim to ground the new plan.
                     if let Some(ref l) = log {
                         if let Some(step) = l.steps.iter().rev().find(|s| match s {
@@ -3086,13 +3093,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 } => (reason_code.as_deref().unwrap_or(""), reason_detail.as_ref()),
                                 _ => ("", None),
                             };
-                            if reason_code == "review_actionable_true" {
-                                if let Some(idx) = actionable_review_entry_step_idx {
-                                    q.push_str(&format!(
-                                        "\nReview entry step idx: {}\nIMPORTANT: Any NEW checklist items introduced due to this review MUST set origin=\"review_actionable\" and origin_step_idx={}.\n",
-                                        idx, idx
-                                    ));
-                                }
+                            if reason_code == "review_requires_plan_change_true" {
                                 if let Some(key) = reason_detail
                                     .and_then(|v| v.get("review_ref"))
                                     .and_then(|v| v.get("key"))
@@ -3103,7 +3104,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                     if let Ok(bytes) = actx.storage.get_bytes(&key).await {
                                         let txt = String::from_utf8_lossy(&bytes).to_string();
                                         if !txt.trim().is_empty() {
-                                            q.push_str("\nReview feedback to incorporate in this plan:\n");
+                                            q.push_str("\nReview feedback requiring plan change (incorporate into this plan):\n");
                                             q.push_str(txt.trim());
                                             q.push('\n');
                                         }
@@ -5273,6 +5274,43 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             }
                         }
                     }
+                    // If we re-entered authoring due to review feedback, inject the full review text (by ref)
+                    // so the agent can address it in implementation without reopening the plan.
+                    if let Some(ref l) = log {
+                        if let Some(step) = l.steps.iter().rev().find(|s| match s {
+                            react_core::session::ThreadStep::Phase { phase: p, .. } => {
+                                p == phase.as_str()
+                            }
+                            _ => false,
+                        }) {
+                            let (reason_code, reason_detail) = match step {
+                                react_core::session::ThreadStep::Phase {
+                                    reason_code,
+                                    reason_detail,
+                                    ..
+                                } => (reason_code.as_deref().unwrap_or(""), reason_detail.as_ref()),
+                                _ => ("", None),
+                            };
+                            if reason_code == "review_fix_required" {
+                                if let Some(key) = reason_detail
+                                    .and_then(|v| v.get("review_ref"))
+                                    .and_then(|v| v.get("key"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    if let Ok(bytes) = actx.storage.get_bytes(&key).await {
+                                        let txt = String::from_utf8_lossy(&bytes).to_string();
+                                        if !txt.trim().is_empty() {
+                                            q.push_str("\n\nPRIOR REVIEW FEEDBACK (must address by editing implementation; do NOT change the approved plan/spec):\n");
+                                            q.push_str(txt.trim());
+                                            q.push('\n');
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if hard_mutation_repair_mode {
                         q.push_str("\n\nConstraint: your next steps must APPLY A MUTATING FIX before attempting dbt_validate again.");
                     }
@@ -6184,6 +6222,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
 
                     let meta = Self::parse_review_meta(&answer).unwrap_or(ReviewMeta {
                         actionable: false,
+                        requires_plan_change: false,
                         dataset_ids: vec![],
                         tier: "unknown".to_string(),
                     });
@@ -6200,6 +6239,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         text: answer.clone(),
                         meta: Some(serde_json::json!({
                             "actionable": meta.actionable,
+                            "requires_plan_change": meta.requires_plan_change,
                             "dataset_ids": meta.dataset_ids.clone(),
                             "tier": meta.tier.clone(),
                         })),
@@ -6224,6 +6264,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 "review_phase": phase.as_str(),
                                 "meta": {
                                     "actionable": meta.actionable,
+                                    "requires_plan_change": meta.requires_plan_change,
                                     "dataset_ids": meta.dataset_ids,
                                     "tier": meta.tier,
                                 },
@@ -6235,12 +6276,45 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         continue;
                     }
 
-                    // Actionable review -> route back to appropriate authoring phase.
+                    // Actionable review:
+                    // - If the reviewer explicitly says the PLAN must change, route back to planning.
+                    // - Otherwise, treat as an IMPLEMENTATION fix and route back to authoring.
+                    if meta.requires_plan_change {
+                        let tier = meta.tier.trim().to_lowercase();
+                        let back = if tier == "silver" {
+                            Phase::CleansePlan
+                        } else {
+                            Phase::ModelPlan
+                        };
+                        control_flow::append_phase_with_reason(
+                            &thread_store,
+                            thread_id,
+                            Some("agent".to_string()),
+                            Some(phase),
+                            back,
+                            Some("review_requires_plan_change_true"),
+                            Some(serde_json::json!({
+                                "review_phase": phase.as_str(),
+                                "meta": {
+                                    "actionable": meta.actionable,
+                                    "requires_plan_change": meta.requires_plan_change,
+                                    "dataset_ids": meta.dataset_ids,
+                                    "tier": meta.tier,
+                                },
+                                "review_ref": review_ref,
+                                "trigger_step_idx": trigger_step_idx,
+                            })),
+                        )
+                        .await;
+                        continue;
+                    }
+
+                    // Default: conformance/correctness fix in implementation (plan remains authoritative).
                     let tier = meta.tier.trim().to_lowercase();
                     let back = if tier == "silver" {
-                        Phase::CleansePlan
+                        Phase::CleanseAuthor
                     } else {
-                        Phase::ModelPlan
+                        Phase::ModelAuthor
                     };
                     control_flow::append_phase_with_reason(
                         &thread_store,
@@ -6248,11 +6322,12 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                         Some("agent".to_string()),
                         Some(phase),
                         back,
-                        Some("review_actionable_true"),
+                        Some("review_fix_required"),
                         Some(serde_json::json!({
                             "review_phase": phase.as_str(),
                             "meta": {
                                 "actionable": meta.actionable,
+                                "requires_plan_change": meta.requires_plan_change,
                                 "dataset_ids": meta.dataset_ids,
                                 "tier": meta.tier,
                             },
