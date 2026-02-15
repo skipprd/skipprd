@@ -796,6 +796,20 @@ mod tests {
                 dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
                 expected_model_path: Some("models/staging/stg_test_raw_raw_customers.sql".to_string()),
                 invariants: vec![],
+                implementation_spec: plan::CleanseImplementationSpec {
+                    spec_version: 1,
+                    row_preserving: true,
+                    output_fields: vec![plan::OutputFieldSpec {
+                        name: "customer_id_raw".to_string(),
+                        kind: plan::FieldKind::Raw,
+                        source_columns: vec!["customer_id".to_string()],
+                        expression: "customer_id as customer_id_raw (raw)".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    prohibited_ops: vec![],
+                },
                 status: plan::TaskStatus::InProgress,
                 checklist: vec![
                     plan::PlanChecklistItem {
@@ -900,6 +914,20 @@ mod tests {
                 dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
                 expected_model_path: Some("models/staging/stg_test_raw_raw_customers.sql".to_string()),
                 invariants: vec![],
+                implementation_spec: plan::CleanseImplementationSpec {
+                    spec_version: 1,
+                    row_preserving: true,
+                    output_fields: vec![plan::OutputFieldSpec {
+                        name: "customer_id_raw".to_string(),
+                        kind: plan::FieldKind::Raw,
+                        source_columns: vec!["customer_id".to_string()],
+                        expression: "customer_id as customer_id_raw (raw)".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    prohibited_ops: vec![],
+                },
                 status: plan::TaskStatus::InProgress,
                 checklist: vec![
                     plan::PlanChecklistItem {
@@ -1007,6 +1035,23 @@ mod tests {
                 inputs: vec!["stg_test_raw_raw_customers".to_string()],
                 expected_model_path: Some("models/marts/dim_customers.sql".to_string()),
                 invariants: vec![],
+                implementation_spec: plan::ModelImplementationSpec {
+                    spec_version: 1,
+                    grain: "1 row per customer".to_string(),
+                    inputs: vec!["stg_test_raw_raw_customers".to_string()],
+                    joins: vec![],
+                    metrics: vec![],
+                    output_fields: vec![plan::OutputFieldSpec {
+                        name: "customer_id".to_string(),
+                        kind: plan::FieldKind::Clean,
+                        source_columns: vec!["customer_id".to_string()],
+                        expression: "customer_id passthrough".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    assumptions: vec![],
+                },
                 status: plan::TaskStatus::InProgress,
                 checklist: vec![
                     plan::PlanChecklistItem {
@@ -1116,6 +1161,23 @@ mod tests {
                 inputs: vec!["stg_test_raw_raw_customers".to_string()],
                 expected_model_path: Some(sql_rel.to_string()),
                 invariants: vec![],
+                implementation_spec: plan::ModelImplementationSpec {
+                    spec_version: 1,
+                    grain: "1 row per customer".to_string(),
+                    inputs: vec!["stg_test_raw_raw_customers".to_string()],
+                    joins: vec![],
+                    metrics: vec![],
+                    output_fields: vec![plan::OutputFieldSpec {
+                        name: "customer_id".to_string(),
+                        kind: plan::FieldKind::Clean,
+                        source_columns: vec!["customer_id".to_string()],
+                        expression: "customer_id passthrough".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    assumptions: vec![],
+                },
                 status: plan::TaskStatus::InProgress,
                 checklist: vec![
                     plan::PlanChecklistItem {
@@ -1224,6 +1286,23 @@ mod tests {
                 inputs: vec!["stg_test_raw_raw_customers".to_string()],
                 expected_model_path: Some(sql_rel.to_string()),
                 invariants: vec![],
+                implementation_spec: plan::ModelImplementationSpec {
+                    spec_version: 1,
+                    grain: "1 row per customer".to_string(),
+                    inputs: vec!["stg_test_raw_raw_customers".to_string()],
+                    joins: vec![],
+                    metrics: vec![],
+                    output_fields: vec![plan::OutputFieldSpec {
+                        name: "customer_id".to_string(),
+                        kind: plan::FieldKind::Clean,
+                        source_columns: vec!["customer_id".to_string()],
+                        expression: "customer_id passthrough".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    assumptions: vec![],
+                },
                 status: plan::TaskStatus::InProgress,
                 checklist: vec![
                     plan::PlanChecklistItem {
@@ -1318,6 +1397,23 @@ mod tests {
                 inputs: vec!["stg_test_raw_raw_customers".to_string()],
                 expected_model_path: Some("models/marts/dim_customers.sql".to_string()),
                 invariants: vec![],
+                implementation_spec: plan::ModelImplementationSpec {
+                    spec_version: 1,
+                    grain: "1 row per customer".to_string(),
+                    inputs: vec!["stg_test_raw_raw_customers".to_string()],
+                    joins: vec![],
+                    metrics: vec![],
+                    output_fields: vec![plan::OutputFieldSpec {
+                        name: "customer_id".to_string(),
+                        kind: plan::FieldKind::Clean,
+                        source_columns: vec!["customer_id".to_string()],
+                        expression: "customer_id passthrough".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    assumptions: vec![],
+                },
                 status: plan::TaskStatus::InProgress,
                 checklist: vec![
                     plan::PlanChecklistItem {

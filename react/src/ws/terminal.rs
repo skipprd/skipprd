@@ -1433,6 +1433,15 @@ fn phase_detail_summary(t: &ThreadView, ph: &str) -> Option<String> {
 fn phase_reason_summary(t: &ThreadView, ph: &str) -> Option<String> {
     let rc = t.phase_reason_code.get(ph).map(|s| s.as_str()).unwrap_or("");
     let rd = t.phase_reason_detail.get(ph);
+    let trunc = |s: &str, max_chars: usize| -> String {
+        let s = s.trim();
+        if s.chars().count() <= max_chars {
+            return s.to_string();
+        }
+        let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    };
     match rc {
         "review_actionable_true" => {
             let review_phase = rd
@@ -1480,6 +1489,71 @@ fn phase_reason_summary(t: &ThreadView, ph: &str) -> Option<String> {
             Some(format!(
                 "plan update: {touched} touched, +{added}/-{removed}, {review_items} review items"
             ))
+        }
+        "phase_blocked" => {
+            let kind = rd
+                .and_then(|v| v.get("kind"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("blocked");
+            match kind {
+                "plan_design_critique" => {
+                    let blockers_n = rd
+                        .and_then(|v| v.get("blockers"))
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0usize);
+                    let fixes_n = rd
+                        .and_then(|v| v.get("fixes"))
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0usize);
+                    let example = rd
+                        .and_then(|v| v.get("blockers"))
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_str())
+                        .map(|s| trunc(s, 72));
+                    let round = rd.and_then(|v| v.get("round")).and_then(|v| v.as_u64());
+                    let max_rounds = rd
+                        .and_then(|v| v.get("max_rounds"))
+                        .and_then(|v| v.as_u64());
+                    let r = match (round, max_rounds) {
+                        (Some(r), Some(m)) => format!(", round {}/{}", r, m),
+                        _ => "".to_string(),
+                    };
+                    let ex = example.map(|s| format!(" — e.g. {}", s)).unwrap_or_default();
+                    Some(format!(
+                        "blocked: design critique ({} blocker{}, {} fix{}){}{}",
+                        blockers_n,
+                        if blockers_n == 1 { "" } else { "s" },
+                        fixes_n,
+                        if fixes_n == 1 { "" } else { "es" },
+                        r,
+                        ex
+                    ))
+                }
+                "plan_semantic_invalid" => {
+                    let errors_n = rd
+                        .and_then(|v| v.get("errors"))
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0usize);
+                    let example = rd
+                        .and_then(|v| v.get("errors"))
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_str())
+                        .map(|s| trunc(s, 72));
+                    let ex = example.map(|s| format!(" — e.g. {}", s)).unwrap_or_default();
+                    Some(format!(
+                        "blocked: plan semantics ({} error{}){}",
+                        errors_n,
+                        if errors_n == 1 { "" } else { "s" },
+                        ex
+                    ))
+                }
+                other => Some(format!("blocked: {}", other)),
+            }
         }
         _ => None,
     }
@@ -1842,7 +1916,7 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
         // Attach compact detail summaries for:
         // - the current phase (live progress/reasoning), and
         // - completed (historical) phases.
-        if !is_future && (ph == &cur || item_status == Some("ok") || done.contains(ph)) {
+        if !is_future && (ph == &cur || blocked || item_status == Some("ok") || done.contains(ph)) {
             let mut parts: Vec<String> = Vec::new();
             if let Some(detail) = phase_detail_summary(t, ph.as_str()) {
                 parts.push(detail);

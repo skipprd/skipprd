@@ -18,6 +18,20 @@ Plan output rules (CRITICAL):
       "dataset_id": "<catalog>.<schema>.<table>",
       "expected_model_path": "models/staging/<...>.sql",
       "invariants": ["..."],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "prohibited_ops": ["filtering", "deduplication", "grain_enforcement"],
+        "output_fields": [{
+          "name": "<output_column_name>",
+          "kind": "raw|clean|derived|quality_flag",
+          "source_columns": ["<source_col>", "..."],
+          "expression": "<imperative transform contract>",
+          "data_type": "<optional type string or null>",
+          "nullable": true,
+          "description": "<optional 1-line meaning>"
+        }, ...]
+      },
       "status":"pending",
       "checklist": [{
         "checklist_item_id": "sql_model|schema_contract|validate|...",
@@ -53,6 +67,15 @@ Plan output rules (CRITICAL):
   - Silver/staging is a **row-preserving cleanse layer**. Do NOT plan any grain enforcement, deduplication, or row filtering to satisfy keys/tests.
   - Your invariants should focus on column preservation, deterministic cleansing, safe casting/parsing, and explicit quality flags (has_*, is_valid_*).
   - Do NOT include invariants like “Grain: 1 row per X” or “PK must be unique/non-null” for silver; those belong in gold/core+marts.
+- Design-first requirement (CRITICAL):
+  - The `implementation_spec` is the authoritative design contract. Authoring should be able to implement without inventing new fields/logic.
+  - `implementation_spec.output_fields` MUST include:
+    - Raw fields (as `*_raw` where the source type is string-ish or ambiguous).
+    - Clean/canonical fields (trim/lower/standardize).
+    - Derived typed fields (e.g. parsed timestamps) only when grounded.
+    - Quality flags (e.g. has_*, is_valid_*) derived from the canonical field (no duplicated logic).
+  - Keep `expression` concise and imperative (what to do), not a long SQL block.
+  - Avoid bloating: cap to ~30 output_fields per dataset unless truly necessary.
 - Review-feedback triage (CRITICAL, when review feedback is present in the user message/context):
   - Treat review comments as proposals, not commands. Incorporate only blocker/high-risk items, or one small high-value quick win.
   - Do NOT create checklist work for medium/low nits, stylistic cleanups, or repeated feedback with no new evidence.
@@ -66,8 +89,8 @@ Discovery requirements (CRITICAL - do these before finalizing the plan):
 - For each dataset in your FIRST batch, you MUST ground your invariants with actual evidence:
   - sql_schema(table) to see columns/types
   - AND at least one of:
-    - sql_stats (for candidate id/time fields), OR
-    - sql_sample (top values for key fields), OR
+    - sql_stats (for candidate id/time fields; requires args.field), OR
+    - sql_sample (top values for key fields; requires args.field), OR
     - run_sql probes (e.g., row counts, null rates, timestamp parseability)
 - Your plan MUST reference the CURRENT project state (do not assume a blank dbt project).
 
@@ -79,6 +102,9 @@ Tool argument shapes (CRITICAL):
 - sql_schema:
   - list tables: {"table": null} (omit table arg) or {}
   - describe table: {"table":"AwsDataCatalog.schema.table"}
+- sql_stats / sql_sample:
+  - Both require {"table":"<fqn>","field":"<col_name>"}.
+  - Choose 1-3 candidate fields per first-batch dataset (id/time/email/status) based on sql_schema output.
 
 Do NOT include any summary prose in final.payload; put only the JSON plan object there.
 "#
@@ -108,6 +134,32 @@ Plan output rules (CRITICAL):
       "inputs":["stg_*", ...],
       "expected_model_path":"models/<folder>/<name>.sql",
       "invariants":["..."],
+      "implementation_spec": {
+        "spec_version": 1,
+        "grain": "<1 sentence grain contract>",
+        "inputs": ["stg_*", "..."],
+        "joins": [{
+          "right_model": "stg_*",
+          "join_type": "left|inner|right|full",
+          "on": ["<left_key> = <right_key>", "..."],
+          "cardinality": "<optional many_to_one|one_to_many|...>"
+        }],
+        "metrics": [{
+          "name": "<metric_name>",
+          "definition": "<1-line formula + inclusion/exclusion rules>",
+          "caveats": ["<optional>", "..."]
+        }],
+        "output_fields": [{
+          "name": "<output_column_name>",
+          "kind": "raw|clean|derived|quality_flag",
+          "source_columns": ["<input_col>", "..."],
+          "expression": "<imperative transform contract>",
+          "data_type": "<optional type string or null>",
+          "nullable": true,
+          "description": "<optional 1-line meaning>"
+        }],
+        "assumptions": ["<assumption needing probe>", "..."]
+      },
       "status":"pending",
       "checklist": [{
         "checklist_item_id": "sql_model|schema_contract|validate|...",
@@ -135,6 +187,10 @@ Plan output rules (CRITICAL):
   - Each task.goal MUST state the business question it answers (1 sentence) and the primary consumer (e.g., finance/ops/growth).
   - Each task.invariants MUST include concrete metric definitions + caveats grounded in available staging columns (e.g., what "revenue" means; inclusion/exclusion rules).
   - If domain meaning is not explicit in available columns, record assumptions explicitly (as invariants) and add a validate checklist.details line describing the smallest probe to confirm/refute (null rate, distinctness, top values).
+- Design-first requirement (CRITICAL):
+  - `implementation_spec` is the authoritative design contract. It must be explicit enough that authoring does not invent joins/metrics/fields.
+  - `implementation_spec.grain` and `implementation_spec.metrics` are required for business-usable models.
+  - Keep `implementation_spec.output_fields` bounded; prefer describing computed metrics over enumerating every passthrough column.
 - Conciseness caps (CRITICAL - keep payload small to avoid truncation/invalid JSON):
   - `tasks[].goal`: max 1 sentence, max 180 characters.
   - `tasks[].invariants`: 3–6 items max; each invariant must be a single line, max 180 characters.

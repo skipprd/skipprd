@@ -228,6 +228,105 @@ pub struct PlanWorkGroup {
     pub depends_on_group_ids: Option<Vec<String>>,
 }
 
+// -----------------------
+// Design-first plan spec
+// -----------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldKind {
+    Raw,
+    Clean,
+    Derived,
+    QualityFlag,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputFieldSpec {
+    /// Output column name.
+    pub name: String,
+    /// The role of the field in the model interface.
+    pub kind: FieldKind,
+    /// Upstream source columns (or prior-stage columns) this field depends on.
+    #[serde(default)]
+    pub source_columns: Vec<String>,
+    /// A concise, imperative expression or transformation contract.
+    /// This is not required to be dialect-perfect SQL; it is the design contract that authoring
+    /// should implement faithfully.
+    pub expression: String,
+    /// Optional intended type (best-effort). Prefer empty over guessing.
+    #[serde(default)]
+    pub data_type: Option<String>,
+    /// Whether the field is allowed to be NULL in the output.
+    #[serde(default)]
+    pub nullable: bool,
+    /// Optional one-line meaning / usage guidance.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanseImplementationSpec {
+    /// Schema version for the spec itself (not the overall plan). Enables future evolution.
+    pub spec_version: i64,
+    /// Row-preserving is mandatory for SILVER/staging.
+    pub row_preserving: bool,
+    /// Explicit output field design for this staging model.
+    pub output_fields: Vec<OutputFieldSpec>,
+    /// Optional explicit guardrails to prevent accidental grain enforcement (e.g. "no filtering", "no dedup").
+    #[serde(default)]
+    pub prohibited_ops: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JoinSpec {
+    pub right_model: String,
+    /// join type: inner|left|right|full (design intent)
+    pub join_type: String,
+    /// Join keys contract. Example: ["customer_id = customer_id"] or ["order_id = order_id"].
+    pub on: Vec<String>,
+    /// Optional cardinality expectation (e.g. "many_to_one", "one_to_many").
+    #[serde(default)]
+    pub cardinality: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricSpec {
+    pub name: String,
+    /// One-line definition (formula + inclusion/exclusion rules).
+    pub definition: String,
+    /// Optional caveats/assumptions (bounded).
+    #[serde(default)]
+    pub caveats: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelImplementationSpec {
+    pub spec_version: i64,
+    /// Grain contract, e.g. "1 row per order_id".
+    pub grain: String,
+    /// Inputs should align with task.inputs (stg_* only).
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    /// Join contract for composing the model.
+    #[serde(default)]
+    pub joins: Vec<JoinSpec>,
+    /// Metric definitions for business use.
+    #[serde(default)]
+    pub metrics: Vec<MetricSpec>,
+    /// Expected output schema contract (columns + semantics).
+    #[serde(default)]
+    pub output_fields: Vec<OutputFieldSpec>,
+    /// Assumptions that require validation probes before downstream reliance.
+    #[serde(default)]
+    pub assumptions: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CleanseTask {
@@ -240,6 +339,8 @@ pub struct CleanseTask {
     /// This should be grounded in schema + stats + sample probes.
     #[serde(default)]
     pub invariants: Vec<String>,
+    /// Design-first implementation contract for this staging model.
+    pub implementation_spec: CleanseImplementationSpec,
     #[serde(default)]
     pub status: TaskStatus,
     #[serde(default)]
@@ -285,6 +386,8 @@ pub struct ModelTask {
     /// High-signal planning output: grain, join keys, time semantics, uniqueness expectations.
     #[serde(default)]
     pub invariants: Vec<String>,
+    /// Design-first implementation contract for this model.
+    pub implementation_spec: ModelImplementationSpec,
     #[serde(default)]
     pub status: TaskStatus,
     #[serde(default)]
@@ -703,6 +806,25 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
             errors.push("task.dataset_id is empty".to_string());
             continue;
         }
+        // Design-first requirement: runnable tasks must have explicit implementation spec.
+        if t.implementation_spec.spec_version <= 0 {
+            errors.push(format!(
+                "{}: implementation_spec.spec_version must be >0",
+                t.dataset_id
+            ));
+        }
+        if !t.implementation_spec.row_preserving {
+            errors.push(format!(
+                "{}: implementation_spec.row_preserving must be true for cleanse/silver",
+                t.dataset_id
+            ));
+        }
+        if t.implementation_spec.output_fields.is_empty() {
+            errors.push(format!(
+                "{}: implementation_spec.output_fields is empty (design detail required)",
+                t.dataset_id
+            ));
+        }
         let sql_status = checklist_status(&t.checklist, CHECKLIST_SQL_MODEL);
         if is_runnable_checklist_status(sql_status) {
             let missing_path = t
@@ -789,6 +911,25 @@ pub fn validate_model_plan_semantics(
         if t.name.trim().is_empty() {
             errors.push("task.name is empty".to_string());
             continue;
+        }
+        // Design-first requirement: runnable tasks must have explicit implementation spec.
+        if t.implementation_spec.spec_version <= 0 {
+            errors.push(format!(
+                "{}: implementation_spec.spec_version must be >0",
+                t.name
+            ));
+        }
+        if t.implementation_spec.grain.trim().is_empty() {
+            errors.push(format!(
+                "{}: implementation_spec.grain is empty (design detail required)",
+                t.name
+            ));
+        }
+        if t.implementation_spec.output_fields.is_empty() && t.implementation_spec.metrics.is_empty() {
+            errors.push(format!(
+                "{}: implementation_spec must include output_fields and/or metrics (design detail required)",
+                t.name
+            ));
         }
         let sql_status = checklist_status(&t.checklist, CHECKLIST_SQL_MODEL);
         if is_runnable_checklist_status(sql_status) {
@@ -2965,6 +3106,99 @@ mod tests {
         ]
     }
 
+    fn dummy_cleanse_spec() -> CleanseImplementationSpec {
+        CleanseImplementationSpec {
+            spec_version: 1,
+            row_preserving: true,
+            output_fields: vec![OutputFieldSpec {
+                name: "id_raw".to_string(),
+                kind: FieldKind::Raw,
+                source_columns: vec!["id".to_string()],
+                expression: "id as id_raw (raw)".to_string(),
+                data_type: None,
+                nullable: true,
+                description: None,
+            }],
+            prohibited_ops: vec![],
+        }
+    }
+
+    fn dummy_model_spec() -> ModelImplementationSpec {
+        ModelImplementationSpec {
+            spec_version: 1,
+            grain: "1 row per id".to_string(),
+            inputs: vec!["stg_x".to_string()],
+            joins: vec![],
+            metrics: vec![],
+            output_fields: vec![OutputFieldSpec {
+                name: "id".to_string(),
+                kind: FieldKind::Clean,
+                source_columns: vec!["id".to_string()],
+                expression: "id passthrough".to_string(),
+                data_type: None,
+                nullable: true,
+                description: None,
+            }],
+            assumptions: vec![],
+        }
+    }
+
+    #[test]
+    fn validate_cleanse_plan_semantics_rejects_missing_design_spec_details() {
+        let mut bad_spec = dummy_cleanse_spec();
+        bad_spec.output_fields = vec![];
+        let plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![CleanseTask {
+                dataset_id: "a.b.c".to_string(),
+                expected_model_path: Some("models/staging/stg_b_c.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: bad_spec,
+                status: TaskStatus::Pending,
+                checklist: std_checklist("Author staging SQL"),
+            }],
+            batches: vec![vec!["a.b.c".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        let v = validate_cleanse_plan_semantics(&plan);
+        assert!(!v.ok);
+        assert!(v.errors.iter().any(|e| e.contains("implementation_spec.output_fields is empty")));
+    }
+
+    #[test]
+    fn validate_model_plan_semantics_rejects_missing_grain_in_design_spec() {
+        let mut bad_spec = dummy_model_spec();
+        bad_spec.grain = "".to_string();
+        let plan = ModelPlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![ModelTask {
+                name: "m".to_string(),
+                folder: "marts".to_string(),
+                goal: "g".to_string(),
+                inputs: vec!["stg_x".to_string()],
+                expected_model_path: Some("models/marts/m.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: bad_spec,
+                status: TaskStatus::Pending,
+                checklist: std_checklist("Author gold SQL"),
+            }],
+            batches: vec![vec!["m".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        let allowed = std::collections::BTreeSet::from(["stg_x".to_string()]);
+        let v = validate_model_plan_semantics(&plan, Some(&allowed));
+        assert!(!v.ok);
+        assert!(v.errors.iter().any(|e| e.contains("implementation_spec.grain is empty")));
+    }
+
     fn status_of(items: &[PlanChecklistItem], id: &str) -> ChecklistItemStatus {
         items
             .iter()
@@ -2984,6 +3218,7 @@ mod tests {
                     dataset_id: "a.b.c".to_string(),
                     expected_model_path: None,
                     invariants: vec![],
+                    implementation_spec: dummy_cleanse_spec(),
                     status: TaskStatus::Pending,
                     checklist: std_checklist("Author staging SQL"),
                 },
@@ -2991,6 +3226,7 @@ mod tests {
                     dataset_id: "d.e.f".to_string(),
                     expected_model_path: None,
                     invariants: vec![],
+                    implementation_spec: dummy_cleanse_spec(),
                     status: TaskStatus::Pending,
                     checklist: std_checklist("Author staging SQL"),
                 },
@@ -3049,6 +3285,7 @@ mod tests {
                     inputs: vec!["stg_x".to_string()],
                     expected_model_path: None,
                     invariants: vec![],
+                    implementation_spec: dummy_model_spec(),
                     status: TaskStatus::Pending,
                     checklist: std_checklist("Author gold SQL"),
                 },
@@ -3059,6 +3296,7 @@ mod tests {
                     inputs: vec!["stg_y".to_string()],
                     expected_model_path: None,
                     invariants: vec![],
+                    implementation_spec: dummy_model_spec(),
                     status: TaskStatus::Pending,
                     checklist: std_checklist("Author gold SQL"),
                 },
@@ -3104,6 +3342,7 @@ mod tests {
                 dataset_id: "a.b.c".to_string(),
                 expected_model_path: None,
                 invariants: vec![],
+                implementation_spec: dummy_cleanse_spec(),
                 status: TaskStatus::Pending,
                 checklist: vec![
                     PlanChecklistItem {
@@ -3171,6 +3410,7 @@ mod tests {
                 dataset_id: "a.b.c".to_string(),
                 expected_model_path: None,
                 invariants: vec![],
+                implementation_spec: dummy_cleanse_spec(),
                 status: TaskStatus::Pending,
                 checklist: vec![
                     PlanChecklistItem {
@@ -3238,6 +3478,7 @@ mod tests {
                     inputs: vec!["stg_test_raw_raw_customers".to_string()],
                     expected_model_path: None,
                     invariants: vec![],
+                    implementation_spec: dummy_model_spec(),
                     status: TaskStatus::Pending,
                     checklist: std_checklist("Author gold SQL"),
                 },
@@ -3248,6 +3489,7 @@ mod tests {
                     inputs: vec!["stg_test_raw_raw_orders".to_string()],
                     expected_model_path: None,
                     invariants: vec![],
+                    implementation_spec: dummy_model_spec(),
                     status: TaskStatus::Pending,
                     checklist: std_checklist("Author gold SQL"),
                 },
@@ -3313,6 +3555,7 @@ sources:
                     dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
                     expected_model_path: None,
                     invariants: vec![],
+                    implementation_spec: dummy_cleanse_spec(),
                     status: TaskStatus::Pending,
                     checklist: vec![],
                 },
@@ -3320,6 +3563,7 @@ sources:
                     dataset_id: "AwsDataCatalog.test_raw.raw_products".to_string(),
                     expected_model_path: None,
                     invariants: vec![],
+                    implementation_spec: dummy_cleanse_spec(),
                     status: TaskStatus::Pending,
                     checklist: vec![],
                 },
@@ -3362,6 +3606,7 @@ sources:
                     inputs: vec!["stg_customers".to_string()],
                     expected_model_path: None,
                     invariants: vec![],
+                    implementation_spec: dummy_model_spec(),
                     status: TaskStatus::Pending,
                     checklist: vec![],
                 },
@@ -3372,6 +3617,7 @@ sources:
                     inputs: vec!["raw_orders".to_string()],
                     expected_model_path: None,
                     invariants: vec![],
+                    implementation_spec: dummy_model_spec(),
                     status: TaskStatus::Pending,
                     checklist: vec![],
                 },
@@ -3415,6 +3661,7 @@ sources:
                 inputs: vec![],
                 expected_model_path: None,
                 invariants: vec![],
+                implementation_spec: dummy_model_spec(),
                 status: TaskStatus::Pending,
                 checklist: std_checklist("Author gold SQL"),
             }],
@@ -3443,6 +3690,7 @@ sources:
                 dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
                 expected_model_path: None,
                 invariants: vec![],
+                implementation_spec: dummy_cleanse_spec(),
                 status: TaskStatus::Pending,
                 checklist: vec![],
             }],
@@ -3468,6 +3716,7 @@ sources:
                 dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
                 expected_model_path: Some("models/staging/customers.sql".to_string()),
                 invariants: vec![],
+                implementation_spec: dummy_cleanse_spec(),
                 status: TaskStatus::Pending,
                 checklist: vec![],
             }],
@@ -3496,6 +3745,7 @@ sources:
                     "models/staging/stg_test_raw_raw_customers.sql".to_string(),
                 ),
                 invariants: vec![],
+                implementation_spec: dummy_cleanse_spec(),
                 status: TaskStatus::NeedsUpdate,
                 checklist: vec![],
             }],
@@ -3534,6 +3784,7 @@ sources:
                     dataset_id: "AwsDataCatalog.test_raw.raw_orders".to_string(),
                     expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
                     invariants: vec![],
+                    implementation_spec: dummy_cleanse_spec(),
                     status: TaskStatus::Pending,
                     checklist: std_checklist("Author staging SQL"),
                 },
@@ -3543,6 +3794,7 @@ sources:
                         "models/staging/stg_test_raw_raw_customers.sql".to_string(),
                     ),
                     invariants: vec![],
+                    implementation_spec: dummy_cleanse_spec(),
                     status: TaskStatus::Pending,
                     checklist: std_checklist("Author staging SQL"),
                 },
@@ -3592,6 +3844,7 @@ sources:
                     dataset_id: "AwsDataCatalog.test_raw.raw_orders".to_string(),
                     expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
                     invariants: vec![],
+                    implementation_spec: dummy_cleanse_spec(),
                     status: TaskStatus::Pending,
                     checklist: std_checklist("Author staging SQL"),
                 },
@@ -3601,6 +3854,7 @@ sources:
                         "models/staging/stg_test_raw_raw_customers.sql".to_string(),
                     ),
                     invariants: vec![],
+                    implementation_spec: dummy_cleanse_spec(),
                     status: TaskStatus::Pending,
                     checklist: std_checklist("Author staging SQL"),
                 },

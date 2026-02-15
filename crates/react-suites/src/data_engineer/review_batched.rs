@@ -842,15 +842,33 @@ fn parse_review_meta_line(text: &str) -> (bool, String, Vec<String>) {
 fn resolve_cleanse_batch_paths(
     plan: &de_plan::CleansePlan,
     batch: &[String],
-) -> Vec<(String, String, Vec<String>, Vec<de_plan::PlanChecklistItem>)> {
-    // returns (dataset_id, expected_path, invariants, checklist)
-    let mut out: Vec<(String, String, Vec<String>, Vec<de_plan::PlanChecklistItem>)> = Vec::new();
+) -> Vec<(
+    String,
+    String,
+    Vec<String>,
+    Vec<de_plan::PlanChecklistItem>,
+    Option<de_plan::CleanseImplementationSpec>,
+)> {
+    // returns (dataset_id, expected_path, invariants, checklist, implementation_spec)
+    let mut out: Vec<(
+        String,
+        String,
+        Vec<String>,
+        Vec<de_plan::PlanChecklistItem>,
+        Option<de_plan::CleanseImplementationSpec>,
+    )> = Vec::new();
     for ds in batch.iter() {
         if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
             let p = t.expected_model_path.clone().unwrap_or_default();
-            out.push((ds.clone(), p, t.invariants.clone(), t.checklist.clone()));
+            out.push((
+                ds.clone(),
+                p,
+                t.invariants.clone(),
+                t.checklist.clone(),
+                Some(t.implementation_spec.clone()),
+            ));
         } else {
-            out.push((ds.clone(), String::new(), vec![], vec![]));
+            out.push((ds.clone(), String::new(), vec![], vec![], None));
         }
     }
     out
@@ -859,15 +877,33 @@ fn resolve_cleanse_batch_paths(
 fn resolve_model_batch_paths(
     plan: &de_plan::ModelPlan,
     batch: &[String],
-) -> Vec<(String, String, Vec<String>, Vec<de_plan::PlanChecklistItem>)> {
-    // returns (name, expected_path, invariants, checklist)
-    let mut out: Vec<(String, String, Vec<String>, Vec<de_plan::PlanChecklistItem>)> = Vec::new();
+) -> Vec<(
+    String,
+    String,
+    Vec<String>,
+    Vec<de_plan::PlanChecklistItem>,
+    Option<de_plan::ModelImplementationSpec>,
+)> {
+    // returns (name, expected_path, invariants, checklist, implementation_spec)
+    let mut out: Vec<(
+        String,
+        String,
+        Vec<String>,
+        Vec<de_plan::PlanChecklistItem>,
+        Option<de_plan::ModelImplementationSpec>,
+    )> = Vec::new();
     for name in batch.iter() {
         if let Some(t) = plan.tasks.iter().find(|t| t.name == *name) {
             let p = t.expected_model_path.clone().unwrap_or_default();
-            out.push((name.clone(), p, t.invariants.clone(), t.checklist.clone()));
+            out.push((
+                name.clone(),
+                p,
+                t.invariants.clone(),
+                t.checklist.clone(),
+                Some(t.implementation_spec.clone()),
+            ));
         } else {
-            out.push((name.clone(), String::new(), vec![], vec![]));
+            out.push((name.clone(), String::new(), vec![], vec![], None));
         }
     }
     out
@@ -1156,12 +1192,13 @@ pub async fn run_batched_review(
                     let mut map: Vec<Value> = Vec::new();
                     for b in batches.iter() {
                         let resolved = resolve_cleanse_batch_paths(&p, b);
-                        for (ds, path, inv, checklist) in resolved {
+                        for (ds, path, inv, checklist, implementation_spec) in resolved {
                             map.push(serde_json::json!({
                                 "item": ds,
                                 "expected_model_path": path,
                                 "invariants": inv,
-                                "checklist": checklist
+                                "checklist": checklist,
+                                "implementation_spec": implementation_spec
                             }));
                         }
                     }
@@ -1190,12 +1227,13 @@ pub async fn run_batched_review(
                     let mut map: Vec<Value> = Vec::new();
                     for b in batches.iter() {
                         let resolved = resolve_model_batch_paths(&p, b);
-                        for (name, path, inv, checklist) in resolved {
+                        for (name, path, inv, checklist, implementation_spec) in resolved {
                             map.push(serde_json::json!({
                                 "item": name,
                                 "expected_model_path": path,
                                 "invariants": inv,
-                                "checklist": checklist
+                                "checklist": checklist,
+                                "implementation_spec": implementation_spec
                             }));
                         }
                     }
@@ -1240,12 +1278,13 @@ pub async fn run_batched_review(
                         let mut map: Vec<Value> = Vec::new();
                         for b in batches.iter() {
                             let resolved = resolve_cleanse_batch_paths(&p, b);
-                            for (ds, path, inv, checklist) in resolved {
+                            for (ds, path, inv, checklist, implementation_spec) in resolved {
                                 map.push(serde_json::json!({
                                     "item": ds,
                                     "expected_model_path": path,
                                     "invariants": inv,
-                                    "checklist": checklist
+                                    "checklist": checklist,
+                                    "implementation_spec": implementation_spec
                                 }));
                             }
                         }
@@ -1270,12 +1309,13 @@ pub async fn run_batched_review(
                         let mut map: Vec<Value> = Vec::new();
                         for b in batches.iter() {
                             let resolved = resolve_model_batch_paths(&p, b);
-                            for (name, path, inv, checklist) in resolved {
+                            for (name, path, inv, checklist, implementation_spec) in resolved {
                                 map.push(serde_json::json!({
                                     "item": name,
                                     "expected_model_path": path,
                                     "invariants": inv,
-                                    "checklist": checklist
+                                    "checklist": checklist,
+                                    "implementation_spec": implementation_spec
                                 }));
                             }
                         }
@@ -1423,6 +1463,7 @@ pub async fn run_batched_review(
             let mut expected_path = String::new();
             let mut invariants: Vec<String> = Vec::new();
             let mut notes: Vec<String> = Vec::new();
+            let mut implementation_spec: Value = Value::Null;
             if let Some(m) = map_for(item) {
                 expected_path = m
                     .get("expected_model_path")
@@ -1431,6 +1472,7 @@ pub async fn run_batched_review(
                     .to_string();
                 invariants = str_list(m.get("invariants").unwrap_or(&Value::Null));
                 notes = str_list(m.get("notes").unwrap_or(&Value::Null));
+                implementation_spec = m.get("implementation_spec").cloned().unwrap_or(Value::Null);
             }
             if expected_path.trim().is_empty() {
                 // Fallback: if item looks like a path, treat it as such. Otherwise assume models/<name>.sql.
@@ -1469,6 +1511,7 @@ pub async fn run_batched_review(
                 "expected_model_path": expected_path,
                 "invariants": invariants,
                 "task_notes": notes,
+                "implementation_spec": implementation_spec,
                 "authoritative_schema": schema_obs
                 ,"dependency_schemas": deps
             }));
@@ -1774,6 +1817,20 @@ mod tests {
                     dataset_id: "a.b.a".to_string(),
                     expected_model_path: Some("models/staging/stg_a.sql".to_string()),
                     invariants: vec!["inv".to_string()],
+                    implementation_spec: de_plan::CleanseImplementationSpec {
+                        spec_version: 1,
+                        row_preserving: true,
+                        output_fields: vec![de_plan::OutputFieldSpec {
+                            name: "a".to_string(),
+                            kind: de_plan::FieldKind::Derived,
+                            source_columns: vec![],
+                            expression: "select 1 as a (test stub)".to_string(),
+                            data_type: None,
+                            nullable: true,
+                            description: None,
+                        }],
+                        prohibited_ops: vec![],
+                    },
                     status: de_plan::TaskStatus::Done,
                     checklist: vec![],
                 },
@@ -1781,6 +1838,20 @@ mod tests {
                     dataset_id: "a.b.b".to_string(),
                     expected_model_path: Some("models/staging/stg_b.sql".to_string()),
                     invariants: vec![],
+                    implementation_spec: de_plan::CleanseImplementationSpec {
+                        spec_version: 1,
+                        row_preserving: true,
+                        output_fields: vec![de_plan::OutputFieldSpec {
+                            name: "b".to_string(),
+                            kind: de_plan::FieldKind::Derived,
+                            source_columns: vec![],
+                            expression: "select 1 as b (test stub)".to_string(),
+                            data_type: None,
+                            nullable: true,
+                            description: None,
+                        }],
+                        prohibited_ops: vec![],
+                    },
                     status: de_plan::TaskStatus::Done,
                     checklist: vec![],
                 },

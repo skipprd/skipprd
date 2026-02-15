@@ -4734,6 +4734,20 @@ mod tests {
                 dataset_id: "AwsDataCatalog.test_raw.raw_orders".to_string(),
                 expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
                 invariants: vec![],
+                implementation_spec: de_plan::CleanseImplementationSpec {
+                    spec_version: 1,
+                    row_preserving: true,
+                    output_fields: vec![de_plan::OutputFieldSpec {
+                        name: "order_id".to_string(),
+                        kind: de_plan::FieldKind::Raw,
+                        source_columns: vec![],
+                        expression: "order_id".to_string(),
+                        data_type: None,
+                        nullable: false,
+                        description: None,
+                    }],
+                    prohibited_ops: vec![],
+                },
                 status: de_plan::TaskStatus::Pending,
                 checklist: vec![de_plan::PlanChecklistItem {
                     checklist_item_id: "sql_model".to_string(),

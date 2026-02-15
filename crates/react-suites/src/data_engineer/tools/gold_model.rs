@@ -390,7 +390,7 @@ impl Tool for GoldModelTool {
                 continue;
             }
 
-            let (plan_invariants, plan_checklist, plan_expected_model_path) = plan_opt
+            let (plan_invariants, plan_checklist, plan_expected_model_path, plan_implementation_spec) = plan_opt
                 .as_ref()
                 .and_then(|p| p.tasks.iter().find(|t| t.name.trim() == name))
                 .map(|t| {
@@ -398,9 +398,10 @@ impl Tool for GoldModelTool {
                         t.invariants.clone(),
                         t.checklist.clone(),
                         t.expected_model_path.clone().unwrap_or_default(),
+                        Some(t.implementation_spec.clone()),
                     )
                 })
-                .unwrap_or_else(|| (vec![], vec![], String::new()));
+                .unwrap_or_else(|| (vec![], vec![], String::new(), None));
             let plan_instr = render_plan_driven_instructions(&plan_invariants, &plan_checklist);
             let effective_instructions = combine_instructions(&it.instructions, &plan_instr);
 
@@ -412,6 +413,7 @@ impl Tool for GoldModelTool {
                 "instructions": effective_instructions,
                 "plan_invariants": plan_invariants,
                 "plan_checklist": plan_checklist,
+                "plan_implementation_spec": plan_implementation_spec,
                 "plan_expected_model_path": plan_expected_model_path,
                 "inputs": input_blocks,
                 "existing_model_sql": ctx
@@ -876,6 +878,27 @@ mod tests {
                 inputs: vec!["stg_test_raw_raw_orders".to_string()],
                 expected_model_path: Some("models/marts/fct_orders.sql".to_string()),
                 invariants: vec!["Grain: exactly 1 row per order_pk.".to_string()],
+                implementation_spec: crate::data_engineer::plan::ModelImplementationSpec {
+                    spec_version: 1,
+                    grain: "1 row per order_id".to_string(),
+                    inputs: vec!["stg_test_raw_raw_orders".to_string()],
+                    joins: vec![],
+                    metrics: vec![crate::data_engineer::plan::MetricSpec {
+                        name: "orders".to_string(),
+                        definition: "count(*) of orders".to_string(),
+                        caveats: vec![],
+                    }],
+                    output_fields: vec![crate::data_engineer::plan::OutputFieldSpec {
+                        name: "order_id".to_string(),
+                        kind: crate::data_engineer::plan::FieldKind::Clean,
+                        source_columns: vec!["order_id".to_string()],
+                        expression: "order_id passthrough from staging".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    assumptions: vec![],
+                },
                 status: crate::data_engineer::plan::TaskStatus::Pending,
                 checklist: vec![crate::data_engineer::plan::PlanChecklistItem {
                     checklist_item_id: "sql_model".to_string(),

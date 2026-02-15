@@ -692,7 +692,7 @@ impl Tool for StagingModelTool {
                 .map(|b| String::from_utf8_lossy(&b).to_string())
                 .unwrap_or_default();
 
-            let (plan_invariants, plan_checklist, plan_expected_model_path) = plan_opt
+            let (plan_invariants, plan_checklist, plan_expected_model_path, plan_implementation_spec) = plan_opt
                 .as_ref()
                 .and_then(|p| p.tasks.iter().find(|t| t.dataset_id == *ds))
                 .map(|t| {
@@ -700,9 +700,10 @@ impl Tool for StagingModelTool {
                         t.invariants.clone(),
                         t.checklist.clone(),
                         t.expected_model_path.clone().unwrap_or_default(),
+                        Some(t.implementation_spec.clone()),
                     )
                 })
-                .unwrap_or_else(|| (vec![], vec![], String::new()));
+                .unwrap_or_else(|| (vec![], vec![], String::new(), None));
             let plan_instr = render_plan_driven_instructions(&plan_invariants, &plan_checklist);
             let effective_instructions = combine_instructions(&user_instructions, &plan_instr);
 
@@ -712,6 +713,7 @@ impl Tool for StagingModelTool {
                 "user_instructions": effective_instructions,
                 "plan_invariants": plan_invariants,
                 "plan_checklist": plan_checklist,
+                "plan_implementation_spec": plan_implementation_spec,
                 "plan_expected_model_path": plan_expected_model_path,
                 "expected_model_path": rel_path,
                 "existing_model_sql": existing_sql,
@@ -1334,6 +1336,24 @@ mod tests {
                 dataset_id: ds.clone(),
                 expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
                 invariants: vec!["Staging grain: exactly 1 row per order_pk.".to_string()],
+                implementation_spec: crate::data_engineer::plan::CleanseImplementationSpec {
+                    spec_version: 1,
+                    row_preserving: true,
+                    output_fields: vec![crate::data_engineer::plan::OutputFieldSpec {
+                        name: "order_id_raw".to_string(),
+                        kind: crate::data_engineer::plan::FieldKind::Raw,
+                        source_columns: vec!["order_id".to_string()],
+                        expression: "order_id as order_id_raw (raw passthrough)".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    prohibited_ops: vec![
+                        "filtering".to_string(),
+                        "deduplication".to_string(),
+                        "grain_enforcement".to_string(),
+                    ],
+                },
                 status: crate::data_engineer::plan::TaskStatus::Pending,
                 checklist: vec![crate::data_engineer::plan::PlanChecklistItem {
                     checklist_item_id: "sql_model".to_string(),
