@@ -41,8 +41,13 @@ mod tests {
                     content: "hello".into(),
                 }],
                 &react_core::llm::LlmCallOptions {
+                    prompt_id: "react.openai_compat.tests.chat",
+                    thread_id: None,
                     expected_format: react_core::llm::LlmExpectedFormat::Text,
-                    ..Default::default()
+                    max_output_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    reasoning_effort: None,
                 },
             )
             .unwrap();
@@ -422,23 +427,86 @@ impl LargeLanguageModel for OpenAICompatModel {
             }
             let body_text = resp.into_string().map_err(|e| e.to_string())?;
             tracing::debug!("LLM(responses) response:\n{}", pretty_json(&body_text));
-            let obj: RespResp = serde_json::from_str(&body_text).map_err(|e| e.to_string())?;
-            if let Some(t) = obj.output_text {
-                tracing::debug!("LLM(responses) output_text:\n{}", t);
+            fn text_from_part(p: &serde_json::Value) -> Option<String> {
+                if let Some(s) = p.get("text").and_then(|x| x.as_str()) {
+                    if !s.trim().is_empty() {
+                        return Some(s.to_string());
+                    }
+                }
+                if let Some(s) = p
+                    .get("text")
+                    .and_then(|x| x.get("value"))
+                    .and_then(|x| x.as_str())
+                {
+                    if !s.trim().is_empty() {
+                        return Some(s.to_string());
+                    }
+                }
+                if let Some(s) = p.get("refusal").and_then(|x| x.as_str()) {
+                    if !s.trim().is_empty() {
+                        return Some(s.to_string());
+                    }
+                }
+                None
+            }
+
+            fn extract_text(v: &serde_json::Value) -> Option<String> {
+                if let Some(s) = v.get("output_text").and_then(|x| x.as_str()) {
+                    if !s.trim().is_empty() {
+                        return Some(s.to_string());
+                    }
+                }
+                if let Some(msg) = v
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|x| x.as_str())
+                {
+                    if !msg.trim().is_empty() {
+                        return Some(format!("LLM_ERROR: {msg}"));
+                    }
+                }
+                let mut chunks: Vec<String> = Vec::new();
+                if let Some(out) = v.get("output").and_then(|x| x.as_array()) {
+                    for item in out {
+                        if let Some(s) = item.get("text").and_then(|x| x.as_str()) {
+                            if !s.trim().is_empty() {
+                                chunks.push(s.to_string());
+                            }
+                        }
+                        if let Some(s) = item.get("refusal").and_then(|x| x.as_str()) {
+                            if !s.trim().is_empty() {
+                                chunks.push(s.to_string());
+                            }
+                        }
+                        if let Some(content) = item.get("content").and_then(|x| x.as_array()) {
+                            for part in content {
+                                if let Some(s) = text_from_part(part) {
+                                    chunks.push(s);
+                                }
+                            }
+                        }
+                    }
+                }
+                let joined = chunks.join("");
+                if joined.trim().is_empty() {
+                    None
+                } else {
+                    Some(joined)
+                }
+            }
+
+            let v: serde_json::Value =
+                serde_json::from_str(&body_text).map_err(|e| e.to_string())?;
+            if let Some(t) = extract_text(&v) {
+                tracing::debug!("LLM(responses) extracted text:\n{}", t);
                 return Ok(t);
             }
-            if let Some(t) = obj
-                .output
-                .get(0)
-                .and_then(|v| v.get("content"))
-                .and_then(|c| c.get(0))
-                .and_then(|p| p.get("text"))
-                .and_then(|x| x.as_str())
-            {
-                tracing::debug!("LLM(responses) output.content[0].text:\n{}", t);
-                return Ok(t.to_string());
-            }
-            Err("empty response".to_string())
+            let snippet = if body_text.len() > 1200 {
+                format!("{}...", &body_text[..1200])
+            } else {
+                body_text
+            };
+            Err(format!("empty response: {}", snippet))
         } else {
             let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
             // latency-optimized defaults

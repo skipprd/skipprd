@@ -119,8 +119,13 @@ async fn agent_default_policy_accepts_typed_final() {
         "tools",
         "q",
         react_core::llm::LlmCallOptions {
+            prompt_id: "react.tests.kb_suite_smoke.basic",
+            thread_id: None,
             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-            ..Default::default()
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            reasoning_effort: None,
         },
     )
         .await
@@ -177,8 +182,13 @@ async fn agent_does_not_special_case_ask_user_tool_name() {
         "tools",
         "q",
         react_core::llm::LlmCallOptions {
+            prompt_id: "react.tests.kb_suite_smoke.ask_user_name_not_special_cased",
+            thread_id: None,
             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-            ..Default::default()
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            reasoning_effort: None,
         },
     )
         .await
@@ -233,8 +243,13 @@ async fn agent_interrupts_only_when_policy_requests_it() {
         "tools",
         "q",
         react_core::llm::LlmCallOptions {
+            prompt_id: "react.tests.kb_suite_smoke.policy_interrupts_only_when_requested",
+            thread_id: None,
             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-            ..Default::default()
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            reasoning_effort: None,
         },
     )
         .await

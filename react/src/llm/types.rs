@@ -23,6 +23,9 @@ pub struct ChatRequest {
     /// Optional provider hint (e.g. OpenAI reasoning.effort).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Optional stable identifier for the prompt/call site.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
 }

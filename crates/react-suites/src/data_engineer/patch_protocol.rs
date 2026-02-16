@@ -376,7 +376,10 @@ pub async fn llm_patch_loop_single_file(
         },
     ];
 
-    let mut call_opts = llm_options.unwrap_or_default();
+    let mut call_opts = llm_options.unwrap_or_else(|| react_core::llm::LlmCallOptions::new(
+        "data_engineer.patch_protocol.llm_patch_loop",
+        react_core::llm::LlmExpectedFormat::JsonObject,
+    ));
     call_opts.expected_format = react_core::llm::LlmExpectedFormat::JsonObject;
 
     let mut last_err: Option<String> = None;

@@ -434,6 +434,8 @@ impl Tool for GoldModelTool {
                 &rel_path,
                 4,
                 Some(LlmCallOptions {
+                    prompt_id: "data_engineer.tools.gold_model.patch_loop",
+                    thread_id: ctx.thread_id.clone(),
                     expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                     temperature: Some(0.12),
                     top_p: Some(1.0),

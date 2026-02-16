@@ -137,8 +137,13 @@ impl Tool for CatalogNoteTool {
         let resp = llm.chat(
             &messages,
             &react_core::llm::LlmCallOptions {
+                prompt_id: "data_engineer.tools.catalog_note.curate",
+                thread_id: Some(thread_id.clone()),
                 expected_format: react_core::llm::LlmExpectedFormat::Text,
-                ..Default::default()
+                max_output_tokens: None,
+                temperature: None,
+                top_p: None,
+                reasoning_effort: None,
             },
         );
         let bullets_text = match resp.as_ref() {

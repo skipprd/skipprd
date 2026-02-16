@@ -425,6 +425,8 @@ pub fn llm_should_remediate_sql(
         },
     ];
     let call_opts = LlmCallOptions {
+        prompt_id: "data_engineer.dbt_should_remediate",
+        thread_id: ctx.thread_id.clone(),
         expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
         temperature: Some(0.0),
         top_p: Some(1.0),
@@ -601,6 +603,8 @@ pub async fn remediate_dbt_sql_keys_with_llm(
             },
         ];
         let call_opts = LlmCallOptions {
+        prompt_id: "data_engineer.dbt_dialect_remediation",
+            thread_id: ctx.thread_id.clone(),
             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
             temperature: Some(0.0),
             top_p: Some(1.0),
@@ -1159,6 +1163,8 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         },
     ];
     let call_opts = LlmCallOptions {
+        prompt_id: "data_engineer.dbt_find_missing_sources",
+        thread_id: ctx.thread_id.clone(),
         expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
         temperature: Some(0.0),
         top_p: Some(1.0),
@@ -1587,6 +1593,8 @@ pub async fn remediate_unresolved_columns_with_llm(
         },
     ];
     let call_opts = LlmCallOptions {
+        prompt_id: "data_engineer.dbt_resolve_missing_columns",
+        thread_id: ctx.thread_id.clone(),
         expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
         temperature: Some(0.0),
         top_p: Some(1.0),

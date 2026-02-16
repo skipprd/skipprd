@@ -500,8 +500,13 @@ pub fn summarize_dbt_failure_llm(
         msg,
         ],
         &react_core::llm::LlmCallOptions {
+            prompt_id: "data_engineer.dbt_error.summarize",
+            thread_id: None,
             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-            ..Default::default()
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            reasoning_effort: None,
         },
     )?;
 

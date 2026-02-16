@@ -450,29 +450,150 @@ async fn llm_json(
     name: &str,
     user: String,
 ) -> Result<Value, String> {
+    fn parse_review_reasoning_effort(var: &str) -> Option<ReasoningEffort> {
+        match std::env::var(var)
+            .ok()
+            .map(|s| s.trim().to_lowercase())
+            .as_deref()
+        {
+            Some("none") => Some(ReasoningEffort::None),
+            Some("low") => Some(ReasoningEffort::Low),
+            Some("medium") => Some(ReasoningEffort::Medium),
+            Some("high") => Some(ReasoningEffort::High),
+            _ => None,
+        }
+    }
+
+    // Default to MEDIUM for reviews: we do want some reasoning, but Responses output_tokens includes
+    // reasoning tokens, so max_output_tokens must be high enough to still emit the JSON payload.
+    let review_reasoning_effort = parse_review_reasoning_effort("LLM_REVIEW_REASONING_EFFORT")
+        .unwrap_or(ReasoningEffort::Medium);
+
+    fn parse_u32_env(key: &str) -> Option<u32> {
+        std::env::var(key).ok().and_then(|s| s.trim().parse::<u32>().ok())
+    }
+
+    // Provide ample headroom by default. Review prompts are structured JSON and truncation is costly.
+    // Env knobs (optional):
+    // - LLM_REVIEW_MAX_TOKENS (global default for non-unify)
+    // - LLM_REVIEW_MAX_TOKENS_UNIFY (global default for unify)
+    // - LLM_REVIEW_MAX_TOKENS_CLEANSE / _MODEL / _POSTPUBLISH
+    // - LLM_REVIEW_MAX_TOKENS_CLEANSE_UNIFY / _MODEL_UNIFY / _POSTPUBLISH_UNIFY
+    let default_non_unify: u32 = parse_u32_env("LLM_REVIEW_MAX_TOKENS")
+        .unwrap_or(12_000)
+        .max(2_000)
+        .min(32_000);
+    let default_unify: u32 = parse_u32_env("LLM_REVIEW_MAX_TOKENS_UNIFY")
+        .unwrap_or(18_000)
+        .max(2_000)
+        .min(32_000);
+    let is_unify = name == "unify";
+    let phase_budget: u32 = match phase {
+        Phase::CleanseReview => {
+            let k = if is_unify {
+                "LLM_REVIEW_MAX_TOKENS_CLEANSE_UNIFY"
+            } else {
+                "LLM_REVIEW_MAX_TOKENS_CLEANSE"
+            };
+            parse_u32_env(k).unwrap_or(if is_unify { default_unify } else { default_non_unify })
+        }
+        Phase::ModelReview => {
+            let k = if is_unify {
+                "LLM_REVIEW_MAX_TOKENS_MODEL_UNIFY"
+            } else {
+                "LLM_REVIEW_MAX_TOKENS_MODEL"
+            };
+            parse_u32_env(k).unwrap_or(if is_unify { default_unify } else { default_non_unify })
+        }
+        Phase::PostPublishReview => {
+            let k = if is_unify {
+                "LLM_REVIEW_MAX_TOKENS_POSTPUBLISH_UNIFY"
+            } else {
+                "LLM_REVIEW_MAX_TOKENS_POSTPUBLISH"
+            };
+            parse_u32_env(k).unwrap_or(if is_unify { default_unify } else { default_non_unify })
+        }
+        _ => {
+            if is_unify {
+                default_unify
+            } else {
+                default_non_unify
+            }
+        }
+    }
+    .max(2_000)
+    .min(32_000);
+
+    let prompt_id: &'static str = match (phase, name) {
+        (Phase::CleanseReview, "summary") => "data_engineer.cleanse_review.summary",
+        (Phase::CleanseReview, "batch") => "data_engineer.cleanse_review.batch",
+        (Phase::CleanseReview, "unify") => "data_engineer.cleanse_review.unify",
+        (Phase::ModelReview, "summary") => "data_engineer.model_review.summary",
+        (Phase::ModelReview, "batch") => "data_engineer.model_review.batch",
+        (Phase::ModelReview, "unify") => "data_engineer.model_review.unify",
+        (Phase::PostPublishReview, "summary") => "data_engineer.post_publish_review.summary",
+        (Phase::PostPublishReview, "batch") => "data_engineer.post_publish_review.batch",
+        (Phase::PostPublishReview, "unify") => "data_engineer.post_publish_review.unify",
+        // Fallback: keep stable even if new names are introduced.
+        (Phase::CleanseReview, _) => "data_engineer.cleanse_review.other",
+        (Phase::ModelReview, _) => "data_engineer.model_review.other",
+        (Phase::PostPublishReview, _) => "data_engineer.post_publish_review.other",
+        _ => "data_engineer.review.other_phase",
+    };
+
+    let system_prompt = match name {
+        "summary" => system_prompt_for_summary(&phase_plan_kind(phase)),
+        "batch" => system_prompt_for_batch(&phase_plan_kind(phase)),
+        _ => system_prompt_for_unify(&phase_plan_kind(phase)),
+    };
+
+    // Dynamic sizing: bigger review contexts need bigger output budgets, otherwise Responses truncates
+    // the JSON payload after spending many tokens on reasoning.
+    //
+    // Heuristic: estimate input tokens from chars and add a fixed cushion depending on call kind.
+    // Use a conservative chars->tokens heuristic. `usage.input_tokens` is frequently closer to
+    // chars/2 (not chars/4) once we include large JSON payloads, identifiers, and schema text.
+    let approx_in_tokens: u32 = ((system_prompt.len() + user.len()) as u32 / 2).max(1);
+    let extra_out_tokens: u32 = match name {
+        "summary" => 6_000,
+        "batch" => 12_000,
+        _ => 16_000, // unify
+    };
+    let dynamic_budget: u32 = approx_in_tokens
+        .saturating_add(extra_out_tokens)
+        .max(2_000)
+        .min(32_000);
+    let phase_budget: u32 = phase_budget.max(dynamic_budget).min(32_000);
+
     // Tune output budgets by (phase, call kind). Unify frequently needs a bit more headroom because it
     // returns a single `final_review_text` field which can be longer than the per-batch notes.
     let llm_options = match phase {
         Phase::CleanseReview => Some(LlmCallOptions {
+            prompt_id,
+            thread_id: Some(thread_id.to_string()),
             expected_format: LlmExpectedFormat::JsonObject,
             temperature: Some(0.15),
             top_p: Some(1.0),
-            max_output_tokens: Some(if name == "unify" { 2800 } else { 1600 }),
-            reasoning_effort: Some(ReasoningEffort::Medium),
+            max_output_tokens: Some(phase_budget),
+            reasoning_effort: Some(review_reasoning_effort),
         }),
         Phase::ModelReview => Some(LlmCallOptions {
+            prompt_id,
+            thread_id: Some(thread_id.to_string()),
             expected_format: LlmExpectedFormat::JsonObject,
             temperature: Some(0.25),
             top_p: Some(1.0),
-            max_output_tokens: Some(if name == "unify" { 3200 } else { 1800 }),
-            reasoning_effort: Some(ReasoningEffort::Medium),
+            max_output_tokens: Some(phase_budget),
+            reasoning_effort: Some(review_reasoning_effort),
         }),
         Phase::PostPublishReview => Some(LlmCallOptions {
+            prompt_id,
+            thread_id: Some(thread_id.to_string()),
             expected_format: LlmExpectedFormat::JsonObject,
             temperature: Some(0.20),
             top_p: Some(1.0),
-            max_output_tokens: Some(if name == "unify" { 2600 } else { 1400 }),
-            reasoning_effort: Some(ReasoningEffort::Medium),
+            max_output_tokens: Some(phase_budget),
+            reasoning_effort: Some(review_reasoning_effort),
         }),
         _ => None,
     };
@@ -480,11 +601,7 @@ async fn llm_json(
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
-            content: match name {
-                "summary" => system_prompt_for_summary(&phase_plan_kind(phase)),
-                "batch" => system_prompt_for_batch(&phase_plan_kind(phase)),
-                _ => system_prompt_for_unify(&phase_plan_kind(phase)),
-            },
+            content: system_prompt,
         },
         ChatMessage {
             role: "user".to_string(),
@@ -513,7 +630,12 @@ async fn llm_json(
         );
 
         // We append the llm_call step after we have response_text below.
-        let mut opts = llm_options.unwrap_or_default();
+        let mut opts = llm_options.unwrap_or_else(|| {
+            react_core::llm::LlmCallOptions::new(
+                "data_engineer.review_batched.llm_json",
+                LlmExpectedFormat::JsonObject,
+            )
+        });
         opts.expected_format = LlmExpectedFormat::JsonObject;
         let res = ctx.llm.chat(&messages, &opts);
         let (ok, raw) = match &res {
@@ -587,7 +709,12 @@ async fn llm_json(
         }
     }
 
-    let mut opts = llm_options.unwrap_or_default();
+    let mut opts = llm_options.unwrap_or_else(|| {
+        react_core::llm::LlmCallOptions::new(
+            "data_engineer.review_batched.llm_json",
+            LlmExpectedFormat::JsonObject,
+        )
+    });
     opts.expected_format = LlmExpectedFormat::JsonObject;
     let raw = ctx.llm.chat(&messages, &opts).map_err(|e| e.to_string())?;
     match serde_json::from_str::<Value>(&raw) {

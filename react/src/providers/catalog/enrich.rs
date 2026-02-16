@@ -182,8 +182,13 @@ pub async fn enrich_dataset_with_llm(
                         content: prompt_clone,
                     }],
                     &react_core::llm::LlmCallOptions {
+                        prompt_id: "react.catalog.enrich.dataset_description",
+                        thread_id: None,
                         expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                        ..Default::default()
+                        max_output_tokens: None,
+                        temperature: None,
+                        top_p: None,
+                        reasoning_effort: None,
                     },
                 )
             })
@@ -203,8 +208,13 @@ pub async fn enrich_dataset_with_llm(
                             content: prompt,
                         }],
                         &react_core::llm::LlmCallOptions {
+                            prompt_id: "react.catalog.enrich.dataset_description",
+                            thread_id: None,
                             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                            ..Default::default()
+                            max_output_tokens: None,
+                            temperature: None,
+                            top_p: None,
+                            reasoning_effort: None,
                         },
                     )
                 }),
@@ -514,8 +524,13 @@ pub async fn enrich_dataset_with_llm(
                             content: p,
                         }],
                         &react_core::llm::LlmCallOptions {
+                            prompt_id: "react.catalog.enrich.field_descriptions_batch",
+                            thread_id: None,
                             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                            ..Default::default()
+                            max_output_tokens: None,
+                            temperature: None,
+                            top_p: None,
+                            reasoning_effort: None,
                         },
                     )
                 }
@@ -587,8 +602,13 @@ pub async fn enrich_dataset_with_llm(
                                     content: p,
                                 }],
                                 &react_core::llm::LlmCallOptions {
+                                    prompt_id: "react.catalog.enrich.field_description_single",
+                                    thread_id: None,
                                     expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                                    ..Default::default()
+                                    max_output_tokens: None,
+                                    temperature: None,
+                                    top_p: None,
+                                    reasoning_effort: None,
                                 },
                             )
                         }
@@ -634,8 +654,13 @@ pub async fn enrich_dataset_with_llm(
                             content: p,
                         }],
                         &react_core::llm::LlmCallOptions {
+                            prompt_id: "react.catalog.enrich.field_synonyms_batch",
+                            thread_id: None,
                             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                            ..Default::default()
+                            max_output_tokens: None,
+                            temperature: None,
+                            top_p: None,
+                            reasoning_effort: None,
                         },
                     )
                 }
@@ -703,8 +728,13 @@ pub async fn enrich_dataset_with_llm(
                             content: p,
                         }],
                         &react_core::llm::LlmCallOptions {
+                            prompt_id: "react.catalog.enrich.field_pii_units_batch",
+                            thread_id: None,
                             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                            ..Default::default()
+                            max_output_tokens: None,
+                            temperature: None,
+                            top_p: None,
+                            reasoning_effort: None,
                         },
                     )
                 }
@@ -904,8 +934,13 @@ Output JSON only:",
                                 content: prompt,
                             }],
                             &react_core::llm::LlmCallOptions {
+                                prompt_id: "react.catalog.enrich.global_semantic_context",
+                                thread_id: None,
                                 expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                                ..Default::default()
+                                max_output_tokens: None,
+                                temperature: None,
+                                top_p: None,
+                                reasoning_effort: None,
                             },
                         )
                     })
@@ -923,8 +958,13 @@ Output JSON only:",
                                     content: prompt,
                                 }],
                                 &react_core::llm::LlmCallOptions {
+                                    prompt_id: "react.catalog.enrich.global_semantic_context",
+                                    thread_id: None,
                                     expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                                    ..Default::default()
+                                    max_output_tokens: None,
+                                    temperature: None,
+                                    top_p: None,
+                                    reasoning_effort: None,
                                 },
                             )
                         }),
@@ -966,8 +1006,13 @@ Output JSON only:",
                         content: prompt,
                     }],
                     &react_core::llm::LlmCallOptions {
+                        prompt_id: "react.catalog.enrich.global_semantic_context",
+                        thread_id: None,
                         expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                        ..Default::default()
+                        max_output_tokens: None,
+                        temperature: None,
+                        top_p: None,
+                        reasoning_effort: None,
                     },
                 )
             })
@@ -985,8 +1030,13 @@ Output JSON only:",
                             content: prompt,
                         }],
                         &react_core::llm::LlmCallOptions {
+                            prompt_id: "react.catalog.enrich.global_semantic_context",
+                            thread_id: None,
                             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                            ..Default::default()
+                            max_output_tokens: None,
+                            temperature: None,
+                            top_p: None,
+                            reasoning_effort: None,
                         },
                     )
                 }),

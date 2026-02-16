@@ -117,12 +117,17 @@ impl LlmRouter {
                 .collect();
             let expected_format = matches!(req.response_format, Some(ChatResponseFormat::JsonObject));
             let opts = react_core::llm::LlmCallOptions {
+                prompt_id: "react.router.local_llama_chat",
+                thread_id: None,
                 expected_format: if expected_format {
                     react_core::llm::LlmExpectedFormat::JsonObject
                 } else {
                     react_core::llm::LlmExpectedFormat::Text
                 },
-                ..Default::default()
+                max_output_tokens: None,
+                temperature: None,
+                top_p: None,
+                reasoning_effort: None,
             };
             let text = model.chat(&msgs, &opts)?;
             return Ok(ChatResponse { text, raw: None });
@@ -163,14 +168,15 @@ impl LlmRouter {
                     let (core_msgs, parts) = router_parts_for_messages(req);
                     let prompt_hash = llm_observability::prompt_hash_for_messages(&core_msgs);
                     let built = llm_observability::build_parts_for_thread(tid, &parts);
+                    let prompt_id = req.prompt_id.as_deref().unwrap_or("-");
                     debug!(
-                    "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_hash={} response_pending=1",
+                    "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_id={} response_pending=1",
                     tid,
                     call_id,
                     "router",
                     "router",
                     req.model,
-                    prompt_hash
+                    prompt_id
                 );
                     for p in built.parts.iter() {
                         let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
@@ -269,6 +275,54 @@ impl LlmRouter {
                 full_url, ph.status, snippet
             ));
         }
+        // Fail fast on Responses truncation due to output token budget.
+        // When this happens, the response may contain *no usable output_text* or a partial/truncated JSON object.
+        // In either case, callers should stop immediately and increase max_output_tokens.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ph.body_text) {
+            let resp_id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
+            let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
+            let reason = v
+                .get("incomplete_details")
+                .and_then(|x| x.get("reason"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            if status == "incomplete" && reason == "max_output_tokens" {
+                let budget = req.max_output_tokens.unwrap_or(0);
+                let usage_out = v
+                    .get("usage")
+                    .and_then(|u| u.get("output_tokens"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                let usage_in = v
+                    .get("usage")
+                    .and_then(|u| u.get("input_tokens"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                let effort = req
+                    .reasoning_effort
+                    .as_deref()
+                    .unwrap_or("(unset)");
+                let tid = obs_thread_id.as_deref().unwrap_or("-");
+                let call_id = call_id_opt
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                let prompt_id = req.prompt_id.as_deref().unwrap_or("-");
+                return Err(format!(
+                    "LLM output truncated (Responses status=incomplete reason=max_output_tokens). \
+Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} model={} reasoning_effort={} max_output_tokens={} usage_in={} usage_out={} response_id={}",
+                    tid,
+                    call_id,
+                    prompt_id,
+                    req.model,
+                    effort,
+                    budget,
+                    usage_in,
+                    usage_out,
+                    resp_id
+                ));
+            }
+        }
+
         let parsed = adapter.parse_chat_http(&ph)?;
         // Observability response logging (no truncation). If not enabled, do not print parsed text at all by default.
         if let (Some(tid), Some(call_id), Some(prompt_hash), Some(built)) = (
@@ -285,13 +339,20 @@ impl LlmRouter {
             };
             if let Some(rt) = response_text.as_deref() {
                 debug!(
-                    "LLM_RESPONSE thread_id={} call_id={} response_hash={} response_text={}",
-                    tid, call_id, response_hash, rt
+                    "LLM_RESPONSE thread_id={} call_id={} prompt_id={} response_hash={} response_text={}",
+                    tid,
+                    call_id,
+                    req.prompt_id.as_deref().unwrap_or("-"),
+                    response_hash,
+                    rt
                 );
             } else {
                 debug!(
-                    "LLM_RESPONSE thread_id={} call_id={} response_hash={} response_text=disabled",
-                    tid, call_id, response_hash
+                    "LLM_RESPONSE thread_id={} call_id={} prompt_id={} response_hash={} response_text=disabled",
+                    tid,
+                    call_id,
+                    req.prompt_id.as_deref().unwrap_or("-"),
+                    response_hash
                 );
             }
             // Keep variables used (to avoid accidental drop warnings if future edits extend this).

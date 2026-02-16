@@ -29,8 +29,13 @@ impl LlmSession {
             content: prompt.into(),
         }],
             &LlmCallOptions {
+                prompt_id: "react.session.chat_strict",
+                thread_id: None,
                 expected_format: LlmExpectedFormat::JsonObject,
-                ..Default::default()
+                max_output_tokens: None,
+                temperature: None,
+                top_p: None,
+                reasoning_effort: None,
             },
         )
     }
@@ -76,6 +81,7 @@ impl LargeLanguageModel for RouterModel {
             ReasoningEffort::Medium => Some("medium".to_string()),
             ReasoningEffort::High => Some("high".to_string()),
         };
+        let prompt_id = Some(options.prompt_id.to_string());
 
         let req = crate::llm::types::ChatRequest {
             model,
@@ -95,7 +101,11 @@ impl LargeLanguageModel for RouterModel {
                 None
             },
             reasoning_effort,
-            thread_id: thread_ctx::current_thread_id(),
+            prompt_id,
+            thread_id: options
+                .thread_id
+                .clone()
+                .or_else(|| thread_ctx::current_thread_id()),
         };
         let r = self.router.chat(&req)?;
         Ok(r.text)

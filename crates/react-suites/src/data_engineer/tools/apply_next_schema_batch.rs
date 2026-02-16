@@ -301,6 +301,8 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                 &yml_rel,
                 4,
                 Some(LlmCallOptions {
+                    prompt_id: "data_engineer.apply_next_schema_batch.staging_schema_patch",
+                    thread_id: ctx.thread_id.clone(),
                     expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                     temperature: Some(0.05),
                     top_p: Some(1.0),
@@ -528,6 +530,8 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             expected_rel,
             4,
             Some(LlmCallOptions {
+                prompt_id: "data_engineer.apply_next_schema_batch.models_schema_patch",
+                thread_id: ctx.thread_id.clone(),
                 expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                 temperature: Some(0.05),
                 top_p: Some(1.0),

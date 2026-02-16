@@ -728,6 +728,8 @@ impl Tool for StagingModelTool {
                 &rel_path,
                 4,
                 Some(LlmCallOptions {
+                    prompt_id: "data_engineer.tools.staging_model.patch_loop",
+                    thread_id: ctx.thread_id.clone(),
                     expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                     temperature: Some(0.05),
                     top_p: Some(1.0),

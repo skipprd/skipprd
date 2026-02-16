@@ -388,12 +388,36 @@ Rules:
                 content: user,
             },
         ];
+        // The critique is structured JSON and can legitimately exceed 1200 tokens for large plans.
+        // Keep it bounded but give enough headroom to avoid truncation (fail-fast).
+        let critique_max_tokens: u32 = std::env::var("LLM_PLAN_DESIGN_CRITIQUE_MAX_TOKENS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(6_000)
+            .max(800)
+            .min(16_000);
+        // Important: on OpenAI Responses, "output_tokens" includes reasoning tokens. If reasoning_effort
+        // is too high, the model can spend most tokens reasoning and leave too few for the JSON payload.
+        // Default to LOW (env-overridable).
+        let critique_reasoning_effort = match std::env::var("LLM_PLAN_DESIGN_CRITIQUE_REASONING_EFFORT")
+            .ok()
+            .map(|s| s.trim().to_lowercase())
+            .as_deref()
+        {
+            Some("none") => react_core::llm::ReasoningEffort::None,
+            Some("low") | None | Some("") => react_core::llm::ReasoningEffort::Low,
+            Some("medium") => react_core::llm::ReasoningEffort::Medium,
+            Some("high") => react_core::llm::ReasoningEffort::High,
+            _ => react_core::llm::ReasoningEffort::Low,
+        };
         let opts = LlmCallOptions {
+            prompt_id: "data_engineer.plan_design_critique",
+            thread_id: Some(_thread_id.to_string()),
             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
             temperature: Some(0.15),
             top_p: Some(1.0),
-            max_output_tokens: Some(1200),
-            reasoning_effort: Some(react_core::llm::ReasoningEffort::Medium),
+            max_output_tokens: Some(critique_max_tokens),
+            reasoning_effort: Some(critique_reasoning_effort),
         };
         let raw = sctx.llm.chat(&messages, &opts).map_err(|e| e.to_string())?;
         let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
@@ -776,6 +800,8 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
         let registry = ToolRegistry::new();
         let tools_card = "";
         let llm_options = LlmCallOptions {
+            prompt_id: "data_engineer.plan_json_repair",
+            thread_id: actx.thread_id.clone(),
             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
             // Strict JSON repair emitter: keep variance minimal.
             temperature: Some(0.0),
@@ -2221,8 +2247,13 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
             &tools_card,
             question,
             LlmCallOptions {
+                prompt_id: "data_engineer.ask_user_parse",
+                thread_id: None,
                 expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                ..Default::default()
+                max_output_tokens: None,
+                temperature: None,
+                top_p: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -2297,8 +2328,13 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
             &tools_card,
             &prompt,
             LlmCallOptions {
+                prompt_id: "data_engineer.ask_approval_parse",
+                thread_id: None,
                 expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                ..Default::default()
+                max_output_tokens: None,
+                temperature: None,
+                top_p: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -3189,21 +3225,60 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                     // Note: plan design critique injection is handled above via phase entry reason_detail
                     // (`critique_ref`) so it remains stable across re-entry loops.
 
+                    fn parse_reasoning_effort_env(var: &str) -> Option<react_core::llm::ReasoningEffort> {
+                        match std::env::var(var)
+                            .ok()
+                            .map(|s| s.trim().to_lowercase())
+                            .as_deref()
+                        {
+                            Some("none") => Some(react_core::llm::ReasoningEffort::None),
+                            Some("low") => Some(react_core::llm::ReasoningEffort::Low),
+                            Some("medium") => Some(react_core::llm::ReasoningEffort::Medium),
+                            Some("high") => Some(react_core::llm::ReasoningEffort::High),
+                            _ => None,
+                        }
+                    }
+
                     let llm_options = if is_cleanse {
+                        let plan_max_tokens_cleanse: u32 = std::env::var("LLM_PLAN_MAX_TOKENS_CLEANSE")
+                            .ok()
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(18_000)
+                            .max(4_000)
+                            .min(64_000);
+                        let reasoning_effort = parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT_CLEANSE")
+                            .or_else(|| parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT"))
+                            .unwrap_or(react_core::llm::ReasoningEffort::Medium);
                         LlmCallOptions {
+                            prompt_id: "data_engineer.cleanse_plan",
+                            thread_id: None,
                             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                             temperature: Some(0.20),
                             top_p: Some(1.0),
-                            max_output_tokens: Some(2200),
-                            reasoning_effort: Some(react_core::llm::ReasoningEffort::High),
+                            // Planning uses high reasoning effort; give enough headroom to emit full,
+                            // explicit JSON (otherwise Responses can truncate before any output_text).
+                            max_output_tokens: Some(plan_max_tokens_cleanse),
+                            reasoning_effort: Some(reasoning_effort),
                         }
                     } else {
+                        let plan_max_tokens_model: u32 = std::env::var("LLM_PLAN_MAX_TOKENS_MODEL")
+                            .ok()
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(24_000)
+                            .max(8_000)
+                            .min(64_000);
+                        let reasoning_effort = parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT_MODEL")
+                            .or_else(|| parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT"))
+                            .unwrap_or(react_core::llm::ReasoningEffort::Medium);
                         LlmCallOptions {
+                            prompt_id: "data_engineer.model_plan",
+                            thread_id: None,
                             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                             temperature: Some(0.55),
                             top_p: Some(0.95),
-                            max_output_tokens: Some(2800),
-                            reasoning_effort: Some(react_core::llm::ReasoningEffort::High),
+                            // Model planning tends to be larger than cleanse planning (more tasks, joins, semantics).
+                            max_output_tokens: Some(plan_max_tokens_model),
+                            reasoning_effort: Some(reasoning_effort),
                         }
                     };
                     match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q, llm_options).await {
@@ -3345,6 +3420,9 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 plan.status = crate::data_engineer::plan::PlanStatus::Draft;
                                 plan.plan_key =
                                     crate::data_engineer::plan::new_cleanse_plan_key(&actx);
+                                // Crash-safety: checkpoint the draft plan immediately so the thread
+                                // can be resumed even if we crash during grounding/critique.
+                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
                                 // Scope progress to the current plan instance so we don't replay the full
                                 // historical log and accidentally mark tasks done from prior cycles.
                                 plan.progress.last_applied_step_idx =
@@ -3451,6 +3529,9 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                             .to_string(),
                                     }]);
                                 }
+                                // Crash-safety: persist the grounded/pruned draft so resume/inspection reflects
+                                // what we actually validated/critiqued (not just the initial parsed JSON).
+                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
 
                                 // Quality gate 1: semantic validity (includes implementation_spec requirements).
                                 let sem = crate::data_engineer::plan::validate_cleanse_plan_semantics(&plan);
@@ -3707,6 +3788,9 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 plan.status = crate::data_engineer::plan::PlanStatus::Draft;
                                 plan.plan_key =
                                     crate::data_engineer::plan::new_model_plan_key(&actx);
+                                // Crash-safety: checkpoint the draft plan immediately so the thread
+                                // can be resumed even if we crash during grounding/critique.
+                                let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
                                 // Scope progress to the current plan instance so we don't replay the full
                                 // historical log and accidentally mark tasks done from prior cycles.
                                 plan.progress.last_applied_step_idx =
@@ -3794,6 +3878,9 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                             .to_string(),
                                     }]);
                                 }
+                                // Crash-safety: persist the grounded/pruned draft so resume/inspection reflects
+                                // what we actually validated/critiqued (not just the initial parsed JSON).
+                                let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
 
                                 // Quality gate 1: semantic validity (includes implementation_spec requirements).
                                 let sem = crate::data_engineer::plan::validate_model_plan_semantics(&plan, Some(&stg.allowed_models));
@@ -4094,9 +4181,22 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             {
                                 Some(p) => p,
                                 None => {
-                                    // Hard fail: authoring was entered, so we EXPECT an approved plan to exist.
-                                    // Missing plan indicates storage drift or a corrupted thread state and should not loop.
-                                    return Err("missing active cleanse plan in authoring phase (expected plan to exist)".to_string());
+                                    // Recovery: authoring was entered, but no plan exists (e.g. restart/resume drift).
+                                    // Bounce back to planning so the thread can rehydrate deterministically.
+                                    control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        Phase::CleansePlan,
+                                        Some("plan_missing"),
+                                        Some(serde_json::json!({
+                                            "plan_kind": "cleanse",
+                                            "note": "authoring entered without an active cleanse plan; routing back to planning",
+                                        })),
+                                    )
+                                    .await;
+                                    continue;
                                 }
                             };
                             // Safety: do not allow authoring to proceed with an empty/invalid approved plan,
@@ -4491,7 +4591,22 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                             {
                                 Some(p) => p,
                                 None => {
-                                    return Err("missing active model plan in authoring phase (expected plan to exist)".to_string());
+                                    // Recovery: authoring was entered, but no plan exists (e.g. restart/resume drift).
+                                    // Bounce back to planning so the thread can rehydrate deterministically.
+                                    control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        Phase::ModelPlan,
+                                        Some("plan_missing"),
+                                        Some(serde_json::json!({
+                                            "plan_kind": "model",
+                                            "note": "authoring entered without an active model plan; routing back to planning",
+                                        })),
+                                    )
+                                    .await;
+                                    continue;
                                 }
                             };
                             // Safety: do not allow authoring to proceed with an empty/invalid approved plan,
@@ -5327,19 +5442,35 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                     }
 
                     let llm_options = if is_cleanse {
+                        let author_max_tokens: u32 = std::env::var("LLM_AUTHOR_MAX_TOKENS_CLEANSE")
+                            .ok()
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(12_000)
+                            .max(2_000)
+                            .min(64_000);
                         LlmCallOptions {
+                            prompt_id: "data_engineer.cleanse_author",
+                            thread_id: None,
                             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                             temperature: Some(0.05),
                             top_p: Some(1.0),
-                            max_output_tokens: Some(1800),
+                            max_output_tokens: Some(author_max_tokens),
                             reasoning_effort: None,
                         }
                     } else {
+                        let author_max_tokens: u32 = std::env::var("LLM_AUTHOR_MAX_TOKENS_MODEL")
+                            .ok()
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(16_000)
+                            .max(2_000)
+                            .min(64_000);
                         LlmCallOptions {
+                            prompt_id: "data_engineer.model_author",
+                            thread_id: None,
                             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                             temperature: Some(0.12),
                             top_p: Some(1.0),
-                            max_output_tokens: Some(2200),
+                            max_output_tokens: Some(author_max_tokens),
                             reasoning_effort: None,
                         }
                     };
@@ -6613,23 +6744,50 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
 
         let llm_options = match kind {
             AuthoringKind::Cleanse => LlmCallOptions {
+                prompt_id: "data_engineer.cleanse_author",
+                thread_id: None,
                 expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                 temperature: Some(0.05),
                 top_p: Some(1.0),
-                max_output_tokens: Some(1800),
+                max_output_tokens: Some(
+                    std::env::var("LLM_AUTHOR_MAX_TOKENS_CLEANSE")
+                        .ok()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(12_000)
+                        .max(2_000)
+                        .min(64_000),
+                ),
                 reasoning_effort: None,
             },
             AuthoringKind::Model => LlmCallOptions {
+                prompt_id: "data_engineer.model_author",
+                thread_id: None,
                 expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                 temperature: Some(0.12),
                 top_p: Some(1.0),
-                max_output_tokens: Some(2200),
+                max_output_tokens: Some(
+                    std::env::var("LLM_AUTHOR_MAX_TOKENS_MODEL")
+                        .ok()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(16_000)
+                        .max(2_000)
+                        .min(64_000),
+                ),
                 reasoning_effort: None,
             },
         };
 
         for attempt in 0..10 {
-            match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &prompt, llm_options).await {
+            match Agent::run_until_block(
+                &registry,
+                &actx,
+                &sys,
+                &tools_card,
+                &prompt,
+                llm_options.clone(),
+            )
+            .await
+            {
                 Ok(RunOutcome::Final {
                     thread_id: _tid,
                     result,
@@ -7702,7 +7860,7 @@ mod tests {
                     .map(|m| m.content.clone())
                     .unwrap_or_default();
                 if let Ok(mut g) = self.captured.lock() {
-                    g.push((prompt, *options));
+                    g.push((prompt, options.clone()));
                 }
                 Ok(self.reply.clone())
             }

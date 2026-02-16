@@ -1052,6 +1052,8 @@ pub async fn repair_cleanse_plan_semantics_via_llm(
         },
     ];
     let call_opts = LlmCallOptions {
+        prompt_id: "data_engineer.cleanse_plan_semantic_repair",
+        thread_id: ctx.thread_id.clone(),
         expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
         temperature: Some(0.0),
         top_p: Some(1.0),
@@ -1096,6 +1098,8 @@ pub async fn repair_model_plan_semantics_via_llm(
         },
     ];
     let call_opts = LlmCallOptions {
+        prompt_id: "data_engineer.model_plan_semantic_repair",
+        thread_id: ctx.thread_id.clone(),
         expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
         temperature: Some(0.0),
         top_p: Some(1.0),

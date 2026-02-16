@@ -445,13 +445,13 @@ impl Agent {
 
             // Stdout debug logs: print each part in full if changed, else "unchanged".
             tracing::debug!(
-                "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_hash={} response_pending=1",
+                "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_id={} response_pending=1",
                 thread_id,
                 call_id,
                 agent,
                 phase,
                 "unknown",
-                prompt_hash
+                llm_options.prompt_id
             );
             for p in built.parts.iter() {
                 let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("-");
@@ -493,6 +493,11 @@ impl Agent {
                 .await;
         }
 
+        // Ensure the provider/router receives the thread_id even inside spawn_blocking.
+        let mut llm_options = llm_options;
+        if llm_options.thread_id.is_none() {
+            llm_options.thread_id = thread_id_opt.clone();
+        }
         let res = tokio::task::spawn_blocking(move || model.chat(&messages, &llm_options))
             .await
             .map_err(|e| format!("LLM execution failed: {}", e))?
@@ -792,7 +797,7 @@ impl Agent {
 
             // Ask model for next action.
             let prompt = transcript.join("\n");
-            let mut raw = Self::llm_chat_once(ctx, prompt, llm_options).await?;
+            let mut raw = Self::llm_chat_once(ctx, prompt, llm_options.clone()).await?;
             let mut action = match Self::parse_action(&raw) {
                 Ok(v) => v,
                 Err(e) => {
@@ -833,7 +838,7 @@ impl Agent {
                     keep.extend(transcript.iter().skip(transcript.len().saturating_sub(tail_n)).cloned());
                     keep.push("User: IMPORTANT: Return ONLY a single JSON object (no markdown, no code fences).".to_string());
                     let retry_prompt = keep.join("\n");
-                    raw = Self::llm_chat_once(ctx, retry_prompt, llm_options).await?;
+                    raw = Self::llm_chat_once(ctx, retry_prompt, llm_options.clone()).await?;
                     match Self::parse_action(&raw) {
                         Ok(v) => v,
                         Err(e2) => {
@@ -850,7 +855,7 @@ impl Agent {
                             }
                             keep2.push("User: Return ONLY JSON: either {\"action\":\"<tool>\",\"args\":{...}} or {\"final\":{...}}.".to_string());
                             let retry_prompt2 = keep2.join("\n");
-                            raw = Self::llm_chat_once(ctx, retry_prompt2, llm_options).await?;
+                            raw = Self::llm_chat_once(ctx, retry_prompt2, llm_options.clone()).await?;
                             Self::parse_action(&raw)?
                         }
                     }
@@ -1185,7 +1190,7 @@ mod tests {
             options: &crate::llm::LlmCallOptions,
         ) -> Result<String, String> {
             if let Ok(mut g) = self.last_opts.lock() {
-                *g = Some(*options);
+                *g = Some(options.clone());
             }
             let mut g = self
                 .replies
@@ -1294,8 +1299,13 @@ mod tests {
             "tools",
             "q",
             crate::llm::LlmCallOptions {
+                prompt_id: "react_core.agent.tests.run_until_block_basic",
+                thread_id: None,
                 expected_format: crate::llm::LlmExpectedFormat::JsonObject,
-                ..Default::default()
+                max_output_tokens: None,
+                temperature: None,
+                top_p: None,
+                reasoning_effort: None,
             },
         )
             .await
@@ -1353,15 +1363,22 @@ mod tests {
             runtime: None,
         };
         let opts = crate::llm::LlmCallOptions {
+            prompt_id: "react_core.agent.tests.capture_options",
+            thread_id: None,
             expected_format: crate::llm::LlmExpectedFormat::JsonObject,
             temperature: Some(0.9),
             top_p: Some(0.8),
             max_output_tokens: Some(1234),
+            reasoning_effort: None,
         };
         let _out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q", opts)
             .await
             .expect("ok");
-        let got = last_opts.lock().ok().and_then(|g| *g).expect("opts");
+        let got = last_opts
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .expect("opts");
         assert_eq!(got.temperature, Some(0.9));
         assert_eq!(got.top_p, Some(0.8));
         assert_eq!(got.max_output_tokens, Some(1234));
@@ -1413,8 +1430,13 @@ mod tests {
             "tools",
             "q",
             crate::llm::LlmCallOptions {
+                prompt_id: "react_core.agent.tests.final_payload_round_trip",
+                thread_id: None,
                 expected_format: crate::llm::LlmExpectedFormat::JsonObject,
-                ..Default::default()
+                max_output_tokens: None,
+                temperature: None,
+                top_p: None,
+                reasoning_effort: None,
             },
         )
             .await
@@ -1508,8 +1530,13 @@ mod tests {
             "tools",
             "q",
             crate::llm::LlmCallOptions {
+                prompt_id: "react_core.agent.tests.retry_loop",
+                thread_id: None,
                 expected_format: crate::llm::LlmExpectedFormat::JsonObject,
-                ..Default::default()
+                max_output_tokens: None,
+                temperature: None,
+                top_p: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -1624,8 +1651,13 @@ mod tests {
             "tools",
             "q",
             crate::llm::LlmCallOptions {
+                prompt_id: "react_core.agent.tests.dbt_files_patch_invoked",
+                thread_id: None,
                 expected_format: crate::llm::LlmExpectedFormat::JsonObject,
-                ..Default::default()
+                max_output_tokens: None,
+                temperature: None,
+                top_p: None,
+                reasoning_effort: None,
             },
         )
         .await

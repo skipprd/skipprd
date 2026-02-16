@@ -31,8 +31,17 @@ impl Default for LlmExpectedFormat {
 ///
 /// When optional fields are `None`, implementations should fall back to configured defaults
 /// (e.g., env/config values).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct LlmCallOptions {
+    /// Stable identifier for the prompt/call site.
+    ///
+    /// This is REQUIRED so logs/errors can directly name the prompt to tune.
+    /// If you see a compile error about missing `prompt_id`, add an explicit id.
+    pub prompt_id: &'static str,
+    /// Optional thread id (UUID) for observability and provider thread affinity.
+    ///
+    /// This must be passed explicitly because `spawn_blocking` does not propagate tokio task-locals.
+    pub thread_id: Option<String>,
     pub expected_format: LlmExpectedFormat,
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -43,10 +52,12 @@ pub struct LlmCallOptions {
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
-impl Default for LlmCallOptions {
-    fn default() -> Self {
+impl LlmCallOptions {
+    pub fn new(prompt_id: &'static str, expected_format: LlmExpectedFormat) -> Self {
         Self {
-            expected_format: LlmExpectedFormat::Text,
+            prompt_id,
+            thread_id: None,
+            expected_format,
             max_output_tokens: None,
             temperature: None,
             top_p: None,

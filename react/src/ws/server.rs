@@ -1988,8 +1988,13 @@ async fn synthesize_title(llm: &react_core::llm::DynLlm, question: &str, answer:
                     content: p,
                 }],
                 &react_core::llm::LlmCallOptions {
+                    prompt_id: "react.ws.synthesize_title",
+                    thread_id: None,
                     expected_format: react_core::llm::LlmExpectedFormat::Text,
-                    ..Default::default()
+                    max_output_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    reasoning_effort: None,
                 },
             )
         }
