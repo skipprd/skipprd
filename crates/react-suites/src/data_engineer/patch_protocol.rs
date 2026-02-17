@@ -144,6 +144,37 @@ fn parse_json_from_llm(text: &str) -> Result<Value, String> {
     Err("LLM response did not contain valid JSON object".to_string())
 }
 
+fn looks_like_patch_object(v: &Value) -> bool {
+    let Some(m) = v.as_object() else { return false };
+    m.contains_key("replace_file") || m.contains_key("replace_range") || m.contains_key("replace_list")
+}
+
+fn parse_patch_json_from_llm(text: &str) -> Result<Value, String> {
+    // Like parse_json_from_llm, but prefer the JSON object that actually contains patch primitives.
+    if let Ok(v) = serde_json::from_str::<Value>(text) {
+        if v.is_object() && looks_like_patch_object(&v) {
+            return Ok(v);
+        }
+    }
+    let s = text.trim();
+    let vals = extract_all_json_values(s, 16);
+    let mut last_obj: Option<Value> = None;
+    for vtxt in vals.iter().rev() {
+        if let Ok(v) = serde_json::from_str::<Value>(vtxt) {
+            if v.is_object() {
+                if looks_like_patch_object(&v) {
+                    return Ok(v);
+                }
+                last_obj = Some(v);
+            }
+        }
+    }
+    if let Some(v) = last_obj {
+        return Ok(v);
+    }
+    Err("LLM response did not contain valid JSON object".to_string())
+}
+
 fn extract_all_json_values(s: &str, max: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if max == 0 {
@@ -306,7 +337,7 @@ struct LlmPatchResponse {
 }
 
 fn parse_llm_patch_response(text: &str) -> Result<LlmPatchResponse, String> {
-    let v = parse_json_from_llm(text)?;
+    let v = parse_patch_json_from_llm(text)?;
     serde_json::from_value(v).map_err(|e| format!("failed to parse patch response JSON: {}", e))
 }
 

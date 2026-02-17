@@ -540,6 +540,31 @@ fn yaml_collect_model_section<'a>(
     out
 }
 
+fn yaml_collect_model_names(root: &serde_yaml::Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Some(models) = root
+        .as_mapping()
+        .and_then(|m| m.get(serde_yaml::Value::String("models".to_string())))
+        .and_then(|v| v.as_sequence())
+    else {
+        return out;
+    };
+    for it in models.iter() {
+        let Some(mm) = it.as_mapping() else { continue };
+        let name = mm
+            .get(serde_yaml::Value::String("name".to_string()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if !name.is_empty() {
+            out.push(name.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn yaml_collect_column_names(model: &serde_yaml::Mapping) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let Some(cols) = model
@@ -638,32 +663,6 @@ pub(crate) async fn validate_staging_schema_ymls(
         if !(rel.starts_with("models/staging/") && rel.ends_with(".yml")) {
             continue;
         }
-        let Some(stem) = file_stem(rel) else { continue };
-        let model_name = stem.clone();
-        let sql_rel = format!("models/staging/{}.sql", stem);
-
-        let sql_text = if let Some(s) = new_by_rel.get(&sql_rel) {
-            s.clone()
-        } else {
-            // Fall back to existing sibling SQL in storage.
-            let key = project_fs::join_storage_key(ctx, &sql_rel);
-            let bytes = ctx
-                .storage
-                .get_bytes(&key)
-                .await
-                .map_err(|_| format!("cannot validate {}: missing sibling SQL {}", rel, sql_rel))?;
-            String::from_utf8_lossy(&bytes).to_string()
-        };
-
-        let allowed_cols = extract_final_select_output_columns(&sql_text).map_err(|e| {
-            format!(
-                "cannot validate {} against {}: {}",
-                rel,
-                sql_rel,
-                e.trim()
-            )
-        })?;
-
         let yml_root: serde_yaml::Value = serde_yaml::from_str(&o.content).map_err(|e| {
             format!(
                 "invalid YAML in {}: {}",
@@ -672,9 +671,11 @@ pub(crate) async fn validate_staging_schema_ymls(
             )
         })?;
 
-        let models = yaml_collect_model_section(&yml_root, &model_name);
-        if models.is_empty() {
-            // If the file doesn't declare the expected model name, skip (best-effort).
+        // Validate each staging model declared by name in this YAML file.
+        // We intentionally do NOT require a sibling SQL for the YAML file's own stem,
+        // since dbt allows aggregating docs/tests for many models into one YAML file.
+        let model_names = yaml_collect_model_names(&yml_root);
+        if model_names.is_empty() {
             continue;
         }
 
@@ -727,125 +728,157 @@ pub(crate) async fn validate_staging_schema_ymls(
             out
         }
 
-        // Contract enforcement is disabled by suite policy.
-        // We still validate that schema YAML references only columns produced by sibling SQL
-        // (prevents obvious COLUMN_NOT_FOUND and reduces drift), but we do not require full
-        // contract completeness or data_type coverage.
-        let contract_enforced_any = false;
-        let mut missing_cols: BTreeSet<String> = BTreeSet::new();
-        let mut missing_data_type: BTreeSet<String> = BTreeSet::new();
-        if contract_enforced_any {
-            // Consolidate across all declarations for this model name in the file (best-effort).
-            let mut declared: HashMap<String, Option<String>> = HashMap::new();
-            let mut duplicates: BTreeSet<String> = BTreeSet::new();
-            for mm in models.iter() {
-                for (name, dt) in yaml_collect_column_name_and_type(mm).into_iter() {
-                    if declared.contains_key(&name) {
-                        duplicates.insert(name.clone());
+        for model_name in model_names.iter() {
+            let models = yaml_collect_model_section(&yml_root, model_name);
+            if models.is_empty() {
+                continue;
+            }
+
+            let sql_rel = format!("models/staging/{}.sql", model_name);
+            let sql_text = if let Some(s) = new_by_rel.get(&sql_rel) {
+                s.clone()
+            } else {
+                // Fall back to existing staging SQL in storage.
+                let key = project_fs::join_storage_key(ctx, &sql_rel);
+                let bytes = ctx.storage.get_bytes(&key).await.map_err(|_| {
+                    format!(
+                        "cannot validate {}: missing staging model SQL {} (for model '{}')",
+                        rel, sql_rel, model_name
+                    )
+                })?;
+                String::from_utf8_lossy(&bytes).to_string()
+            };
+
+            let allowed_cols = extract_final_select_output_columns(&sql_text).map_err(|e| {
+                format!(
+                    "cannot validate {} against {} (model '{}'): {}",
+                    rel,
+                    sql_rel,
+                    model_name,
+                    e.trim()
+                )
+            })?;
+
+            // Contract enforcement is disabled by suite policy.
+            // We still validate that schema YAML references only columns produced by staging SQL
+            // (prevents obvious COLUMN_NOT_FOUND and reduces drift), but we do not require full
+            // contract completeness or data_type coverage.
+            let contract_enforced_any = models.iter().any(|m| yaml_model_contract_enforced(m));
+            let mut missing_cols: BTreeSet<String> = BTreeSet::new();
+            let mut missing_data_type: BTreeSet<String> = BTreeSet::new();
+            if contract_enforced_any {
+                // Consolidate across all declarations for this model name in the file (best-effort).
+                let mut declared: HashMap<String, Option<String>> = HashMap::new();
+                let mut duplicates: BTreeSet<String> = BTreeSet::new();
+                for mm in models.iter() {
+                    for (name, dt) in yaml_collect_column_name_and_type(mm).into_iter() {
+                        if declared.contains_key(&name) {
+                            duplicates.insert(name.clone());
+                        }
+                        declared.insert(name, dt);
                     }
-                    declared.insert(name, dt);
+                }
+                if !duplicates.is_empty() {
+                    let mut msg = format!(
+                        "schema contract has duplicate column entries for staging model '{}'.\nFile: {}\n",
+                        model_name, rel
+                    );
+                    msg.push_str(&format!(
+                        "\nDuplicate columns under models[].columns[]:\n- {}\n",
+                        duplicates.into_iter().collect::<Vec<_>>().join("\n- ")
+                    ));
+                    msg.push_str("\nFix: de-duplicate YAML columns so each output column appears once.\n");
+                    return Err(msg);
+                }
+
+                for c in allowed_cols.iter() {
+                    if !declared.contains_key(c) {
+                        missing_cols.insert(c.clone());
+                    }
+                }
+                for (name, dt) in declared.iter() {
+                    if allowed_cols.contains(name) && dt.is_none() {
+                        missing_data_type.insert(name.clone());
+                    }
                 }
             }
-            if !duplicates.is_empty() {
-                let mut msg = format!(
-                    "schema contract has duplicate column entries for staging model '{}'.\nFile: {}\n",
-                    model_name, rel
+
+            // (1) Validate declared columns exist in the staging SQL output.
+            let mut unknown_cols: BTreeSet<String> = BTreeSet::new();
+            for mm in models.iter() {
+                for c in yaml_collect_column_names(mm).into_iter() {
+                    if !allowed_cols.contains(&c) {
+                        unknown_cols.insert(c);
+                    }
+                }
+            }
+
+            // (2) Validate any where: predicates that reference *_raw also exist in the staging output.
+            let mut unknown_raw: BTreeSet<String> = BTreeSet::new();
+            for mm in models.iter() {
+                let mut where_strs: Vec<String> = Vec::new();
+                yaml_collect_where_strings(
+                    &serde_yaml::Value::Mapping((*mm).clone()),
+                    &mut where_strs,
                 );
-                msg.push_str(&format!(
-                    "\nDuplicate columns under models[].columns[]:\n- {}\n",
-                    duplicates.into_iter().collect::<Vec<_>>().join("\n- ")
-                ));
-                msg.push_str("\nFix: de-duplicate YAML columns so each output column appears once.\n");
+                where_strs.sort();
+                where_strs.dedup();
+                for ws in where_strs.iter() {
+                    for tok in extract_idents_ending_with_raw(ws).into_iter() {
+                        if !allowed_cols.contains(&tok) {
+                            unknown_raw.insert(tok);
+                        }
+                    }
+                }
+            }
+
+            if !unknown_cols.is_empty() || !unknown_raw.is_empty() {
+                let mut msg = format!(
+                    "schema contract references unknown columns for staging model '{}'.\n\
+File: {}\n\
+Staging SQL (defines allowed output columns): {}\n",
+                    model_name, rel, sql_rel
+                );
+                if !unknown_cols.is_empty() {
+                    msg.push_str(&format!(
+                        "\nUnknown columns declared under models[].columns[].name:\n- {}\n",
+                        unknown_cols.into_iter().collect::<Vec<_>>().join("\n- ")
+                    ));
+                }
+                if !unknown_raw.is_empty() {
+                    msg.push_str(&format!(
+                        "\nUnknown *_raw identifiers referenced in where: clauses:\n- {}\n",
+                        unknown_raw.into_iter().collect::<Vec<_>>().join("\n- ")
+                    ));
+                }
+                msg.push_str("\nFix: either (a) update the staging SQL to actually output these columns, or (b) remove/rename the YAML references to match the staging model output. Do NOT invent new column names.\n");
                 return Err(msg);
             }
 
-            for c in allowed_cols.iter() {
-                if !declared.contains_key(c) {
-                    missing_cols.insert(c.clone());
-                }
-            }
-            for (name, dt) in declared.iter() {
-                if allowed_cols.contains(name) && dt.is_none() {
-                    missing_data_type.insert(name.clone());
-                }
-            }
-        }
-
-        // (1) Validate declared columns exist in the sibling SQL output.
-        let mut unknown_cols: BTreeSet<String> = BTreeSet::new();
-        for mm in models.iter() {
-            for c in yaml_collect_column_names(mm).into_iter() {
-                if !allowed_cols.contains(&c) {
-                    unknown_cols.insert(c);
-                }
-            }
-        }
-
-        // (2) Validate any where: predicates that reference *_raw also exist in the sibling output.
-        let mut unknown_raw: BTreeSet<String> = BTreeSet::new();
-        for mm in models.iter() {
-            let mut where_strs: Vec<String> = Vec::new();
-            yaml_collect_where_strings(&serde_yaml::Value::Mapping((*mm).clone()), &mut where_strs);
-            where_strs.sort();
-            where_strs.dedup();
-            for ws in where_strs.iter() {
-                for tok in extract_idents_ending_with_raw(ws).into_iter() {
-                    if !allowed_cols.contains(&tok) {
-                        unknown_raw.insert(tok);
-                    }
-                }
-            }
-        }
-
-        if !unknown_cols.is_empty() || !unknown_raw.is_empty() {
-            let mut msg = format!(
-                "schema contract references unknown columns for staging model '{}'.\n\
+            if contract_enforced_any && (!missing_cols.is_empty() || !missing_data_type.is_empty()) {
+                let mut msg = format!(
+                    "schema contract is incomplete for contracted staging model '{}'.\n\
 File: {}\n\
-Sibling SQL (defines allowed output columns): {}\n",
-                model_name, rel, sql_rel
-            );
-            if !unknown_cols.is_empty() {
-                msg.push_str(&format!(
-                    "\nUnknown columns declared under models[].columns[].name:\n- {}\n",
-                    unknown_cols.into_iter().collect::<Vec<_>>().join("\n- ")
-                ));
+Staging SQL (defines required output columns): {}\n",
+                    model_name, rel, sql_rel
+                );
+                if !missing_cols.is_empty() {
+                    msg.push_str(&format!(
+                        "\nMissing required columns (must declare every output column when contract is enforced):\n- {}\n",
+                        missing_cols.into_iter().collect::<Vec<_>>().join("\n- ")
+                    ));
+                }
+                if !missing_data_type.is_empty() {
+                    msg.push_str(&format!(
+                        "\nMissing data_type for columns (required when contract is enforced):\n- {}\n",
+                        missing_data_type.into_iter().collect::<Vec<_>>().join("\n- ")
+                    ));
+                }
+                msg.push_str(
+                    "\nFix: declare every output column under models[].columns and set data_type for each column.\n",
+                );
+                return Err(msg);
             }
-            if !unknown_raw.is_empty() {
-                msg.push_str(&format!(
-                    "\nUnknown *_raw identifiers referenced in where: clauses:\n- {}\n",
-                    unknown_raw.into_iter().collect::<Vec<_>>().join("\n- ")
-                ));
-            }
-            msg.push_str("\nFix: either (a) update the staging SQL to actually output these columns, or (b) remove/rename the YAML references to match the staging model output. Do NOT invent new column names.\n");
-            return Err(msg);
-        }
-
-        if contract_enforced_any && (!missing_cols.is_empty() || !missing_data_type.is_empty()) {
-            let mut msg = format!(
-                "schema contract is incomplete for contracted staging model '{}'.\n\
-File: {}\n\
-Sibling SQL (defines required output columns): {}\n",
-                model_name, rel, sql_rel
-            );
-            if !missing_cols.is_empty() {
-                msg.push_str(&format!(
-                    "\nMissing required columns (must declare every output column when contract is enforced):\n- {}\n",
-                    missing_cols.into_iter().collect::<Vec<_>>().join("\n- ")
-                ));
-            }
-            if !missing_data_type.is_empty() {
-                msg.push_str(&format!(
-                    "\nMissing data_type for columns (required when contract is enforced):\n- {}\n",
-                    missing_data_type
-                        .into_iter()
-                        .collect::<Vec<_>>()
-                        .join("\n- ")
-                ));
-            }
-            msg.push_str(
-                "\nFix: declare every output column under models[].columns and set data_type for each column.\n",
-            );
-            return Err(msg);
         }
     }
     Ok(())

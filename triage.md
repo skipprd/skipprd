@@ -723,3 +723,47 @@ This run is inefficient and effectively loops in `model_plan`: the model repeate
 - `model_plan` exits reliably without repeated `invalid_json_from_model` churn.
 - Fewer repeated LLM calls with identical failing hashes.
 - Lower latency and token usage for planning phases that require strict JSON envelopes.
+
+## Thread a858714c-4359-46a4-b0f9-adb345ff1431 / a3225340-377b-47c0-9b18-67473544ba20 / ef0f3f56-2cde-4875-8f6d-3a2e577f309d / 866e0089-eed1-480d-ae96-8dff898132cc — schema patch/validation loops + schema patch truncation
+
+### Issue
+Two of these runs are **looping/inefficient** due to deterministic schema-patching and staging-schema validation traps:
+- **`a858...`**: schema patch authoring emits a non-conforming patch envelope (e.g. `{"op":"patch", ...}` and/or multi-object outputs), causing repeated patch failures/retries.
+- **`a322...`**: the run repeatedly tries to “fix” staging schema YAML by creating/adjusting a non-canonical `models/staging/staging.sql` sibling, but the project’s staging SQL rules make that impossible, so it churns.
+- **`ef0f...`**: `apply_next_model_schema_batch` repeatedly fails because the schema patch LLM output is **truncated at `max_output_tokens=3200`**, producing repeated no-progress retries until a manual patch is attempted.
+- **`866e...`**: mostly **not a loop**; it’s dominated by AWS STS/DNS connectivity issues (the run summary indicates dbt ultimately succeeded).
+
+### Evidence (logs + codebase)
+- `a858...` log shows patch-like output shaped as `{"op":"patch","replace_file":[...]}...` (not the patch protocol contract), which is then re-attempted. (`.react/picnic/dev/example4/logs/a858714c-4359-46a4-b0f9-adb345ff1431.log`)
+- `a322...` log shows repeated failures alternating between:
+  - `cannot validate models/staging/staging.yml: missing sibling SQL models/staging/staging.sql`
+  - and `invalid staging model SQL at 'models/staging/staging.sql': staging models must contain exactly one dbt source() call and be written to the canonical path ...`
+  (`.react/picnic/dev/example5/logs/a3225340-377b-47c0-9b18-67473544ba20.log`)
+- `validate_staging_schema_ymls` **requires the sibling SQL** (`models/staging/<stem>.sql`) *before* it even knows whether the YAML declares a model matching `<stem>`, so doc/aggregate YAMLs can trigger “missing sibling SQL” errors even though they’d be skipped later. (`crates/react-suites/src/data_engineer/tools/dbt_files.rs`)
+- Staging SQL identity rules are strict: any `models/staging/*.sql` must contain exactly one `source()` and be written to the canonical `stg_<schema>_<table>.sql` path, meaning “placeholder” siblings like `staging.sql` are **guaranteed to fail**. (`crates/react-suites/src/data_engineer/project_fs/mod.rs`)
+- `apply_next_model_schema_batch` calls the patch protocol with `max_output_tokens: Some(3200)` (comment says “avoid truncation”), but `ef0f...` shows repeated `Responses status=incomplete reason=max_output_tokens` truncations and retries. (`crates/react-suites/src/data_engineer/tools/apply_next_schema_batch.rs`, `.react/picnic/dev/example7/logs/ef0f3f56-2cde-4875-8f6d-3a2e577f309d.log`)
+- Patch protocol parsing is strict (`#[serde(deny_unknown_fields)]`), so any extra wrapper keys (e.g. `op`) can deterministically fail patch parsing. (`crates/react-suites/src/data_engineer/patch_protocol.rs`)
+
+### Root cause (evidenced)
+1. **Schema patch envelope mismatch**: the patch protocol expects a single JSON object containing exactly one of `replace_file|replace_range|replace_list` (and denies unknown fields). Some authoring paths emit extra wrapper keys (like `op`) / multi-object outputs, which then fail parse and trigger retries.
+2. **Staging YAML validation policy trap**: `validate_staging_schema_ymls` enforces a *per-YAML sibling SQL* rule for any `models/staging/*.yml` file, but the staging SQL validator forbids non-canonical “sibling” models like `models/staging/staging.sql`. The combination creates a deterministic repair loop.
+3. **Schema patch truncation**: `apply_next_model_schema_batch` can request large `models/schema.yml` edits but caps output at 3200 tokens; when the patch text is large, it truncates and the tool retries without reducing output size.
+
+### How the solution design/approach contributes
+- **Heuristic “make a sibling file” remediation** conflicts with the **strict canonical staging model policy**, so retries can never converge once the system chooses the wrong repair strategy.
+- **Strict JSON contracts without transport-level enforcement** mean small prompt deviations (“op” wrappers, extra JSON objects) become deterministic parse failures that look like “agent loops.”
+- **Large single-shot schema edits** (many models at once) increase the probability of truncation, producing repeated attempts with no progress.
+
+### High-impact, low-risk solution
+1. **Fix staging schema YAML validation to avoid the sibling-SQL trap.**
+   - In `validate_staging_schema_ymls` (`crates/react-suites/src/data_engineer/tools/dbt_files.rs`), parse the YAML first and **only** require/validate a sibling SQL if the YAML actually declares a model matching the file stem.
+   - Additionally, consider scoping this validation to `models/staging/stg_*.yml` only (since staging models are canonicalized as `stg_*`).
+2. **Harden patch protocol parsing against harmless wrappers.**
+   - In `LlmPatchResponse` (`crates/react-suites/src/data_engineer/patch_protocol.rs`), allow/ignore an optional wrapper field like `op` (or strip it before deserialization), while keeping `deny_unknown_fields` for everything else.
+3. **Reduce schema patch truncation risk.**
+   - Raise `max_output_tokens` for `models_schema_patch`, and/or cap the number of models patched per batch so patches reliably fit without truncation.
+
+### Expected result
+- Staging docs/schema edits stop triggering deterministic “missing sibling SQL” / “invalid staging model SQL” loops.
+- Patch authoring retries converge (wrapper keys no longer cause immediate parse failure).
+- `apply_next_model_schema_batch` stops failing on truncation and progresses without repeated no-op retries.
