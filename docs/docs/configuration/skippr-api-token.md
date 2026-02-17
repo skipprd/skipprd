@@ -1,34 +1,48 @@
-# Configuration: SKIPPR_API_TOKEN
+# Configuration: SKIPPR_S3_BUCKET
 
 ## Description
 
-This configuration is used to sync metadata to Skippr Metadata API and validate a paid subscription license.
+This configuration specifies the S3 bucket where Skippr will store metadata, logs, metrics, and the query manifest. All persistence operations are handled through S3.
 
 ## Default Value
 
-No default value. The SKIPPR_API_TOKEN must be provided by the user.
+Default value: `skippr-data`
 
 ## Example Values
 
-Let's consider an example where the user has a Skippr API token as "abc123".
+Let's consider an example where you want to use a bucket named "my-skippr-data".
 
-- SKIPPR_API_TOKEN=abc123
+- SKIPPR_S3_BUCKET=my-skippr-data
 
-In this example, the `abc123` token will be used to authenticate requests to the Skippr Metadata API and verify the user's license.
+In this example, Skippr will store data at paths like:
+- `s3://my-skippr-data/{tenant}/{workspace}/{pipeline}/metadata/metadata.json`
+- `s3://my-skippr-data/{tenant}/{workspace}/{pipeline}/logs/{timestamp}_{run_id}.json`
+- `s3://my-skippr-data/{tenant}/{workspace}/{pipeline}/metrics/{timestamp}_{run_id}.json`
+- `s3://my-skippr-data/{tenant}/{workspace}/{pipeline}/manifest/manifest.json` (contains absolute `s3://...` URLs for DataFusion)
 
 ## Detailed Description
 
-The SKIPPR_API_TOKEN is a unique identifier associated with each user account. The API uses this token to authenticate requests from users and ensure they have valid subscriptions. This configuration is necessary for syncing metadata to the Skippr Metadata API.
+The SKIPPR_S3_BUCKET configuration defines the S3 bucket used for all Skippr persistence operations. This includes:
+
+- **Metadata**: Pipeline schema and configuration metadata
+- **Logs**: Application logs with structured JSON format
+- **Metrics**: Performance and operational metrics
+- **Config**: Pipeline configuration snapshots
+- **Manifest**: Query catalog with absolute S3 paths used to build DataFusion tables
+
+All data is organized by workspace and pipeline name within the bucket for easy management and access control.
 
 ## Considerations
 
-When setting up Skippr, special attention should be given to the SKIPPR_API_TOKEN configuration. Here are a few considerations:
+When setting up Skippr with S3 persistence, consider the following:
 
-- The SKIPPR_API_TOKEN is unique to each user account. Do not share your token with others, as it provides access to your account and data.
+- Ensure your AWS credentials have read/write access to the specified S3 bucket.
 
-- Keep your API token secure. If your token is lost or compromised, you should revoke it immediately and generate a new one.
+- The bucket should exist before running Skippr, or your AWS credentials should have permissions to create buckets.
 
-- The API token is necessary for validating the subscription license. Without a valid license, Skippr will not function as expected.
+- Consider implementing appropriate S3 bucket policies and lifecycle rules for data retention and cost management.
 
-- Always ensure that the SKIPPR_API_TOKEN is correctly configured in your environment. Incorrect or missing configuration may result in failure to sync metadata or validate the license.
+- All team members should have access to the same S3 bucket for shared pipeline metadata.
+
+- Use consistent workspace and pipeline names across your team to ensure proper data organization.
 

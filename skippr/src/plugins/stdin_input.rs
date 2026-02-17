@@ -1,0 +1,131 @@
+
+use crate::helpers::configuration::{Config};
+use crate::helpers::offsets::{OffsetKey, Offsets};
+use crate::helpers::Helpers;
+use crate::ingest_work::{Ingest, IngestBatch};
+
+use std::io::{self, BufRead, BufReader};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc};
+use std::thread;
+use std::time::Instant;
+use tracing::error;
+// use async_trait::async_trait;
+use tokio::time::Duration;
+use crate::buffer::BufferChunker;
+// use crate::plugins::DataSourcePlugin;
+
+
+pub struct DataSourceStdinPlugin {
+    ingest: Ingest,
+    buffer_size: usize,
+    buffer_timeout: Duration,
+    buffer_threshold: Duration,
+}
+
+// #[async_trait]
+// impl DataSourcePlugin for DataSourceStdinPlugin  {
+impl DataSourceStdinPlugin {
+    pub async fn new() -> DataSourceStdinPlugin {
+        DataSourceStdinPlugin {
+            ingest: Ingest::new(),
+            buffer_size: Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1")
+                .parse()
+                .unwrap(),
+            buffer_timeout: Duration::from_secs(
+                Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "1")
+                    .parse()
+                    .unwrap(),
+            ),
+            buffer_threshold: Duration::from_secs(
+                Config::getenv("BUFFER_THRESHOLD_SECONDS", "5")
+                    .parse()
+                    .unwrap(),
+            ),
+        }
+    }
+
+    pub async fn sync(
+        &mut self,
+        offsets: Arc<Offsets>,
+    ) {
+        let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
+
+        let buffer_size = self.buffer_size;
+        let buffer_timeout = self.buffer_timeout;
+
+        thread::spawn(move || {
+            let stdin = io::stdin();
+            let reader = BufReader::new(stdin.lock());
+
+            let mut buffer = Vec::new();
+            let mut last_flush = Instant::now();
+
+            for line_result in reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        buffer.extend(line.into_bytes());
+
+                        // Add newline after each line
+                        buffer.push('\n' as u8);
+
+                        if buffer.len() >= buffer_size || last_flush.elapsed() >= buffer_timeout {
+                            if let Err(e) = tx.send(buffer.clone()) {
+                                error!("Error sending to buffer channel: {}", e);
+                                break;
+                            }
+                            buffer.clear();
+                            last_flush = Instant::now();
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error reading from stdin: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            // Send any remaining data
+            if !buffer.is_empty() {
+                if let Err(e) = tx.send(buffer) {
+                    error!("Error sending to buffer channel: {}", e);
+                }
+            }
+        });
+
+        loop {
+            match rx.recv_timeout(self.buffer_threshold) {
+                Ok(buffer) => {
+                    let data = String::from_utf8_lossy(&buffer).to_string();
+                    let batch = IngestBatch {
+                        offset_key: OffsetKey {
+                            namespace: "stdin".to_string(),
+                            partition: Helpers::random_str(10), // no partition for stdin
+                        },
+                        data: data.clone(),
+                        bytes: data.len(),
+                        source_uri: "".to_string(),
+                    };
+
+                    // Spawn a new task in the runtime for each batch received.
+                    let offsets_clone = offsets.clone();
+
+                    // thread::spawn(move || {
+                        self.ingest.ingest_file(vec![batch], &offsets_clone)
+                    // })
+                    // .join()
+                    // .unwrap();
+                }
+                Err(e) => match e {
+                    mpsc::RecvTimeoutError::Timeout => {
+                        // BufferChunker::rotate_buffers(true);
+                    }
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        error!("Error receiving from buffer channel: {}", e);
+                        break;
+                    }
+                },
+            }
+        }
+    }
+}

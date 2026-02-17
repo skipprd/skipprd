@@ -1,0 +1,61 @@
+name: Bike Hire Test
+inputs:
+  architecture_name:
+    description: 'macos_arm64, macos-x86, linux_x86'
+    required: true
+    default: 'stable'
+  aws_access_key_id:
+    required: true
+  aws_secret_access_key:
+    required: true
+  docker_hub_pass:
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Run Skippr Tests
+      shell: bash
+      run: |
+        chmod +x ./skippr-${{ inputs.architecture_name }}/skippr
+        
+        cp .github/actions/e2e/bike_hire/skippr.yml ./skippr.yml
+        
+        ls -la ./
+        
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire"
+        
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 STATS_HISTOGRAM_ENABLED=true ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire
+
+    - name: Validate Stats via SHOW STATS (plain)
+      shell: bash
+      run: |
+        set -euo pipefail
+        AWS_DEFAULT_REGION=us-east-1 \
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} \
+        AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} \
+        ./skippr-${{ inputs.architecture_name }}/skippr query --plain --sql "SHOW STATS FOR bike_hire" > stats.json
+        echo "Stats JSON preview:" && head -n 50 stats.json || true
+        # Basic validations
+        jq -e '.namespace == "bike_hire"' stats.json
+        jq -e '(.fields | type) == "object"' stats.json
+        jq -e '(.fields | to_entries | length) > 0' stats.json
+        # Sum totals across fields must be > 0
+        jq -e '(.fields | to_entries | map(.value.total) | add) > 0' stats.json
+        # nulls must be >= 0 for all fields (spot-check via fail if any negative)
+        jq -e '(.fields | to_entries | map(.value.nulls) | min) >= 0' stats.json
+        # Histogram validations: if a field is numeric with min/max, expect histogram arrays to exist
+        # Collect candidate numeric fields (presence of min_numeric/max_numeric)
+        NUMERIC_FIELDS=$(jq -r '.fields | to_entries | map(select((.value.min_numeric != null) or (.value.max_numeric != null))) | .[].key' stats.json)
+        if [ -n "${NUMERIC_FIELDS}" ]; then
+          for f in ${NUMERIC_FIELDS}; do
+            echo "Validating histogram for field: ${f}"
+            jq -e --arg f "$f" '.fields[$f].histogram_bins | type == "array" and (. | length) == 20' stats.json
+            jq -e --arg f "$f" '.fields[$f].histogram_min != null and .fields[$f].histogram_max != null' stats.json
+          done
+        fi
+
+    - name: Asset Athena
+      shell: bash
+      run: |
+        pip install soda-core-athena
+        AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }}  soda scan -d datalake_e2e -c ./soda/configuration.yml ./soda/bike_hire.yml

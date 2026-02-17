@@ -1,4 +1,20 @@
 
+This repository is a Cargo workspace with two crates:
+
+
+- `skippr`: ingest + plugins + `sqlrt`
+- `react`: ReAct runtime + WebSocket server (`serve`)
+
+To run the ReAct server:
+
+```bash
+cargo run -p react -- serve --port 8787 --log
+```
+
+Suites (default registry):
+- `data_engineer`: unified analytics + DBT-oriented suite (`ask` | `model` | `cleanse`)
+- `kb`: minimal local knowledge-base suite (local file ingest + vector Q&A)
+
 
 Usage: skippr convert <INPUT> <OUTPUT> [OPTIONS]
 
@@ -23,6 +39,9 @@ skippr discover DATA_SOURCE
 skippr sync DATA_SOURCE DATA_DEST
 	--schema 
 	--data 
+
+Global options:
+- `--log` Enable diagnostic logs (disabled by default). Respect `RUST_LOG` for level (e.g., `RUST_LOG=debug`).
 
 
 skippr validate DATA_SOURCE

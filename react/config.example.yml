@@ -1,0 +1,31 @@
+server:
+  port: 8089
+
+storage:
+  # Local-first storage: artifacts/threads/catalog/vectors are persisted under this path.
+  mode: local
+  path: "./.react"
+  # For S3 storage instead:
+  # mode: s3
+  # bucket: "example-bucket"
+
+scope:
+  tenant: "example"
+  workspace: "default"
+  project_id: "data_engineer"
+
+llm:
+  # "null" starts the server without an external LLM (useful for smoke tests)
+  provider: "null"
+
+providers:
+  # Disable all providers for a pure server boot smoke test.
+  athena:
+    enabled: false
+  catalog:
+    enabled: false
+  dbt:
+    enabled: false
+  vector:
+    enabled: false
+

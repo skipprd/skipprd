@@ -1,0 +1,2 @@
+checks for bike_hire:
+  - row_count = 5100000
