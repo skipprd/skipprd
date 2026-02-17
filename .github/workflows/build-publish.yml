@@ -188,6 +188,50 @@ jobs:
           rust-version: stable
           architecture_name: linux_x86
 
+  react_binary_build:
+    name: react build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos arm64
+            runs_on: macos-latest
+            target: aarch64-apple-darwin
+            bin_ext: ""
+          - name: linux x86_64
+            runs_on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin_ext: ""
+          - name: windows x86_64
+            runs_on: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin_ext: ".exe"
+    runs-on: ${{ matrix.runs_on }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build react release binary
+        run: cargo build --release -p react --target ${{ matrix.target }}
+
+      - name: Upload react artifact (unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: react-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/react${{ matrix.bin_ext }}
+
+      - name: Upload react artifact (windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: react-${{ matrix.target }}
+          path: target\${{ matrix.target }}\release\react${{ matrix.bin_ext }}
+
 #  linux_x86_heaptrack:
 #    needs:
 #      - linux_x86
@@ -231,26 +275,26 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
-     linux_x86_llm_tests:
-     needs:
-       - linux_x86
-     name: LLM functional tests (linux x86)
-     runs-on:
-       - ubuntu-latest
-     steps:
-       - uses: actions/checkout@v3
-       - name: Install system deps
-         run: |
-           sudo apt-get update
-           sudo apt-get install -y cmake
-       - name: Build with local llama feature (no model)
-         run: |
-           cargo build --features llama_cpp
-       - name: Run LLM functional tests
-         env:
-           RUST_BACKTRACE: 1
-         run: |
-           cargo test --tests -- --nocapture llm_
+  linux_x86_llm_tests:
+    needs:
+      - linux_x86
+    name: LLM functional tests (linux x86)
+    runs-on:
+      - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake
+      - name: Build with local llama feature (no model)
+        run: |
+          cargo build --features llama_cpp
+      - name: Run LLM functional tests
+        env:
+          RUST_BACKTRACE: 1
+        run: |
+          cargo test --tests -- --nocapture llm_
 
   chaos_mode_test:
     needs:
