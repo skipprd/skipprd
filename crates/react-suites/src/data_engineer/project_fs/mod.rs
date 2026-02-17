@@ -410,6 +410,105 @@ pub async fn manifest_find(
     Ok(serde_json::json!({"ok": true, "path": rel, "key": key, "items": out}))
 }
 
+pub async fn remove_file(
+    ctx: &AgentCtx,
+    path: &str,
+    expected_sha256: Option<&str>,
+) -> Result<Value, String> {
+    let rel = normalize_rel_path(path)?;
+    let key = join_storage_key(ctx, &rel);
+
+    let existing = ctx.storage.get_bytes(&key).await.ok();
+    let existed = existing.is_some();
+    let base_sha256 = existing
+        .as_ref()
+        .map(|b| sha256_hex(String::from_utf8_lossy(b).as_ref()))
+        .unwrap_or_default();
+
+    if let Some(expected) = expected_sha256 {
+        if existed && expected != base_sha256 {
+            return Err(format!(
+                "expected_sha256 mismatch for {}: expected {}, current {}",
+                rel, expected, base_sha256
+            ));
+        }
+        // If the file doesn't exist, treat as idempotent no-op regardless of expected_sha256.
+    }
+
+    if existed {
+        ctx.storage.delete_object(&key).await?;
+    }
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "mutated": existed,
+        "results": [{
+            "op": "rm",
+            "path": rel,
+            "key": key,
+            "existed": existed,
+            "mutated": existed,
+            "base_sha256": base_sha256
+        }]
+    }))
+}
+
+pub async fn move_file(
+    ctx: &AgentCtx,
+    from_path: &str,
+    to_path: &str,
+    expected_sha256: Option<&str>,
+) -> Result<Value, String> {
+    let from_rel = normalize_rel_path(from_path)?;
+    let to_rel = normalize_rel_path(to_path)?;
+    if from_rel == to_rel {
+        return Err("mv requires from != to".to_string());
+    }
+    let from_key = join_storage_key(ctx, &from_rel);
+    let to_key = join_storage_key(ctx, &to_rel);
+
+    let bytes = ctx
+        .storage
+        .get_bytes(&from_key)
+        .await
+        .map_err(|_| format!("not found: {}", from_rel))?;
+    let base_sha256 = sha256_hex(String::from_utf8_lossy(&bytes).as_ref());
+    if let Some(expected) = expected_sha256 {
+        if expected != base_sha256 {
+            return Err(format!(
+                "expected_sha256 mismatch for {}: expected {}, current {}",
+                from_rel, expected, base_sha256
+            ));
+        }
+    }
+
+    // No implicit overwrite: destination must not exist.
+    if ctx.storage.get_bytes(&to_key).await.is_ok() {
+        return Err(format!("destination already exists: {}", to_rel));
+    }
+
+    ctx.storage
+        .put_bytes(&to_key, &bytes, "text/plain")
+        .await?;
+    ctx.storage.delete_object(&from_key).await?;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "mutated": true,
+        "results": [{
+            "op": "mv",
+            "from": from_rel,
+            "to": to_rel,
+            "path": to_rel,
+            "from_key": from_key,
+            "key": to_key,
+            "mutated": true,
+            "base_sha256": base_sha256,
+            "new_sha256": base_sha256
+        }]
+    }))
+}
+
 pub async fn apply_patch(
     ctx: &AgentCtx,
     datasets: Option<&std::sync::Arc<dyn DatasetCatalogProvider>>,

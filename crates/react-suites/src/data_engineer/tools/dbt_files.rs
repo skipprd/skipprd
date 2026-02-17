@@ -986,6 +986,25 @@ struct ReplaceListArgs {
     expected_sha256: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoveFileArgs {
+    op: String,
+    path: String,
+    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
+    expected_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MoveFileArgs {
+    op: String,
+    from: String,
+    to: String,
+    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
+    expected_sha256: Option<String>,
+}
+
 #[async_trait]
 impl Tool for DbtFilesTool {
     fn name(&self) -> &'static str {
@@ -1039,6 +1058,30 @@ impl Tool for DbtFilesTool {
                     .unwrap_or(20)
                     .min(200) as usize;
                 project_fs::manifest_find(ctx, path, unique_id, name, resource_type, limit).await
+            }
+            "rm" => {
+                let parsed = serde_json::from_value::<RemoveFileArgs>(args.clone()).map_err(|e| {
+                    format!(
+                        "dbt_files op=rm contract violation: {}\n\nExpected args: {{\"op\":\"rm\",\"path\":\"...\",\"expected_sha256?\":\"...\"}}",
+                        e
+                    )
+                })?;
+                project_fs::remove_file(ctx, &parsed.path, parsed.expected_sha256.as_deref()).await
+            }
+            "mv" => {
+                let parsed = serde_json::from_value::<MoveFileArgs>(args.clone()).map_err(|e| {
+                    format!(
+                        "dbt_files op=mv contract violation: {}\n\nExpected args: {{\"op\":\"mv\",\"from\":\"...\",\"to\":\"...\",\"expected_sha256?\":\"...\"}}",
+                        e
+                    )
+                })?;
+                project_fs::move_file(
+                    ctx,
+                    &parsed.from,
+                    &parsed.to,
+                    parsed.expected_sha256.as_deref(),
+                )
+                .await
             }
             "patch" => {
                 validate_patch_args_shape(&args)?;
@@ -1283,7 +1326,7 @@ impl Tool for DbtFilesTool {
                 }))
             }
             _ => Err(
-                "unsupported op; use 'list', 'get', 'get_json', 'manifest_find', or 'patch'"
+                "unsupported op; use 'list', 'get', 'get_json', 'manifest_find', 'patch', 'rm', or 'mv'"
                     .to_string(),
             ),
         }
@@ -1373,6 +1416,91 @@ mod tests {
             exec_ctx: None,
             runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         }
+    }
+
+    #[tokio::test]
+    async fn dbt_files_rm_deletes_existing_file() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone());
+        let tool = DbtFilesTool { datasets: None };
+
+        let key = project_fs::join_storage_key(&ctx, "models/x.sql");
+        storage
+            .put_bytes(&key, b"select 1\n", "text/plain")
+            .await
+            .expect("preload");
+
+        let obs = tool
+            .call(
+                serde_json::json!({"op":"rm","path":"models/x.sql"}),
+                &ctx,
+            )
+            .await
+            .expect("rm ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(obs.get("mutated").and_then(|v| v.as_bool()), Some(true));
+        assert!(storage.get_bytes(&key).await.is_err(), "file should be removed");
+    }
+
+    #[tokio::test]
+    async fn dbt_files_rm_is_idempotent_when_missing() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let obs = tool
+            .call(
+                serde_json::json!({"op":"rm","path":"models/missing.sql"}),
+                &ctx,
+            )
+            .await
+            .expect("rm ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(obs.get("mutated").and_then(|v| v.as_bool()), Some(false));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_mv_moves_file_and_rejects_overwrite() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone());
+        let tool = DbtFilesTool { datasets: None };
+
+        let from_key = project_fs::join_storage_key(&ctx, "models/from.sql");
+        let to_key = project_fs::join_storage_key(&ctx, "models/to.sql");
+        storage
+            .put_bytes(&from_key, b"select 1\n", "text/plain")
+            .await
+            .expect("preload from");
+
+        let obs = tool
+            .call(
+                serde_json::json!({"op":"mv","from":"models/from.sql","to":"models/to.sql"}),
+                &ctx,
+            )
+            .await
+            .expect("mv ok");
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(obs.get("mutated").and_then(|v| v.as_bool()), Some(true));
+
+        assert!(storage.get_bytes(&from_key).await.is_err(), "from should be removed");
+        let bytes = storage.get_bytes(&to_key).await.expect("to exists");
+        assert_eq!(String::from_utf8_lossy(&bytes), "select 1\n");
+
+        // Reject overwrite
+        storage
+            .put_bytes(&from_key, b"select 2\n", "text/plain")
+            .await
+            .expect("restore from");
+        let err = tool
+            .call(
+                serde_json::json!({"op":"mv","from":"models/from.sql","to":"models/to.sql"}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("destination already exists"));
     }
 
     #[tokio::test]

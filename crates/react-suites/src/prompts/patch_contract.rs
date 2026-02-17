@@ -21,8 +21,10 @@ Output schema:
 }
 
 pub fn dbt_files_patch_contract() -> &'static str {
-    r#"dbt_files(op=patch) contract (MUST follow exactly):
-- args.op MUST be "patch"
+    r#"dbt_files file operations contract (MUST follow exactly):
+- args.op MUST be one of: "patch" | "rm" | "mv"
+
+op="patch":
 - args MUST include EXACTLY ONE of:
   - replace_file: {path:string, new_text:string, expected_sha256?:string} | [{...}]
   - replace_range: {path:string, start_line:int, end_line:int, new_text:string, expected_sha256?:string} | [{...}]
@@ -30,6 +32,19 @@ pub fn dbt_files_patch_contract() -> &'static str {
 - If expected_sha256 is provided, it MUST match the current file content sha256.
 - Only include fields shown above; the patch structs are strict and extra keys will fail parsing.
 Example args (replace_file):
-{"op":"patch","replace_file":{"path":"models/staging/stg_example.sql","new_text":"-- sql...","expected_sha256":"<sha256>"}}"#
+{"op":"patch","replace_file":{"path":"models/staging/stg_example.sql","new_text":"-- sql...","expected_sha256":"<sha256>"}}
+
+op="rm":
+- args: {path:string, expected_sha256?:string}
+- If expected_sha256 is provided and the file exists, it MUST match the current file sha256.
+Example args:
+{"op":"rm","path":"models/staging/staging.sql"}
+
+op="mv":
+- args: {from:string, to:string, expected_sha256?:string}
+- Destination MUST NOT already exist (no implicit overwrite).
+- If expected_sha256 is provided, it MUST match the current source file sha256.
+Example args:
+{"op":"mv","from":"models/staging/foo.sql","to":"models/staging/stg_test_raw_raw_customers.sql"}"#
 }
 

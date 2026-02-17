@@ -60,37 +60,60 @@ fn file_stem(s: &str) -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
-fn extract_dbt_files_patch_paths(args: &Value) -> Vec<String> {
+fn extract_dbt_files_paths(op: &str, args: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
-    // Optional single-file guard.
-    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-        let p = p.trim();
-        if !p.is_empty() {
-            out.push(p.to_string());
-        }
-    }
-
-    // Structured patch primitives can embed paths.
-    for key in ["replace_file", "replace_range", "replace_list"] {
-        let Some(v) = args.get(key) else { continue };
-        let mut visit = |obj: &serde_json::Map<String, Value>| {
-            if let Some(p) = obj.get("path").and_then(|v| v.as_str()) {
+    match op {
+        "patch" => {
+            // Optional single-file guard.
+            if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
                 let p = p.trim();
                 if !p.is_empty() {
                     out.push(p.to_string());
                 }
             }
-        };
-        if let Some(arr) = v.as_array() {
-            for it in arr.iter() {
-                if let Some(obj) = it.as_object() {
+
+            // Structured patch primitives can embed paths.
+            for key in ["replace_file", "replace_range", "replace_list"] {
+                let Some(v) = args.get(key) else { continue };
+                let mut visit = |obj: &serde_json::Map<String, Value>| {
+                    if let Some(p) = obj.get("path").and_then(|v| v.as_str()) {
+                        let p = p.trim();
+                        if !p.is_empty() {
+                            out.push(p.to_string());
+                        }
+                    }
+                };
+                if let Some(arr) = v.as_array() {
+                    for it in arr.iter() {
+                        if let Some(obj) = it.as_object() {
+                            visit(obj);
+                        }
+                    }
+                } else if let Some(obj) = v.as_object() {
                     visit(obj);
                 }
             }
-        } else if let Some(obj) = v.as_object() {
-            visit(obj);
         }
+        "mv" => {
+            // Prefer destination path for progress tracking.
+            if let Some(p) = args.get("to").and_then(|v| v.as_str()) {
+                let p = p.trim();
+                if !p.is_empty() {
+                    out.push(p.to_string());
+                }
+            }
+        }
+        "rm" => {
+            // Removals generally shouldn't advance authoring checklists, but we still capture the target.
+            if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                let p = p.trim();
+                if !p.is_empty() {
+                    out.push(p.to_string());
+                }
+            }
+        }
+        _ => {}
     }
 
     out.sort();
@@ -2242,10 +2265,10 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
 
         if name == "dbt_files" {
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
-            if op == "patch" {
+            if op == "patch" || op == "mv" {
                 let ok = observation.ok;
 
-                let paths = extract_dbt_files_patch_paths(args);
+                let paths = extract_dbt_files_paths(op, args);
                 // SQL patching can be used for targeted remediation; treat successful patches as progress.
                 let mut stems: Vec<String> = paths.iter().filter_map(|p| file_stem(p)).collect();
                 stems.sort();
@@ -2837,7 +2860,7 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
             if op == "patch" {
                 let ok = observation.ok;
-                let paths = extract_dbt_files_patch_paths(args);
+                let paths = extract_dbt_files_paths(op, args);
                 let mut stems: Vec<String> = paths.iter().filter_map(|p| file_stem(p)).collect();
                 stems.sort();
                 stems.dedup();

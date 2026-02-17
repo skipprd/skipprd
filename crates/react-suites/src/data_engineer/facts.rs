@@ -100,31 +100,68 @@ fn dbt_files_patch_contract_value() -> Value {
     // as an immutable contract, and reused in deterministic validators.
     serde_json::json!({
         "dbt_files": {
-            "op": "patch",
-            "top_level_args": {
-                "op": "patch",
-                "path": "optional string (single-file guard)",
-                "replace_file": "{path,new_text,expected_sha256?} or array of those",
-                "replace_range": "{path,start_line,end_line,new_text,expected_sha256?} or array of those",
-                "replace_list": "{path,edits:[{start_line,end_line,new_text}...],expected_sha256?} or array of those"
-            },
-            "rules": [
-                "args.op MUST equal \"patch\"",
-                "Provide EXACTLY ONE of replace_file OR replace_range OR replace_list",
-                "replace_file object keys MUST be exactly: path, new_text, expected_sha256 (optional)",
-                "replace_range object keys MUST be exactly: path, start_line, end_line, new_text, expected_sha256 (optional)",
-                "replace_list object keys MUST be exactly: path, edits, expected_sha256 (optional)",
-                "replace_list.edits items MUST have exactly: start_line, end_line, new_text",
-                "When expected_sha256 is present, it MUST match the current file content sha256"
-            ],
-            "example_replace_file": {
-                "action": "dbt_files",
-                "args": {
-                    "op": "patch",
-                    "replace_file": {
-                        "path": "models/marts/fct_example.sql",
-                        "new_text": "-- sql...",
-                        "expected_sha256": "<sha256 optional>"
+            "ops": {
+                "patch": {
+                    "top_level_args": {
+                        "op": "patch",
+                        "path": "optional string (single-file guard)",
+                        "replace_file": "{path,new_text,expected_sha256?} or array of those",
+                        "replace_range": "{path,start_line,end_line,new_text,expected_sha256?} or array of those",
+                        "replace_list": "{path,edits:[{start_line,end_line,new_text}...],expected_sha256?} or array of those"
+                    },
+                    "rules": [
+                        "args.op MUST equal \"patch\"",
+                        "Provide EXACTLY ONE of replace_file OR replace_range OR replace_list",
+                        "replace_file object keys MUST be exactly: path, new_text, expected_sha256 (optional)",
+                        "replace_range object keys MUST be exactly: path, start_line, end_line, new_text, expected_sha256 (optional)",
+                        "replace_list object keys MUST be exactly: path, edits, expected_sha256 (optional)",
+                        "replace_list.edits items MUST have exactly: start_line, end_line, new_text",
+                        "When expected_sha256 is present, it MUST match the current file content sha256"
+                    ],
+                    "example_replace_file": {
+                        "action": "dbt_files",
+                        "args": {
+                            "op": "patch",
+                            "replace_file": {
+                                "path": "models/marts/fct_example.sql",
+                                "new_text": "-- sql...",
+                                "expected_sha256": "<sha256 optional>"
+                            }
+                        }
+                    }
+                },
+                "rm": {
+                    "top_level_args": {
+                        "op": "rm",
+                        "path": "string (project-relative path)",
+                        "expected_sha256": "optional string (only checked if the file exists)"
+                    },
+                    "rules": [
+                        "args.op MUST equal \"rm\"",
+                        "args.path MUST be a project-relative path (no absolute paths, no '..')",
+                        "If expected_sha256 is provided and the file exists, it MUST match the current file content sha256"
+                    ],
+                    "example": {
+                        "action": "dbt_files",
+                        "args": {"op":"rm","path":"models/staging/staging.sql"}
+                    }
+                },
+                "mv": {
+                    "top_level_args": {
+                        "op": "mv",
+                        "from": "string (project-relative path)",
+                        "to": "string (project-relative path)",
+                        "expected_sha256": "optional string (checked against the source file content)"
+                    },
+                    "rules": [
+                        "args.op MUST equal \"mv\"",
+                        "args.from and args.to MUST be project-relative paths (no absolute paths, no '..')",
+                        "Destination MUST NOT already exist (no implicit overwrite)",
+                        "If expected_sha256 is provided, it MUST match the current source file sha256"
+                    ],
+                    "example": {
+                        "action": "dbt_files",
+                        "args": {"op":"mv","from":"models/staging/foo.sql","to":"models/staging/stg_test_raw_raw_customers.sql"}
                     }
                 }
             }

@@ -1643,10 +1643,9 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         ctx: &react_core::agent::AgentCtx,
                     ) -> Result<serde_json::Value, String> {
                         let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                        if op == "patch" {
+                        if matches!(op, "patch" | "rm" | "mv") {
                             return Err(
-                                "dbt_files is read-only for review; use op='get' or op='list'"
-                                    .to_string(),
+                                "dbt_files is read-only for review; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string(),
                             );
                         }
                         self.inner.call(args, ctx).await
@@ -1796,10 +1795,9 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         ctx: &react_core::agent::AgentCtx,
                     ) -> Result<serde_json::Value, String> {
                         let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                        if op == "patch" {
+                        if matches!(op, "patch" | "rm" | "mv") {
                             return Err(
-                                "dbt_files is read-only in plan phases; use op='get' or op='list'"
-                                    .to_string(),
+                                "dbt_files is read-only in plan phases; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string(),
                             );
                         }
                         self.inner.call(args, ctx).await
@@ -1820,7 +1818,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                     "- artifacts",
                     "- ask_user",
                     "",
-                    "Not available: staging_model, gold_model, dbt_files patch, dbt_validate, publish_dbt_to_provider.",
+                    "Not available: staging_model, gold_model, dbt_files patch/rm/mv, dbt_validate, publish_dbt_to_provider.",
                 ];
             }
             control_flow::Phase::CleanseAuthor | control_flow::Phase::ModelAuthor => {
@@ -1833,7 +1831,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                 reg.register(tools::ask_user::AskUserTool);
 
                 if hard_mutation_only {
-                    // Patch-only dbt_files to avoid "read-only thrash" when we require a mutation next.
+                    // Mutation-only dbt_files to avoid "read-only thrash" when we require a mutation next.
                     struct PutOnlyDbtFilesTool {
                         inner: DbtFilesTool,
                     }
@@ -1848,8 +1846,8 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             ctx: &react_core::agent::AgentCtx,
                         ) -> Result<serde_json::Value, String> {
                             let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                            if op != "patch" {
-                                return Err("dbt_files is patch-only right now (a mutating fix is required before any further validation).".to_string());
+                            if !matches!(op, "patch" | "rm" | "mv") {
+                                return Err("dbt_files is mutation-only right now (a mutating fix is required before any further validation). Allowed ops: patch/rm/mv.".to_string());
                             }
                             self.inner.call(args, ctx).await
                         }
@@ -1885,7 +1883,10 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         tool_lines.push("- apply_next_model_schema_batch(args:{instructions?:string})");
                     }
                     tool_lines.extend_from_slice(&[
-                        "- dbt_files(args:{op:\"patch\", replace_file?:{path:string,new_text:string,expected_sha256?:string}|[{...}], replace_range?:{path:string,start_line:int,end_line:int,new_text:string,expected_sha256?:string}|[{...}], replace_list?:{path:string,edits:[{start_line:int,end_line:int,new_text:string}],expected_sha256?:string}|[{...}], path?:string})",
+                        "- dbt_files(args:{op:\"patch\"|\"rm\"|\"mv\", ...})",
+                        "  - op=patch args: {replace_file?|replace_range?|replace_list?, path?:string(single-file guard)}",
+                        "  - op=rm args: {path:string, expected_sha256?:string}",
+                        "  - op=mv args: {from:string, to:string, expected_sha256?:string}",
                         "- run_sql(args:{sql:string}) (targeted probes; required after runtime failures)",
                         "- ask_user(args:{prompt:string})",
                         "",
@@ -1949,7 +1950,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_cleanse_batch(args:{instructions?:string})",
 							"- apply_next_cleanse_schema_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, limit?:int, max_chars?:int})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, from?:string, to?:string, expected_sha256?:string, limit?:int, max_chars?:int})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -1962,7 +1963,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_model_batch(args:{instructions?:string})",
 							"- apply_next_model_schema_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, limit?:int, max_chars?:int})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, from?:string, to?:string, expected_sha256?:string, limit?:int, max_chars?:int})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -1983,7 +1984,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 							"  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
 							"- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})",
 							"  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, limit?:int, max_chars?:int})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, from?:string, to?:string, expected_sha256?:string, limit?:int, max_chars?:int})",
 							"- ask_user(args:{prompt:string})",
 							"",
 							"Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).",
@@ -2009,8 +2010,8 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         ctx: &react_core::agent::AgentCtx,
                     ) -> Result<serde_json::Value, String> {
                         let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                        if op == "patch" {
-                            return Err("dbt_files is read-only in review phases; use op='get' or op='list'".to_string());
+                        if matches!(op, "patch" | "rm" | "mv") {
+                            return Err("dbt_files is read-only in review phases; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string());
                         }
                         self.inner.call(args, ctx).await
                     }

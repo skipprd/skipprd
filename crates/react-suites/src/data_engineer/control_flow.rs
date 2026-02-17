@@ -172,7 +172,7 @@ fn is_mutation_step(step: &ThreadStep) -> bool {
             "dbt_files" => {
                 args.get("op")
                     .and_then(|v| v.as_str())
-                    .map(|s| s == "patch")
+                    .map(|s| matches!(s, "patch" | "rm" | "mv"))
                     .unwrap_or(false)
             }
             _ => false,
@@ -394,12 +394,12 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
                 } = step
                 {
                     if name == "dbt_files" && observation.ok {
-                        let is_patch = args
+                        let is_dbt_files_mut = args
                             .get("op")
                             .and_then(|v| v.as_str())
-                            .map(|s| s == "patch")
+                            .map(|s| matches!(s, "patch" | "rm" | "mv"))
                             .unwrap_or(false);
-                        if is_patch {
+                        if is_dbt_files_mut {
                             out.patched_since_fail = true;
                         }
                     }
@@ -448,7 +448,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
 /// - If the patch touched global-impact files (macros/, packages.yml, dbt_project.yml), return an
 ///   empty list to indicate we should skip targeted validation and do full validation instead.
 pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Vec<String> {
-    // Find the most recent successful dbt_files patch.
+    // Find the most recent successful dbt_files mutation that should influence targeted validation.
     let mut patched_paths: Vec<String> = Vec::new();
     for step in log.steps.iter().rev() {
         let ThreadStep::ToolEnd {
@@ -463,12 +463,13 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
         if name != "dbt_files" || !observation.ok {
             continue;
         }
-        let is_patch = args
+        let op = args
             .get("op")
             .and_then(|v| v.as_str())
-            .map(|s| s == "patch")
-            .unwrap_or(false);
-        if !is_patch {
+            .unwrap_or("");
+        // Consider patch and mv as sources of new/updated model paths.
+        // (rm removes paths; targeting removed paths is usually unhelpful.)
+        if op != "patch" && op != "mv" {
             continue;
         }
 
@@ -485,10 +486,19 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
 
         // If tool didn't return results[] for some reason, fall back to args.path (single-file).
         if patched_paths.is_empty() {
-            if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-                let p = p.trim();
-                if !p.is_empty() {
-                    patched_paths.push(p.to_string());
+            if op == "patch" {
+                if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                    let p = p.trim();
+                    if !p.is_empty() {
+                        patched_paths.push(p.to_string());
+                    }
+                }
+            } else if op == "mv" {
+                if let Some(p) = args.get("to").and_then(|v| v.as_str()) {
+                    let p = p.trim();
+                    if !p.is_empty() {
+                        patched_paths.push(p.to_string());
+                    }
                 }
             }
         }
@@ -1194,6 +1204,50 @@ mod tests {
                     "dbt_files",
                     serde_json::json!({"op":"patch","path":"models/a.sql","content":"select 1"}),
                     serde_json::json!({"ok": true, "mutated": true}),
+                ),
+            ],
+            ..Default::default()
+        };
+        let g = derive_guard_state(Some(&log));
+        assert!(g.last_validate_failed);
+        assert!(g.mutated_since_fail);
+    }
+
+    #[test]
+    fn guard_clears_block_after_dbt_files_rm_mutation() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "dbt_validate",
+                    serde_json::json!({"build": true}),
+                    serde_json::json!({"ok": false, "compile_ok": false, "run_ok": false, "errors":["x"]}),
+                ),
+                step(
+                    "dbt_files",
+                    serde_json::json!({"op":"rm","path":"models/a.sql"}),
+                    serde_json::json!({"ok": true, "mutated": true, "results":[{"path":"models/a.sql","mutated":true}]}),
+                ),
+            ],
+            ..Default::default()
+        };
+        let g = derive_guard_state(Some(&log));
+        assert!(g.last_validate_failed);
+        assert!(g.mutated_since_fail);
+    }
+
+    #[test]
+    fn guard_clears_block_after_dbt_files_mv_mutation() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "dbt_validate",
+                    serde_json::json!({"build": true}),
+                    serde_json::json!({"ok": false, "compile_ok": false, "run_ok": false, "errors":["x"]}),
+                ),
+                step(
+                    "dbt_files",
+                    serde_json::json!({"op":"mv","from":"models/a.sql","to":"models/b.sql"}),
+                    serde_json::json!({"ok": true, "mutated": true, "results":[{"path":"models/b.sql","mutated":true}]}),
                 ),
             ],
             ..Default::default()
