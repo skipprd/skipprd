@@ -1,6 +1,7 @@
 
 This repository is a Cargo workspace with two crates:
 
+
 - `skippr`: ingest + plugins + `sqlrt`
 - `react`: ReAct runtime + WebSocket server (`serve`)
 
