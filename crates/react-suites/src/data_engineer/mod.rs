@@ -290,20 +290,20 @@ impl DataEngineerSuite {
             "cleanse_plan" => crate::prompts::plan::cleanse_plan_system_prompt()
                 + "\n\nSTRICT REPAIR MODE:\n\
 - Tools are NOT available.\n\
-- You MUST output ONLY a single final JSON envelope.\n\
-- Do not output any prose.\n\
-- Return: {\"final\":{\"kind\":\"cleanse_plan\",\"payload\":<json_plan_object>,\"display\":\"<optional short summary>\"}}\n",
+- You MUST finish with a single final result (no tool calls).\n\
+- Do not output any prose outside the contracted output.\n\
+- When you finish: final.kind MUST be \"cleanse_plan\".\n",
             "model_plan" => crate::prompts::plan::model_plan_system_prompt()
                 + "\n\nSTRICT REPAIR MODE:\n\
 - Tools are NOT available.\n\
-- You MUST output ONLY a single final JSON envelope.\n\
-- Do not output any prose.\n\
-- Return: {\"final\":{\"kind\":\"model_plan\",\"payload\":<json_plan_object>,\"display\":\"<optional short summary>\"}}\n",
+- You MUST finish with a single final result (no tool calls).\n\
+- Do not output any prose outside the contracted output.\n\
+- When you finish: final.kind MUST be \"model_plan\".\n",
             _ => {
                 "You are repairing a JSON plan.\n\
 Hard rules:\n\
 - Tools are NOT available.\n\
-- Output STRICT JSON only.\n"
+- Output format is enforced by the system-provided output contract.\n"
                     .to_string()
             }
         }
@@ -315,7 +315,7 @@ Hard rules:\n\
 You will be given a DRAFT plan JSON (already parsed by the server).
 Your job is to determine whether the plan is explicit enough that authoring can implement it without inventing logic.
 
-Return STRICT JSON only with this schema:
+Return a JSON object with this schema:
 {
   "ok": true|false,
   "blockers": [string, ...],
@@ -787,9 +787,9 @@ You MUST fix it and re-emit the plan.\n\n\
 Validation error:\n{err}\n\n\
 Invalid payload JSON ({payload_label}):\n{payload_str}\n{payload_note}\n\
 Hard constraints:\n\
-- The entire response must be STRICT JSON only.\n\
+- Your response format is enforced by the system-provided output contract.\n\
 - Every checklist item's `evidence` must be an empty array `[]` (no strings, no objects).\n\n\
-Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
+Now finish with a final result where final.kind=\"{expected_kind}\"."
         );
 
         let sys = crate::util::time_context::with_time_context(
@@ -3404,7 +3404,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 if let Some(e) = last_err {
                                     return Ok(vec![FlowFrame::AwaitUser {
                                         prompt: format!(
-                                            "Plan JSON is invalid and could not be repaired automatically.\n\nError:\n{e}\n\nPlease reply with a corrected STRICT JSON final envelope for kind='cleanse_plan'."
+                                            "Plan JSON is invalid and could not be repaired automatically.\n\nError:\n{e}\n\nPlease reply with a corrected final result where final.kind='cleanse_plan' and final.payload is the full plan object."
                                         ),
                                     }]);
                                 }
@@ -3772,7 +3772,7 @@ Now re-emit ONLY the corrected final envelope with kind=\"{expected_kind}\"."
                                 if let Some(e) = last_err {
                                     return Ok(vec![FlowFrame::AwaitUser {
                                         prompt: format!(
-                                            "Plan JSON is invalid and could not be repaired automatically.\n\nError:\n{e}\n\nPlease reply with a corrected STRICT JSON final envelope for kind='model_plan'."
+                                            "Plan JSON is invalid and could not be repaired automatically.\n\nError:\n{e}\n\nPlease reply with a corrected final result where final.kind='model_plan' and final.payload is the full plan object."
                                         ),
                                     }]);
                                 }
@@ -7881,7 +7881,7 @@ mod tests {
         let captured: Arc<std::sync::Mutex<Vec<(String, LlmCallOptions)>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(CapturingLlm {
-            reply: r#"{"final":{"kind":"model_plan","payload":{}}}"#.to_string(),
+            reply: r#"{"type":"final","final":{"kind":"model_plan","payload":{}}}"#.to_string(),
             captured: captured.clone(),
         });
 
@@ -7934,7 +7934,10 @@ mod tests {
         let got = captured.lock().unwrap();
         assert!(!got.is_empty(), "expected at least one llm call");
         let (prompt, opts) = &got[0];
-        assert_eq!(opts.expected_format, LlmExpectedFormat::JsonObject);
+        assert_eq!(
+            opts.expected_format,
+            LlmExpectedFormat::JsonSchema(react_core::schema_registry::SchemaId::AgentStepV1)
+        );
         assert!(
             prompt.contains("Invalid payload JSON (COMPACTED)"),
             "expected compaction label in prompt"

@@ -244,16 +244,23 @@ impl LargeLanguageModel for OpenAICompatModel {
                     }],
                 });
             }
+            let response_format = match options.expected_format {
+                react_core::llm::LlmExpectedFormat::Text => serde_json::json!({ "type": "text" }),
+                react_core::llm::LlmExpectedFormat::JsonObject => {
+                    serde_json::json!({ "type": "json_object" })
+                }
+                react_core::llm::LlmExpectedFormat::JsonSchema(id) => serde_json::json!({
+                    "type": "json_schema",
+                    "name": id.name().replace('.', "_"),
+                    "schema": react_core::schema_registry::json_schema(id),
+                    "strict": true
+                }),
+            };
             let body = RespReq {
                 model: model.clone(),
                 input: msgs,
                 modalities: Some(vec!["text".to_string()]),
-                response_format: Some(serde_json::json!({
-                    "type": match options.expected_format {
-                        react_core::llm::LlmExpectedFormat::Text => "text",
-                        react_core::llm::LlmExpectedFormat::JsonObject => "json_object",
-                    }
-                })),
+                response_format: Some(response_format),
                 max_output_tokens: Some(max_tokens),
                 reasoning: Some(RespReasoning {
                     effort: match options

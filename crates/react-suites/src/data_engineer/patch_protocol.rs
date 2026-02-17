@@ -392,7 +392,7 @@ pub async fn llm_patch_loop_single_file(
         "existing_content_with_line_numbers": existing_content_with_line_numbers,
         "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
         "input": user_payload_value,
-        "instruction": "Return ONLY JSON. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. Prefer replace_file when possible. The patch MUST modify ONLY expected_rel_path. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
+        "instruction": "Return a single JSON object matching schema patch_protocol.single_file.v1. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. Prefer replace_file when possible. The patch MUST modify ONLY expected_rel_path. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
     })
     .to_string();
 
@@ -409,9 +409,13 @@ pub async fn llm_patch_loop_single_file(
 
     let mut call_opts = llm_options.unwrap_or_else(|| react_core::llm::LlmCallOptions::new(
         "data_engineer.patch_protocol.llm_patch_loop",
-        react_core::llm::LlmExpectedFormat::JsonObject,
+        react_core::llm::LlmExpectedFormat::JsonSchema(
+            react_core::schema_registry::SchemaId::PatchSingleFileV1,
+        ),
     ));
-    call_opts.expected_format = react_core::llm::LlmExpectedFormat::JsonObject;
+    call_opts.expected_format = react_core::llm::LlmExpectedFormat::JsonSchema(
+        react_core::schema_registry::SchemaId::PatchSingleFileV1,
+    );
 
     let mut last_err: Option<String> = None;
     for attempt in 1..=max_iters {

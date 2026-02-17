@@ -238,7 +238,7 @@ You will be given:
 - The original goal and review context (brief)
 - A small, deterministic project snapshot (dbt_project.yml, sources list, model file index, and minimal manifest metadata)
 
-Output STRICT JSON only (exactly one object) with this schema:
+Output one JSON object with this schema:
 {
   "project_notes": [string, ...],
   "project_risks": [string, ...]
@@ -260,7 +260,7 @@ You will be given:
 - The original goal and review context (brief)
 - A small, deterministic project snapshot (dbt_project.yml, sources list, model file index, and minimal manifest metadata)
 
-Output STRICT JSON only (exactly one object) with this schema:
+Output one JSON object with this schema:
 {
   "project_notes": [string, ...],
   "project_risks": [string, ...]
@@ -287,7 +287,7 @@ You will be given:
 - Any invariants/notes from planning
 - The authoritative schema (columns/types) for each dataset in the batch (when available)
 
-Output STRICT JSON only (exactly one object) with this schema:
+Output one JSON object with this schema:
 {
   "notes": [string, ...],
   "actionable_hints": [string, ...]
@@ -329,7 +329,7 @@ You will be given:
 - Any invariants/notes from planning
 - The authoritative schema (columns/types) for each dataset in the batch (when available)
 
-Output STRICT JSON only (exactly one object) with this schema:
+Output one JSON object with this schema:
 {
   "notes": [string, ...],
   "actionable_hints": [string, ...]
@@ -371,7 +371,7 @@ You will be given:
 - Project-level notes/risks
 - Notes from ALL review batches
 
-You must output STRICT JSON only (exactly one object) with this schema:
+You must output one JSON object with this schema:
 {
   "final_review_text": string
 }
@@ -410,7 +410,7 @@ You will be given:
 - Project-level notes/risks
 - Notes from ALL review batches
 
-You must output STRICT JSON only (exactly one object) with this schema:
+You must output one JSON object with this schema:
 {
   "final_review_text": string
 }

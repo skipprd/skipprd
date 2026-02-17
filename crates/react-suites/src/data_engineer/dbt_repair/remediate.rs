@@ -922,7 +922,7 @@ async fn best_effort_schema_columns_for_relation(
 ///
 /// Contract:
 /// - Provide immutable facts (dialect, errors, failing + related files, source schemas, optional samples).
-/// - LLM must return ONLY JSON and ONLY propose edits required to fix the provided errors.
+/// - LLM must return a single JSON object and propose only edits required to fix the provided errors.
 /// - LLM returns structured patch primitives per changed key; we canonicalize and apply patches deterministically.
 pub async fn remediate_dbt_failures_grounded_with_llm(
     ctx: &AgentCtx,

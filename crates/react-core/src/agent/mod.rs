@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::any::Any;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::keyspace::Keyspace;
 use crate::llm::{ChatMessage, LlmCallOptions, LlmExpectedFormat};
@@ -9,6 +9,7 @@ use crate::llm_observability::PartInput;
 use crate::providers::{
     DbtProvider, QueryProvider, VectorStore, WarehouseProvider,
 };
+use crate::schema_registry::{AgentStepTypeV1, AgentStepV1, SchemaId};
 use crate::scope::RequestScope;
 use crate::session::{ExecutionContext, Observation, ThreadResult, ThreadStep, ThreadStore, ToolObservation};
 use crate::storage::StorageAdapter;
@@ -69,6 +70,12 @@ pub struct AgentCtx {
 }
 
 pub struct Agent;
+
+#[derive(Clone, Debug)]
+enum ParsedStep {
+    Tool { name: String, args: Value },
+    Final { final_env: FinalEnvelope },
+}
 
 fn title_case_words(s: &str) -> String {
     let mut out = String::new();
@@ -593,78 +600,98 @@ impl Agent {
         res
     }
 
-    fn parse_action(raw: &str) -> Result<Value, String> {
-        // Be forgiving: some model backends may emit multiple JSON objects in one response
-        // (e.g. a tool action followed by a final). Prefer an object that contains "action"
-        // (tool call) over "final" and over args-only objects.
-        match serde_json::from_str::<Value>(raw) {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                let trimmed = raw.trim();
-                let extracted = Self::extract_all_json_values(trimmed, 8);
-                if extracted.is_empty() {
-                    return Err(format!("invalid JSON from model: {}", e));
-                }
-
-                let mut parsed: Vec<Value> = Vec::new();
-                for txt in extracted.iter() {
-                    if let Ok(v) = serde_json::from_str::<Value>(txt) {
-                        parsed.push(v);
-                        continue;
-                    }
-                    // Conservative repair: escape control chars inside strings (raw newlines, etc).
-                    let repaired = Self::escape_control_chars_in_json_strings(txt);
-                    if let Ok(v) = serde_json::from_str::<Value>(&repaired) {
-                        parsed.push(v);
-                    }
-                }
-
-                if parsed.is_empty() {
-                    return Err(format!("invalid JSON from model: {}", e));
-                }
-
-                // Prefer the *last* action (tool call); otherwise the *last* final; otherwise the last JSON value.
-                let mut best_action: Option<Value> = None;
-                let mut best_final: Option<Value> = None;
-                for v in parsed.iter() {
-                    if let Some(obj) = v.as_object() {
-                        if obj.contains_key("action") {
-                            best_action = Some(v.clone());
-                        } else if obj.contains_key("final") {
-                            best_final = Some(v.clone());
-                        }
-                    }
-                }
-                Ok(best_action
-                    .or(best_final)
-                    .unwrap_or_else(|| parsed.last().cloned().unwrap()))
-            }
+    fn strip_markdown_code_fences(raw: &str) -> String {
+        let t = raw.trim();
+        if !t.starts_with("```") {
+            return t.to_string();
         }
+        // Handle ```json ... ``` and ``` ... ```
+        let t = t
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim();
+        if let Some(end) = t.rfind("```") {
+            return t[..end].trim().to_string();
+        }
+        t.to_string()
     }
 
-    fn coerce_args_only_action(v: Value) -> Value {
-        // Deterministic coercion for common failure mode: model emits tool args without
-        // the required {"action": "...", "args": {...}} envelope.
-        if let Some(obj) = v.as_object() {
-            if obj.contains_key("action") || obj.contains_key("final") {
-                return v;
-            }
-            // dbt_files tool: always has an "op" discriminator.
-            if obj.get("op").and_then(|x| x.as_str()).is_some() {
-                return serde_json::json!({ "action": "dbt_files", "args": v });
-            }
-            // run_sql tool: args are commonly just {"sql": "..."}.
-            if obj.get("sql").and_then(|x| x.as_str()).is_some() {
-                return serde_json::json!({ "action": "run_sql", "args": v });
-            }
-            // vect_query tool: args include scope + query_text.
-            if obj.get("scope").and_then(|x| x.as_str()).is_some()
-                && obj.get("query_text").and_then(|x| x.as_str()).is_some()
-            {
-                return serde_json::json!({ "action": "vect_query", "args": v });
+    fn parse_agent_step(raw: &str) -> Result<ParsedStep, String> {
+        let cleaned = Self::strip_markdown_code_fences(raw);
+        let trimmed = cleaned.trim();
+
+        fn parse_json_from_model_string_field(
+            raw_json: &str,
+            what: &str,
+        ) -> Result<Value, String> {
+            match serde_json::from_str::<Value>(raw_json) {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    // Repair raw control chars inside JSON strings (literal newlines, etc).
+                    let repaired = Agent::escape_control_chars_in_json_strings(raw_json);
+                    serde_json::from_str::<Value>(&repaired).map_err(|_| {
+                        format!("{what} is not valid JSON string: {e}")
+                    })
+                }
             }
         }
-        v
+
+        let v = match serde_json::from_str::<Value>(trimmed) {
+            Ok(v) => v,
+            Err(e) => {
+                // Conservative repair: escape control chars inside strings (raw newlines, etc).
+                let repaired = Self::escape_control_chars_in_json_strings(trimmed);
+                serde_json::from_str::<Value>(&repaired)
+                    .map_err(|_| format!("invalid JSON from model: {}", e))?
+            }
+        };
+
+        crate::schema_registry::validate(SchemaId::AgentStepV1, &v)?;
+        let step: AgentStepV1 = serde_json::from_value::<AgentStepV1>(v)
+            .map_err(|e| format!("failed to deserialize {}: {}", SchemaId::AgentStepV1.name(), e))?;
+
+        match step.type_ {
+            AgentStepTypeV1::Tool => {
+                let Some(name) = step.name else {
+                    return Err("agent.step.v1 validation error: missing tool name".to_string());
+                };
+                let Some(args_json) = step.args else {
+                    return Err("agent.step.v1 validation error: missing tool args".to_string());
+                };
+                if step.final_.is_some() {
+                    return Err(
+                        "agent.step.v1 validation error: tool step must not include final".to_string(),
+                    );
+                }
+                let args: Value = parse_json_from_model_string_field(
+                    &args_json,
+                    "agent.step.v1 validation error: args",
+                )?;
+                Ok(ParsedStep::Tool { name, args })
+            }
+            AgentStepTypeV1::Final => {
+                if step.name.is_some() || step.args.is_some() {
+                    return Err(
+                        "agent.step.v1 validation error: final step must not include name/args"
+                            .to_string(),
+                    );
+                }
+                let Some(fin) = step.final_ else {
+                    return Err("agent.step.v1 validation error: missing final".to_string());
+                };
+                let payload: Value = parse_json_from_model_string_field(
+                    &fin.payload,
+                    "agent.step.v1 validation error: final.payload",
+                )?;
+                Ok(ParsedStep::Final {
+                    final_env: FinalEnvelope {
+                        kind: fin.kind,
+                        payload,
+                        display: fin.display,
+                    },
+                })
+            }
+        }
     }
 
     fn extract_all_json_values(s: &str, max: usize) -> Vec<String> {
@@ -756,12 +783,21 @@ impl Agent {
         question: &str,
         llm_options: LlmCallOptions,
     ) -> Result<RunOutcome, String> {
-        // Agent action/final envelopes are a strict JSON contract: always enforce provider JSON mode.
+        // Agent steps are a strict JSON Schema contract: enforce provider JSON mode and validate.
         let mut llm_options = llm_options;
-        llm_options.expected_format = LlmExpectedFormat::JsonObject;
+        llm_options.expected_format = LlmExpectedFormat::JsonSchema(SchemaId::AgentStepV1);
 
         let tid = ctx.thread_id.clone().unwrap_or_else(Self::gen_uuid);
         let store = ctx.thread_store.as_ref();
+
+        let step_schema = crate::schema_registry::json_schema(SchemaId::AgentStepV1);
+        let step_schema_txt =
+            serde_json::to_string(&step_schema).unwrap_or_else(|_| "{\"error\":\"schema\"}".into());
+        let output_contract_line = format!(
+            "System: OUTPUT_CONTRACT schema_id={} schema={}. Return ONLY one JSON object matching this schema.",
+            SchemaId::AgentStepV1.name(),
+            step_schema_txt
+        );
 
         // Transcript is plain-text lines the model sees.
         let mut transcript: Vec<String> = Vec::new();
@@ -796,14 +832,16 @@ impl Agent {
             }
 
             // Ask model for next action.
-            let prompt = transcript.join("\n");
+            let prompt = format!("{}\n{}", transcript.join("\n"), output_contract_line);
             let mut raw = Self::llm_chat_once(ctx, prompt, llm_options.clone()).await?;
-            let mut action = match Self::parse_action(&raw) {
+            let step = match Self::parse_agent_step(&raw) {
                 Ok(v) => v,
                 Err(e) => {
-                    // Defense in depth: if the model output is invalid/truncated JSON, retry with a
-                    // minimal prompt so we don't amplify prompt bloat.
-                    if !e.starts_with("invalid JSON from model:") {
+                    // Defense in depth: if the model output is invalid JSON or fails schema validation,
+                    // retry with a minimal prompt so we don't amplify prompt bloat.
+                    let is_json_err = e.starts_with("invalid JSON from model:");
+                    let is_schema_err = e.contains("validation error:");
+                    if !is_json_err && !is_schema_err {
                         return Err(e);
                     }
 
@@ -814,7 +852,8 @@ impl Agent {
                             "Observation: {}",
                             serde_json::json!({
                                 "ok": false,
-                                "error": "invalid_json_from_model",
+                                "error": if is_schema_err { "schema_validation_failed" } else { "invalid_json_from_model" },
+                                "detail": e,
                                 "response_hash": resp_hash,
                                 "bytes": raw.as_bytes().len(),
                             })
@@ -836,13 +875,19 @@ impl Agent {
                     // Keep a small tail of the transcript for local context.
                     let tail_n = 12usize.min(transcript.len());
                     keep.extend(transcript.iter().skip(transcript.len().saturating_sub(tail_n)).cloned());
-                    keep.push("User: IMPORTANT: Return ONLY a single JSON object (no markdown, no code fences).".to_string());
-                    let retry_prompt = keep.join("\n");
+                    keep.push(format!(
+                        "User: IMPORTANT: Your previous response did not match schema {}. Error: {}. Return ONLY one JSON object that matches the schema.",
+                        SchemaId::AgentStepV1.name(),
+                        e
+                    ));
+                    let retry_prompt = format!("{}\n{}", keep.join("\n"), output_contract_line);
                     raw = Self::llm_chat_once(ctx, retry_prompt, llm_options.clone()).await?;
-                    match Self::parse_action(&raw) {
+                    match Self::parse_agent_step(&raw) {
                         Ok(v) => v,
                         Err(e2) => {
-                            if !e2.starts_with("invalid JSON from model:") {
+                            let is_json_err2 = e2.starts_with("invalid JSON from model:");
+                            let is_schema_err2 = e2.contains("validation error:");
+                            if !is_json_err2 && !is_schema_err2 {
                                 return Err(e2);
                             }
                             // Retry 2: ultra-minimal.
@@ -853,160 +898,39 @@ impl Agent {
                             if let Some(l) = transcript.iter().find(|l| l.starts_with("Tools:")) {
                                 keep2.push(l.clone());
                             }
-                            keep2.push("User: Return ONLY JSON: either {\"action\":\"<tool>\",\"args\":{...}} or {\"final\":{...}}.".to_string());
-                            let retry_prompt2 = keep2.join("\n");
-                            raw = Self::llm_chat_once(ctx, retry_prompt2, llm_options.clone()).await?;
-                            Self::parse_action(&raw)?
-                        }
-                    }
-                }
-            };
-            action = Self::coerce_args_only_action(action);
-
-            // Deterministic repair: some models mistakenly emit the patch-protocol JSON (replace_file /
-            // replace_range / replace_list) directly, instead of wrapping it in an {"action": "...", "args": {...}}
-            // tool envelope. When we are in a checklist-driven execution context, we can safely treat that object
-            // as a `dbt_files` patch request by adding op="patch" and stripping non-tool fields like `notes`.
-            //
-            // This prevents brittle structural failures during author/review phases without introducing retries.
-            if action.get("action").is_none() && action.get("final").is_none() {
-                if ctx.exec_ctx.is_some() {
-                    if let Some(obj) = action.as_object() {
-                        let has_rf = obj.contains_key("replace_file");
-                        let has_rr = obj.contains_key("replace_range");
-                        let has_rl = obj.contains_key("replace_list");
-                        let provided = (has_rf as usize) + (has_rr as usize) + (has_rl as usize);
-                        if provided == 1 {
-                            let mut args_map = serde_json::Map::new();
-                            args_map.insert("op".to_string(), Value::String("patch".to_string()));
-                            if has_rf {
-                                if let Some(v) = obj.get("replace_file") {
-                                    args_map.insert("replace_file".to_string(), v.clone());
-                                }
-                            } else if has_rr {
-                                if let Some(v) = obj.get("replace_range") {
-                                    args_map.insert("replace_range".to_string(), v.clone());
-                                }
-                            } else if has_rl {
-                                if let Some(v) = obj.get("replace_list") {
-                                    args_map.insert("replace_list".to_string(), v.clone());
-                                }
-                            }
-                            action = serde_json::json!({
-                                "action": "dbt_files",
-                                "args": Value::Object(args_map),
-                            });
-                        }
-                    }
-                }
-            }
-
-            if let Some(final_obj) = action.get("final") {
-                let env = match serde_json::from_value::<FinalEnvelope>(final_obj.clone()) {
-                    Ok(env) => env,
-                    Err(e) => {
-                        // Some providers/models occasionally mis-nest plan payload keys into the final envelope,
-                        // e.g. {"final":{"kind":"...","payload":{...},"tasks":[...],...},"display":"..."}.
-                        // This is a structural error, but we can repair it deterministically without retrying.
-                        fn normalize_final_envelope_value(
-                            outer_action: &Value,
-                            final_obj: &Value,
-                        ) -> Option<Value> {
-                            let final_map = final_obj.as_object()?;
-
-                            let kind = final_map.get("kind")?.as_str()?.to_string();
-
-                            let display = final_map
-                                .get("display")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                                .or_else(|| {
-                                    outer_action
-                                        .get("display")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string())
-                                });
-
-                            let mut payload = match final_map.get("payload") {
-                                Some(Value::Object(m)) => Value::Object(m.clone()),
-                                Some(_) => return None,
-                                None => Value::Object(serde_json::Map::new()),
-                            };
-
-                            // Move any extra keys under `final` into payload.
-                            if let Value::Object(ref mut payload_map) = payload {
-                                for (k, v) in final_map.iter() {
-                                    if k == "kind" || k == "payload" || k == "display" {
-                                        continue;
-                                    }
-                                    // Preserve: payload wins if already present.
-                                    payload_map.entry(k.clone()).or_insert_with(|| v.clone());
-                                }
-                            }
-
-                            let mut out = serde_json::Map::new();
-                            out.insert("kind".to_string(), Value::String(kind));
-                            out.insert("payload".to_string(), payload);
-                            if let Some(d) = display {
-                                out.insert("display".to_string(), Value::String(d));
-                            }
-                            Some(Value::Object(out))
-                        }
-
-                        if let Some(fixed) = normalize_final_envelope_value(&action, final_obj) {
-                            if let Ok(env) = serde_json::from_value::<FinalEnvelope>(fixed) {
-                                env
-                            } else {
-                                warn!("model emitted invalid final envelope: {}", e);
-                                let resp_hash = crate::llm_observability::sha256_hex_str(&raw);
-                                return Err(format!(
-                                    "structural_error: invalid final envelope (response_hash={}): {}",
-                                    resp_hash, e
-                                ));
-                            }
-                        } else {
-                            warn!("model emitted invalid final envelope: {}", e);
-                            // Strict JSON channel: structural final-envelope parse failures should not churn retries.
-                            let resp_hash = crate::llm_observability::sha256_hex_str(&raw);
-                            return Err(format!(
-                                "structural_error: invalid final envelope (response_hash={}): {}",
-                                resp_hash, e
+                            keep2.push(format!(
+                                "User: Return ONLY one JSON object matching schema {}. Error: {}.",
+                                SchemaId::AgentStepV1.name(),
+                                e2
                             ));
+                            let retry_prompt2 = format!("{}\n{}", keep2.join("\n"), output_contract_line);
+                            raw = Self::llm_chat_once(ctx, retry_prompt2, llm_options.clone()).await?;
+                            Self::parse_agent_step(&raw)?
                         }
                     }
-                };
-
-                if let Some(outcome) = ctx
-                    .policy
-                    .handle_final(tools, ctx, &mut transcript, store, &tid, &env)
-                    .await?
-                {
-                    return Ok(outcome);
                 }
-                // Policy rejected final; continue.
-                continue;
-            }
-
-            let Some(action_name) = action.get("action").and_then(|x| x.as_str()) else {
-                warn!("model output missing action/final");
-                // Strict JSON channel: structural envelope failures should not churn retries.
-                let resp_hash = crate::llm_observability::sha256_hex_str(&raw);
-                let snippet: String = raw.chars().take(400).collect();
-                return Err(format!(
-                    "structural_error: expected JSON object with `action` or `final` (response_hash={}, snippet={})",
-                    resp_hash,
-                    snippet
-                ));
             };
-            let args = action
-                .get("args")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
+            let (action_name, args) = match step {
+                ParsedStep::Final { final_env: env } => {
+                    if let Some(outcome) = ctx
+                        .policy
+                        .handle_final(tools, ctx, &mut transcript, store, &tid, &env)
+                        .await?
+                    {
+                        return Ok(outcome);
+                    }
+                    // Policy rejected final; continue.
+                    continue;
+                }
+                ParsedStep::Tool { name, args } => (name, args),
+            };
+            let action_name = action_name;
+            let action_name_str = action_name.as_str();
 
-            info!("agent action: {}", action_name);
+            info!("agent action: {}", action_name_str);
             let timeout_secs = ctx
                 .policy
-                .timeout_for_tool(action_name)
+                .timeout_for_tool(action_name_str)
                 .unwrap_or(ctx.per_step_timeout_secs)
                 .max(1);
 
@@ -1016,7 +940,7 @@ impl Agent {
                 .agent_name
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
-            let clean_name = clean_tool_name(action_name, &args);
+            let clean_name = clean_tool_name(action_name_str, &args);
             if let Some(store) = store {
                 let _ = store
                     .append_step(
@@ -1038,7 +962,7 @@ impl Agent {
 
             let raw_obs = match tokio::time::timeout(
                 std::time::Duration::from_secs(timeout_secs),
-                tools.call(action_name, args.clone(), ctx),
+                tools.call(action_name_str, args.clone(), ctx),
             )
             .await
             {
@@ -1082,7 +1006,7 @@ impl Agent {
             // Policy may turn this tool into an interrupt.
             if let Some(int) = ctx
                 .policy
-                .interrupt_for_action(action_name, &args, &raw_obs)
+                .interrupt_for_action(action_name_str, &args, &raw_obs)
             {
                 match int {
                     Interrupt::AwaitUser { prompt } => {
@@ -1251,8 +1175,8 @@ mod tests {
     async fn per_tool_timeout_override_is_used() {
         let llm = Arc::new(ScriptedModel {
             replies: Arc::new(Mutex::new(vec![
-                "{\"action\":\"slow_tool\",\"args\":{}}".to_string(),
-                "{\"final\":{\"kind\":\"generic\",\"payload\":{\"text\":\"ok\"}}}".to_string(),
+                "{\"type\":\"tool\",\"name\":\"slow_tool\",\"args\":\"{}\",\"final\":null}".to_string(),
+                "{\"type\":\"final\",\"name\":null,\"args\":null,\"final\":{\"kind\":\"generic\",\"payload\":\"{\\\"text\\\":\\\"ok\\\"}\",\"display\":null}}".to_string(),
             ])),
         });
         let storage = Arc::new(InMemoryStorageAdapter::default());
@@ -1328,7 +1252,7 @@ mod tests {
             Arc::new(Mutex::new(None));
         let llm = Arc::new(CapturingOptionsModel {
             replies: Arc::new(Mutex::new(vec![
-                "{\"final\":{\"kind\":\"generic\",\"payload\":{\"text\":\"ok\"}}}".to_string(),
+                "{\"type\":\"final\",\"name\":null,\"args\":null,\"final\":{\"kind\":\"generic\",\"payload\":\"{\\\"text\\\":\\\"ok\\\"}\",\"display\":null}}".to_string(),
             ])),
             last_opts: last_opts.clone(),
         });
@@ -1388,7 +1312,7 @@ mod tests {
     async fn final_payload_round_trips_as_json_value() {
         let llm = Arc::new(ScriptedModel {
             replies: Arc::new(Mutex::new(vec![
-                "{\"final\":{\"kind\":\"generic\",\"payload\":{\"obj\":{\"hello\":\"world\",\"n\":1}}}}".to_string(),
+                "{\"type\":\"final\",\"name\":null,\"args\":null,\"final\":{\"kind\":\"generic\",\"payload\":\"{\\\"obj\\\":{\\\"hello\\\":\\\"world\\\",\\\"n\\\":1}}\",\"display\":null}}".to_string(),
             ])),
         });
         let storage = Arc::new(InMemoryStorageAdapter::default());
@@ -1453,16 +1377,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_action_repairs_raw_newlines_inside_json_strings() {
+    fn parse_agent_step_repairs_raw_newlines_inside_json_strings() {
         // NOTE: This is intentionally invalid JSON: literal newline in the string value.
-        let raw = "{\"final\":{\"kind\":\"generic\",\"payload\":{\"text\":\"line1\nline2\"}}}";
-        let v = Agent::parse_action(raw).expect("should repair and parse");
-        let final_obj = v.get("final").expect("final");
-        let env: FinalEnvelope = serde_json::from_value(final_obj.clone()).expect("env");
-        assert_eq!(env.kind, "generic");
-        assert_eq!(
-            env.payload.get("text").and_then(|x| x.as_str()).unwrap(),
-            "line1\nline2"
+        let raw =
+            "{\"type\":\"final\",\"name\":null,\"args\":null,\"final\":{\"kind\":\"generic\",\"payload\":\"{\\\"text\\\":\\\"line1\nline2\\\"}\",\"display\":null}}";
+        let step = Agent::parse_agent_step(raw).expect("should repair and parse");
+        match step {
+            ParsedStep::Final { final_env } => {
+                assert_eq!(final_env.kind, "generic");
+                assert_eq!(
+                    final_env.payload.get("text").and_then(|x| x.as_str()).unwrap(),
+                    "line1\nline2"
+                );
+            }
+            _ => panic!("expected final step"),
+        }
+    }
+
+    #[test]
+    fn parse_agent_step_rejects_concatenated_multiple_json_objects() {
+        let raw = concat!(
+            "{\"type\":\"tool\",\"name\":\"noop\",\"args\":\"{}\",\"final\":null}",
+            "{\"type\":\"final\",\"name\":null,\"args\":null,\"final\":{\"kind\":\"generic\",\"payload\":\"{}\",\"display\":null}}"
+        );
+        let err = Agent::parse_agent_step(raw).expect_err("should reject concatenation");
+        assert!(
+            err.starts_with("invalid JSON from model:"),
+            "unexpected err: {err}"
         );
     }
 
@@ -1482,11 +1423,11 @@ mod tests {
         let llm = Arc::new(ScriptedModel {
             replies: Arc::new(Mutex::new(vec![
                 // Truncated/invalid JSON (EOF mid-string).
-                "{\"action\":\"noop\",\"args\":{".to_string(),
+                "{\"type\":\"tool\",\"name\":\"noop\",\"args\":\"{".to_string(),
                 // Retry succeeds.
-                "{\"action\":\"noop\",\"args\":{}}".to_string(),
+                "{\"type\":\"tool\",\"name\":\"noop\",\"args\":\"{}\",\"final\":null}".to_string(),
                 // Then final.
-                "{\"final\":{\"kind\":\"generic\",\"payload\":{\"text\":\"ok\"}}}".to_string(),
+                "{\"type\":\"final\",\"name\":null,\"args\":null,\"final\":{\"kind\":\"generic\",\"payload\":\"{\\\"text\\\":\\\"ok\\\"}\",\"display\":null}}".to_string(),
             ])),
         });
         let storage = Arc::new(InMemoryStorageAdapter::default());
@@ -1594,8 +1535,16 @@ mod tests {
                     }
                 })
                 .to_string(),
+                // Retry: model emits a correct tool step.
+                serde_json::json!({
+                    "type": "tool",
+                    "name": "dbt_files",
+                    "args": "{\"op\":\"patch\",\"replace_range\":{\"path\":\"models/staging/stg_x.yml\",\"start_line\":1,\"end_line\":10,\"new_text\":\"version: 2\\n\"}}",
+                    "final": null
+                })
+                .to_string(),
                 // Then finish.
-                "{\"final\":{\"kind\":\"generic\",\"payload\":{\"text\":\"ok\"}}}".to_string(),
+                "{\"type\":\"final\",\"name\":null,\"args\":null,\"final\":{\"kind\":\"generic\",\"payload\":\"{\\\"text\\\":\\\"ok\\\"}\",\"display\":null}}".to_string(),
             ])),
         });
 

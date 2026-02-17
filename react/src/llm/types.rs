@@ -6,10 +6,19 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatResponseFormat {
     Text,
     JsonObject,
+    JsonSchema {
+        /// Provider-visible schema name (stable).
+        name: String,
+        /// Full JSON Schema document.
+        schema: serde_json::Value,
+        /// When supported, enforce strict schema adherence at transport.
+        strict: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

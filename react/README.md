@@ -53,8 +53,8 @@ Suites receive a `SuiteCtx` (injected capabilities) and return `FlowFrame`s (`Fi
 - Responsibilities:
   - Maintain transcript state
   - Call the LLM and parse strict JSON actions:
-    - `{"action":"<tool_name>","args":{...}}`
-    - `{"final":{...}}`
+    - `{"type":"tool","name":"<tool_name>","args":{...}}`
+    - `{"type":"final","final":{...}}`
   - Execute tools via `ToolRegistry`
   - Apply suite policy (`AgentPolicy`) to accept/reject finals and convert tool actions into interrupts
 

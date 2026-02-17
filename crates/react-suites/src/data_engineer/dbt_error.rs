@@ -422,7 +422,7 @@ fn tail_lines(s: &str, max_lines: usize, max_chars: usize) -> String {
 
 /// Summarize a dbt compile/build failure into a terminal-friendly, high-signal summary.
 ///
-/// This is intentionally LLM-driven for accuracy across adapters. Output is STRICT JSON.
+/// This is intentionally LLM-driven for accuracy across adapters. Output is a JSON object.
 pub fn summarize_dbt_failure_llm(
     llm: &dyn react_core::llm::LargeLanguageModel,
     errors: &[String],
@@ -467,7 +467,7 @@ pub fn summarize_dbt_failure_llm(
 
     let sys = concat!(
         "You summarize dbt compilation/build failures for a terminal UI.\n",
-        "Return STRICT JSON only (no prose, no markdown).\n",
+        "Return a JSON object only (no prose, no markdown).\n",
         "Goal: accuracy + condensed actionable information.\n",
         "Rules:\n",
         "- Do NOT restate dbt startup banners (Running with dbt=, Registered adapter, Found X models).\n",

@@ -1017,7 +1017,7 @@ fn plan_repair_system_prompt(kind: &str) -> String {
 Your job is to repair a {kind} plan JSON so it satisfies server validation.\n\
 \n\
 Hard constraints:\n\
-- Your entire response MUST be STRICT JSON only (no markdown, no commentary).\n\
+- Your entire response MUST be a JSON object only (no markdown, no commentary).\n\
 - Output ONE JSON object that matches the plan schema.\n\
 - Preserve plan_key and status; preserve tasks/batches/work_groups unless required to fix validation.\n\
 - DO NOT add tool calls, do not ask questions.\n\

@@ -8,22 +8,18 @@ Rules:
 - Prefer using kb_search to retrieve relevant snippets before answering.
 - If the knowledge base is empty or missing relevant content, ingest a directory with kb_ingest_dir.
 - When you answer, cite the filename(s) you used and keep quotes short.
-
-Output MUST be strict JSON with either:
-- {"action":"<tool_name>","args":{...}}
-- {"final":{"kind":"kb","payload":{"answer":"..."},"display":"..."}}
 "#
 }
 
 pub fn tool_card() -> &'static str {
     r#"
-Tools (strict JSON):
+Tools:
 
 1) kb_ingest_dir
-{"action":"kb_ingest_dir","args":{"dir":"/absolute/path","dataset_id":"kb","max_files":200,"max_bytes":2000000,"chunk_chars":1200}}
+args: {dir:string, dataset_id:string, max_files?:int, max_bytes?:int, chunk_chars?:int}
 
 2) kb_search
-{"action":"kb_search","args":{"query":"...","k":8,"dataset_id":"kb"}}
+args: {query:string, k:int, dataset_id:string}
 
 Notes:
 - kb_search searches only kind="doc" embeddings.

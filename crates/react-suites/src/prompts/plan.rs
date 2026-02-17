@@ -3,14 +3,12 @@ pub fn cleanse_plan_system_prompt() -> String {
 Your job is to create an execution plan that the system will run in batches of 5 datasets at a time.
 
 Hard rules:
-- You MUST NOT output prose outside STRICT JSON.
-- At each step, you must either:
-  - Call ONE tool (STRICT JSON: {"action":"<tool_name>","args":{...}})
-  - Or finish with STRICT JSON:
-    {"final":{"kind":"cleanse_plan","payload":<json_plan_object>,"display":"<optional short summary>"}}
+- At each step, you must either call ONE tool or finish with a final result.
+- Your response format is defined by the system-provided output contract (schema). Do not invent your own wrapper formats or add prose outside the contracted output.
 
 Plan output rules (CRITICAL):
-- final.payload MUST be a JSON object (not prefixed with prose) matching this shape:
+- When you finish, final.kind MUST be "cleanse_plan".
+- final.payload MUST be a JSON object matching this shape:
   {
     "status": "draft",
     "project_snapshot": { ... },
@@ -116,14 +114,12 @@ pub fn model_plan_system_prompt() -> String {
 Your job is to create an execution plan that the system will run in batches of 5 models at a time.
 
 Hard rules:
-- You MUST NOT output prose outside STRICT JSON.
-- At each step, you must either:
-  - Call ONE tool (STRICT JSON: {"action":"<tool_name>","args":{...}})
-  - Or finish with STRICT JSON:
-    {"final":{"kind":"model_plan","payload":<json_plan_object>,"display":"<optional short summary>"}}
+- At each step, you must either call ONE tool or finish with a final result.
+- Your response format is defined by the system-provided output contract (schema). Do not invent your own wrapper formats or add prose outside the contracted output.
 
 Plan output rules (CRITICAL):
-- final.payload MUST be a JSON object (not prefixed with prose) matching this shape:
+- When you finish, final.kind MUST be "model_plan".
+- final.payload MUST be a JSON object matching this shape:
   {
     "status": "draft",
     "project_snapshot": { ... },

@@ -122,9 +122,19 @@ impl Adapter for OpenAIResponsesAdapter {
 
         // Default to plain text, but allow callers to request structured output via `response_format`.
         // This maps directly to the Responses API `text.format` object.
-        let format = match req.response_format {
+        let format = match req.response_format.as_ref() {
             None | Some(ChatResponseFormat::Text) => serde_json::json!({"type":"text"}),
             Some(ChatResponseFormat::JsonObject) => serde_json::json!({"type":"json_object"}),
+            Some(ChatResponseFormat::JsonSchema {
+                name,
+                schema,
+                strict,
+            }) => serde_json::json!({
+                "type": "json_schema",
+                "name": name,
+                "schema": schema,
+                "strict": strict,
+            }),
         };
 
         let body = RespReq {
@@ -297,6 +307,43 @@ mod tests {
             .and_then(|x| x.as_str())
             .unwrap_or("");
         assert_eq!(fmt, "json_object");
+    }
+
+    #[test]
+    fn build_chat_http_supports_json_schema_response_format() {
+        let ad = OpenAIResponsesAdapter::new();
+        let req = ChatRequest {
+            model: "gpt-4.1-mini".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            }],
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            response_format: Some(ChatResponseFormat::JsonSchema {
+                name: "agent.step.v1".to_string(),
+                schema: serde_json::json!({"type":"object"}),
+                strict: true,
+            }),
+            reasoning_effort: None,
+            prompt_id: None,
+            thread_id: None,
+        };
+        let http = ad.build_chat_http(&req).expect("build");
+        let fmt = http
+            .body
+            .get("text")
+            .and_then(|t| t.get("format"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert_eq!(fmt.get("type").and_then(|x| x.as_str()), Some("json_schema"));
+        assert_eq!(fmt.get("name").and_then(|x| x.as_str()), Some("agent.step.v1"));
+        assert_eq!(fmt.get("strict").and_then(|x| x.as_bool()), Some(true));
+        assert_eq!(
+            fmt.get("schema").and_then(|x| x.get("type")).and_then(|x| x.as_str()),
+            Some("object")
+        );
     }
 
     #[test]

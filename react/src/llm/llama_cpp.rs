@@ -318,10 +318,13 @@ mod inner {
         let mut json_depth: i32 = 0;
         let mut json_buf = String::new();
         let mut n_cur = batch.n_tokens();
-        // cap new tokens; use smaller cap for STRICT JSON prompts
-        let is_strict_json = prompt.contains("STRICT JSON") || prompt.contains("Output JSON:");
+        // cap new tokens; use smaller cap for structured JSON outputs
+        let is_strict_json = matches!(
+            options.expected_format,
+            react_core::llm::LlmExpectedFormat::JsonObject | react_core::llm::LlmExpectedFormat::JsonSchema(_)
+        );
         let max_new_tokens: i32 = if is_strict_json {
-            // Allow larger responses for STRICT JSON (batched outputs). Scale with context.
+            // Allow larger responses for structured JSON outputs. Scale with context.
             ((tuned_ctx_len as i32) / 2).clamp(256, 2048)
         } else {
             ((tuned_ctx_len as i32) / 4).clamp(64, 1024)

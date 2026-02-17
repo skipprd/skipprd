@@ -15,6 +15,7 @@ pub mod llm;
 pub mod llm_observability;
 pub mod providers;
 pub mod scope;
+pub mod schema_registry;
 pub mod session;
 pub mod storage;
 pub mod tools;

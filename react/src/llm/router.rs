@@ -115,7 +115,10 @@ impl LlmRouter {
                     content: m.content.clone(),
                 })
                 .collect();
-            let expected_format = matches!(req.response_format, Some(ChatResponseFormat::JsonObject));
+            let expected_format = matches!(
+                req.response_format.as_ref(),
+                Some(ChatResponseFormat::JsonObject) | Some(ChatResponseFormat::JsonSchema { .. })
+            );
             let opts = react_core::llm::LlmCallOptions {
                 prompt_id: "react.router.local_llama_chat",
                 thread_id: None,

@@ -27,6 +27,9 @@ struct OaiChatReq {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
+    /// OpenAI Chat Completions `response_format` (json_object / json_schema).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 struct OaiChatRespChoiceDelta {
@@ -67,6 +70,22 @@ impl Adapter for OpenAIChatAdapter {
     }
 
     fn build_chat_http(&self, req: &ChatRequest) -> Result<ProviderHttpRequest, String> {
+        let response_format = match req.response_format.as_ref() {
+            None | Some(ChatResponseFormat::Text) => None,
+            Some(ChatResponseFormat::JsonObject) => Some(serde_json::json!({"type":"json_object"})),
+            Some(ChatResponseFormat::JsonSchema {
+                name,
+                schema,
+                strict,
+            }) => Some(serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": name,
+                    "schema": schema,
+                    "strict": strict,
+                }
+            })),
+        };
         let body = OaiChatReq {
             model: req.model.clone(),
             messages: req
@@ -81,6 +100,7 @@ impl Adapter for OpenAIChatAdapter {
             max_tokens: req.max_output_tokens,
             temperature: req.temperature,
             top_p: req.top_p,
+            response_format,
         };
         Ok(ProviderHttpRequest {
             method: "POST".to_string(),
@@ -127,5 +147,48 @@ impl Adapter for OpenAIChatAdapter {
         let vecs: Vec<Vec<f32>> = obj.data.into_iter().map(|d| d.embedding).collect();
         let dim = vecs.get(0).map(|v| v.len()).unwrap_or(0);
         Ok(EmbedResponse { vectors: vecs, dim })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_chat_http_supports_json_schema_response_format() {
+        let ad = OpenAIChatAdapter::new();
+        let req = ChatRequest {
+            model: "gpt-4.1-mini".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            }],
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            response_format: Some(ChatResponseFormat::JsonSchema {
+                name: "agent.step.v1".to_string(),
+                schema: serde_json::json!({"type":"object"}),
+                strict: true,
+            }),
+            reasoning_effort: None,
+            prompt_id: None,
+            thread_id: None,
+        };
+        let http = ad.build_chat_http(&req).expect("build");
+        assert_eq!(http.url, "/v1/chat/completions");
+        let rf = http
+            .body
+            .get("response_format")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert_eq!(rf.get("type").and_then(|x| x.as_str()), Some("json_schema"));
+        let js = rf.get("json_schema").cloned().unwrap_or(serde_json::Value::Null);
+        assert_eq!(js.get("name").and_then(|x| x.as_str()), Some("agent.step.v1"));
+        assert_eq!(js.get("strict").and_then(|x| x.as_bool()), Some(true));
+        assert_eq!(
+            js.get("schema").and_then(|x| x.get("type")).and_then(|x| x.as_str()),
+            Some("object")
+        );
     }
 }

@@ -1,9 +1,10 @@
 pub fn cleanse_system_prompt() -> String {
     r#"You are a data cleansing/staging agent focused on authoring artifacts, not answering queries.
 At each step, you must either:
-- Call ONE tool (STRICT JSON: {"action": "<tool_name>", "args": {...}})
-- Or finish with STRICT JSON:
-  {"final":{"kind":"generic","payload":{"text":"<concise summary>"},"display":"<concise summary>"}}
+- Call ONE tool
+- Or finish with a final result
+
+Your response format is defined by the system-provided output contract (schema). Do not invent your own wrapper formats or add prose outside the contracted output.
 
 Hard rules:
 - You MUST NOT provide SQL results as an answer.
@@ -98,7 +99,7 @@ Hard rules:
 - After saving artifacts, validate the project with dbt_validate (deps → parse → compile; build when ready to publish). Do not send inline file content.
 - For project scaffolding: do NOT build piece‑meal and do NOT request per‑artifact approvals. Produce ONE consolidated plan and then save the ENTIRE initial project via dbt_files op=patch in as few calls as possible. If dbt_validate is unavailable, proceed without blocking.
 - For full project creation: include dbt_project.yml, sources (schema.yml), and staging models for all resolved datasets (split across batches as needed).
-- STRICT JSON only; exactly one JSON object per step; no prose outside JSON."#.to_string()
+- Output format is enforced by the system-provided output contract; return exactly one contracted object per step."#.to_string()
 }
 
 pub fn cleanse_tool_card() -> String {
@@ -138,8 +139,7 @@ Usage guidance:
         r#"
 - If you reference any package macros, ensure packages.yml includes the required packages and run dbt deps.
 - For staging_model: keep batches small (max 5 dataset_ids per call). If more are provided, the tool will only process the first 5 and return `deferred_dataset_ids` for follow-up calls.
-- After you have saved and validated, finalize with:
-  {"final":{"kind":"generic","payload":{"text":"<concise summary>"},"display":"<concise summary>"}}
+- After you have saved and validated, finalize with a concise summary.
 - Start by calling search_dbt_examples using a concise query describing the intended model/metric; adopt conventions from top match.
 - After saving artifacts, call dbt_validate and fix any parse/compile errors; only then proceed.
 - After a clean validate, publish with publish_dbt_to_provider (it may return await_approval; on approval re-run with confirm=true).

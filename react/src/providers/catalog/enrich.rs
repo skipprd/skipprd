@@ -154,7 +154,7 @@ pub async fn enrich_dataset_with_llm(
     )
     .await;
 
-    // Dataset-level short description (STRICT JSON)
+    // Dataset-level short description (JSON object)
     if !semantic.fields.is_empty() {
         let mut lines: Vec<String> = Vec::new();
         lines.push(format!("Dataset: {}", dataset_id));
@@ -169,7 +169,7 @@ pub async fn enrich_dataset_with_llm(
                 .join(", ")
         ));
         let prompt = format!(
-            "Return STRICT JSON only: {{\"description\": \"<≤40 words>\"}}.\\nRules: one or two short sentences; JSON only; start with '{{' and end with '}}'. No labels or prose.\\n\\nContext: \\n+{}\\n\\nOutput JSON:",
+            "Return a JSON object: {{\"description\": \"<≤40 words>\"}}.\\nRules: one or two short sentences; start with '{{' and end with '}}'. No labels or prose.\\n\\nContext: \\n+{}\\n\\nOutput JSON:",
             lines.join("\n")
         );
         let prompt_clone = prompt.clone();
@@ -509,7 +509,7 @@ pub async fn enrich_dataset_with_llm(
                 .collect::<Vec<String>>()
                 .join(", ");
             let prompt_desc = format!(
-                        "Return STRICT JSON only: {{\"descriptionByField\": {{ \"<field_name>\": \"<≤20 words>\" }} }}.\nRules: one sentence (≤20 words) per field; JSON only; start with '{{' and end with '}}'. Keys MUST be exactly the provided FieldNames.\n\nDataset: {ns}\nFieldNames: {fnames}\nField details: [{items}]\n\nOutput JSON:",
+                        "Return a JSON object: {{\"descriptionByField\": {{ \"<field_name>\": \"<≤20 words>\" }} }}.\nRules: one sentence (≤20 words) per field; start with '{{' and end with '}}'. Keys MUST be exactly the provided FieldNames.\n\nDataset: {ns}\nFieldNames: {fnames}\nField details: [{items}]\n\nOutput JSON:",
                         ns = dataset_id,
                         fnames = field_names_json,
                         items = items
@@ -587,7 +587,7 @@ pub async fn enrich_dataset_with_llm(
                         .unwrap_or_else(|_| "\"\"".to_string())
                     );
                     let single_prompt = format!(
-                                "Return STRICT JSON only: {{\"descriptionByField\": {{ \"{fname}\": \"<≤20 words>\" }} }}.\nRules: one sentence (≤20 words) per field; JSON only; start with '{{' and end with '}}'.\nDataset: {ns}\nField details: [{item}]\n\nOutput JSON:",
+                                "Return a JSON object: {{\"descriptionByField\": {{ \"{fname}\": \"<≤20 words>\" }} }}.\nRules: one sentence (≤20 words) per field; start with '{{' and end with '}}'.\nDataset: {ns}\nField details: [{item}]\n\nOutput JSON:",
                                 fname = fname,
                                 ns = dataset_id,
                                 item = item
@@ -639,7 +639,7 @@ pub async fn enrich_dataset_with_llm(
                 .collect::<Vec<String>>()
                 .join(", ");
             let prompt_syn = format!(
-                        "Return STRICT JSON only: {{\"synonymsByField\": {{ \"<field_name>\": [\"a\",\"b\"] }} }}.\nRules: 3–6 single-word synonyms, lowercase; JSON only; start with '{{' and end with '}}'. Keys MUST match FieldNames.\n\nDataset: {ns}\nFieldNames: {fnames}\nFields: [{items}]\n\nOutput JSON:",
+                        "Return a JSON object: {{\"synonymsByField\": {{ \"<field_name>\": [\"a\",\"b\"] }} }}.\nRules: 3–6 single-word synonyms, lowercase; start with '{{' and end with '}}'. Keys MUST match FieldNames.\n\nDataset: {ns}\nFieldNames: {fnames}\nFields: [{items}]\n\nOutput JSON:",
                         ns = dataset_id,
                         fnames = field_names_json,
                         items = items2
@@ -713,7 +713,7 @@ pub async fn enrich_dataset_with_llm(
                 .collect::<Vec<String>>()
                 .join(", ");
             let prompt_pu = format!(
-                        "Return STRICT JSON only: {{\"piiUnitsByField\": {{ \"<field_name>\": {{\"pii\": \"none|low|medium|high\", \"units\": \"<units or format>\"}} }} }}.\nRules: units may be null if not applicable; JSON only; start with '{{' and end with '}}'. Keys MUST match FieldNames.\n\nDataset: {ns}\nFieldNames: {fnames}\nFields: [{items}]\n\nOutput JSON:",
+                        "Return a JSON object: {{\"piiUnitsByField\": {{ \"<field_name>\": {{\"pii\": \"none|low|medium|high\", \"units\": \"<units or format>\"}} }} }}.\nRules: units may be null if not applicable; start with '{{' and end with '}}'. Keys MUST match FieldNames.\n\nDataset: {ns}\nFieldNames: {fnames}\nFields: [{items}]\n\nOutput JSON:",
                         ns = dataset_id,
                         fnames = field_names_json,
                         items = items3
@@ -887,7 +887,7 @@ pub async fn run_llm_global_context_enrichment_all(
         batch.clear();
         Some(format!(
             "You are inferring project-level business context from datasets.\n\
-Return STRICT JSON only for this schema:\n\
+Return a JSON object for this schema:\n\
 {{\n\
   \"version\": 1,\n\
   \"built_at_epoch_secs\": <optional int>,\n\

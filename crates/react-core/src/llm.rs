@@ -8,6 +8,11 @@ use std::sync::Arc;
 pub enum LlmExpectedFormat {
     Text,
     JsonObject,
+    /// A single JSON object matching a named JSON Schema.
+    ///
+    /// Providers that support transport-level schema enforcement should use it.
+    /// Providers that don't must still return a JSON object; callers will validate and retry.
+    JsonSchema(crate::schema_registry::SchemaId),
 }
 
 /// OpenAI-style reasoning effort hint.
