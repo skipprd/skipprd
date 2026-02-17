@@ -35,9 +35,9 @@ pub struct PhaseResponse {
     #[serde(rename = "from_phase", skip_serializing_if = "Option::is_none")]
     pub from_phase: Option<String>,
     #[serde(rename = "reason_code", skip_serializing_if = "Option::is_none")]
-    pub reason_code: Option<String>,
+    pub reason_code: Option<models::PhaseReasonCode>,
     #[serde(rename = "reason_detail", skip_serializing_if = "Option::is_none")]
-    pub reason_detail: Option<std::collections::HashMap<String, serde_json::Value>>,
+    pub reason_detail: Option<models::PhaseReasonDetail>,
     /// RFC3339 timestamp stored in the thread log for this phase transition.
     #[serde(rename = "ts")]
     pub ts: String,

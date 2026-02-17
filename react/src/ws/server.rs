@@ -756,7 +756,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
                         0,
                     );
                     ev.for_cid = Some(cid.clone());
-                    ev.reason_code = Some("preflight_start".to_string());
+                    ev.reason_code = Some(api::PhaseReasonCode::PreflightStart);
                     let s = serde_json::to_string(&api::ServerMessage::Phase(ev)).unwrap();
                     state.buffer_last(&s);
                     out.push(s);
@@ -821,18 +821,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
                                 text.clone(),
                             );
                             if let Some(v) = meta {
-                                if let Some(obj) = v.as_object() {
-                                    let mut hm: std::collections::HashMap<
-                                        String,
-                                        serde_json::Value,
-                                    > = std::collections::HashMap::new();
-                                    for (k, vv) in obj.iter() {
-                                        hm.insert(k.clone(), vv.clone());
-                                    }
-                                    if !hm.is_empty() {
-                                        rr.meta = Some(hm);
-                                    }
-                                }
+                                rr.meta = serde_json::from_value::<api::ReviewDecisionMeta>(v).ok();
                             }
                             let resp = api::ServerMessage::Review(rr.clone());
                             let s = serde_json::to_string(&resp).unwrap();
@@ -1079,7 +1068,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
                         0,
                     );
                     ev.for_cid = Some(cid.clone());
-                    ev.reason_code = Some("preflight_start".to_string());
+                    ev.reason_code = Some(api::PhaseReasonCode::PreflightStart);
                     let s = serde_json::to_string(&api::ServerMessage::Phase(ev)).unwrap();
                     state.buffer_last(&s);
                     out.push(s);
@@ -1109,16 +1098,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
                             text.clone(),
                         );
                         if let Some(v) = meta {
-                            if let Some(obj) = v.as_object() {
-                                let mut hm: std::collections::HashMap<String, serde_json::Value> =
-                                    std::collections::HashMap::new();
-                                for (k, vv) in obj.iter() {
-                                    hm.insert(k.clone(), vv.clone());
-                                }
-                                if !hm.is_empty() {
-                                    rr.meta = Some(hm);
-                                }
-                            }
+                            rr.meta = serde_json::from_value::<api::ReviewDecisionMeta>(v).ok();
                         }
                         let resp = api::ServerMessage::Review(rr.clone());
                         let s = serde_json::to_string(&resp).unwrap();
@@ -1309,16 +1289,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
                             text.clone(),
                         );
                         if let Some(v) = meta {
-                            if let Some(obj) = v.as_object() {
-                                let mut hm: std::collections::HashMap<String, serde_json::Value> =
-                                    std::collections::HashMap::new();
-                                for (k, vv) in obj.iter() {
-                                    hm.insert(k.clone(), vv.clone());
-                                }
-                                if !hm.is_empty() {
-                                    rr.meta = Some(hm);
-                                }
-                            }
+                            rr.meta = serde_json::from_value::<api::ReviewDecisionMeta>(v).ok();
                         }
                         let resp = api::ServerMessage::Review(rr.clone());
                         let s = serde_json::to_string(&resp).unwrap();
@@ -1797,7 +1768,7 @@ async fn ensure_preflight_phase_step(
             ThreadStep::Phase {
                 phase: "preflight".to_string(),
                 from_phase: None,
-                reason_code: Some("preflight_start".to_string()),
+                reason_code: Some(react_core::control_flow::PhaseReasonCode::PreflightStart),
                 reason_detail: Some(serde_json::Value::Object(detail)),
                 observation: Observation::ok(),
                 ts: ts.clone(),
@@ -3146,7 +3117,7 @@ async fn run_agent_with_processing_suite(
                 0,
             );
             ev.for_cid = Some(cid.to_string());
-            ev.reason_code = Some("preflight_start".to_string());
+            ev.reason_code = Some(api::PhaseReasonCode::PreflightStart);
             let s = serde_json::to_string(&api::ServerMessage::Phase(ev)).unwrap();
             state.buffer_last(&s);
             ws_log_out(&s);
@@ -3247,8 +3218,112 @@ async fn run_agent_with_processing_suite(
                 let (cleanse, model) = load_latest_plans(&state.suite_ctx, thread_id).await;
                 // Emit a lightweight "plans changed" notification so UIs can fetch `plans`.
                 {
+                    fn semantic_plan_fp(p: &api::PlanSnapshot) -> String {
+                        fn norm_checklist(items: &[api::PlanChecklistItem]) -> Vec<serde_json::Value> {
+                            let mut out: Vec<serde_json::Value> = items
+                                .iter()
+                                .map(|it| {
+                                    serde_json::json!({
+                                        "checklist_item_id": it.checklist_item_id,
+                                        "status": it.status
+                                    })
+                                })
+                                .collect();
+                            out.sort_by(|a, b| {
+                                a.get("checklist_item_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .cmp(
+                                        b.get("checklist_item_id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or(""),
+                                    )
+                            });
+                            out
+                        }
+
+                        fn norm_task(t: &api::PlanTask) -> serde_json::Value {
+                            match t {
+                                api::PlanTask::Cleanse(x) => serde_json::json!({
+                                    "task_kind": "cleanse",
+                                    "task_id": x.task_id,
+                                    "dataset_id": x.dataset_id,
+                                    "status": x.status,
+                                    "checklist": norm_checklist(&x.checklist)
+                                }),
+                                api::PlanTask::Model(x) => serde_json::json!({
+                                    "task_kind": "model",
+                                    "task_id": x.task_id,
+                                    "name": x.name,
+                                    "status": x.status,
+                                    "checklist": norm_checklist(&x.checklist)
+                                }),
+                            }
+                        }
+
+                        let mut tasks = p.tasks.iter().map(norm_task).collect::<Vec<_>>();
+                        tasks.sort_by(|a, b| {
+                            a.get("task_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .cmp(b.get("task_id").and_then(|v| v.as_str()).unwrap_or(""))
+                        });
+
+                        let mut groups: Vec<serde_json::Value> = p
+                            .work_groups
+                            .iter()
+                            .map(|g| {
+                                let mut items = g
+                                    .items
+                                    .iter()
+                                    .map(|it| serde_json::json!({
+                                        "task_id": it.task_id,
+                                        "checklist_item_id": it.checklist_item_id
+                                    }))
+                                    .collect::<Vec<_>>();
+                                items.sort_by(|a, b| {
+                                    let ak = format!(
+                                        "{}:{}",
+                                        a.get("task_id").and_then(|v| v.as_str()).unwrap_or(""),
+                                        a.get("checklist_item_id").and_then(|v| v.as_str()).unwrap_or("")
+                                    );
+                                    let bk = format!(
+                                        "{}:{}",
+                                        b.get("task_id").and_then(|v| v.as_str()).unwrap_or(""),
+                                        b.get("checklist_item_id").and_then(|v| v.as_str()).unwrap_or("")
+                                    );
+                                    ak.cmp(&bk)
+                                });
+                                let mut deps = g.depends_on_group_ids.clone().unwrap_or_default();
+                                deps.sort();
+                                deps.dedup();
+                                serde_json::json!({
+                                    "group_id": g.group_id,
+                                    "kind": g.kind,
+                                    "items": items,
+                                    "depends_on_group_ids": deps
+                                })
+                            })
+                            .collect();
+                        groups.sort_by(|a, b| {
+                            a.get("group_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .cmp(b.get("group_id").and_then(|v| v.as_str()).unwrap_or(""))
+                        });
+
+                        let norm = serde_json::json!({
+                            "plan_kind": p.plan_kind,
+                            "plan_key": p.plan_key,
+                            "status": p.status,
+                            "tasks": tasks,
+                            "work_groups": groups
+                        });
+                        serde_json::to_string(&norm).unwrap_or_default()
+                    }
+
                     let fp = |p: &Option<api::PlanSnapshot>| -> Option<String> {
-                        p.as_ref().and_then(|pp| serde_json::to_string(pp).ok())
+                        p.as_ref().map(semantic_plan_fp)
                     };
                     let new_cleanse_fp = fp(&cleanse);
                     let new_model_fp = fp(&model);
@@ -3344,15 +3419,28 @@ async fn run_agent_with_processing_suite(
                             );
                             ev.for_cid = Some(cid.to_string());
                             ev.from_phase = from_phase.clone();
-                            ev.reason_code = reason_code.clone();
+                            ev.reason_code = reason_code
+                                .as_ref()
+                                .and_then(|rc| serde_json::to_value(rc).ok())
+                                .and_then(|v| serde_json::from_value::<api::PhaseReasonCode>(v).ok());
                             ev.from_phase_runs = from_runs;
                             ev.from_phase_total_runtime_ms = from_total;
-                            ev.reason_detail = reason_detail.as_ref().and_then(|v| v.as_object()).map(|obj| {
-                                let mut hm: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
-                                for (k, vv) in obj.iter() {
-                                    hm.insert(k.clone(), vv.clone());
+                            ev.reason_detail = reason_detail.as_ref().and_then(|v| {
+                                // Prefer strict decoding into the typed wrapper.
+                                if let Ok(rd) = serde_json::from_value::<api::PhaseReasonDetail>(v.clone()) {
+                                    return Some(rd);
                                 }
-                                hm
+                                // Fallback: wrap arbitrary detail payload under `data`.
+                                let mut rd = api::PhaseReasonDetail::new();
+                                rd.data = v.as_object().map(|obj| {
+                                    let mut hm: std::collections::HashMap<String, serde_json::Value> =
+                                        std::collections::HashMap::new();
+                                    for (k, vv) in obj.iter() {
+                                        hm.insert(k.clone(), vv.clone());
+                                    }
+                                    hm
+                                });
+                                Some(rd)
                             });
                             if let Some(t) = state.term() {
                                 t.emit(TerminalEvent::Phase(ev.clone()));
@@ -3605,17 +3693,8 @@ async fn run_agent_with_processing_suite(
                                 tseq,
                                 text.clone(),
                             );
-                            // Convert meta value to ReviewResponse's map type (best-effort).
                             if let Some(v) = meta {
-                                if let Some(obj) = v.as_object() {
-                                    let mut hm: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
-                                    for (k, vv) in obj.iter() {
-                                        hm.insert(k.clone(), vv.clone());
-                                    }
-                                    if !hm.is_empty() {
-                                        resp.meta = Some(hm);
-                                    }
-                                }
+                                resp.meta = serde_json::from_value::<api::ReviewDecisionMeta>(v).ok();
                             }
                             // Persist meta before moving `resp` into the event sink.
                             let meta_json = resp

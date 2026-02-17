@@ -1,8 +1,10 @@
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
 use react_core::llm::{ChatMessage, LlmCallOptions, LlmExpectedFormat, ReasoningEffort};
+use react_core::control_flow::{PhaseReasonCode, ReviewDecision, ReviewTier};
 use react_core::session::{Observation, ThreadStep, ThreadStore};
 use react_core::tools::Tool;
 
@@ -211,7 +213,7 @@ async fn append_review_step(
     thread_id: &str,
     phase: Phase,
     agent: &str,
-    code: &str,
+    code: PhaseReasonCode,
     detail: Value,
 ) {
     let _ = store
@@ -220,7 +222,7 @@ async fn append_review_step(
             ThreadStep::Phase {
                 phase: phase.as_str().to_string(),
                 from_phase: Some(phase.as_str().to_string()),
-                reason_code: Some(code.to_string()),
+                reason_code: Some(code),
                 reason_detail: Some(detail),
                 observation: Observation::ok(),
                 ts: utc_ts(),
@@ -373,29 +375,25 @@ You will be given:
 
 You must output one JSON object with this schema:
 {
+  "decision": "proceed" | "patch_plan" | "patch_impl",
+  "tier": "silver" | "gold" | "unknown",
+  "dataset_ids": [string],
   "final_review_text": string
 }
 
-The final_review_text MUST start with:
-META:{"actionable":true|false,"requires_plan_change":true|false,"dataset_ids":[...],"tier":"silver"|"gold"|"unknown"}
-
-Then a blank line, then the human review body.
-
 Interpretation rules (CRITICAL):
-- actionable=true means: "a concrete implementation change is required NOW to match the approved plan/spec or fix a critical correctness issue."
-  - If actionable=true, requires_plan_change MUST be false unless you are explicitly saying the plan/spec itself must change.
-- requires_plan_change=true means: "the plan/spec is wrong/ambiguous and must be revised before implementation can proceed safely."
-  - If requires_plan_change=true, the review body MUST be limited to describing the plan defect and the smallest fix to the plan.
+- decision="proceed" means: no action required now; the implementation conforms and there are no net-new/still-unresolved high-value issues.
+- decision="patch_impl" means: a concrete implementation change is required NOW to match the approved plan/spec (conformance/correctness fix), without changing the plan/spec.
+- decision="patch_plan" means: the plan/spec is wrong or ambiguous and must be revised before implementation can proceed safely.
+  - If decision="patch_plan", final_review_text MUST be limited to describing the plan defect and the smallest fix to the plan/spec.
   - Do NOT propose implementation edits that deviate from the current plan/spec.
 
-Set actionable=true only for conformance violations (implementation does not match plan/spec) or a small high-value fix that does NOT require changing the plan/spec.
-If feedback is substantially unchanged from prior iteration, set actionable=false.
+Tier rules: this is a SILVER/staging (cleanse) review. Set tier="silver".
 
 Unify requirements (CRITICAL):
 - Produce a concise, business-focused review that prioritizes decision usefulness.
-- Tier focus (CRITICAL): this is a SILVER/staging (cleanse) review. Do NOT penalize missing GOLD/marts models.
 - Delta-first output: include only net-new or still-unresolved high-value issues since prior review context. Suppress repeated advice that has no meaningful change in evidence or priority.
-- If no net-new/still-unresolved blocker/high items exist, set actionable=false and keep the body brief.
+- If no net-new/still-unresolved blocker/high items exist, set decision="proceed" and keep the body brief.
 - Hard cap: list at most 5 issues total across the final review body.
 - Include a short “Insightfulness summary” section:
   - What operational/analytical use-cases the SILVER layer supports today.
@@ -412,28 +410,25 @@ You will be given:
 
 You must output one JSON object with this schema:
 {
+  "decision": "proceed" | "patch_plan" | "patch_impl",
+  "tier": "silver" | "gold" | "unknown",
+  "dataset_ids": [string],
   "final_review_text": string
 }
 
-The final_review_text MUST start with:
-META:{\"actionable\":true|false,\"requires_plan_change\":true|false,\"dataset_ids\":[...],\"tier\":\"silver\"|\"gold\"|\"unknown\"}
-
-Then a blank line, then the human review body.
-
 Interpretation rules (CRITICAL):
-- actionable=true means: "a concrete implementation change is required NOW to match the approved plan/spec or fix a critical correctness issue."
-  - If actionable=true, requires_plan_change MUST be false unless you are explicitly saying the plan/spec itself must change.
-- requires_plan_change=true means: "the plan/spec is wrong/ambiguous and must be revised before implementation can proceed safely."
-  - If requires_plan_change=true, the review body MUST be limited to describing the plan defect and the smallest fix to the plan.
+- decision="proceed" means: no action required now; the implementation conforms and there are no net-new/still-unresolved high-value issues.
+- decision="patch_impl" means: a concrete implementation change is required NOW to match the approved plan/spec (conformance/correctness fix), without changing the plan/spec.
+- decision="patch_plan" means: the plan/spec is wrong or ambiguous and must be revised before implementation can proceed safely.
+  - If decision="patch_plan", final_review_text MUST be limited to describing the plan defect and the smallest fix to the plan/spec.
   - Do NOT propose implementation edits that deviate from the current plan/spec.
 
-Set actionable=true only for conformance violations (implementation does not match plan/spec) or a small high-value fix that does NOT require changing the plan/spec.
-If feedback is substantially unchanged from prior iteration, set actionable=false.
+Tier rules: this is a GOLD/model review. Set tier="gold".
 
 Unify requirements (CRITICAL):
 - Produce a concise, business-focused review that prioritizes decision usefulness.
 - Delta-first output: include only net-new or still-unresolved high-value issues since prior review context. Suppress repeated advice that has no meaningful change in evidence or priority.
-- If no net-new/still-unresolved blocker/high items exist, set actionable=false and keep the body brief.
+- If no net-new/still-unresolved blocker/high items exist, set decision="proceed" and keep the body brief.
 - Hard cap: list at most 5 issues total across the final review body.
 - Include a short “Insightfulness summary” section:
   - What business decisions the current GOLD layer enables today.
@@ -906,9 +901,8 @@ async fn persist_review_final_to_plan(
     actx: &AgentCtx,
     plan_kind: &str,
     plan_key: &str,
-    actionable: bool,
-    requires_plan_change: bool,
-    tier: String,
+    decision: ReviewDecision,
+    tier: ReviewTier,
     dataset_ids: Vec<String>,
     text: String,
 ) {
@@ -931,8 +925,7 @@ async fn persist_review_final_to_plan(
                 review_obj.insert(
                     "final".to_string(),
                     serde_json::json!({
-                        "actionable": actionable,
-                        "requires_plan_change": requires_plan_change,
+                        "decision": decision,
                         "tier": tier,
                         "dataset_ids": dataset_ids,
                         "text": text,
@@ -960,8 +953,7 @@ async fn persist_review_final_to_plan(
                 review_obj.insert(
                     "final".to_string(),
                     serde_json::json!({
-                        "actionable": actionable,
-                        "requires_plan_change": requires_plan_change,
+                        "decision": decision,
                         "tier": tier,
                         "dataset_ids": dataset_ids,
                         "text": text,
@@ -974,38 +966,15 @@ async fn persist_review_final_to_plan(
     }
 }
 
-fn parse_review_meta_line(text: &str) -> (bool, bool, String, Vec<String>) {
-    let first = text.lines().next().unwrap_or("").trim();
-    if !first.starts_with("META:") {
-        return (false, false, "unknown".to_string(), vec![]);
-    }
-    let json_text = first.trim_start_matches("META:").trim();
-    let Ok(v) = serde_json::from_str::<Value>(json_text) else {
-        return (false, false, "unknown".to_string(), vec![]);
-    };
-    let actionable = v
-        .get("actionable")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
-    let requires_plan_change = v
-        .get("requires_plan_change")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
-    let tier = v
-        .get("tier")
-        .and_then(|x| x.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let dataset_ids = v
-        .get("dataset_ids")
-        .and_then(|x| x.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|it| it.as_str().map(|s| s.to_string()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    (actionable, requires_plan_change, tier, dataset_ids)
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewUnifyOutput {
+    decision: ReviewDecision,
+    #[serde(default)]
+    tier: ReviewTier,
+    #[serde(default)]
+    dataset_ids: Vec<String>,
+    final_review_text: String,
 }
 
 fn resolve_cleanse_batch_paths(
@@ -1592,7 +1561,7 @@ pub async fn run_batched_review(
         thread_id,
         phase,
         "review",
-        "review_project_summary",
+        PhaseReasonCode::ReviewProjectSummary,
         serde_json::json!({
             "project_notes": project_notes,
             "project_risks": project_risks
@@ -1717,7 +1686,7 @@ pub async fn run_batched_review(
             thread_id,
             phase,
             "review",
-            "review_batch",
+            PhaseReasonCode::ReviewBatch,
             detail.clone(),
         )
         .await;
@@ -1759,18 +1728,18 @@ pub async fn run_batched_review(
         batches = serde_json::to_string_pretty(&unify_batches).unwrap_or_else(|_| "[]".to_string()),
     );
     let unify_v = llm_json(sctx, &actx, thread_id, phase, "unify", unify_user).await?;
-    let final_review_text = unify_v
-        .get("final_review_text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let unify: ReviewUnifyOutput = serde_json::from_value(unify_v).map_err(|e| {
+        format!("batched review unify output did not match schema: {e}")
+    })?;
+    let final_review_text = unify.final_review_text;
     if final_review_text.trim().is_empty() {
         return Err("batched review unify produced empty final_review_text".to_string());
     }
 
     // Persist full review text to storage; keep thread steps small (store only a reference).
-    let (actionable, requires_plan_change, tier, dataset_ids) =
-        parse_review_meta_line(&final_review_text);
+    let decision = unify.decision;
+    let tier = unify.tier;
+    let dataset_ids = unify.dataset_ids;
     let review_sha256 = react_core::llm_observability::sha256_hex_str(&final_review_text);
     let review_bytes = final_review_text.as_bytes().len() as u64;
     let review_key = {
@@ -1790,22 +1759,24 @@ pub async fn run_batched_review(
         .put_bytes(&review_key, final_review_text.as_bytes(), "text/plain")
         .await;
 
+    let review_ref = serde_json::json!({
+        "key": review_key,
+        "sha256": review_sha256,
+        "bytes": review_bytes
+    });
+
     append_review_step(
         &thread_store,
         thread_id,
         phase,
         "review",
-        "review_final_unify",
+        PhaseReasonCode::ReviewFinalUnify,
         serde_json::json!({
-            "review_ref": {
-                "key": review_key,
-                "sha256": review_sha256,
-                "bytes": review_bytes
-            },
+            "review_ref": review_ref.clone(),
             "meta": {
-                "actionable": actionable,
+                "decision": decision,
                 "tier": tier,
-                "dataset_ids": dataset_ids
+                "dataset_ids": dataset_ids.clone()
             },
             "review_phase": phase.as_str()
         }),
@@ -1816,10 +1787,9 @@ pub async fn run_batched_review(
             &actx,
             pk,
             plan_key,
-            actionable,
-            requires_plan_change,
+            decision,
             tier,
-            dataset_ids,
+            dataset_ids.clone(),
             final_review_text.clone(),
         )
         .await;
@@ -1827,7 +1797,15 @@ pub async fn run_batched_review(
 
     Ok(vec![FlowFrame::Final {
         kind: "generic".to_string(),
-        payload: serde_json::json!({ "text": final_review_text.clone() }),
+        payload: serde_json::json!({
+            "text": final_review_text.clone(),
+            "meta": {
+                "decision": decision,
+                "tier": tier,
+                "dataset_ids": dataset_ids,
+                "review_ref": review_ref
+            }
+        }),
         display: Some(final_review_text),
     }])
 }
@@ -1928,7 +1906,7 @@ mod tests {
                 // batch 2
                 serde_json::json!({"notes":["b2n"],"actionable_hints":["h2"]}).to_string(),
                 // unify
-                serde_json::json!({"final_review_text":"META:{\"actionable\":false,\"dataset_ids\":[],\"tier\":\"unknown\"}\n\nAll good."}).to_string(),
+                serde_json::json!({"decision":"proceed","tier":"silver","dataset_ids":[],"final_review_text":"All good."}).to_string(),
             ])),
         });
         let sctx = make_suite_ctx(storage.clone(), llm);
@@ -2129,7 +2107,7 @@ mod tests {
             captured_user_prompts: captured_cleanse.clone(),
             replies: Arc::new(Mutex::new(vec![
                 serde_json::json!({"project_notes":[],"project_risks":[]}).to_string(), // summary
-                serde_json::json!({"final_review_text":"META:{\"actionable\":false,\"dataset_ids\":[],\"tier\":\"unknown\"}\n\nok"}).to_string(), // unify
+                serde_json::json!({"decision":"proceed","tier":"silver","dataset_ids":[],"final_review_text":"ok"}).to_string(), // unify
             ])),
         });
         let sctx_cleanse = SuiteCtx::new(
@@ -2155,7 +2133,7 @@ mod tests {
             captured_user_prompts: captured_model.clone(),
             replies: Arc::new(Mutex::new(vec![
                 serde_json::json!({"project_notes":[],"project_risks":[]}).to_string(), // summary
-                serde_json::json!({"final_review_text":"META:{\"actionable\":false,\"dataset_ids\":[],\"tier\":\"unknown\"}\n\nok"}).to_string(), // unify
+                serde_json::json!({"decision":"proceed","tier":"gold","dataset_ids":[],"final_review_text":"ok"}).to_string(), // unify
             ])),
         });
         let sctx_model = SuiteCtx::new(

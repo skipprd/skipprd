@@ -7,6 +7,7 @@
 //! - Minimal capability traits/types (LLM + storage + scope/keyspace + optional providers)
 
 pub mod agent;
+pub mod control_flow;
 pub mod discover;
 pub mod error_context;
 pub mod helpers;

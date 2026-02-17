@@ -49,6 +49,24 @@ pub use generic_final_result::GenericFinalResult;
 pub mod review_response;
 pub use review_response::ReviewResponse;
 
+pub mod review_decision;
+pub use review_decision::ReviewDecision;
+
+pub mod review_tier;
+pub use review_tier::ReviewTier;
+
+pub mod review_ref;
+pub use review_ref::ReviewRef;
+
+pub mod review_decision_meta;
+pub use review_decision_meta::ReviewDecisionMeta;
+
+pub mod phase_reason_code;
+pub use phase_reason_code::PhaseReasonCode;
+
+pub mod phase_reason_detail;
+pub use phase_reason_detail::PhaseReasonDetail;
+
 pub mod await_approval_response;
 pub use await_approval_response::AwaitApprovalResponse;
 

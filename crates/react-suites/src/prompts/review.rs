@@ -27,15 +27,9 @@ Hard rules:
   - Call out top high-signal staged tables that are NOT used by any gold model yet (prioritize by business value; do not list everything).
   - Only propose *new* marts if they are clearly high value; otherwise recommend improving existing marts (add missing joins/keys/time semantics) instead of creating more models.
 
-Machine-readable header (CRITICAL):
-- Your review text (i.e., `final.payload.text`) MUST start with a single line in this exact format:
-  META:{"actionable":true|false,"dataset_ids":["<dataset_id>",...],"tier":"silver"|"gold"|"unknown"}
-- Then a blank line, then your human-readable review.
-- If you are unsure which datasets are affected, set dataset_ids to [] and tier to "unknown".
-
-When to set META.actionable=true:
-- Only if there are Blocker/High severity issues OR a small, high-value fix that is clearly worth doing now.
-- If the project is "good enough" for business use, set actionable=false and do NOT invent busywork.
+Machine-readable decision (CRITICAL):
+- Follow the system-provided output contract (schema) for any decision/meta fields.
+- Do NOT embed control signals in the review text (no `META:` prefixes).
 
 Review structure (keep concise):
 1) What looks correct / promising (business value)

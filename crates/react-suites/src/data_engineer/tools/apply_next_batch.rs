@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
+use react_core::control_flow::PhaseReasonCode;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
@@ -81,7 +82,7 @@ async fn maybe_advance_phase_on_done(
     ctx: &AgentCtx,
     from_phase: control_flow::Phase,
     to_phase: control_flow::Phase,
-    reason_code: &'static str,
+    reason_code: PhaseReasonCode,
     detail: Value,
 ) {
     let (Some(store), Some(tid)) = (ctx.thread_store.as_ref(), ctx.thread_id.as_deref()) else {
@@ -176,7 +177,7 @@ impl Tool for ApplyNextCleanseBatchTool {
                     ctx,
                     control_flow::Phase::CleanseAuthor,
                     control_flow::Phase::CleanseValidate,
-                    "no_work_all_done",
+                    PhaseReasonCode::NoWorkAllDone,
                     serde_json::json!({ "plan_key": plan.plan_key }),
                 )
                 .await;
@@ -449,7 +450,7 @@ impl Tool for ApplyNextModelBatchTool {
                     ctx,
                     control_flow::Phase::ModelAuthor,
                     control_flow::Phase::ModelValidate,
-                    "no_work_all_done",
+                    PhaseReasonCode::NoWorkAllDone,
                     serde_json::json!({ "plan_key": plan.plan_key }),
                 )
                 .await;

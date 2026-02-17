@@ -9,8 +9,9 @@ use std::time::Instant;
 use crate::keyspace::Keyspace;
 use crate::scope::RequestScope;
 use crate::storage::StorageAdapter;
+use crate::control_flow::{GuardBlockKind, PhaseReasonCode};
 
-pub const THREAD_SCHEMA_VERSION: u32 = 3;
+pub const THREAD_SCHEMA_VERSION: u32 = 4;
 pub const THREAD_STATE_SCHEMA_VERSION: u32 = 1;
 
 /// Materialized, reloadable thread state (stable summary, not raw streaming events).
@@ -339,7 +340,8 @@ pub enum ThreadStep {
     Phase {
         phase: String,
         from_phase: Option<String>,
-        reason_code: Option<String>,
+        #[serde(default)]
+        reason_code: Option<PhaseReasonCode>,
         reason_detail: Option<Value>,
         observation: Observation,
         ts: String,
@@ -347,7 +349,7 @@ pub enum ThreadStep {
     },
     GuardBlock {
         phase: String,
-        kind: String,
+        kind: GuardBlockKind,
         reason: String,
         observation: Observation,
         ts: String,
