@@ -858,14 +858,6 @@ fn ensure_selected(m: &mut Model, tid: &str) {
     m.selected = Some(tid.to_string());
 }
 
-fn short_tid(tid: &str) -> String {
-    if tid.len() <= 8 {
-        tid.to_string()
-    } else {
-        tid[..8].to_string()
-    }
-}
-
 fn fmt_dur(d: Duration) -> String {
     let ms = d.as_millis() as i64;
     fmt_ms(ms)
@@ -1745,7 +1737,7 @@ fn render_model(m: &Model) -> Vec<String> {
     let sel = m
         .selected
         .as_ref()
-        .map(|s| short_tid(s))
+        .cloned()
         .unwrap_or_else(|| "-".to_string());
 
     out.push(format!(
