@@ -369,7 +369,27 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.CIRCLES_AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
           AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
+          CIRCLES_AWS_ACCESS_KEY_ID: ${{ secrets.CIRCLES_AWS_ACCESS_KEY_ID }}
+          CIRCLES_AWS_SECRET_ACCESS_KEY: ${{ secrets.CIRCLES_AWS_SECRET_ACCESS_KEY }}
+          CIRCLES_AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
         run: |
+          echo "React parallel AWS diagnostics"
+          echo "AWS_REGION=${AWS_REGION}"
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+            aws sts get-caller-identity || true
+            aws glue get-database --name test_raw
+            table_count=$(aws glue get-tables --database-name test_raw --max-results 1 --query 'length(TableList)' --output text)
+            echo "glue test_raw table_count=${table_count}"
+            if [ "${table_count}" = "0" ]; then
+              echo "ERROR: Glue database test_raw has zero tables; aborting before react parallel run"
+              exit 1
+            fi
+          else
+            echo "aws cli not available on runner"
+            exit 1
+          fi
+
           cargo run -p react -- run --parallel \
             --config ./react/react1.yaml \
             --config ./react/react2.yaml \

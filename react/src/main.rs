@@ -223,6 +223,100 @@ fn sanitize_for_filename(s: &str) -> String {
         .collect()
 }
 
+fn getenv_nonempty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn env_usize(key: &str) -> Option<usize> {
+    getenv_nonempty(key).and_then(|v| v.parse::<usize>().ok())
+}
+
+fn env_u64(key: &str) -> Option<u64> {
+    getenv_nonempty(key).and_then(|v| v.parse::<u64>().ok())
+}
+
+fn apply_aws_region_fallback_from_warehouse(warehouse_extras: &serde_json::Value) {
+    if let Some(region) = warehouse_extras
+        .get("region")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let has_default = std::env::var("AWS_DEFAULT_REGION")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_some();
+        let has_region = std::env::var("AWS_REGION")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_some();
+        if !has_default {
+            std::env::set_var("AWS_DEFAULT_REGION", region);
+        }
+        if !has_region {
+            std::env::set_var("AWS_REGION", region);
+        }
+    }
+}
+
+fn resolve_athena_settings(cfg: &react::config::ReactResolvedConfig) -> AthenaSettings {
+    let extras = &cfg.providers.warehouse.extras;
+    let workgroup = getenv_nonempty("ATHENA_WORKGROUP")
+        .or_else(|| getenv_nonempty("DATA_OUTPUT_ATHENA_WORKGROUP_NAME"))
+        .or_else(|| {
+            extras
+                .get("workgroup")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+
+    let result_output_location = getenv_nonempty("ATHENA_RESULT_S3")
+        .or_else(|| {
+            getenv_nonempty("DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET")
+                .map(|b| format!("s3://{}/", b.trim_end_matches('/')))
+        })
+        .or_else(|| {
+            extras
+                .get("result_s3")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+
+    let default_catalog = getenv_nonempty("ATHENA_TARGET_CATALOG")
+        .or_else(|| getenv_nonempty("ATHENA_CATALOG"))
+        .or_else(|| cfg.providers.warehouse.container.clone())
+        .unwrap_or_else(|| "AwsDataCatalog".to_string());
+
+    let source_schema = getenv_nonempty("ATHENA_SOURCE_SCHEMA")
+        .or_else(|| getenv_nonempty("ATHENA_SOURCE_DATABASE"))
+        .or_else(|| cfg.providers.warehouse.namespace.clone());
+
+    let max_concurrency = env_usize("ATHENA_MAX_CONCURRENCY")
+        .or_else(|| {
+            extras
+                .get("max_concurrency")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+        })
+        .unwrap_or(15);
+
+    let discovery_cache_ttl_secs = env_u64("ATHENA_DISCOVERY_CACHE_TTL_SECS")
+        .or_else(|| extras.get("discovery_cache_ttl_secs").and_then(|v| v.as_u64()))
+        .unwrap_or(120);
+
+    AthenaSettings {
+        workgroup,
+        result_output_location,
+        default_catalog,
+        source_schema,
+        max_concurrency,
+        discovery_cache_ttl_secs,
+    }
+}
+
 async fn run_parallel_configs(
     log: &Option<String>,
     verbose_debug: bool,
@@ -649,40 +743,9 @@ async fn main() {
             // Warehouse provider (single provider; dbt target)
             let wh_kind = cfg.providers.warehouse.kind.trim().to_ascii_lowercase();
             if wh_kind == "athena" {
-                let extras = &cfg.providers.warehouse.extras;
-                let workgroup = extras
-                    .get("workgroup")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let result_s3 = extras
-                    .get("result_s3")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let max_conc = extras
-                    .get("max_concurrency")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as usize)
-                    .unwrap_or(15);
-                let ttl = extras
-                    .get("discovery_cache_ttl_secs")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(120);
-                let catalog = cfg
-                    .providers
-                    .warehouse
-                    .container
-                    .clone()
-                    .unwrap_or_else(|| "AwsDataCatalog".to_string());
-                let schema = cfg.providers.warehouse.namespace.clone();
+                apply_aws_region_fallback_from_warehouse(&cfg.providers.warehouse.extras);
                 let athena = Arc::new(
-                    AthenaQueryProvider::from_settings(AthenaSettings {
-                        workgroup,
-                        result_output_location: result_s3,
-                        default_catalog: catalog,
-                        source_schema: schema,
-                        max_concurrency: max_conc,
-                        discovery_cache_ttl_secs: ttl,
-                    })
+                    AthenaQueryProvider::from_settings(resolve_athena_settings(&cfg))
                     .await,
                 );
                 suite_ctx.warehouse = athena.clone();
@@ -1047,40 +1110,9 @@ async fn main() {
             // Warehouse provider (single provider; dbt target)
             let wh_kind = cfg.providers.warehouse.kind.trim().to_ascii_lowercase();
             if wh_kind == "athena" {
-                let extras = &cfg.providers.warehouse.extras;
-                let workgroup = extras
-                    .get("workgroup")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let result_s3 = extras
-                    .get("result_s3")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let max_conc = extras
-                    .get("max_concurrency")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as usize)
-                    .unwrap_or(15);
-                let ttl = extras
-                    .get("discovery_cache_ttl_secs")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(120);
-                let catalog = cfg
-                    .providers
-                    .warehouse
-                    .container
-                    .clone()
-                    .unwrap_or_else(|| "AwsDataCatalog".to_string());
-                let schema = cfg.providers.warehouse.namespace.clone();
+                apply_aws_region_fallback_from_warehouse(&cfg.providers.warehouse.extras);
                 let athena = Arc::new(
-                    AthenaQueryProvider::from_settings(AthenaSettings {
-                        workgroup,
-                        result_output_location: result_s3,
-                        default_catalog: catalog,
-                        source_schema: schema,
-                        max_concurrency: max_conc,
-                        discovery_cache_ttl_secs: ttl,
-                    })
+                    AthenaQueryProvider::from_settings(resolve_athena_settings(&cfg))
                     .await,
                 );
                 suite_ctx.warehouse = athena.clone();

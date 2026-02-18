@@ -2025,50 +2025,54 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
     /// If no catalogs/stats exist yet for this scope, build them for all tables first.
     ///
     /// This avoids table-name assumptions and gives the agent a reliable base for shortlist selection.
-    async fn ensure_catalog_bootstrap(sctx: &SuiteCtx) {
+    async fn ensure_catalog_bootstrap(sctx: &SuiteCtx) -> Result<(), String> {
         let (Some(cat), Some(datasets)) = (sctx.catalog.as_ref(), sctx.datasets.as_ref()) else {
-            return;
+            return Ok(());
         };
         // Detect whether any catalog entry already exists (sample a few datasets).
         let mut has_any = false;
-        if let Ok(dss) = datasets.list_datasets().await {
-            // Also detect whether the global semantic context exists.
-            let global_key = sctx.keyspace.semantic_key(
-                &sctx.scope,
-                react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
-            );
-            let has_global = sctx.storage.get_json(&global_key).await.is_ok();
+        let dss = datasets
+            .list_datasets()
+            .await
+            .map_err(|e| format!("catalog bootstrap failed: dataset discovery error: {e}"))?;
+        if dss.is_empty() {
+            return Err("catalog bootstrap failed: dataset discovery returned zero datasets (check AWS credentials/region and warehouse schema config)".to_string());
+        }
 
-            for ds in dss.iter().take(5) {
-                let id = ds.fqn();
-                if let Ok(Some(_)) = cat.read_catalog(&sctx.scope, &id).await {
-                    has_any = true;
-                    break;
-                }
-            }
-            if !has_any || !has_global {
-                tracing::info!("data_engineer: no existing catalog found; building catalogs/stats for all datasets");
-                let empty: HashMap<String, react_core::discover::Metadata> = HashMap::new();
-                if !has_any {
-                    if let Err(e) = cat
-                        .build_all_with_progress(&sctx.scope, datasets.as_ref(), &empty, None)
-                        .await
-                    {
-                        tracing::warn!("data_engineer: catalog bootstrap failed: {}", e);
-                    }
-                }
+        // Also detect whether the global semantic context exists.
+        let global_key = sctx.keyspace.semantic_key(
+            &sctx.scope,
+            react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
+        );
+        let has_global = sctx.storage.get_json(&global_key).await.is_ok();
 
-                // Best-effort LLM enrichment (dataset descriptions + global context).
-                // Use a stable dataset_id map so the provider can chunk deterministically.
-                let mut all: HashMap<String, react_core::discover::Metadata> = HashMap::new();
-                for ds in dss.iter() {
-                    all.insert(ds.fqn(), react_core::discover::Metadata::default());
-                }
-                if let Err(e) = cat.run_llm_enrichment_all(&sctx.scope, &all).await {
-                    tracing::warn!("data_engineer: catalog enrichment failed: {}", e);
-                }
+        for ds in dss.iter().take(5) {
+            let id = ds.fqn();
+            if let Ok(Some(_)) = cat.read_catalog(&sctx.scope, &id).await {
+                has_any = true;
+                break;
             }
         }
+        if !has_any || !has_global {
+            tracing::info!("data_engineer: no existing catalog found; building catalogs/stats for all datasets");
+            let empty: HashMap<String, react_core::discover::Metadata> = HashMap::new();
+            if !has_any {
+                cat.build_all_with_progress(&sctx.scope, datasets.as_ref(), &empty, None)
+                    .await
+                    .map_err(|e| format!("catalog bootstrap failed while building catalogs: {e}"))?;
+            }
+
+            // Best-effort LLM enrichment (dataset descriptions + global context).
+            // Use a stable dataset_id map so the provider can chunk deterministically.
+            let mut all: HashMap<String, react_core::discover::Metadata> = HashMap::new();
+            for ds in dss.iter() {
+                all.insert(ds.fqn(), react_core::discover::Metadata::default());
+            }
+            if let Err(e) = cat.run_llm_enrichment_all(&sctx.scope, &all).await {
+                tracing::warn!("data_engineer: catalog enrichment failed: {}", e);
+            }
+        }
+        Ok(())
     }
 
     async fn manifest_targeting_lines(
@@ -2265,7 +2269,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
         question: &str,
         sctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
-        Self::ensure_catalog_bootstrap(sctx).await;
+        Self::ensure_catalog_bootstrap(sctx).await?;
         let sys = crate::util::time_context::with_time_context(prompts::review_system_prompt());
         let tools_card = prompts::review_tool_card();
 
@@ -2419,7 +2423,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
         sctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
         use control_flow::{DerivedGuardState, Phase};
-        Self::ensure_catalog_bootstrap(sctx).await;
+        Self::ensure_catalog_bootstrap(sctx).await?;
 
         // Phase-step budget is reset when we make clear forward progress (phase advances).
         // This prevents aborting a healthy thread that is steadily moving through phases,
@@ -2895,7 +2899,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                     }
 
                     // Generate a new draft plan via LLM and then ask the user to approve it.
-                    Self::ensure_catalog_bootstrap(sctx).await;
+                    Self::ensure_catalog_bootstrap(sctx).await?;
                     // Deterministic bootstrap: ensure the plan phase ALWAYS has grounded context recorded
                     // in the thread history. This prevents LLM loops that repeatedly call dbt_files list
                     // and never reach sql_schema/evidence, which would trip the plan_grounding guard.
@@ -6629,7 +6633,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
         question: &str,
         sctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
-        Self::ensure_catalog_bootstrap(sctx).await;
+        Self::ensure_catalog_bootstrap(sctx).await?;
 
         let (agent_name, sys, tools_card, run_preflight_on_bundle) = match kind {
             AuthoringKind::Cleanse => (

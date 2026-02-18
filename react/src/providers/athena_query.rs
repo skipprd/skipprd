@@ -661,7 +661,10 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
         let dbs = self.cached_databases().await?;
         let mut out: Vec<DatasetId> = Vec::new();
         for db in dbs {
-            let tables = self.cached_tables(&db).await.unwrap_or_default();
+            let tables = self
+                .cached_tables(&db)
+                .await
+                .map_err(|e| format!("athena discovery failed for database '{}': {}", db, e))?;
             for t in tables {
                 out.push(DatasetId {
                     catalog: self.inner.default_catalog.clone(),
