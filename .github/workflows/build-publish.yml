@@ -121,6 +121,52 @@ jobs:
             aws glue delete-database --catalog-id 353855562591 --name "example${i}_gold" || true
           done
 
+  react_ci:
+    name: React build + tests + examples (single runner)
+    needs:
+      - react_cleanup
+    runs-on:
+      - ubuntu-latest-32-cores
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+
+      - name: Install dbt runtime
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install dbt-core dbt-athena-community
+
+      - name: Build react crate
+        run: cargo build -p react
+
+      - name: Test react crate
+        run: cargo test -p react
+
+      - name: Run React examples (1..8) in parallel
+        env:
+          REACT_LOG_THREAD_STEPS: ${{ secrets.REACT_LOG_THREAD_STEPS }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.CIRCLES_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CIRCLES_AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
+          AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
+        run: |
+          ./target/debug/react --log info run --parallel \
+            --config ./react/react1.yaml \
+            --config ./react/react2.yaml \
+            --config ./react/react3.yaml \
+            --config ./react/react4.yaml \
+            --config ./react/react5.yaml \
+            --config ./react/react6.yaml \
+            --config ./react/react7.yaml \
+            --config ./react/react8.yaml \
+            --suite-id data_engineer \
+            --agent agent
+
 #  smoke_test:
 #    needs:
 #      - cleanup
@@ -216,6 +262,8 @@ jobs:
 
   react_binary_build:
     name: react build (${{ matrix.name }})
+    needs:
+      - react_ci
     strategy:
       fail-fast: false
       matrix:
@@ -324,86 +372,6 @@ jobs:
           RUST_BACKTRACE: 1
         run: |
           cargo test --tests -- --nocapture llm_
-
-  react_ci_build_test:
-    name: React build + tests
-    needs:
-      - react_cleanup
-    runs-on:
-      - ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Setup Rust toolchain
-        uses: ./.github/actions/setup-builder
-        with:
-          rust-version: stable
-
-      - name: Build react crate
-        run: cargo build -p react
-
-      - name: Test react crate
-        run: cargo test -p react
-
-  react_examples_parallel:
-    needs:
-      - react_ci_build_test
-    name: React examples (parallel)
-    runs-on:
-      - ubuntu-latest-32-cores
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Setup Rust toolchain
-        uses: ./.github/actions/setup-builder
-        with:
-          rust-version: stable
-
-      - name: Install dbt runtime
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install dbt-core dbt-athena-community
-
-      - name: Run React examples (1..8) in parallel
-        env:
-          REACT_LOG_THREAD_STEPS: ${{ secrets.REACT_LOG_THREAD_STEPS }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.CIRCLES_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.CIRCLES_AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
-          AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
-          CIRCLES_AWS_ACCESS_KEY_ID: ${{ secrets.CIRCLES_AWS_ACCESS_KEY_ID }}
-          CIRCLES_AWS_SECRET_ACCESS_KEY: ${{ secrets.CIRCLES_AWS_SECRET_ACCESS_KEY }}
-          CIRCLES_AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
-        run: |
-          echo "React parallel AWS diagnostics"
-          echo "AWS_REGION=${AWS_REGION}"
-          if command -v aws >/dev/null 2>&1; then
-            aws --version
-            aws sts get-caller-identity || true
-            aws glue get-database --name test_raw
-            table_count=$(aws glue get-tables --database-name test_raw --max-results 1 --query 'length(TableList)' --output text)
-            echo "glue test_raw table_count=${table_count}"
-            if [ "${table_count}" = "0" ]; then
-              echo "ERROR: Glue database test_raw has zero tables; aborting before react parallel run"
-              exit 1
-            fi
-          else
-            echo "aws cli not available on runner"
-            exit 1
-          fi
-
-          cargo run -p react -- run --parallel \
-            --config ./react/react1.yaml \
-            --config ./react/react2.yaml \
-            --config ./react/react3.yaml \
-            --config ./react/react4.yaml \
-            --config ./react/react5.yaml \
-            --config ./react/react6.yaml \
-            --config ./react/react7.yaml \
-            --config ./react/react8.yaml \
-            --suite-id data_engineer \
-            --agent agent
 
   chaos_mode_test:
     needs:
