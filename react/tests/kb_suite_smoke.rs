@@ -83,7 +83,7 @@ impl AgentPolicy for InterruptOnAskUser {
 #[tokio::test]
 async fn agent_default_policy_accepts_typed_final() {
     let llm = Arc::new(FixedJsonModel {
-        out: r#"{"type":"final","final":{"kind":"kb","payload":{"answer":"hello"}}} "#.to_string(),
+        out: r#"{"type":"final","name":null,"args":null,"final":{"kind":"kb","payload":"{\"answer\":\"hello\"}","display":null}} "#.to_string(),
     });
     let ctx = AgentCtx {
         top_k: 1,
@@ -145,7 +145,7 @@ async fn agent_default_policy_accepts_typed_final() {
 #[tokio::test]
 async fn agent_does_not_special_case_ask_user_tool_name() {
     let llm = Arc::new(FixedJsonModel {
-        out: r#"{"type":"tool","name":"ask_user","args":{}} "#.to_string(),
+        out: r#"{"type":"tool","name":"ask_user","args":"{}","final":null} "#.to_string(),
     });
     let ctx = AgentCtx {
         top_k: 1,
@@ -206,7 +206,7 @@ async fn agent_does_not_special_case_ask_user_tool_name() {
 #[tokio::test]
 async fn agent_interrupts_only_when_policy_requests_it() {
     let llm = Arc::new(FixedJsonModel {
-        out: r#"{"type":"tool","name":"ask_user","args":{}} "#.to_string(),
+        out: r#"{"type":"tool","name":"ask_user","args":"{}","final":null} "#.to_string(),
     });
     let ctx = AgentCtx {
         top_k: 1,
