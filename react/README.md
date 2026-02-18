@@ -2,6 +2,10 @@
 
 This crate implements a **WebSocket-based ReAct agent runtime**. Clients send JSON frames, the server routes each request to a **suite**, and the suite runs a **ReAct loop** (LLM → tool calls → observations → final/interrupt), using injected providers (query/catalog/vector/dbt/storage).
 
+### Getting started
+
+- Windows + BigQuery (local storage): see `GETTING_STARTED_WINDOWS_BIGQUERY.md`
+
 ### Run the server
 
 From the workspace root:
