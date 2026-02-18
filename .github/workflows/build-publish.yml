@@ -95,6 +95,32 @@ jobs:
       - name: Run script
         run: node _files/purge-dynamodb.js
 
+  react_cleanup:
+    name: React cleanup
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.8-alpine
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Install dependencies
+        run: |
+          apk add --no-cache groff less jq
+          pip install awscli
+      - name: Configure AWS and clean React resources
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CIRCLES_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CIRCLES_AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
+        run: |
+          aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+          aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
+          aws configure set default.region "$AWS_DEFAULT_REGION"
+          for i in 1 2 3 4 5 6 7 8; do
+            aws glue delete-database --catalog-id 353855562591 --name "example${i}_silver" || true
+            aws glue delete-database --catalog-id 353855562591 --name "example${i}_gold" || true
+          done
+
 #  smoke_test:
 #    needs:
 #      - cleanup
@@ -295,6 +321,66 @@ jobs:
           RUST_BACKTRACE: 1
         run: |
           cargo test --tests -- --nocapture llm_
+
+  react_ci_build_test:
+    name: React build + tests
+    needs:
+      - react_cleanup
+    runs-on:
+      - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+
+      - name: Build react crate
+        run: cargo build -p react
+
+      - name: Test react crate
+        run: cargo test -p react
+
+  react_examples_parallel:
+    needs:
+      - react_ci_build_test
+    name: React examples (parallel)
+    runs-on:
+      - ubuntu-latest-32-cores
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+
+      - name: Install dbt runtime
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install dbt-core dbt-athena-community
+
+      - name: Run React examples (1..8) in parallel
+        env:
+          REACT_LOG_THREAD_STEPS: ${{ secrets.REACT_LOG_THREAD_STEPS }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.CIRCLES_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CIRCLES_AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
+          AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
+        run: |
+          cargo run -p react -- run --parallel \
+            --config ./react/react1.yaml \
+            --config ./react/react2.yaml \
+            --config ./react/react3.yaml \
+            --config ./react/react4.yaml \
+            --config ./react/react5.yaml \
+            --config ./react/react6.yaml \
+            --config ./react/react7.yaml \
+            --config ./react/react8.yaml \
+            --suite-id data_engineer \
+            --agent agent
 
   chaos_mode_test:
     needs:

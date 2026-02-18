@@ -8,6 +8,7 @@ use crate::flow_frame::FlowFrame;
 use crate::preflight::PreflightProvider;
 use crate::suite::{Suite, SuiteCtx};
 use react_core::agent::{Agent, AgentCtx, AgentPolicy, Interrupt, RunOutcome};
+use react_core::control_flow::{GuardBlockKind, PhaseReasonCode, ReviewDecision, ReviewDecisionMeta, ReviewTier};
 use react_core::llm::LlmCallOptions;
 use react_core::session::ThreadStore;
 use react_core::tools::{Tool, ToolRegistry};
@@ -241,18 +242,6 @@ mod interrupt_only_policy_tests {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct ReviewMeta {
-    #[serde(default)]
-    actionable: bool,
-    #[serde(default)]
-    requires_plan_change: bool,
-    #[serde(default)]
-    dataset_ids: Vec<String>,
-    #[serde(default)]
-    tier: String, // "silver"|"gold"|"unknown"
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthoringKind {
     Cleanse,
@@ -478,7 +467,7 @@ Rules:
         };
         match step {
             react_core::session::ThreadStep::Phase { reason_code, .. } => {
-                if reason_code.as_deref() == Some("review_actionable_true") {
+                if *reason_code == Some(PhaseReasonCode::ReviewPatchPlan) {
                     Some(idx)
                 } else {
                     None
@@ -494,7 +483,7 @@ Rules:
         phase: control_flow::Phase,
         actx: &AgentCtx,
         log_len: usize,
-        transition_reason_code: &str,
+        transition_reason_code: PhaseReasonCode,
         transition_reason_detail: serde_json::Value,
     ) -> Result<bool, String> {
         let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan(actx).await else {
@@ -540,7 +529,7 @@ Rules:
                 Some("agent".to_string()),
                 Some(phase),
                 phase,
-                Some("plan_pruned_empty"),
+                Some(PhaseReasonCode::PlanPrunedEmpty),
                 Some(serde_json::json!({ "plan_key": p.plan_key })),
             )
             .await?;
@@ -561,7 +550,7 @@ Rules:
                 Some("agent".to_string()),
                 Some(phase),
                 phase,
-                Some("plan_semantic_invalid"),
+                Some(PhaseReasonCode::PlanSemanticInvalid),
                 Some(serde_json::json!({ "plan_key": p.plan_key, "errors": v.errors })),
             )
             .await?;
@@ -592,7 +581,7 @@ Rules:
         phase: control_flow::Phase,
         actx: &AgentCtx,
         log_len: usize,
-        transition_reason_code: &str,
+        transition_reason_code: PhaseReasonCode,
         transition_reason_detail: serde_json::Value,
     ) -> Result<bool, String> {
         let Some(mut p) = crate::data_engineer::plan::load_model_plan(actx).await else {
@@ -619,7 +608,7 @@ Rules:
                 Some("agent".to_string()),
                 Some(phase),
                 phase,
-                Some("plan_pruned_empty"),
+                Some(PhaseReasonCode::PlanPrunedEmpty),
                 Some(serde_json::json!({ "plan_key": p.plan_key })),
             )
             .await?;
@@ -642,7 +631,7 @@ Rules:
                 Some("agent".to_string()),
                 Some(phase),
                 phase,
-                Some("plan_semantic_invalid"),
+                Some(PhaseReasonCode::PlanSemanticInvalid),
                 Some(serde_json::json!({ "plan_key": p.plan_key, "errors": v.errors })),
             )
             .await?;
@@ -735,7 +724,7 @@ Rules:
         );
         let step = react_core::session::ThreadStep::GuardBlock {
             phase: phase.as_str().to_string(),
-            kind: "plan_json_invalid".to_string(),
+            kind: GuardBlockKind::PlanJsonInvalid,
             reason: reason.clone(),
             observation: react_core::session::Observation::fail(vec![reason.clone()]),
             ts: ts.clone(),
@@ -748,7 +737,7 @@ Rules:
             Some("agent".to_string()),
             Some(phase),
             phase,
-            Some("phase_blocked"),
+            Some(PhaseReasonCode::PhaseBlocked),
             Some(serde_json::json!({
                 "kind": "plan_json_invalid",
                 "attempt": attempt,
@@ -806,7 +795,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
             // Strict JSON repair emitter: keep variance minimal.
             temperature: Some(0.0),
             top_p: Some(1.0),
-            max_output_tokens: Some(1400),
+            max_output_tokens: Some(3600),
             reasoning_effort: None,
         };
         match Agent::run_until_block(&registry, actx, &sys, tools_card, &q, llm_options).await {
@@ -916,16 +905,6 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
             }
         }
         false
-    }
-
-    fn parse_review_meta(answer: &str) -> Option<ReviewMeta> {
-        let first = answer.lines().next()?.trim();
-        let prefix = "META:";
-        if !first.starts_with(prefix) {
-            return None;
-        }
-        let json_text = first[prefix.len()..].trim();
-        serde_json::from_str::<ReviewMeta>(json_text).ok()
     }
 
     fn strip_meta_line(answer: &str) -> String {
@@ -1349,10 +1328,10 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                 reason_code,
                 reason_detail,
                 ..
-            } => Some((reason_code.as_deref(), reason_detail.as_ref())),
+            } => Some((*reason_code, reason_detail.as_ref())),
             _ => None,
         });
-        let entry_reason_code: Option<&str> = entry.and_then(|(rc, _)| rc);
+        let entry_reason_code: Option<PhaseReasonCode> = entry.and_then(|(rc, _)| rc);
         let entry_reason_detail: serde_json::Value = entry
             .and_then(|(_, rd)| rd.cloned())
             .unwrap_or(serde_json::Value::Null);
@@ -1366,10 +1345,12 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                 reason_code: Some(rc),
                 ..
             } => {
-                rc == "review_actionable_true"
-                    || rc == "review_actionable_false"
-                    || rc == "review_fix_required"
-                    || rc == "review_requires_plan_change_true"
+                matches!(
+                    rc,
+                    PhaseReasonCode::ReviewProceed
+                        | PhaseReasonCode::ReviewPatchPlan
+                        | PhaseReasonCode::ReviewPatchImpl
+                )
             }
             _ => false,
         }) {
@@ -1430,7 +1411,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
         if entry_reason_code.is_some() || !entry_reason_detail.is_null() {
             ctx_lines.push(format!(
                 "Why we are reviewing now:\n- entry_reason_code: {}\n- entry_reason_detail: {}",
-                entry_reason_code.unwrap_or("null"),
+                entry_reason_code.map(|rc| rc.as_str()).unwrap_or("null"),
                 entry_reason_detail
             ));
         }
@@ -2588,7 +2569,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         Some("agent".to_string()),
                         Some(Phase::Preflight),
                         Phase::CleansePlan,
-                        Some("preflight_ok"),
+                        Some(PhaseReasonCode::PreflightOk),
                         Some(serde_json::json!({
                             "dbt_project_key": key,
                             "has_query_provider": sctx.query.is_some(),
@@ -2643,7 +2624,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             phase,
                                             &actx,
                                             l.steps.len(),
-                                            "plan_approved",
+                                            PhaseReasonCode::PlanApproved,
                                             serde_json::json!({ "user_step": last_user }),
                                         )
                                         .await?;
@@ -2657,7 +2638,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             Some("agent".to_string()),
                                             Some(phase),
                                             Phase::CleanseAuthor,
-                                            Some("plan_approved"),
+                                            Some(PhaseReasonCode::PlanApproved),
                                             Some(serde_json::json!({ "user_step": last_user })),
                                         )
                                         .await?;
@@ -2669,7 +2650,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             phase,
                                             &actx,
                                             l.steps.len(),
-                                            "plan_approved",
+                                            PhaseReasonCode::PlanApproved,
                                             serde_json::json!({ "user_step": last_user }),
                                         )
                                         .await?;
@@ -2682,7 +2663,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             Some("agent".to_string()),
                                             Some(phase),
                                             Phase::ModelAuthor,
-                                            Some("plan_approved"),
+                                            Some(PhaseReasonCode::PlanApproved),
                                             Some(serde_json::json!({ "user_step": last_user })),
                                         )
                                         .await?;
@@ -2742,7 +2723,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
-                                        Some("plan_invalid_empty"),
+                                        Some(PhaseReasonCode::PlanInvalidEmpty),
                                         Some(serde_json::json!({
                                             "plan_key": plan_key,
                                             "status": format!("{:?}", p.status),
@@ -2759,7 +2740,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     Some("agent".to_string()),
                                     Some(phase),
                                     Phase::CleanseAuthor,
-                                    Some("plan_already_approved"),
+                                    Some(PhaseReasonCode::PlanAlreadyApproved),
                                     Some(
                                         serde_json::json!({ "status": format!("{:?}", p.status) }),
                                     ),
@@ -2789,7 +2770,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
-                                        Some("plan_invalid_empty"),
+                                        Some(PhaseReasonCode::PlanInvalidEmpty),
                                         Some(serde_json::json!({
                                             "plan_key": plan_key,
                                             "status": format!("{:?}", p.status),
@@ -2806,7 +2787,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     Some("agent".to_string()),
                                     Some(phase),
                                     Phase::ModelAuthor,
-                                    Some("plan_already_approved"),
+                                    Some(PhaseReasonCode::PlanAlreadyApproved),
                                     Some(
                                         serde_json::json!({ "status": format!("{:?}", p.status) }),
                                     ),
@@ -2849,7 +2830,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         phase,
                                         &actx,
                                         log.as_ref().map(|l| l.steps.len()).unwrap_or(0),
-                                        "plan_auto_approved",
+                                        PhaseReasonCode::PlanAutoApproved,
                                         detail,
                                     )
                                     .await?;
@@ -2895,7 +2876,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         phase,
                                         &actx,
                                         log.as_ref().map(|l| l.steps.len()).unwrap_or(0),
-                                        "plan_auto_approved",
+                                        PhaseReasonCode::PlanAutoApproved,
                                         detail,
                                     )
                                     .await?;
@@ -3127,11 +3108,12 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     reason_code,
                                     reason_detail,
                                     ..
-                                } => (reason_code.as_deref().unwrap_or(""), reason_detail.as_ref()),
-                                _ => ("", None),
+                                } => (reason_code.as_ref(), reason_detail.as_ref()),
+                                _ => (None, None),
                             };
-                            if reason_code == "review_requires_plan_change_true" {
+                            if matches!(reason_code, Some(PhaseReasonCode::ReviewPatchPlan)) {
                                 if let Some(key) = reason_detail
+                                    .and_then(|v| v.get("meta"))
                                     .and_then(|v| v.get("review_ref"))
                                     .and_then(|v| v.get("key"))
                                     .and_then(|v| v.as_str())
@@ -3155,7 +3137,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             // This is intentionally based on the *phase entry reason_detail* (like review_ref),
                             // not on scanning GuardBlock steps since `phase_start_idx` points at the latest
                             // phase entry and would otherwise miss the immediately preceding critique block.
-                            if reason_code == "phase_blocked" {
+                            if matches!(reason_code, Some(PhaseReasonCode::PhaseBlocked)) {
                                 let blocked_kind = reason_detail
                                     .and_then(|v| v.get("kind"))
                                     .and_then(|v| v.as_str())
@@ -3332,7 +3314,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     let ts = chrono::Utc::now().to_rfc3339();
                                     let step = react_core::session::ThreadStep::GuardBlock {
                                         phase: phase.as_str().to_string(),
-                                        kind: "plan_grounding".to_string(),
+                                        kind: GuardBlockKind::PlanGrounding,
                                         reason: miss.clone(),
                                         observation: react_core::session::Observation::fail(vec![
                                             miss.clone(),
@@ -3347,7 +3329,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
-                                        Some("phase_blocked"),
+                                        Some(PhaseReasonCode::PhaseBlocked),
                                         Some(serde_json::json!({
                                             "kind": "plan_grounding",
                                             "reason": miss,
@@ -3544,7 +3526,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     let ts = chrono::Utc::now().to_rfc3339();
                                     let step = react_core::session::ThreadStep::GuardBlock {
                                         phase: phase.as_str().to_string(),
-                                        kind: "plan_semantic_invalid".to_string(),
+                                        kind: GuardBlockKind::PlanSemanticInvalid,
                                         reason: reason.clone(),
                                         observation: react_core::session::Observation::fail(vec![reason.clone()]),
                                         ts,
@@ -3557,7 +3539,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
-                                        Some("phase_blocked"),
+                                        Some(PhaseReasonCode::PhaseBlocked),
                                         Some(serde_json::json!({
                                             "kind": "plan_semantic_invalid",
                                             "errors": sem.errors,
@@ -3585,7 +3567,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             let mut n: usize = 0;
                                             for s in l.steps.iter().skip(start + 1) {
                                                 if let react_core::session::ThreadStep::GuardBlock { kind, .. } = s {
-                                                    if kind == "plan_design_critique" {
+                                                    if *kind == GuardBlockKind::PlanDesignCritique {
                                                         n = n.saturating_add(1);
                                                     }
                                                 }
@@ -3639,7 +3621,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     let ts = chrono::Utc::now().to_rfc3339();
                                     let step = react_core::session::ThreadStep::GuardBlock {
                                         phase: phase.as_str().to_string(),
-                                        kind: "plan_design_critique".to_string(),
+                                        kind: GuardBlockKind::PlanDesignCritique,
                                         reason: reason.clone(),
                                         observation: react_core::session::Observation::fail(vec![reason.clone()]),
                                         ts,
@@ -3652,7 +3634,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
-                                        Some("phase_blocked"),
+                                        Some(PhaseReasonCode::PhaseBlocked),
                                         Some(serde_json::json!({
                                             "kind": "plan_design_critique",
                                             "round": round,
@@ -3713,7 +3695,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         phase,
                                         &actx,
                                         log.as_ref().map(|l| l.steps.len()).unwrap_or(0),
-                                        "plan_auto_approved",
+                                        PhaseReasonCode::PlanAutoApproved,
                                         detail,
                                     )
                                     .await?;
@@ -3893,7 +3875,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     let ts = chrono::Utc::now().to_rfc3339();
                                     let step = react_core::session::ThreadStep::GuardBlock {
                                         phase: phase.as_str().to_string(),
-                                        kind: "plan_semantic_invalid".to_string(),
+                                        kind: GuardBlockKind::PlanSemanticInvalid,
                                         reason: reason.clone(),
                                         observation: react_core::session::Observation::fail(vec![reason.clone()]),
                                         ts,
@@ -3906,7 +3888,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
-                                        Some("phase_blocked"),
+                                        Some(PhaseReasonCode::PhaseBlocked),
                                         Some(serde_json::json!({
                                             "kind": "plan_semantic_invalid",
                                             "errors": sem.errors,
@@ -3934,7 +3916,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             let mut n: usize = 0;
                                             for s in l.steps.iter().skip(start + 1) {
                                                 if let react_core::session::ThreadStep::GuardBlock { kind, .. } = s {
-                                                    if kind == "plan_design_critique" {
+                                                    if *kind == GuardBlockKind::PlanDesignCritique {
                                                         n = n.saturating_add(1);
                                                     }
                                                 }
@@ -3988,7 +3970,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     let ts = chrono::Utc::now().to_rfc3339();
                                     let step = react_core::session::ThreadStep::GuardBlock {
                                         phase: phase.as_str().to_string(),
-                                        kind: "plan_design_critique".to_string(),
+                                        kind: GuardBlockKind::PlanDesignCritique,
                                         reason: reason.clone(),
                                         observation: react_core::session::Observation::fail(vec![reason.clone()]),
                                         ts,
@@ -4001,7 +3983,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
-                                        Some("phase_blocked"),
+                                        Some(PhaseReasonCode::PhaseBlocked),
                                         Some(serde_json::json!({
                                             "kind": "plan_design_critique",
                                             "round": round,
@@ -4062,7 +4044,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         phase,
                                         &actx,
                                         log.as_ref().map(|l| l.steps.len()).unwrap_or(0),
-                                        "plan_auto_approved",
+                                        PhaseReasonCode::PlanAutoApproved,
                                         detail,
                                     )
                                     .await?;
@@ -4110,10 +4092,10 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 phase: p,
                                 reason_code,
                                 ..
-                            } if p == phase.as_str() => reason_code.as_deref(),
+                            } if p == phase.as_str() => reason_code.as_ref().copied(),
                             _ => None,
                         })
-                    }) == Some("precheck_failed");
+                    }) == Some(PhaseReasonCode::PrecheckFailed);
                     let mut phase_guard = guard.clone();
                     if entered_from_precheck_failed {
                         phase_guard.last_validate_failed = true;
@@ -4190,7 +4172,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         Some("agent".to_string()),
                                         Some(phase),
                                         Phase::CleansePlan,
-                                        Some("plan_missing"),
+                                        Some(PhaseReasonCode::PlanMissing),
                                         Some(serde_json::json!({
                                             "plan_kind": "cleanse",
                                             "note": "authoring entered without an active cleanse plan; routing back to planning",
@@ -4213,7 +4195,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     Some("agent".to_string()),
                                     Some(phase),
                                     Phase::CleansePlan,
-                                    Some("plan_invalid_empty"),
+                                    Some(PhaseReasonCode::PlanInvalidEmpty),
                                     Some(serde_json::json!({
                                         "plan_key": plan_key,
                                         "tasks_len": plan.tasks.len(),
@@ -4278,7 +4260,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             let ts = chrono::Utc::now().to_rfc3339();
                             let step = react_core::session::ThreadStep::GuardBlock {
                                 phase: phase.as_str().to_string(),
-                                kind: "batch_locked".to_string(),
+                                kind: GuardBlockKind::BatchLocked,
                                 reason: reason.clone(),
                                 observation: react_core::session::Observation::fail(vec![reason.clone()]),
                                 ts,
@@ -4296,7 +4278,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 Some("agent".to_string()),
                                 Some(phase),
                                 Phase::CleansePlan,
-                                Some("plan_not_approved"),
+                                Some(PhaseReasonCode::PlanNotApproved),
                                 Some(serde_json::json!({ "status": format!("{:?}", plan.status) })),
                             )
                             .await;
@@ -4488,7 +4470,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             Some("agent".to_string()),
                                             Some(phase),
                                             Phase::CleanseValidate,
-                                            Some("work_group_validate"),
+                                            Some(PhaseReasonCode::WorkGroupValidate),
                                             Some(serde_json::json!({ "plan_key": plan.plan_key })),
                                         )
                                         .await;
@@ -4568,7 +4550,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                                 Some("agent".to_string()),
                                                 Some(phase),
                                                 Phase::CleanseValidate,
-                                                Some("plan_tasks_done"),
+                                                Some(PhaseReasonCode::PlanTasksDone),
                                                 Some(serde_json::json!({ "plan_key": plan.plan_key })),
                                             )
                                             .await;
@@ -4600,7 +4582,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         Some("agent".to_string()),
                                         Some(phase),
                                         Phase::ModelPlan,
-                                        Some("plan_missing"),
+                                        Some(PhaseReasonCode::PlanMissing),
                                         Some(serde_json::json!({
                                             "plan_kind": "model",
                                             "note": "authoring entered without an active model plan; routing back to planning",
@@ -4623,7 +4605,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     Some("agent".to_string()),
                                     Some(phase),
                                     Phase::ModelPlan,
-                                    Some("plan_invalid_empty"),
+                                    Some(PhaseReasonCode::PlanInvalidEmpty),
                                     Some(serde_json::json!({
                                         "plan_key": plan_key,
                                         "tasks_len": plan.tasks.len(),
@@ -4685,7 +4667,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             let ts = chrono::Utc::now().to_rfc3339();
                             let step = react_core::session::ThreadStep::GuardBlock {
                                 phase: phase.as_str().to_string(),
-                                kind: "batch_locked".to_string(),
+                                kind: GuardBlockKind::BatchLocked,
                                 reason: reason.clone(),
                                 observation: react_core::session::Observation::fail(vec![reason.clone()]),
                                 ts,
@@ -4703,7 +4685,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 Some("agent".to_string()),
                                 Some(phase),
                                 Phase::ModelPlan,
-                                Some("plan_not_approved"),
+                                Some(PhaseReasonCode::PlanNotApproved),
                                 Some(serde_json::json!({ "status": format!("{:?}", plan.status) })),
                             )
                             .await;
@@ -4968,7 +4950,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             Some("agent".to_string()),
                                             Some(phase),
                                             Phase::ModelValidate,
-                                            Some("work_group_validate"),
+                                            Some(PhaseReasonCode::WorkGroupValidate),
                                             Some(serde_json::json!({ "plan_key": plan.plan_key })),
                                         )
                                         .await;
@@ -5128,7 +5110,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             Some("agent".to_string()),
                                             Some(phase),
                                             Phase::ModelValidate,
-                                            Some("plan_tasks_done"),
+                                            Some(PhaseReasonCode::PlanTasksDone),
                                             Some(serde_json::json!({ "plan_key": plan.plan_key })),
                                         )
                                         .await;
@@ -5404,11 +5386,12 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     reason_code,
                                     reason_detail,
                                     ..
-                                } => (reason_code.as_deref().unwrap_or(""), reason_detail.as_ref()),
-                                _ => ("", None),
+                                } => (reason_code.as_ref(), reason_detail.as_ref()),
+                                _ => (None, None),
                             };
-                            if reason_code == "review_fix_required" {
+                            if matches!(reason_code, Some(PhaseReasonCode::ReviewPatchImpl)) {
                                 if let Some(key) = reason_detail
+                                    .and_then(|v| v.get("meta"))
                                     .and_then(|v| v.get("review_ref"))
                                     .and_then(|v| v.get("key"))
                                     .and_then(|v| v.as_str())
@@ -5529,7 +5512,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     let ts = chrono::Utc::now().to_rfc3339();
                                     let step = react_core::session::ThreadStep::GuardBlock {
                                         phase: phase.as_str().to_string(),
-                                        kind: "authoring_completion".to_string(),
+                                        kind: GuardBlockKind::AuthoringCompletion,
                                         reason: reason.clone(),
                                         observation: react_core::session::Observation::fail(vec![
                                             reason.clone(),
@@ -5550,7 +5533,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
-                                        Some("phase_blocked"),
+                                        Some(PhaseReasonCode::PhaseBlocked),
                                         Some(serde_json::json!({
                                             "kind": "authoring_completion",
                                             "reason": reason,
@@ -5574,7 +5557,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     let ts = chrono::Utc::now().to_rfc3339();
                                     let step = react_core::session::ThreadStep::GuardBlock {
                                         phase: phase.as_str().to_string(),
-                                        kind: "authoring_to_validate".to_string(),
+                                        kind: GuardBlockKind::AuthoringToValidate,
                                         reason: reason.clone(),
                                         observation: react_core::session::Observation::fail(vec![
                                             reason.clone(),
@@ -5595,7 +5578,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
-                                        Some("phase_blocked"),
+                                        Some(PhaseReasonCode::PhaseBlocked),
                                         Some(serde_json::json!({
                                             "kind": "authoring_to_validate",
                                             "reason": reason,
@@ -5617,7 +5600,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     let ts = chrono::Utc::now().to_rfc3339();
                                     let step = react_core::session::ThreadStep::GuardBlock {
                                         phase: phase.as_str().to_string(),
-                                        kind: "missing_gold_models".to_string(),
+                                        kind: GuardBlockKind::MissingGoldModels,
                                         reason: reason.to_string(),
                                         observation: react_core::session::Observation::fail(vec![
                                             reason.to_string(),
@@ -5638,7 +5621,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
-                                        Some("phase_blocked"),
+                                        Some(PhaseReasonCode::PhaseBlocked),
                                         Some(serde_json::json!({
                                             "kind": "missing_gold_models",
                                             "reason": reason,
@@ -5689,7 +5672,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 Some("agent".to_string()),
                                 Some(phase),
                                 to_phase,
-                                Some("authoring_complete"),
+                                Some(PhaseReasonCode::AuthoringComplete),
                                 Some(reason_detail),
                             )
                             .await?;
@@ -5720,7 +5703,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         let ts = chrono::Utc::now().to_rfc3339();
                         let step = react_core::session::ThreadStep::GuardBlock {
                             phase: phase.as_str().to_string(),
-                            kind: "precheck_failed".to_string(),
+                            kind: GuardBlockKind::PrecheckFailed,
                             reason: reason.clone(),
                             observation: react_core::session::Observation::fail(vec![reason.clone()]),
                             ts,
@@ -5738,7 +5721,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             Some("agent".to_string()),
                             Some(phase),
                             to_phase,
-                            Some("precheck_failed"),
+                            Some(PhaseReasonCode::PrecheckFailed),
                             Some(serde_json::json!({ "error": e })),
                         )
                         .await;
@@ -6033,7 +6016,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             Some("agent".to_string()),
                             Some(phase),
                             to_phase,
-                            Some("validate_pass"),
+                            Some(PhaseReasonCode::ValidatePass),
                             Some(serde_json::json!({
                                 "dbt_validate_observation": obs,
                                 "dbt_validate_step_idx": trigger_step_idx,
@@ -6292,7 +6275,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         Some("agent".to_string()),
                         Some(phase),
                         to_phase,
-                        Some("validate_fail"),
+                        Some(PhaseReasonCode::ValidateFail),
                         Some(serde_json::json!({
                             "dbt_validate_observation": obs,
                             "dbt_validate_step_idx": trigger_step_idx,
@@ -6315,17 +6298,21 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         payload: serde_json::json!({ "text": "" }),
                         display: None,
                     });
-                    let answer = match first {
+                    let (answer, decision_meta_v) = match first {
                         FlowFrame::Final {
                             payload, display, ..
-                        } => display
-                            .or_else(|| {
-                                payload
-                                    .get("text")
-                                    .and_then(|x| x.as_str())
-                                    .map(|s| s.to_string())
-                            })
-                            .unwrap_or_default(),
+                        } => {
+                            let ans = display
+                                .or_else(|| {
+                                    payload
+                                        .get("text")
+                                        .and_then(|x| x.as_str())
+                                        .map(|s| s.to_string())
+                                })
+                                .unwrap_or_default();
+                            let mv = payload.get("meta").cloned();
+                            (ans, mv)
+                        }
                         other => return Ok(vec![other]),
                     };
 
@@ -6342,7 +6329,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             0,
                             react_core::session::ThreadStep::GuardBlock {
                                 phase: "unknown".to_string(),
-                                kind: "missing_thread_step".to_string(),
+                                kind: GuardBlockKind::MissingThreadStep,
                                 reason: "missing thread step".to_string(),
                                 observation: react_core::session::Observation::fail(vec![
                                     "missing thread step".to_string(),
@@ -6352,123 +6339,98 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             },
                         ));
 
-                    let meta = Self::parse_review_meta(&answer).unwrap_or(ReviewMeta {
-                        actionable: false,
-                        requires_plan_change: false,
-                        dataset_ids: vec![],
-                        tier: "unknown".to_string(),
-                    });
-                    // Extract review_ref (if present) from the trigger step so we can persist a stable pointer
+                    let mut meta: ReviewDecisionMeta = decision_meta_v
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or(ReviewDecisionMeta {
+                            decision: ReviewDecision::Proceed,
+                            tier: ReviewTier::Unknown,
+                            dataset_ids: vec![],
+                            review_ref: None,
+                        });
+                    // Fallback: extract review_ref (if present) from the trigger step so we can persist a stable pointer
                     // without embedding the full review text in subsequent phase transitions.
-                    let review_ref = match &trigger_step {
+                    let review_ref_from_trigger = match &trigger_step {
                         react_core::session::ThreadStep::Phase { reason_detail, .. } => reason_detail
                             .as_ref()
                             .and_then(|v| v.get("review_ref"))
                             .cloned(),
                         _ => None,
                     };
+                    if meta.review_ref.is_none() {
+                        meta.review_ref = review_ref_from_trigger;
+                    }
                     out_frames.push(FlowFrame::Review {
                         text: answer.clone(),
-                        meta: Some(serde_json::json!({
-                            "actionable": meta.actionable,
-                            "requires_plan_change": meta.requires_plan_change,
-                            "dataset_ids": meta.dataset_ids.clone(),
-                            "tier": meta.tier.clone(),
-                        })),
+                        meta: serde_json::to_value(&meta).ok(),
                     });
 
-                    if !meta.actionable {
-                        // Move forward in the deterministic pipeline.
-                        let next = match phase {
-                            Phase::CleanseReview => Phase::ModelPlan,
-                            Phase::ModelReview => Phase::PublishAwaitApproval,
-                            Phase::PostPublishReview => Phase::Done,
-                            _ => Phase::Done,
-                        };
-                        control_flow::append_phase_with_reason(
-                            &thread_store,
-                            thread_id,
-                            Some("agent".to_string()),
-                            Some(phase),
-                            next,
-                            Some("review_actionable_false"),
-                            Some(serde_json::json!({
-                                "review_phase": phase.as_str(),
-                                "meta": {
-                                    "actionable": meta.actionable,
-                                    "requires_plan_change": meta.requires_plan_change,
-                                    "dataset_ids": meta.dataset_ids,
-                                    "tier": meta.tier,
-                                },
-                                "review_ref": review_ref,
-                                "trigger_step_idx": trigger_step_idx,
-                            })),
-                        )
-                        .await;
-                        continue;
-                    }
+                    let reason_detail = serde_json::json!({
+                        "review_phase": phase.as_str(),
+                        "meta": meta,
+                        "answer": answer,
+                        "trigger_step_idx": trigger_step_idx,
+                        "trigger_step": trigger_step,
+                    });
 
-                    // Actionable review:
-                    // - If the reviewer explicitly says the PLAN must change, route back to planning.
-                    // - Otherwise, treat as an IMPLEMENTATION fix and route back to authoring.
-                    if meta.requires_plan_change {
-                        let tier = meta.tier.trim().to_lowercase();
-                        let back = if tier == "silver" {
-                            Phase::CleansePlan
-                        } else {
-                            Phase::ModelPlan
-                        };
-                        control_flow::append_phase_with_reason(
-                            &thread_store,
-                            thread_id,
-                            Some("agent".to_string()),
-                            Some(phase),
-                            back,
-                            Some("review_requires_plan_change_true"),
-                            Some(serde_json::json!({
-                                "review_phase": phase.as_str(),
-                                "meta": {
-                                    "actionable": meta.actionable,
-                                    "requires_plan_change": meta.requires_plan_change,
-                                    "dataset_ids": meta.dataset_ids,
-                                    "tier": meta.tier,
-                                },
-                                "review_ref": review_ref,
-                                "trigger_step_idx": trigger_step_idx,
-                            })),
-                        )
-                        .await;
-                        continue;
+                    match meta.decision {
+                        ReviewDecision::Proceed => {
+                            // Move forward in the deterministic pipeline.
+                            let next = match phase {
+                                Phase::CleanseReview => Phase::ModelPlan,
+                                Phase::ModelReview => Phase::PublishAwaitApproval,
+                                Phase::PostPublishReview => Phase::Done,
+                                _ => Phase::Done,
+                            };
+                            control_flow::append_phase_with_reason(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                Some(phase),
+                                next,
+                                Some(PhaseReasonCode::ReviewProceed),
+                                Some(reason_detail),
+                            )
+                            .await;
+                            continue;
+                        }
+                        ReviewDecision::PatchPlan => {
+                            let back = match meta.tier {
+                                ReviewTier::Silver => Phase::CleansePlan,
+                                ReviewTier::Gold => Phase::ModelPlan,
+                                ReviewTier::Unknown => Phase::ModelPlan,
+                            };
+                            control_flow::append_phase_with_reason(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                Some(phase),
+                                back,
+                                Some(PhaseReasonCode::ReviewPatchPlan),
+                                Some(reason_detail),
+                            )
+                            .await;
+                            continue;
+                        }
+                        ReviewDecision::PatchImpl => {
+                            // Conformance/correctness fix in implementation (plan remains authoritative).
+                            let back = match meta.tier {
+                                ReviewTier::Silver => Phase::CleanseAuthor,
+                                ReviewTier::Gold => Phase::ModelAuthor,
+                                ReviewTier::Unknown => Phase::ModelAuthor,
+                            };
+                            control_flow::append_phase_with_reason(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                Some(phase),
+                                back,
+                                Some(PhaseReasonCode::ReviewPatchImpl),
+                                Some(reason_detail),
+                            )
+                            .await;
+                            continue;
+                        }
                     }
-
-                    // Default: conformance/correctness fix in implementation (plan remains authoritative).
-                    let tier = meta.tier.trim().to_lowercase();
-                    let back = if tier == "silver" {
-                        Phase::CleanseAuthor
-                    } else {
-                        Phase::ModelAuthor
-                    };
-                    control_flow::append_phase_with_reason(
-                        &thread_store,
-                        thread_id,
-                        Some("agent".to_string()),
-                        Some(phase),
-                        back,
-                        Some("review_fix_required"),
-                        Some(serde_json::json!({
-                            "review_phase": phase.as_str(),
-                            "meta": {
-                                "actionable": meta.actionable,
-                                "requires_plan_change": meta.requires_plan_change,
-                                "dataset_ids": meta.dataset_ids,
-                                "tier": meta.tier,
-                            },
-                            "review_ref": review_ref,
-                            "trigger_step_idx": trigger_step_idx,
-                        })),
-                    )
-                    .await;
-                    continue;
                 }
 
                 Phase::PublishAwaitApproval => {
@@ -6498,7 +6460,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     Some("agent".to_string()),
                                     Some(Phase::PublishAwaitApproval),
                                     Phase::Publish,
-                                    Some("user_approved_publish"),
+                                    Some(PhaseReasonCode::UserApprovedPublish),
                                     Some(serde_json::json!({
                                         "last_user_step": last_user,
                                     })),
@@ -6533,7 +6495,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             Some("agent".to_string()),
                             Some(Phase::PublishAwaitApproval),
                             Phase::PostPublishReview,
-                            Some("publish_success"),
+                            Some(PhaseReasonCode::PublishSuccess),
                             Some(serde_json::json!({
                                 "publish_observation": obs,
                             })),
@@ -6556,7 +6518,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         Some("agent".to_string()),
                         Some(Phase::PublishAwaitApproval),
                         Phase::ModelAuthor,
-                        Some("publish_fail"),
+                        Some(PhaseReasonCode::PublishFail),
                         Some(serde_json::json!({
                             "publish_observation": obs,
                         })),
@@ -6611,7 +6573,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             Some("agent".to_string()),
                             Some(Phase::Publish),
                             Phase::PostPublishReview,
-                            Some("publish_confirmed_success"),
+                            Some(PhaseReasonCode::PublishConfirmedSuccess),
                             Some(serde_json::json!({
                                 "publish_observation": obs,
                             })),
@@ -6626,7 +6588,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         Some("agent".to_string()),
                         Some(Phase::Publish),
                         Phase::ModelAuthor,
-                        Some("publish_confirmed_fail"),
+                        Some(PhaseReasonCode::PublishConfirmedFail),
                         Some(serde_json::json!({
                             "publish_observation": obs,
                         })),
@@ -7370,7 +7332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_phase_auto_approves_when_entered_from_review_actionable_true_cleanse() {
+    async fn plan_phase_auto_approves_when_entered_from_review_patch_plan_cleanse() {
         let thread_id = "t_auto_cleanse";
         let mut sctx = SuiteCtx::default();
 
@@ -7425,8 +7387,8 @@ mod tests {
             steps: vec![react_core::session::ThreadStep::Phase {
                 phase: control_flow::Phase::CleansePlan.as_str().to_string(),
                 from_phase: Some(control_flow::Phase::CleanseReview.as_str().to_string()),
-                reason_code: Some("review_actionable_true".to_string()),
-                reason_detail: Some(serde_json::json!({"answer":"META:{\"actionable\":true}\n\nFix contracts."})),
+                reason_code: Some(react_core::control_flow::PhaseReasonCode::ReviewPatchPlan),
+                reason_detail: Some(serde_json::json!({"answer":"Fix contracts."})),
                 observation: react_core::session::Observation::ok(),
                 ts: "t".to_string(),
                 agent: "agent".to_string(),
@@ -7445,8 +7407,11 @@ mod tests {
             control_flow::Phase::CleansePlan,
             &actx,
             123,
-            "plan_auto_approved",
-            serde_json::json!({ "plan_key": plan_key, "entry_reason_code": "review_actionable_true" }),
+            react_core::control_flow::PhaseReasonCode::PlanAutoApproved,
+            serde_json::json!({
+                "plan_key": plan_key,
+                "entry_reason_code": react_core::control_flow::PhaseReasonCode::ReviewPatchPlan.as_str()
+            }),
         )
         .await
         .expect("approve");
@@ -7467,11 +7432,14 @@ mod tests {
         });
         let (p, rc) = last_phase.expect("phase");
         assert_eq!(p, control_flow::Phase::CleanseAuthor.as_str());
-        assert_eq!(rc.as_deref(), Some("plan_auto_approved"));
+        assert_eq!(
+            rc,
+            Some(react_core::control_flow::PhaseReasonCode::PlanAutoApproved)
+        );
     }
 
     #[tokio::test]
-    async fn plan_phase_auto_approves_when_entered_from_review_actionable_true_model() {
+    async fn plan_phase_auto_approves_when_entered_from_review_patch_plan_model() {
         let thread_id = "t_auto_model";
         let sctx = SuiteCtx::default();
 
@@ -7532,8 +7500,8 @@ mod tests {
             steps: vec![react_core::session::ThreadStep::Phase {
                 phase: control_flow::Phase::ModelPlan.as_str().to_string(),
                 from_phase: Some(control_flow::Phase::ModelReview.as_str().to_string()),
-                reason_code: Some("review_actionable_true".to_string()),
-                reason_detail: Some(serde_json::json!({"answer":"META:{\"actionable\":true}\n\nFix docs."})),
+                reason_code: Some(react_core::control_flow::PhaseReasonCode::ReviewPatchPlan),
+                reason_detail: Some(serde_json::json!({"answer":"Fix docs."})),
                 observation: react_core::session::Observation::ok(),
                 ts: "t".to_string(),
                 agent: "agent".to_string(),
@@ -7552,8 +7520,11 @@ mod tests {
             control_flow::Phase::ModelPlan,
             &actx,
             77,
-            "plan_auto_approved",
-            serde_json::json!({ "plan_key": plan_key, "entry_reason_code": "review_actionable_true" }),
+            react_core::control_flow::PhaseReasonCode::PlanAutoApproved,
+            serde_json::json!({
+                "plan_key": plan_key,
+                "entry_reason_code": react_core::control_flow::PhaseReasonCode::ReviewPatchPlan.as_str()
+            }),
         )
         .await
         .expect("approve");
@@ -7574,7 +7545,10 @@ mod tests {
         });
         let (p, rc) = last_phase.expect("phase");
         assert_eq!(p, control_flow::Phase::ModelAuthor.as_str());
-        assert_eq!(rc.as_deref(), Some("plan_auto_approved"));
+        assert_eq!(
+            rc,
+            Some(react_core::control_flow::PhaseReasonCode::PlanAutoApproved)
+        );
     }
 
     #[test]
@@ -7659,14 +7633,14 @@ mod tests {
         use crate::data_engineer::control_flow::Phase;
         use react_core::session::{ThreadLog, ThreadStep};
 
-        let prior_review_answer = "META:{\"actionable\":true,\"dataset_ids\":[\"x\"],\"tier\":\"silver\"}\n\nPlease add tests.";
+        let prior_review_answer = "Please add tests.";
         let prior_review_transition = ThreadStep::Phase {
             phase: "cleanse_author".to_string(),
             from_phase: Some("cleanse_review".to_string()),
-            reason_code: Some("review_actionable_true".to_string()),
+            reason_code: Some(react_core::control_flow::PhaseReasonCode::ReviewPatchPlan),
             reason_detail: Some(serde_json::json!({
                 "review_phase":"cleanse_review",
-                "meta": {"actionable": true, "dataset_ids": ["x"], "tier":"silver"},
+                "meta": {"decision":"patch_plan", "dataset_ids": ["x"], "tier":"silver"},
                 "answer": prior_review_answer
             })),
             observation: react_core::session::Observation::ok(),
@@ -7694,7 +7668,7 @@ mod tests {
                 ThreadStep::Phase {
                     phase: "cleanse_review".to_string(),
                     from_phase: Some("cleanse_validate".to_string()),
-                    reason_code: Some("validate_pass".to_string()),
+                    reason_code: Some(react_core::control_flow::PhaseReasonCode::ValidatePass),
                     reason_detail: Some(serde_json::json!({"dbt_validate_step_idx": 1})),
                     observation: react_core::session::Observation::ok(),
                     ts: "t".to_string(),
@@ -7882,7 +7856,10 @@ mod tests {
         let captured: Arc<std::sync::Mutex<Vec<(String, LlmCallOptions)>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(CapturingLlm {
-            reply: r#"{"type":"final","final":{"kind":"model_plan","payload":{}}}"#.to_string(),
+            // AgentStepV1 is a strict schema: all top-level keys must be present,
+            // and final payload is a JSON-encoded string.
+            reply: r#"{"type":"final","name":null,"args":null,"final":{"kind":"model_plan","payload":"{}","display":null}}"#
+                .to_string(),
             captured: captured.clone(),
         });
 

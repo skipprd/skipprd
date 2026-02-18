@@ -5,6 +5,7 @@ use tokio::time::timeout;
 use tracing::warn;
 
 use react_core::agent::AgentCtx;
+use react_core::control_flow::PhaseReasonCode;
 use react_core::providers::DbtValidateArgs;
 use react_core::session::{Observation, ThreadLog, ThreadStep, ThreadStore, ToolObservation};
 use react_core::tools::Tool;
@@ -104,7 +105,7 @@ pub async fn append_phase(
         agent,
         prev_phase,
         phase,
-        Some("phase_set"),
+        Some(PhaseReasonCode::PhaseSet),
         Some(serde_json::json!({
             "derived_from_log": prev_phase.is_some(),
         })),
@@ -122,7 +123,7 @@ pub async fn append_phase_with_reason(
     agent: Option<String>,
     from_phase: Option<Phase>,
     phase: Phase,
-    reason_code: Option<&str>,
+    reason_code: Option<PhaseReasonCode>,
     reason_detail: Option<Value>,
 ) -> Result<(), String> {
     let agent = agent.unwrap_or_else(|| "unknown".to_string());
@@ -132,7 +133,7 @@ pub async fn append_phase_with_reason(
             ThreadStep::Phase {
                 phase: phase.as_str().to_string(),
                 from_phase: from_phase.map(|p| p.as_str().to_string()),
-                reason_code: reason_code.map(|s| s.to_string()),
+                reason_code,
                 reason_detail,
                 observation: Observation::ok(),
                 ts: chrono::Utc::now().to_rfc3339(),
@@ -1108,6 +1109,39 @@ pub async fn invariant_has_dbt_project(ctx: &AgentCtx) -> Result<bool, String> {
 mod tests {
     use super::*;
 
+    fn parse_reason_code(s: &str) -> Option<PhaseReasonCode> {
+        match s {
+            "phase_set" => Some(PhaseReasonCode::PhaseSet),
+            "preflight_start" => Some(PhaseReasonCode::PreflightStart),
+            "preflight_ok" => Some(PhaseReasonCode::PreflightOk),
+            "plan_approved" => Some(PhaseReasonCode::PlanApproved),
+            "plan_auto_approved" => Some(PhaseReasonCode::PlanAutoApproved),
+            "plan_already_approved" => Some(PhaseReasonCode::PlanAlreadyApproved),
+            "plan_missing" => Some(PhaseReasonCode::PlanMissing),
+            "plan_not_approved" => Some(PhaseReasonCode::PlanNotApproved),
+            "plan_invalid_empty" => Some(PhaseReasonCode::PlanInvalidEmpty),
+            "plan_pruned_empty" => Some(PhaseReasonCode::PlanPrunedEmpty),
+            "plan_semantic_invalid" => Some(PhaseReasonCode::PlanSemanticInvalid),
+            "work_group_validate" => Some(PhaseReasonCode::WorkGroupValidate),
+            "plan_tasks_done" => Some(PhaseReasonCode::PlanTasksDone),
+            "no_work_all_done" => Some(PhaseReasonCode::NoWorkAllDone),
+            "authoring_complete" => Some(PhaseReasonCode::AuthoringComplete),
+            "precheck_failed" => Some(PhaseReasonCode::PrecheckFailed),
+            "validate_pass" => Some(PhaseReasonCode::ValidatePass),
+            "validate_fail" => Some(PhaseReasonCode::ValidateFail),
+            "review_proceed" => Some(PhaseReasonCode::ReviewProceed),
+            "review_patch_plan" => Some(PhaseReasonCode::ReviewPatchPlan),
+            "review_patch_impl" => Some(PhaseReasonCode::ReviewPatchImpl),
+            "publish_success" => Some(PhaseReasonCode::PublishSuccess),
+            "publish_fail" => Some(PhaseReasonCode::PublishFail),
+            "publish_confirmed_success" => Some(PhaseReasonCode::PublishConfirmedSuccess),
+            "publish_confirmed_fail" => Some(PhaseReasonCode::PublishConfirmedFail),
+            "user_approved_publish" => Some(PhaseReasonCode::UserApprovedPublish),
+            "phase_blocked" => Some(PhaseReasonCode::PhaseBlocked),
+            _ => None,
+        }
+    }
+
     fn step(action: &str, args: Value, observation: Value) -> ThreadStep {
         let ts = chrono::Utc::now().to_rfc3339();
         match action {
@@ -1124,7 +1158,7 @@ mod tests {
                 reason_code: args
                     .get("reason_code")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
+                    .and_then(parse_reason_code),
                 reason_detail: args.get("reason_detail").cloned(),
                 observation: Observation::ok(),
                 ts,
@@ -1527,7 +1561,7 @@ mod tests {
             Some("agent".to_string()),
             Some(Phase::Preflight),
             Phase::CleanseAuthor,
-            Some("preflight_ok"),
+            Some(PhaseReasonCode::PreflightOk),
             Some(serde_json::json!({"x": 1, "nested": {"y": "z"}})),
         )
         .await;
@@ -1546,7 +1580,7 @@ mod tests {
         };
         assert_eq!(phase.as_str(), "cleanse_author");
         assert_eq!(from_phase.as_deref(), Some("preflight"));
-        assert_eq!(reason_code.as_deref(), Some("preflight_ok"));
+        assert_eq!(reason_code, &Some(PhaseReasonCode::PreflightOk));
         let rd = reason_detail.as_ref().expect("reason_detail should exist");
         assert_eq!(rd.get("x").and_then(|v| v.as_i64()), Some(1));
         assert_eq!(

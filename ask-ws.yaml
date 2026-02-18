@@ -486,9 +486,8 @@ components:
           type: string
           description: Read-only reviewer output (red team)
         meta:
-          type: object
+          $ref: '#/components/schemas/ReviewDecisionMeta'
           nullable: true
-          additionalProperties: true
 
     PlansResponse:
       type: object
@@ -562,11 +561,12 @@ components:
           description: Index of the backing ThreadStep::Phase in the thread log.
         phase: { type: string }
         from_phase: { type: string, nullable: true }
-        reason_code: { type: string, nullable: true }
-        reason_detail:
-          type: object
+        reason_code:
+          $ref: '#/components/schemas/PhaseReasonCode'
           nullable: true
-          additionalProperties: true
+        reason_detail:
+          $ref: '#/components/schemas/PhaseReasonDetail'
+          nullable: true
         ts:
           type: string
           description: RFC3339 timestamp stored in the thread log for this phase transition.
@@ -611,6 +611,97 @@ components:
           format: int64
           nullable: true
           description: Duration for this run (ms), present when ended_at is present.
+
+    # Strongly-typed control-flow enums/meta (kept in sync with `react_core::control_flow`).
+    PhaseReasonCode:
+      type: string
+      enum:
+        - phase_set
+        - preflight_start
+        - preflight_ok
+        - plan_approved
+        - plan_auto_approved
+        - plan_already_approved
+        - plan_missing
+        - plan_not_approved
+        - plan_invalid_empty
+        - plan_pruned_empty
+        - plan_semantic_invalid
+        - work_group_validate
+        - plan_tasks_done
+        - no_work_all_done
+        - authoring_complete
+        - precheck_failed
+        - validate_pass
+        - validate_fail
+        - review_proceed
+        - review_patch_plan
+        - review_patch_impl
+        - review_project_summary
+        - review_batch
+        - review_final_unify
+        - user_approved_publish
+        - publish_success
+        - publish_fail
+        - publish_confirmed_success
+        - publish_confirmed_fail
+        - phase_blocked
+
+    ReviewDecision:
+      type: string
+      enum: [proceed, patch_plan, patch_impl]
+
+    ReviewTier:
+      type: string
+      enum: [silver, gold, unknown]
+
+    ReviewRef:
+      type: object
+      additionalProperties: false
+      required: [key, sha256, bytes]
+      properties:
+        key: { type: string }
+        sha256: { type: string }
+        bytes: { type: integer, format: int64 }
+
+    ReviewDecisionMeta:
+      type: object
+      additionalProperties: false
+      required: [decision, tier, dataset_ids]
+      properties:
+        decision:
+          $ref: '#/components/schemas/ReviewDecision'
+        tier:
+          $ref: '#/components/schemas/ReviewTier'
+        dataset_ids:
+          type: array
+          items: { type: string }
+        review_ref:
+          $ref: '#/components/schemas/ReviewRef'
+          nullable: true
+
+    PhaseReasonDetail:
+      type: object
+      additionalProperties: false
+      description: |
+        Typed wrapper for phase reason details.
+        Suites may include additional debug information under `data`, but control metadata must stay typed.
+      properties:
+        review_phase: { type: string, nullable: true }
+        meta:
+          $ref: '#/components/schemas/ReviewDecisionMeta'
+          nullable: true
+        answer: { type: string, nullable: true }
+        trigger_step_idx: { type: integer, nullable: true }
+        trigger_step:
+          type: object
+          nullable: true
+          additionalProperties: true
+        kind: { type: string, nullable: true }
+        data:
+          type: object
+          nullable: true
+          additionalProperties: true
  
     ToolEventStatus:
       type: string

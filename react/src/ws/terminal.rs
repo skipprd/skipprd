@@ -563,15 +563,13 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
             // Set current phase (phase we're entering).
             tv.current_phase = Some(ev.phase.clone());
             if let Some(rc) = ev.reason_code.clone() {
-                tv.phase_reason_code.insert(ev.phase.clone(), rc);
+                tv.phase_reason_code
+                    .insert(ev.phase.clone(), rc.to_string());
             }
             if let Some(rd) = ev.reason_detail.clone() {
-                let mut obj = serde_json::Map::new();
-                for (k, v) in rd {
-                    obj.insert(k, v);
+                if let Ok(v) = serde_json::to_value(&rd) {
+                    tv.phase_reason_detail.insert(ev.phase.clone(), v);
                 }
-                tv.phase_reason_detail
-                    .insert(ev.phase.clone(), Value::Object(obj));
             }
             let key = format!("phase:{}", ev.phase);
             let mut item = api::ThreadStateItem::new(key.clone(), "phase".to_string(), "running".to_string());

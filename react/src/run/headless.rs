@@ -28,6 +28,10 @@ pub struct RunOpts {
 pub async fn run_headless(ctx: SuiteCtx, opts: RunOpts) -> Result<(i32, String), String> {
     let hub = EventHub::new(4096);
     let mut rx = hub.subscribe();
+    let plain_progress = std::env::var("REACT_PLAIN_PROGRESS")
+        .ok()
+        .filter(|v| !v.trim().is_empty() && v != "0" && v.to_ascii_lowercase() != "false")
+        .is_some();
 
     // Capture the thread id from events (for `new`) and detect completion.
     let mut tid_tx = opts.thread_id_tx.clone();
@@ -39,6 +43,29 @@ pub async fn run_headless(ctx: SuiteCtx, opts: RunOpts) -> Result<(i32, String),
             match rx.recv().await {
                 Ok(msg) => {
                     match msg {
+                        api::ServerMessage::Phase(r) => {
+                            if plain_progress {
+                                let from = r.from_phase.unwrap_or_else(|| "-".to_string());
+                                println!(
+                                    "phase {} -> {} ({})",
+                                    from,
+                                    r.phase,
+                                    r.ts
+                                );
+                            }
+                        }
+                        api::ServerMessage::ToolStart(r) => {
+                            if plain_progress {
+                                let label = r.clean_name.unwrap_or(r.name);
+                                println!("tool start: {}", label);
+                            }
+                        }
+                        api::ServerMessage::ToolEnd(r) => {
+                            if plain_progress {
+                                let label = r.clean_name.unwrap_or(r.name);
+                                println!("tool end: {} ({:?})", label, r.status);
+                            }
+                        }
                         api::ServerMessage::Final(r) => {
                             last_thread_id = Some(r.thread_id.clone());
                             if !sent_tid {
@@ -46,6 +73,9 @@ pub async fn run_headless(ctx: SuiteCtx, opts: RunOpts) -> Result<(i32, String),
                                     let _ = tx.send(r.thread_id.clone());
                                 }
                                 sent_tid = true;
+                            }
+                            if plain_progress {
+                                println!("final thread: {}", r.thread_id);
                             }
                             saw_final = true;
                             break;

@@ -29,7 +29,7 @@ pub struct ReviewResponse {
     #[serde(rename = "text")]
     pub text: String,
     #[serde(rename = "meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<std::collections::HashMap<String, serde_json::Value>>,
+    pub meta: Option<models::ReviewDecisionMeta>,
 }
 
 impl ReviewResponse {
