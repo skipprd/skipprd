@@ -3,6 +3,7 @@ use once_cell::sync::OnceCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::helpers::configuration::Config;
@@ -45,6 +46,7 @@ pub struct LlmRouter {
     base_url: Option<String>,
     api_key: Option<String>,
     http: ureq::Agent,
+    retry_policy: HttpRetryPolicy,
 }
 
 #[derive(Clone)]
@@ -57,21 +59,101 @@ fn chat_memo() -> &'static DashMap<String, MemoEntry> {
     CHAT_MEMO.get_or_init(|| DashMap::new())
 }
 
+#[derive(Clone, Debug)]
+struct HttpRetryPolicy {
+    request_timeout_secs: u64,
+    max_retries: usize,
+}
+
+impl HttpRetryPolicy {
+    fn from_env() -> Self {
+        let request_timeout_secs: u64 = Config::getenv("LLM_HTTP_TIMEOUT_SECS", "420")
+            .parse()
+            .unwrap_or(420)
+            .max(30)
+            .min(1800);
+        let max_retries: usize = Config::getenv("LLM_HTTP_MAX_RETRIES", "3")
+            .parse()
+            .unwrap_or(3)
+            .max(1)
+            .min(10);
+        Self {
+            request_timeout_secs,
+            max_retries,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct InflightLimiter {
+    max_inflight: usize,
+    slots: Mutex<usize>,
+    cv: Condvar,
+}
+
+impl InflightLimiter {
+    fn new(max_inflight: usize) -> Self {
+        Self {
+            max_inflight: max_inflight.max(1),
+            slots: Mutex::new(0),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> InflightPermit<'_> {
+        let mut in_use = self.slots.lock().expect("llm inflight mutex poisoned");
+        while *in_use >= self.max_inflight {
+            in_use = self.cv.wait(in_use).expect("llm inflight condvar poisoned");
+        }
+        *in_use += 1;
+        InflightPermit { limiter: self }
+    }
+
+    fn release(&self) {
+        let mut in_use = self.slots.lock().expect("llm inflight mutex poisoned");
+        if *in_use > 0 {
+            *in_use -= 1;
+        }
+        self.cv.notify_one();
+    }
+}
+
+struct InflightPermit<'a> {
+    limiter: &'a InflightLimiter,
+}
+
+impl Drop for InflightPermit<'_> {
+    fn drop(&mut self) {
+        self.limiter.release();
+    }
+}
+
+static LLM_INFLIGHT_LIMITER: OnceCell<InflightLimiter> = OnceCell::new();
+
+fn llm_inflight_limiter() -> &'static InflightLimiter {
+    LLM_INFLIGHT_LIMITER.get_or_init(|| {
+        let configured = Config::getenv("REACT_LLM_MAX_INFLIGHT", "4")
+            .parse::<usize>()
+            .unwrap_or(4);
+        InflightLimiter::new(configured)
+    })
+}
+
 impl LlmRouter {
     pub fn new() -> Self {
         let adapter = pick_adapter_from_config();
-        // Default timeout bumped to accommodate /v1/responses latency; still overridable via env/config.
-        let timeout_secs: u64 = Config::getenv("LLM_HTTP_TIMEOUT_SECS", "120")
-            .parse()
-            .unwrap_or(120);
+        let retry_policy = HttpRetryPolicy::from_env();
         let http = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .timeout(std::time::Duration::from_secs(
+                retry_policy.request_timeout_secs,
+            ))
             .build();
         Self {
             adapter,
             base_url: Config::llm_base_url(),
             api_key: Config::llm_api_key(),
             http,
+            retry_policy,
         }
     }
 
@@ -156,11 +238,7 @@ impl LlmRouter {
         // Execute
         let full_url = format!("{}{}", self.base_prefix(), http_req.url);
         let payload = serde_json::to_value(&http_req.body).map_err(|e| e.to_string())?;
-        let max_retries: usize = Config::getenv("LLM_HTTP_MAX_RETRIES", "3")
-            .parse()
-            .unwrap_or(3)
-            .max(1)
-            .min(10);
+        let _permit = llm_inflight_limiter().acquire();
 
         // LLM observability (parts): best-effort, thread-scoped when req.thread_id is provided.
         let obs_thread_id = req.thread_id.clone().filter(|s| !s.trim().is_empty());
@@ -198,59 +276,12 @@ impl LlmRouter {
                 (None, None, None)
             };
 
-        let mut attempt = 0usize;
-        let (status, body_text) = loop {
-            attempt += 1;
-            let mut r = self
-                .http
-                .request(&http_req.method, &full_url)
-                .set("Content-Type", "application/json");
-            if let Some(k) = self.api_key.as_ref() {
-                r = r.set("Authorization", &format!("Bearer {}", k));
-            }
-            for (h, v) in http_req.headers.iter() {
-                r = r.set(h, v);
-            }
-
-            let resp = r.send_json(payload.clone());
-            match resp {
-                Ok(resp_ok) => break (resp_ok.status(), resp_ok.into_string().unwrap_or_default()),
-                Err(ureq::Error::Status(s, rr)) => {
-                    // Retry 429 with backoff
-                    if s == 429 && attempt < max_retries {
-                        let retry_after =
-                            rr.header("retry-after").and_then(|v| v.parse::<u64>().ok());
-                        let backoff_ms = retry_after
-                            .map(|secs| secs.saturating_mul(1000))
-                            .unwrap_or_else(|| {
-                                500u64
-                                    .saturating_mul(1u64 << (attempt as u32 - 1))
-                                    .min(5_000)
-                            });
-                        let jitter = rand::random::<u64>() % 250;
-                        std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
-                        continue;
-                    }
-                    break (s, rr.into_string().unwrap_or_default());
-                }
-                Err(e) => {
-                    let es = e.to_string().to_lowercase();
-                    let transient = es.contains("timed out")
-                        || es.contains("timeout")
-                        || es.contains("network error")
-                        || es.contains("connection")
-                        || es.contains("temporarily");
-                    if transient && attempt < max_retries {
-                        let backoff_ms = 250u64
-                            .saturating_mul(1u64 << (attempt as u32 - 1))
-                            .min(2_000);
-                        std::thread::sleep(Duration::from_millis(backoff_ms));
-                        continue;
-                    }
-                    return Err(format!("LLM request failed: {}: {}", full_url, e));
-                }
-            }
-        };
+        let (status, body_text) = self.request_json_with_retry(
+            &http_req.method,
+            &full_url,
+            &http_req.headers,
+            payload,
+        )?;
         let ph = ProviderHttpResponse {
             status: status as u16,
             body_text,
@@ -415,64 +446,13 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
         // Execute
         let full_url = format!("{}{}", self.base_prefix(), http_req.url);
         let payload = serde_json::to_value(&http_req.body).map_err(|e| e.to_string())?;
-        let max_retries: usize = Config::getenv("LLM_HTTP_MAX_RETRIES", "3")
-            .parse()
-            .unwrap_or(3)
-            .max(1)
-            .min(10);
-
-        let mut attempt = 0usize;
-        let (status, body_text) = loop {
-            attempt += 1;
-            let mut r = self
-                .http
-                .request(&http_req.method, &full_url)
-                .set("Content-Type", "application/json");
-            if let Some(k) = self.api_key.as_ref() {
-                r = r.set("Authorization", &format!("Bearer {}", k));
-            }
-            for (h, v) in http_req.headers.iter() {
-                r = r.set(h, v);
-            }
-
-            let resp = r.send_json(payload.clone());
-            match resp {
-                Ok(resp_ok) => break (resp_ok.status(), resp_ok.into_string().unwrap_or_default()),
-                Err(ureq::Error::Status(s, rr)) => {
-                    if s == 429 && attempt < max_retries {
-                        let retry_after =
-                            rr.header("retry-after").and_then(|v| v.parse::<u64>().ok());
-                        let backoff_ms = retry_after
-                            .map(|secs| secs.saturating_mul(1000))
-                            .unwrap_or_else(|| {
-                                500u64
-                                    .saturating_mul(1u64 << (attempt as u32 - 1))
-                                    .min(5_000)
-                            });
-                        let jitter = rand::random::<u64>() % 250;
-                        std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
-                        continue;
-                    }
-                    break (s, rr.into_string().unwrap_or_default());
-                }
-                Err(e) => {
-                    let es = e.to_string().to_lowercase();
-                    let transient = es.contains("timed out")
-                        || es.contains("timeout")
-                        || es.contains("network error")
-                        || es.contains("connection")
-                        || es.contains("temporarily");
-                    if transient && attempt < max_retries {
-                        let backoff_ms = 250u64
-                            .saturating_mul(1u64 << (attempt as u32 - 1))
-                            .min(2_000);
-                        std::thread::sleep(Duration::from_millis(backoff_ms));
-                        continue;
-                    }
-                    return Err(format!("LLM request failed: {}: {}", full_url, e));
-                }
-            }
-        };
+        let _permit = llm_inflight_limiter().acquire();
+        let (status, body_text) = self.request_json_with_retry(
+            &http_req.method,
+            &full_url,
+            &http_req.headers,
+            payload,
+        )?;
         let ph = ProviderHttpResponse {
             status: status as u16,
             body_text,
@@ -501,6 +481,69 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
             ));
         }
         adapter.parse_embed_http(&ph)
+    }
+
+    fn request_json_with_retry(
+        &self,
+        method: &str,
+        full_url: &str,
+        headers: &[(String, String)],
+        payload: serde_json::Value,
+    ) -> Result<(u16, String), String> {
+        let mut attempt = 0usize;
+        loop {
+            attempt += 1;
+            let mut r = self
+                .http
+                .request(method, full_url)
+                .set("Content-Type", "application/json");
+            if let Some(k) = self.api_key.as_ref() {
+                r = r.set("Authorization", &format!("Bearer {}", k));
+            }
+            for (h, v) in headers.iter() {
+                r = r.set(h, v);
+            }
+
+            match r.send_json(payload.clone()) {
+                Ok(resp_ok) => {
+                    return Ok((resp_ok.status() as u16, resp_ok.into_string().unwrap_or_default()))
+                }
+                Err(ureq::Error::Status(s, rr)) => {
+                    if s == 429 && attempt < self.retry_policy.max_retries {
+                        let retry_after =
+                            rr.header("retry-after").and_then(|v| v.parse::<u64>().ok());
+                        let backoff_ms = retry_after
+                            .map(|secs| secs.saturating_mul(1000))
+                            .unwrap_or_else(|| {
+                                500u64
+                                    .saturating_mul(1u64 << (attempt as u32 - 1))
+                                    .min(5_000)
+                            });
+                        let jitter = rand::random::<u64>() % 250;
+                        std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
+                        continue;
+                    }
+                    return Ok((s as u16, rr.into_string().unwrap_or_default()));
+                }
+                Err(e) => {
+                    let es = e.to_string().to_lowercase();
+                    let transient = es.contains("timed out")
+                        || es.contains("timeout")
+                        || es.contains("network error")
+                        || es.contains("connection")
+                        || es.contains("temporarily");
+                    if transient && attempt < self.retry_policy.max_retries {
+                        let backoff_ms = 250u64
+                            .saturating_mul(1u64 << (attempt as u32 - 1))
+                            .min(2_000);
+                        let jitter = rand::random::<u64>() % 250;
+                        std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
+                        continue;
+                    }
+                    return Err(format!("LLM request failed: {}: {}", full_url, e));
+                }
+            }
+        }
     }
 
     fn base_prefix(&self) -> String {

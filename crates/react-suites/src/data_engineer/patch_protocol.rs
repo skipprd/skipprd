@@ -43,6 +43,14 @@ fn excerpt_for_error(s: &str, max_chars: usize) -> String {
     out
 }
 
+pub fn default_patch_loop_max_output_tokens() -> u32 {
+    std::env::var("REACT_PATCH_LOOP_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|v| *v >= 512)
+        .unwrap_or(3200)
+}
+
 fn has_required_analyst_notes(notes: &[String]) -> Result<(), String> {
     // Contract: require these sections (case-insensitive) somewhere in notes as distinct entries.
     // We enforce this only when the caller opts-in via a sys_prompt sentinel.
@@ -416,8 +424,12 @@ pub async fn llm_patch_loop_single_file(
     call_opts.expected_format = react_core::llm::LlmExpectedFormat::JsonSchema(
         react_core::schema_registry::SchemaId::PatchSingleFileV1,
     );
+    if call_opts.max_output_tokens.is_none() {
+        call_opts.max_output_tokens = Some(default_patch_loop_max_output_tokens());
+    }
 
     let mut last_err: Option<String> = None;
+    let mut bumped_output_budget = false;
     for attempt in 1..=max_iters {
         let resp = ctx.llm.chat(&messages, &call_opts);
         let resp_text = match resp {
@@ -509,6 +521,20 @@ pub async fn llm_patch_loop_single_file(
                                 },
                             )
                             .await;
+                    }
+                }
+                if !bumped_output_budget && e.contains("max_output_tokens") {
+                    if let Some(current) = call_opts.max_output_tokens {
+                        let bumped = current.saturating_mul(2).min(8000);
+                        if bumped > current {
+                            bumped_output_budget = true;
+                            call_opts.max_output_tokens = Some(bumped);
+                            last_err = Some(format!(
+                                "patch authoring truncated at max_output_tokens={}; retrying once with {}",
+                                current, bumped
+                            ));
+                            continue;
+                        }
                     }
                 }
                 return Err(format!("LLM patch authoring call failed: {}", e));

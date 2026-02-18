@@ -733,7 +733,9 @@ impl Tool for StagingModelTool {
                     expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                     temperature: Some(0.05),
                     top_p: Some(1.0),
-                    max_output_tokens: Some(1800),
+                    max_output_tokens: Some(
+                        patch_protocol::default_patch_loop_max_output_tokens(),
+                    ),
                     reasoning_effort: None,
                 }),
             )

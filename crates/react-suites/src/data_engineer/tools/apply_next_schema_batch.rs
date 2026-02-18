@@ -306,8 +306,9 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                     expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                     temperature: Some(0.05),
                     top_p: Some(1.0),
-                    // Schema YAML patches can be large; avoid truncation mid-`new_text`.
-                    max_output_tokens: Some(3200),
+                    max_output_tokens: Some(
+                        crate::data_engineer::patch_protocol::default_patch_loop_max_output_tokens(),
+                    ),
                     reasoning_effort: None,
                 }),
             )
@@ -535,8 +536,9 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                 temperature: Some(0.05),
                 top_p: Some(1.0),
-                // Schema YAML patches can be large; avoid truncation mid-`new_text`.
-                max_output_tokens: Some(3200),
+                max_output_tokens: Some(
+                    crate::data_engineer::patch_protocol::default_patch_loop_max_output_tokens(),
+                ),
                 reasoning_effort: None,
             }),
         )

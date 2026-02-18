@@ -10,6 +10,69 @@ use tokio::sync::mpsc;
 use crate::run::event_hub::EventHub;
 use crate::ws::api_gen::src::models as api;
 
+fn classify_error(summary: &str) -> &'static str {
+    let s = summary.to_ascii_lowercase();
+    if s.contains("timed out reading response")
+        || s.contains("timed out")
+        || s.contains("network error")
+    {
+        "network_timeout"
+    } else if s.contains("max_output_tokens") || s.contains("output truncated") {
+        "token_truncation"
+    } else if s.contains("too many consecutive batch failures") || s.contains("batch_locked") {
+        "batch_locked"
+    } else if s.contains("invalid staging model sql") {
+        "invalid_staging_sql"
+    } else if s.contains("nosuchkey") || s.contains("no such key") || s.contains("not found") {
+        "missing_artifact"
+    } else {
+        "unknown"
+    }
+}
+
+fn summarize_failure_state(st: &react_core::session::ThreadState) -> Option<String> {
+    let last_failed_event = st
+        .events
+        .iter()
+        .rev()
+        .find(|e| e.status.as_deref() == Some("failed"));
+    let mut detail = String::new();
+    let mut phase = None::<String>;
+    let mut tool = None::<String>;
+    if let Some(ev) = last_failed_event {
+        phase = ev.phase.clone();
+        tool = ev.clean_name.clone().or_else(|| ev.name.clone());
+        if let Some(err) = ev.error.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            detail = err.to_string();
+        }
+    }
+    if detail.is_empty() {
+        if let Some(it) = st.items.values().find(|it| it.status == "failed") {
+            if let Some(err) = it
+                .last_error
+                .as_ref()
+                .map(|e| e.summary.trim())
+                .filter(|s| !s.is_empty())
+            {
+                detail = err.to_string();
+            }
+        }
+    }
+    if detail.is_empty() {
+        return None;
+    }
+    let class = classify_error(&detail);
+    let mut out = format!("failure summary: class={}", class);
+    if let Some(p) = phase.filter(|p| !p.trim().is_empty()) {
+        out.push_str(&format!(" phase={}", p));
+    }
+    if let Some(t) = tool.filter(|t| !t.trim().is_empty()) {
+        out.push_str(&format!(" tool={}", t));
+    }
+    out.push_str(&format!(" detail={}", detail.replace('\n', " | ")));
+    Some(out)
+}
+
 #[derive(Clone, Debug)]
 pub struct RunOpts {
     pub thread_id: Option<String>,
@@ -156,6 +219,11 @@ pub async fn run_headless(ctx: SuiteCtx, opts: RunOpts) -> Result<(i32, String),
     }
     if let Some(st) = st {
         let any_failed = st.items.values().any(|it| it.status == "failed");
+        if any_failed && plain_progress {
+            if let Some(line) = summarize_failure_state(&st) {
+                println!("{}", line);
+            }
+        }
         let code = if any_failed { 1 } else { 0 };
         return Ok((code, thread_id));
     }

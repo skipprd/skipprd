@@ -279,12 +279,31 @@ pub async fn get_file(ctx: &AgentCtx, path: &str, max_chars: usize) -> Result<Va
                 "content": content
             }))
         }
-        Err(e) => Ok(serde_json::json!({
-            "ok": false,
-            "path": rel,
-            "key": key,
-            "error": format!("not found or failed to fetch: {}", e),
-        })),
+        Err(e) => {
+            let err_text = e.to_string();
+            let bootstrap_missing = (rel == project_files::PACKAGES_YML
+                || rel == project_files::MODELS_SCHEMA_YML)
+                && is_missing_storage_error(&err_text);
+            if bootstrap_missing {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "path": rel,
+                    "key": key,
+                    "exists": false,
+                    "missing": true,
+                    "base_sha256": "",
+                    "existing_line_count": 0,
+                    "existing_had_trailing_newline": false,
+                    "content": "",
+                }));
+            }
+            Ok(serde_json::json!({
+                "ok": false,
+                "path": rel,
+                "key": key,
+                "error": format!("not found or failed to fetch: {}", err_text),
+            }))
+        },
     }
 }
 
@@ -1006,6 +1025,14 @@ fn sha256_hex(s: &str) -> String {
     hasher.update(s.as_bytes());
     let out = hasher.finalize();
     hex::encode(out)
+}
+
+fn is_missing_storage_error(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("nosuchkey")
+        || e.contains("no such key")
+        || e.contains("not found")
+        || e.contains("404")
 }
 
 async fn postprocess_content(
