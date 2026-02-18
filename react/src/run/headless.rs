@@ -63,7 +63,18 @@ pub async fn run_headless(ctx: SuiteCtx, opts: RunOpts) -> Result<(i32, String),
                         api::ServerMessage::ToolEnd(r) => {
                             if plain_progress {
                                 let label = r.clean_name.unwrap_or(r.name);
-                                println!("tool end: {} ({:?})", label, r.status);
+                                if matches!(r.status, api::ToolEventStatus::Failed) {
+                                    let err = r
+                                        .error
+                                        .as_deref()
+                                        .map(|s| s.trim())
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or("tool failed");
+                                    // Keep this single-line and CI-friendly.
+                                    println!("tool end: {} (Failed) — {}", label, err);
+                                } else {
+                                    println!("tool end: {} ({:?})", label, r.status);
+                                }
                             }
                         }
                         api::ServerMessage::Final(r) => {
