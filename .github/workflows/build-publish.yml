@@ -116,6 +116,19 @@ jobs:
           aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
           aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
           aws configure set default.region "$AWS_DEFAULT_REGION"
+          
+          # React uses the S3 bucket configured in the example YAMLs for artifacts:
+          # - threads/logs/catalog/semantic/stats/manifest/dbt/lancedb live under:
+          #   s3://<bucket>/<tenant>/<workspace>/<project_id>/
+          REACT_BUCKET="asgsdag-datalake"
+          REACT_SCOPE_PREFIX="picnic/dev"
+          for i in 1 2 3 4 5 6 7 8; do
+            aws s3 rm "s3://${REACT_BUCKET}/${REACT_SCOPE_PREFIX}/example${i}/" --recursive || true
+          done
+          aws s3 rm "s3://${REACT_BUCKET}/${REACT_SCOPE_PREFIX}/example1_windows/" --recursive || true
+          aws s3 rm "s3://${REACT_BUCKET}/${REACT_SCOPE_PREFIX}/example1_linux_x86_64/" --recursive || true
+          aws s3 rm "s3://${REACT_BUCKET}/${REACT_SCOPE_PREFIX}/example1_macos_arm64/" --recursive || true
+
           for i in 1 2 3 4 5 6 7 8; do
             aws glue delete-database --catalog-id 353855562591 --name "example${i}_silver" || true
             aws glue delete-database --catalog-id 353855562591 --name "example${i}_gold" || true
@@ -160,7 +173,7 @@ jobs:
           AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
           AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
         run: |
-          ./target/debug/react --log info run --parallel \
+          ./target/debug/react --log info run --parallel --storage-mode s3 \
             --config ./react/react1.yaml \
             --config ./react/react2.yaml \
             --config ./react/react3.yaml \
@@ -328,7 +341,7 @@ jobs:
           AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
           AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
         run: |
-          ./target/${{ matrix.target }}/release/react --log info run --config ./react/react-linux-x86_64.yaml --suite-id data_engineer --agent agent
+          ./target/${{ matrix.target }}/release/react --log info run --storage-mode s3 --config ./react/react-linux-x86_64.yaml --suite-id data_engineer --agent agent
 
       - name: Run macOS react config (release binary)
         if: runner.os == 'macOS'
@@ -340,7 +353,7 @@ jobs:
           AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
           AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
         run: |
-          ./target/${{ matrix.target }}/release/react --log info run --config ./react/react-macos-arm64.yaml --suite-id data_engineer --agent agent
+          ./target/${{ matrix.target }}/release/react --log info run --storage-mode s3 --config ./react/react-macos-arm64.yaml --suite-id data_engineer --agent agent
 
       - name: Run Windows react config (release binary)
         if: runner.os == 'Windows'
@@ -352,7 +365,7 @@ jobs:
           AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
           AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
         run: |
-          .\target\${{ matrix.target }}\release\react${{ matrix.bin_ext }} --log info run --config .\react\react-windows.yaml --suite-id data_engineer --agent agent
+          .\target\${{ matrix.target }}\release\react${{ matrix.bin_ext }} --log info run --storage-mode s3 --config .\react\react-windows.yaml --suite-id data_engineer --agent agent
 
       - name: Upload react artifact (unix)
         if: runner.os != 'Windows'
