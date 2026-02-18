@@ -120,13 +120,18 @@ jobs:
             aws glue delete-database --catalog-id 353855562591 --name "example${i}_silver" || true
             aws glue delete-database --catalog-id 353855562591 --name "example${i}_gold" || true
           done
+          aws glue delete-database --catalog-id 353855562591 --name "example1_windows_silver" || true
+          aws glue delete-database --catalog-id 353855562591 --name "example1_windows_gold" || true
+          aws glue delete-database --catalog-id 353855562591 --name "example1_linux_x86_64_silver" || true
+          aws glue delete-database --catalog-id 353855562591 --name "example1_linux_x86_64_gold" || true
+          aws glue delete-database --catalog-id 353855562591 --name "example1_macos_arm64_silver" || true
+          aws glue delete-database --catalog-id 353855562591 --name "example1_macos_arm64_gold" || true
 
   react_ci:
     name: React build + tests + examples (single runner)
     needs:
       - react_cleanup
-    runs-on:
-      - ubuntu-latest-32-cores
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
@@ -294,6 +299,60 @@ jobs:
 
       - name: Build react release binary
         run: cargo build --release -p react --target ${{ matrix.target }}
+
+      - name: Install dbt runtime (linux)
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install dbt-core dbt-athena-community
+
+      - name: Install dbt runtime (macos)
+        if: runner.os == 'macOS'
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install dbt-core dbt-athena-community
+
+      - name: Install dbt runtime (windows)
+        if: runner.os == 'Windows'
+        run: |
+          python -m pip install --upgrade pip
+          pip install dbt-core dbt-athena-community
+
+      - name: Run Linux react config (release binary)
+        if: runner.os == 'Linux'
+        env:
+          REACT_LOG_THREAD_STEPS: ${{ secrets.REACT_LOG_THREAD_STEPS }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.CIRCLES_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CIRCLES_AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
+          AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
+        run: |
+          ./target/${{ matrix.target }}/release/react --log info run --config ./react/react-linux-x86_64.yaml --suite-id data_engineer --agent agent
+
+      - name: Run macOS react config (release binary)
+        if: runner.os == 'macOS'
+        env:
+          REACT_LOG_THREAD_STEPS: ${{ secrets.REACT_LOG_THREAD_STEPS }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.CIRCLES_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CIRCLES_AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
+          AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
+        run: |
+          ./target/${{ matrix.target }}/release/react --log info run --config ./react/react-macos-arm64.yaml --suite-id data_engineer --agent agent
+
+      - name: Run Windows react config (release binary)
+        if: runner.os == 'Windows'
+        env:
+          REACT_LOG_THREAD_STEPS: ${{ secrets.REACT_LOG_THREAD_STEPS }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.CIRCLES_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CIRCLES_AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
+          AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
+        run: |
+          .\target\${{ matrix.target }}\release\react${{ matrix.bin_ext }} --log info run --config .\react\react-windows.yaml --suite-id data_engineer --agent agent
 
       - name: Upload react artifact (unix)
         if: runner.os != 'Windows'
