@@ -795,7 +795,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
             // Strict JSON repair emitter: keep variance minimal.
             temperature: Some(0.0),
             top_p: Some(1.0),
-            max_output_tokens: Some(1400),
+            max_output_tokens: Some(3600),
             reasoning_effort: None,
         };
         match Agent::run_until_block(&registry, actx, &sys, tools_card, &q, llm_options).await {
