@@ -11,7 +11,11 @@ runs:
     - name: Install Build Dependencies
       shell: bash
       run: |
-        apt-get update
+        if [ "$(id -u)" = "0" ]; then
+          apt-get update
+        else
+          sudo apt-get update
+        fi
 #        apt-get install -y protobuf-compiler
     - name: Setup Rust toolchain
       shell: bash

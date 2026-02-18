@@ -539,6 +539,40 @@ jobs:
           repository: skipprd/skipprd
           fail_on_unmatched_files: true
 
+  publish_react:
+    name: Publish React Release Assets
+    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
+    needs:
+      - react_binary_build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Download React Artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Compress React Artifacts
+        run: |
+          ls -la .
+          shopt -s nullglob
+          for d in react-*; do
+            if [ -d "$d" ]; then
+              tar -czvf "${d}.tar.gz" "$d"
+            fi
+          done
+          ls -la react-*.tar.gz || true
+
+      - name: Upload React assets to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ./react-*.tar.gz
+          tag_name: ${{ github.ref_name }}
+          token: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+          repository: skipprd/skipprd
+          fail_on_unmatched_files: false
+
   dockerize:
     if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
     needs:
