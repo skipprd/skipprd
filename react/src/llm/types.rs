@@ -21,6 +21,13 @@ pub enum ChatResponseFormat {
     },
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmExecutionMode {
+    Sync,
+    BackgroundPreferred,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ChatRequest {
     pub model: String,
@@ -37,6 +44,11 @@ pub struct ChatRequest {
     pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    /// Provider-agnostic execution preference.
+    ///
+    /// Providers that do not support background execution should ignore this and run synchronously.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<LlmExecutionMode>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

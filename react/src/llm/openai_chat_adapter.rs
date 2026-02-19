@@ -174,6 +174,7 @@ mod tests {
             reasoning_effort: None,
             prompt_id: None,
             thread_id: None,
+            execution_mode: None,
         };
         let http = ad.build_chat_http(&req).expect("build");
         assert_eq!(http.url, "/v1/chat/completions");

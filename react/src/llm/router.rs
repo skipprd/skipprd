@@ -12,7 +12,8 @@ use tracing::debug;
 use super::adapter::Adapter;
 use super::registry::{pick_adapter_from_config, pick_openai_adapter_for_model};
 use super::types::{
-    ChatRequest, ChatResponse, ChatResponseFormat, EmbedRequest, EmbedResponse, ProviderHttpResponse,
+    ChatRequest, ChatResponse, ChatResponseFormat, EmbedRequest, EmbedResponse, ProviderHttpRequest,
+    ProviderHttpResponse,
 };
 use crate::llm::LargeLanguageModel;
 use react_core::llm::ChatMessage as CoreChatMessage;
@@ -282,6 +283,11 @@ impl LlmRouter {
             &http_req.headers,
             payload,
         )?;
+        let (status, body_text) = if self.should_poll_background_response(&http_req) {
+            self.complete_background_response(&full_url, status, body_text)?
+        } else {
+            (status, body_text)
+        };
         let ph = ProviderHttpResponse {
             status: status as u16,
             body_text,
@@ -544,6 +550,144 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
                 }
             }
         }
+    }
+
+    fn request_get_with_retry(
+        &self,
+        full_url: &str,
+        headers: &[(String, String)],
+    ) -> Result<(u16, String), String> {
+        let mut attempt = 0usize;
+        loop {
+            attempt += 1;
+            let mut r = self.http.request("GET", full_url);
+            if let Some(k) = self.api_key.as_ref() {
+                r = r.set("Authorization", &format!("Bearer {}", k));
+            }
+            for (h, v) in headers.iter() {
+                r = r.set(h, v);
+            }
+
+            match r.call() {
+                Ok(resp_ok) => {
+                    return Ok((resp_ok.status() as u16, resp_ok.into_string().unwrap_or_default()))
+                }
+                Err(ureq::Error::Status(s, rr)) => {
+                    if s == 429 && attempt < self.retry_policy.max_retries {
+                        let retry_after =
+                            rr.header("retry-after").and_then(|v| v.parse::<u64>().ok());
+                        let backoff_ms = retry_after
+                            .map(|secs| secs.saturating_mul(1000))
+                            .unwrap_or_else(|| {
+                                500u64
+                                    .saturating_mul(1u64 << (attempt as u32 - 1))
+                                    .min(5_000)
+                            });
+                        let jitter = rand::random::<u64>() % 250;
+                        std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
+                        continue;
+                    }
+                    return Ok((s as u16, rr.into_string().unwrap_or_default()));
+                }
+                Err(e) => {
+                    let es = e.to_string().to_lowercase();
+                    let transient = es.contains("timed out")
+                        || es.contains("timeout")
+                        || es.contains("network error")
+                        || es.contains("connection")
+                        || es.contains("temporarily");
+                    if transient && attempt < self.retry_policy.max_retries {
+                        let backoff_ms = 250u64
+                            .saturating_mul(1u64 << (attempt as u32 - 1))
+                            .min(2_000);
+                        let jitter = rand::random::<u64>() % 250;
+                        std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
+                        continue;
+                    }
+                    return Err(format!("LLM request failed: {}: {}", full_url, e));
+                }
+            }
+        }
+    }
+
+    fn should_poll_background_response(&self, http_req: &ProviderHttpRequest) -> bool {
+        if http_req.url != "/v1/responses" {
+            return false;
+        }
+        http_req
+            .body
+            .get("background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    fn complete_background_response(
+        &self,
+        full_url: &str,
+        initial_status: u16,
+        initial_body: String,
+    ) -> Result<(u16, String), String> {
+        if !(200..300).contains(&(initial_status as i32)) {
+            return Ok((initial_status, initial_body));
+        }
+        let v: serde_json::Value = match serde_json::from_str(&initial_body) {
+            Ok(v) => v,
+            Err(_) => return Ok((initial_status, initial_body)),
+        };
+        let mut status = v
+            .get("status")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if status != "queued" && status != "in_progress" {
+            return Ok((initial_status, initial_body));
+        }
+        let response_id = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| "background response missing id".to_string())?
+            .to_string();
+        let poll_every_secs: u64 = Config::getenv("LLM_BACKGROUND_POLL_SECS", "2")
+            .parse()
+            .unwrap_or(2)
+            .max(1)
+            .min(30);
+        let max_wait_secs: u64 = Config::getenv("LLM_BACKGROUND_MAX_WAIT_SECS", "900")
+            .parse()
+            .unwrap_or(900)
+            .max(30)
+            .min(3600);
+        let poll_url = format!("{}/{}", full_url.trim_end_matches('/'), response_id);
+        let started = Instant::now();
+        let mut latest_status = initial_status;
+        let mut latest_body = initial_body;
+        while status == "queued" || status == "in_progress" {
+            if started.elapsed().as_secs() >= max_wait_secs {
+                return Err(format!(
+                    "LLM background response timed out waiting for terminal state: id={} status={} waited={}s",
+                    response_id,
+                    status,
+                    started.elapsed().as_secs()
+                ));
+            }
+            std::thread::sleep(Duration::from_secs(poll_every_secs));
+            let (st, body) = self.request_get_with_retry(&poll_url, &[])?;
+            latest_status = st;
+            latest_body = body;
+            if !(200..300).contains(&(latest_status as i32)) {
+                break;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&latest_body) {
+                status = v
+                    .get("status")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+            } else {
+                break;
+            }
+        }
+        Ok((latest_status, latest_body))
     }
 
     fn base_prefix(&self) -> String {

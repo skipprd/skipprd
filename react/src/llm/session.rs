@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::llm::router::LlmRouter;
 use crate::llm::thread_ctx;
 use crate::llm::types::ChatResponseFormat;
+use crate::llm::types::LlmExecutionMode;
 use crate::llm::{create_llm, ChatMessage, LargeLanguageModel, LlmConfig};
 use react_core::llm::{LlmCallOptions, LlmExpectedFormat, ReasoningEffort};
 
@@ -112,6 +113,25 @@ impl LargeLanguageModel for RouterModel {
         };
         let prompt_id = Some(options.prompt_id.to_string());
 
+        fn should_use_background_mode(model: &str) -> bool {
+            let mode = crate::helpers::configuration::Config::getenv("LLM_BACKGROUND_MODE", "auto")
+                .to_ascii_lowercase();
+            match mode.as_str() {
+                "1" | "true" | "on" | "always" => true,
+                "0" | "false" | "off" | "never" => false,
+                _ => {
+                    // Auto: prefer background for longer-running reasoning model families.
+                    let m = model.trim().to_ascii_lowercase();
+                    m.starts_with("gpt-5") || m.starts_with("o")
+                }
+            }
+        }
+        let execution_mode = if should_use_background_mode(&model) {
+            Some(LlmExecutionMode::BackgroundPreferred)
+        } else {
+            Some(LlmExecutionMode::Sync)
+        };
+
         let req = crate::llm::types::ChatRequest {
             model,
             messages: messages
@@ -139,6 +159,7 @@ impl LargeLanguageModel for RouterModel {
                 .thread_id
                 .clone()
                 .or_else(|| thread_ctx::current_thread_id()),
+            execution_mode,
         };
         let r = self.router.chat(&req)?;
         Ok(r.text)

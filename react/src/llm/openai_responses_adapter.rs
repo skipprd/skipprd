@@ -44,6 +44,11 @@ struct RespReq {
     /// Optional reasoning effort hint (Responses API).
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<RespReasoning>,
+    /// OpenAI Responses background execution mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    background: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store: Option<bool>,
 }
 #[derive(Serialize)]
 struct RespReasoning {
@@ -156,6 +161,14 @@ impl Adapter for OpenAIResponsesAdapter {
                 .reasoning_effort
                 .as_ref()
                 .map(|s| RespReasoning { effort: s.clone() }),
+            background: match req.execution_mode {
+                Some(LlmExecutionMode::BackgroundPreferred) => Some(true),
+                _ => None,
+            },
+            store: match req.execution_mode {
+                Some(LlmExecutionMode::BackgroundPreferred) => Some(true),
+                _ => None,
+            },
         };
         Ok(ProviderHttpRequest {
             method: "POST".to_string(),
@@ -296,6 +309,7 @@ mod tests {
             reasoning_effort: None,
             prompt_id: None,
             thread_id: None,
+            execution_mode: None,
         };
         let http = ad.build_chat_http(&req).expect("build");
         assert_eq!(http.url, "/v1/responses");
@@ -329,6 +343,7 @@ mod tests {
             reasoning_effort: None,
             prompt_id: None,
             thread_id: None,
+            execution_mode: None,
         };
         let http = ad.build_chat_http(&req).expect("build");
         let fmt = http
@@ -362,6 +377,7 @@ mod tests {
             reasoning_effort: None,
             prompt_id: None,
             thread_id: None,
+            execution_mode: None,
         };
         let http = ad.build_chat_http(&req).expect("build");
         let fmt = http
@@ -372,5 +388,31 @@ mod tests {
             .and_then(|x| x.as_str())
             .unwrap_or("");
         assert_eq!(fmt, "text");
+    }
+
+    #[test]
+    fn build_chat_http_enables_background_when_requested() {
+        let ad = OpenAIResponsesAdapter::new();
+        let req = ChatRequest {
+            model: "gpt-5.2".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            }],
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            response_format: None,
+            reasoning_effort: None,
+            prompt_id: None,
+            thread_id: None,
+            execution_mode: Some(LlmExecutionMode::BackgroundPreferred),
+        };
+        let http = ad.build_chat_http(&req).expect("build");
+        assert_eq!(
+            http.body.get("background").and_then(|x| x.as_bool()),
+            Some(true)
+        );
+        assert_eq!(http.body.get("store").and_then(|x| x.as_bool()), Some(true));
     }
 }
