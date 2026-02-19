@@ -98,6 +98,7 @@ jobs:
   react_cleanup:
     name: React cleanup
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     container:
       image: python:3.8-alpine
     steps:
@@ -122,14 +123,14 @@ jobs:
           #   s3://<bucket>/<tenant>/<workspace>/<project_id>/
           REACT_BUCKET="asgsdag-datalake"
           REACT_SCOPE_PREFIX="picnic/dev"
-          for i in 1 2 3 4 5 6 7 8; do
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
             aws s3 rm "s3://${REACT_BUCKET}/${REACT_SCOPE_PREFIX}/example${i}/" --recursive || true
           done
           aws s3 rm "s3://${REACT_BUCKET}/${REACT_SCOPE_PREFIX}/example1_windows/" --recursive || true
           aws s3 rm "s3://${REACT_BUCKET}/${REACT_SCOPE_PREFIX}/example1_linux_x86_64/" --recursive || true
           aws s3 rm "s3://${REACT_BUCKET}/${REACT_SCOPE_PREFIX}/example1_macos_arm64/" --recursive || true
 
-          for i in 1 2 3 4 5 6 7 8; do
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
             aws glue delete-database --catalog-id 353855562591 --name "example${i}_silver" || true
             aws glue delete-database --catalog-id 353855562591 --name "example${i}_gold" || true
           done
@@ -145,6 +146,7 @@ jobs:
     needs:
       - react_cleanup
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v3
 
@@ -164,7 +166,7 @@ jobs:
       - name: Test react crate
         run: cargo test -p react
 
-      - name: Run React examples (1..8) in parallel
+      - name: Run React examples (1..16) in parallel
         env:
           REACT_LOG_THREAD_STEPS: ${{ secrets.REACT_LOG_THREAD_STEPS }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
@@ -182,6 +184,14 @@ jobs:
             --config ./react/react6.yaml \
             --config ./react/react7.yaml \
             --config ./react/react8.yaml \
+            --config ./react/react9.yaml \
+            --config ./react/react10.yaml \
+            --config ./react/react11.yaml \
+            --config ./react/react12.yaml \
+            --config ./react/react13.yaml \
+            --config ./react/react14.yaml \
+            --config ./react/react15.yaml \
+            --config ./react/react16.yaml \
             --suite-id data_engineer \
             --agent agent
 
@@ -282,6 +292,7 @@ jobs:
     name: react build (${{ matrix.name }})
     needs:
       - react_ci
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:

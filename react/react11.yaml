@@ -1,0 +1,78 @@
+version: 1
+
+server:
+  port: 8787
+
+storage:
+  bucket: asgsdag-datalake
+
+scope:
+  tenant: picnic
+  workspace: dev
+  project_id: example11
+  # project_id: test
+
+llm:
+  # Keep secrets (api keys) in env via EnvSecretsProvider (e.g. LLM_API_KEY).
+  provider: OPENAI_COMPAT
+  base_url: https://api.openai.com
+  chat_model: gpt-5.1
+  embed_model: text-embedding-3-small
+  context_length: 8192
+  http_timeout_secs: 120
+  max_tokens: 8192
+  temperature: 0.2
+  top_p: 1.0
+
+providers:
+  # Exactly one warehouse provider (bronze/raw + silver/gold + dbt target).
+  warehouse:
+    kind: athena
+    workgroup: picnic
+    region: eu-west-1
+    # Athena catalog (Glue Data Catalog).
+    catalog: AwsDataCatalog
+    # Bronze/raw schema (Glue database).
+    schema: test_raw
+    result_s3: s3://asgsdag-datalake/
+    discovery_cache_ttl_secs: 120
+    max_concurrency: 15
+
+  catalog:
+    enabled: true
+    refresh_secs: 10800 # 3 hours
+    max_concurrency: 8
+
+  dbt:
+    enabled: true
+    # Run dbt on the host (e.g. local venv), not via Docker.
+    runner: host
+    target: athena
+
+    # Naming strategy (portable across warehouses):
+    # dbt will materialize into: <target_schema>_<tier_suffix>
+    # This avoids accidental doubled schemas like `test_warehouse_test_warehouse`.
+    naming:
+      # Base schema name (dbt target.schema). Example: `test`
+      # target_schema: example
+      # target_schema: test
+      # Tier suffixes. Example schemas: `silver`, `warehouse|gold`
+      silver_suffix: silver
+      gold_suffix: gold
+
+    # ---- Future warehouse examples (commented) ----
+    # To switch providers, change providers.warehouse.kind
+    # and ensure providers.dbt.target matches providers.warehouse.kind.
+    #
+    # providers:
+    #   warehouse:
+    #     kind: snowflake
+    #     database: ANALYTICS
+    #     schema: RAW
+    #     warehouse: COMPUTE_WH
+    #     role: ANALYST
+    #   dbt:
+    #     target: snowflake
+
+  vector:
+    enabled: true
