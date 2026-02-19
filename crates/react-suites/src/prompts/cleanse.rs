@@ -23,7 +23,7 @@ Hard rules:
 - Throughput (CRITICAL):
   - If there are many raw tables (>20), you MUST NOT cleanse only one table and stop.
   - In agent mode, an approved cleanse plan will be provided in the question. Execute it deterministically:
-    - Use `staging_model` in BATCHES: pass EXACTLY the next batch's dataset_ids (max 5) per call.
+    - Use the deterministic batch authoring tool shown in the current tool card; pass only the arguments required by that tool.
     - Continue with subsequent batches until the plan is complete.
     - Do NOT invent/substitute dataset_ids outside the plan batch unless the user explicitly updates the plan.
   - “Most important” for event-style analytics typically means:
@@ -31,9 +31,10 @@ Hard rules:
     - High-signal user behavior events (profile_viewed, like_pressed, feed_*, post_*).
     - The key screen/login/profile screens (screen_login, screen_viewprofile, screen_profileedit, screen_settings).
   - If you cannot confidently rank importance, default to all track_* first, then all screen_*.
-- You CAN execute DBT via tools:
-  - Use `dbt_validate` to run deps/parse/compile and optionally build.
-  - Use `publish_dbt_to_provider` to publish (it will ask for approval before it runs build).
+- IMPORTANT: In the data_engineer suite, tool availability is phase-dependent. Follow the current tool card as authoritative for this step.
+- You CAN execute DBT when those tools are available in the current tool card:
+  - Use the available validate tool to run deps/parse/compile and optionally build.
+  - Use the available publish tool to publish (it may require approval before build).
   - NEVER claim “I can’t run dbt” or “run it locally for me”. If DBT fails, iterate until it passes or until you must ask for missing external config.
 - Iteration discipline (CRITICAL):
   - If `dbt_validate` fails for ANY reason, you MUST NOT finalize. Instead:
@@ -96,8 +97,8 @@ Hard rules:
 - Use run_sql ONLY to validate authored SQL fragments; NEVER to answer.
 - For MetricFlow YAML: anchor to the chosen dataset and add a top comment documenting it exactly as:
   # Dataset: <catalog>.<database>.<table>
-- After saving artifacts, validate the project with dbt_validate (deps → parse → compile; build when ready to publish). Do not send inline file content.
-- For project scaffolding: do NOT build piece‑meal and do NOT request per‑artifact approvals. Produce ONE consolidated plan and then save the ENTIRE initial project via dbt_files op=patch in as few calls as possible. If dbt_validate is unavailable, proceed without blocking.
+- After saving artifacts, validate the project when a validate tool is available (deps -> parse -> compile; build when ready to publish). Do not send inline file content.
+- For project scaffolding: do NOT build piece-meal and do NOT request per-artifact approvals. Produce ONE consolidated plan and then save the ENTIRE initial project via dbt_files op=patch in as few calls as possible. If validation tools are unavailable in this step, proceed without blocking.
 - For full project creation: include dbt_project.yml, sources (schema.yml), and staging models for all resolved datasets (split across batches as needed).
 - Output format is enforced by the system-provided output contract; return exactly one contracted object per step."#.to_string()
 }

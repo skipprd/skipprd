@@ -1466,8 +1466,8 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
              - You MAY investigate raw/bronze via sql_schema/sql_sample/sql_stats/vect_query/run_sql to detect missing data, but treat raw as discovery only.\n\
              - If you find useful raw fields/tables missing in silver, request a silver expansion:\n\
                - Use ask_approval to list the missing tables/fields to add to silver.\n\
-               - After approval, if apply_next_cleanse_batch is available (plan-batched mode), use it to execute the next approved silver batch deterministically.\n\
-                 Otherwise, use staging_model (or dbt_files op=patch) to add them to silver BEFORE continuing gold.\n\
+              - After approval, if deterministic plan-batched authoring is available in the current tool card, use that batch authoring tool to execute the next approved silver batch.\n\
+                Otherwise, use staging_model (or dbt_files op=patch) to add them to silver BEFORE continuing gold.\n\
              - Search DBT examples (search_dbt_examples) and adopt conventions from the top match.\n\
              - Model relationships and flow:\n\
                - Identify join keys (user/profile/account/session/device identifiers) across the approved tables using sql_schema + sql_sample/sql_stats.\n\
@@ -1479,7 +1479,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                - If you need more files, do multiple dbt_files calls over multiple steps.\n\
              - IMPORTANT: use `dbt_files op=patch` for ALL DBT project files (e.g. path='dbt_project.yml', 'packages.yml', 'models/schema.yml', and model SQL).\n\
              - IMPORTANT (gold progress): you MUST author gold models under `models/marts/` or `models/core/` in this phase.\n\
-               - Prefer apply_next_model_batch when available (plan-batched mode) so the suite executes the approved batch deterministically (do NOT supply items).\n\
+              - If deterministic plan-batched authoring is available in the current tool card, prefer that batch authoring tool so the suite executes the approved batch deterministically (do NOT supply items/dataset_ids).\n\
                - Otherwise, prefer `gold_model` to write marts in batches of up to 5 models per call.\n\
                - Gold models MUST ONLY select from silver/staging via ref('stg_*') and MUST NOT use source().\n\
              - Staging/silver naming is STRICT and deterministic:\n\
@@ -1499,7 +1499,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
             "Cleansing goal: {}.\n\
              Act as a proactive DBT Engineer focused on producing a curated silver tier.\n\
              - Prefer DBT models over ad-hoc SQL; author staging models and tests.\n\
-             - Prefer apply_next_cleanse_batch when available (plan-batched mode) so the suite executes the approved batch deterministically (do NOT supply dataset_ids).\n\
+             - If deterministic plan-batched authoring is available in the current tool card, prefer that batch authoring tool so the suite executes the approved batch deterministically (do NOT supply items/dataset_ids).\n\
                Otherwise, use `staging_model` to author/update staging models (cleansing + nested field extraction). Treat user instructions as authoritative constraints.\n\
              - Silver tier must land in the configured Athena silver database.\n\
              - Do NOT assume table names.\n\
@@ -4363,7 +4363,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         ids.join("\n- "),
                                         expected_paths.join("\n- "),
                                     );
-                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema checklist work remains; that tool only authors SQL.\n");
+                                    ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                                     (ctx, None)
                                 } else {
                                     let pending_schema =
@@ -4393,7 +4393,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             pending_schema.join("\n- "),
                                             expected_paths.join("\n- "),
                                         );
-                                        ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema checklist work remains; that tool only authors SQL.\n");
+                                        ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                                         (ctx, None)
                                     } else {
                                 let mut ctx = format!(
@@ -4460,7 +4460,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         ids.join("\n- "),
                                         expected_paths.join("\n- "),
                                     );
-                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema checklist work remains; that tool only authors SQL.\n");
+                                    ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                                     (ctx, None)
                                 } else {
                                     if let Some((
@@ -4544,7 +4544,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                                 pending_schema.join("\n- "),
                                                 expected_paths.join("\n- "),
                                             );
-                                            ctx.push_str("\nIMPORTANT: Do NOT call apply_next_cleanse_batch while schema checklist work remains; that tool only authors SQL.\n");
+                                            ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                                             (ctx, None)
                                         } else {
                                             // All SQL + schema tasks are done; advance to validate.
@@ -4565,7 +4565,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             } else {
                                 (
                                 format!(
-								"Approved cleanse plan (stored at: {}).\nNext batch (deterministic, max 5):\n- {}\n\nNext action: call apply_next_cleanse_batch (do NOT call staging_model directly).",
+								"Approved cleanse plan (stored at: {}).\nNext batch (deterministic, max 5):\n- {}\n\nNext action: call the deterministic batch authoring tool from the current tool card (do NOT call staging_model directly).",
                                 plan.plan_key,
                                 next.join("\n- ")
                                 ),
@@ -4768,7 +4768,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         ids.join("\n- "),
                                         expected_paths.join("\n- "),
                                     );
-                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema checklist work remains; that tool only authors SQL.\n");
+                                    ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                                     (ctx, None)
                                 } else {
                                     let pending_schema =
@@ -4798,7 +4798,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             pending_schema.join("\n- "),
                                             expected_paths.join("\n- "),
                                         );
-                                        ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema checklist work remains; that tool only authors SQL.\n");
+                                        ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                                         (ctx, None)
                                     } else {
                                 let mut ctx = format!(
@@ -4940,7 +4940,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         ids.join("\n- "),
                                         expected_paths.join("\n- "),
                                     );
-                                    ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema checklist work remains; that tool only authors SQL.\n");
+                                    ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                                     (ctx, None)
                                 } else {
                                     if let Some((
@@ -5105,7 +5105,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             pending_schema.join("\n- "),
                                             expected_paths.join("\n- "),
                                         );
-                                        ctx.push_str("\nIMPORTANT: Do NOT call apply_next_model_batch while schema checklist work remains; that tool only authors SQL.\n");
+                                        ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                                         (ctx, None)
                                     } else {
                                         control_flow::append_phase_with_reason(
@@ -5139,7 +5139,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 }
                                 (
                                 format!(
-								"Approved model plan (stored at: {}).\nNext batch (deterministic, max 5):\n{}\n\nNext action: call apply_next_model_batch (do NOT call gold_model directly).",
+								"Approved model plan (stored at: {}).\nNext batch (deterministic, max 5):\n{}\n\nNext action: call the deterministic batch authoring tool from the current tool card (do NOT call gold_model directly).",
                                 plan.plan_key,
                                 details.join("\n")
                                 ),

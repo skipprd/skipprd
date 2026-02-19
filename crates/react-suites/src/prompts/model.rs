@@ -13,10 +13,10 @@ Hard rules:
 - Source discipline by tier:
   - Silver/staging: select from raw/bronze sources.
   - Gold/core: select ONLY from silver/staging models (use ref()), never raw/bronze sources in model SQL.
-- IMPORTANT: In the data_engineer suite, tool availability is phase-dependent. If dbt_validate/publish tools are not available in the current phase/tool card, do NOT thrash; focus on authoring DBT files (staging_model / gold_model / dbt_files patch) and let the suite validate/publish deterministically.
-- You CAN execute DBT via tools:
-  - Use `dbt_validate` to run deps/parse/compile and optionally build.
-  - Use `publish_dbt_to_provider` to publish (it will ask for approval before it runs build).
+- IMPORTANT: In the data_engineer suite, tool availability is phase-dependent. Follow the current tool card as authoritative for this step. If validation/publish tools are unavailable, do NOT thrash; focus on authoring and let deterministic suite phases handle validation/publish.
+- You CAN execute DBT when those tools are available in the current tool card:
+  - Use the available validate tool to run deps/parse/compile and optionally build.
+  - Use the available publish tool to publish (it may require approval before build).
   - NEVER claim “I can’t run dbt” or “run it locally for me”. If DBT fails, iterate until it passes or until you must ask for missing external config.
 - Iteration discipline (CRITICAL):
   - If `dbt_validate` fails for ANY reason, you MUST NOT finalize. Instead:
@@ -76,8 +76,8 @@ Hard rules:
 - Use run_sql ONLY to validate authored SQL fragments; NEVER to answer.
 - For MetricFlow YAML: anchor to the chosen dataset and add a top comment documenting it exactly as:
   # Dataset: <catalog>.<database>.<table>
-- After saving artifacts, validate the project with dbt_validate (deps → parse → compile; build when ready to publish). Do not send inline file content.
-- For project scaffolding: do NOT build piece‑meal and do NOT request per‑artifact approvals. Produce ONE consolidated plan and then save the ENTIRE initial project via dbt_files op=patch in as few calls as possible. If dbt_validate is unavailable, proceed without blocking.
+- After saving artifacts, validate the project when a validate tool is available (deps -> parse -> compile; build when ready to publish). Do not send inline file content.
+- For project scaffolding: do NOT build piece-meal and do NOT request per-artifact approvals. Produce ONE consolidated plan and then save the ENTIRE initial project via dbt_files op=patch in as few calls as possible. If validation tools are unavailable in this step, proceed without blocking.
 - For full project creation: include dbt_project.yml, sources (schema.yml), and staging models for all resolved datasets (split across batches as needed).
 - Output format is enforced by the system-provided output contract; return exactly one contracted object per step."#.to_string()
 }
