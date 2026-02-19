@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tokio::task::JoinSet;
 use tracing::info;
 
@@ -27,6 +27,20 @@ fn normalize_folder(folder: Option<&str>) -> String {
 
 fn gold_model_rel_path(folder: &str, name: &str) -> String {
     format!("models/{}/{}.sql", folder, name)
+}
+
+fn athena_alias_reuse_hint(msg: &str, model_rel_path: &str, model_name: &str) -> Option<Value> {
+    let m = msg.to_ascii_lowercase();
+    if !m.contains("select-list alias") {
+        return None;
+    }
+    Some(serde_json::json!({
+        "kind": "athena_select_alias_reuse",
+        "model_name": model_name,
+        "model_path": model_rel_path,
+        "issue": msg,
+        "fix": "Split into CTE + outer select: compute intermediate aliases in an inner CTE/subquery, then reference them only from the outer SELECT."
+    }))
 }
 
 fn staging_rel_path_from_input(input: &str) -> String {
@@ -273,7 +287,9 @@ impl Tool for GoldModelTool {
         let mut written: Vec<String> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
+        let mut remediation_hints: Vec<Value> = Vec::new();
         let mut succeeded_item_names: Vec<String> = Vec::new();
+        let mut canonical_folder_by_name: HashMap<String, String> = HashMap::new();
 
         for it in parsed_args.items.iter() {
             let name = it.name.trim();
@@ -286,7 +302,43 @@ impl Tool for GoldModelTool {
                 continue;
             }
 
-            let folder = normalize_folder(it.folder.as_deref());
+            let requested_folder = normalize_folder(it.folder.as_deref());
+            let core_rel = gold_model_rel_path("core", name);
+            let marts_rel = gold_model_rel_path("marts", name);
+            let core_exists = ctx
+                .storage
+                .get_bytes(&format!("{}/{}", base, core_rel))
+                .await
+                .is_ok();
+            let marts_exists = ctx
+                .storage
+                .get_bytes(&format!("{}/{}", base, marts_rel))
+                .await
+                .is_ok();
+            if core_exists && marts_exists {
+                errors.push(format!(
+                    "{name}: model exists in both canonical folders (models/core and models/marts). Keep exactly one canonical location before authoring."
+                ));
+                continue;
+            }
+            let folder = if core_exists {
+                "core".to_string()
+            } else if marts_exists {
+                "marts".to_string()
+            } else {
+                requested_folder
+            };
+            if let Some(prev) = canonical_folder_by_name.get(name) {
+                if prev != &folder {
+                    errors.push(format!(
+                        "{name}: conflicting target folders in this call ('{}' vs '{}'). Use one canonical folder for this model name.",
+                        prev, folder
+                    ));
+                    continue;
+                }
+            } else {
+                canonical_folder_by_name.insert(name.to_string(), folder.clone());
+            }
             let rel_path = gold_model_rel_path(&folder, name);
 
             // Load the inputs to ground the LLM in actual silver SQL.
@@ -432,7 +484,7 @@ impl Tool for GoldModelTool {
                 sys.clone(),
                 user,
                 &rel_path,
-                4,
+                6,
                 Some(LlmCallOptions {
                     prompt_id: "data_engineer.tools.gold_model.patch_loop",
                     thread_id: ctx.thread_id.clone(),
@@ -470,6 +522,9 @@ impl Tool for GoldModelTool {
                 errors.push(format!(
                     "{name}: unsupported SQL for provider '{provider_name}': {msg}"
                 ));
+                if let Some(h) = athena_alias_reuse_hint(&msg, &rel_path, name) {
+                    remediation_hints.push(h);
+                }
                 continue;
             }
             if let Err(e) = ctx
@@ -517,6 +572,7 @@ impl Tool for GoldModelTool {
             "ok": errors.is_empty(),
             "written_keys": written,
             "notes": out_notes,
+            "remediation_hints": remediation_hints,
             "errors": errors,
             "succeeded_item_names": succeeded_item_names
         }))

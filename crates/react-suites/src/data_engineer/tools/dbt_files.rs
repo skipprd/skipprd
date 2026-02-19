@@ -1013,6 +1013,81 @@ fn normalize_patch_contract_args(args: &Value) -> Result<Value, String> {
     Ok(Value::Object(root))
 }
 
+fn extract_patch_paths_from_args(args: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+        let p = p.trim();
+        if !p.is_empty() {
+            out.push(p.to_string());
+        }
+    }
+    for key in ["replace_file", "replace_range", "replace_list"] {
+        let Some(v) = args.get(key) else { continue };
+        let mut visit = |obj: &serde_json::Map<String, Value>| {
+            if let Some(p) = obj.get("path").and_then(|v| v.as_str()) {
+                let p = p.trim();
+                if !p.is_empty() {
+                    out.push(p.to_string());
+                }
+            }
+        };
+        if let Some(arr) = v.as_array() {
+            for it in arr.iter() {
+                if let Some(obj) = it.as_object() {
+                    visit(obj);
+                }
+            }
+        } else if let Some(obj) = v.as_object() {
+            visit(obj);
+        }
+    }
+    out
+}
+
+async fn recent_noop_patch_failures_for_path(ctx: &AgentCtx, rel_path: &str, lookback: usize) -> usize {
+    let (Some(store), Some(thread_id)) = (ctx.thread_store.as_ref(), ctx.thread_id.as_deref()) else {
+        return 0;
+    };
+    let Ok(log) = store.get(thread_id).await else {
+        return 0;
+    };
+    let mut count = 0usize;
+    for step in log.steps.iter().rev().take(lookback) {
+        let react_core::session::ThreadStep::ToolEnd {
+            name,
+            args,
+            observation,
+            ..
+        } = step
+        else {
+            continue;
+        };
+        if name != "dbt_files" || observation.ok {
+            continue;
+        }
+        if !observation
+            .errors
+            .iter()
+            .any(|e| e.contains("patch produced no file changes"))
+        {
+            continue;
+        }
+        if args.get("op").and_then(|v| v.as_str()) != Some("patch") {
+            continue;
+        }
+        let step_paths = extract_patch_paths_from_args(args);
+        let hit = step_paths.into_iter().any(|p| {
+            project_fs::normalize_rel_path(&p)
+                .map(|rp| rp == rel_path)
+                .unwrap_or(false)
+        });
+        if hit {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReplaceFileArgs {
@@ -1171,6 +1246,7 @@ impl Tool for DbtFilesTool {
                     parse_one_or_many(&args, "replace_range")?;
                 let replace_list_ops: Vec<ReplaceListArgs> =
                     parse_one_or_many(&args, "replace_list")?;
+                let noop_breaker_threshold = 2usize;
 
                 let mut provided = 0usize;
                 if !replace_file_ops.is_empty() {
@@ -1187,6 +1263,30 @@ impl Tool for DbtFilesTool {
                         "dbt_files op=patch requires exactly one of: replace_file | replace_range | replace_list"
                             .to_string(),
                     );
+                }
+                if !replace_range_ops.is_empty() {
+                    for rr in replace_range_ops.iter() {
+                        let rel = project_fs::normalize_rel_path(&rr.path)?;
+                        let failures = recent_noop_patch_failures_for_path(ctx, &rel, 250).await;
+                        if failures >= noop_breaker_threshold {
+                            return Err(format!(
+                                "no-op patch breaker: '{}' already had {} no-op patch failures. Force `replace_file` with a full rewritten file (do not use replace_range/replace_list until the file content actually changes).",
+                                rel, failures
+                            ));
+                        }
+                    }
+                }
+                if !replace_list_ops.is_empty() {
+                    for rl in replace_list_ops.iter() {
+                        let rel = project_fs::normalize_rel_path(&rl.path)?;
+                        let failures = recent_noop_patch_failures_for_path(ctx, &rel, 250).await;
+                        if failures >= noop_breaker_threshold {
+                            return Err(format!(
+                                "no-op patch breaker: '{}' already had {} no-op patch failures. Force `replace_file` with a full rewritten file (do not use replace_range/replace_list until the file content actually changes).",
+                                rel, failures
+                            ));
+                        }
+                    }
                 }
 
                 // Deterministic application: compute intended file contents and use FullOverwrite fast-path.

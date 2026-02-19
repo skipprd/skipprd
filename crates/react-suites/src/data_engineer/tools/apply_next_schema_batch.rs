@@ -299,7 +299,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                 schema_yml_sys_prompt_staging(),
                 user_payload,
                 &yml_rel,
-                4,
+                6,
                 Some(LlmCallOptions {
                     prompt_id: "data_engineer.apply_next_schema_batch.staging_schema_patch",
                     thread_id: ctx.thread_id.clone(),
@@ -529,7 +529,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             schema_yml_sys_prompt_models_schema_yml(),
             user_payload,
             expected_rel,
-            4,
+            6,
             Some(LlmCallOptions {
                 prompt_id: "data_engineer.apply_next_schema_batch.models_schema_patch",
                 thread_id: ctx.thread_id.clone(),

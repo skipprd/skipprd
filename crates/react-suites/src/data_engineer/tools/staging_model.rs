@@ -72,6 +72,20 @@ fn emit_trace(ctx: &AgentCtx, line: impl Into<String>) {
     }
 }
 
+fn athena_alias_reuse_hint(msg: &str, model_rel_path: &str, dataset_id: &str) -> Option<Value> {
+    let m = msg.to_ascii_lowercase();
+    if !m.contains("select-list alias") {
+        return None;
+    }
+    Some(serde_json::json!({
+        "kind": "athena_select_alias_reuse",
+        "dataset_id": dataset_id,
+        "model_path": model_rel_path,
+        "issue": msg,
+        "fix": "Split into CTE + outer select: compute intermediate aliases in an inner CTE/subquery, then reference them only from the outer SELECT."
+    }))
+}
+
 #[derive(Clone)]
 pub struct StagingModelTool {
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
@@ -506,6 +520,7 @@ impl Tool for StagingModelTool {
         let mut written: Vec<String> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
+        let mut remediation_hints: Vec<Value> = Vec::new();
         let mut succeeded_dataset_ids: Vec<String> = Vec::new();
 
         if !deferred_dataset_ids.is_empty() {
@@ -726,7 +741,7 @@ impl Tool for StagingModelTool {
                 sys,
                 user,
                 &rel_path,
-                4,
+                6,
                 Some(LlmCallOptions {
                     prompt_id: "data_engineer.tools.staging_model.patch_loop",
                     thread_id: ctx.thread_id.clone(),
@@ -759,6 +774,9 @@ impl Tool for StagingModelTool {
                 errors.push(format!(
                     "{ds}: unsupported SQL for provider '{provider_name}': {msg}"
                 ));
+                if let Some(h) = athena_alias_reuse_hint(&msg, &rel_path, ds) {
+                    remediation_hints.push(h);
+                }
                 continue;
             }
 
@@ -807,6 +825,7 @@ impl Tool for StagingModelTool {
             "written_keys": written,
             "schema_key": schema_key,
             "notes": out_notes,
+            "remediation_hints": remediation_hints,
             "errors": errors,
             "deferred_dataset_ids": deferred_dataset_ids,
             "succeeded_dataset_ids": succeeded_dataset_ids,

@@ -70,6 +70,55 @@ fn extract_declared_columns_from_model_entry(model: &YamlValue) -> HashSet<Strin
     out
 }
 
+async fn collect_sql_model_name_collisions(
+    ctx: &AgentCtx,
+    limit: usize,
+) -> Result<Vec<(String, Vec<String>)>, String> {
+    let limit = limit.max(1).min(2000);
+    let base = ctx
+        .keyspace
+        .dbt_prefix(&ctx.scope)
+        .trim_end_matches('/')
+        .to_string();
+    let pref = format!("{}/models/", base);
+    let mut keys = ctx.storage.list_prefix(&pref).await.unwrap_or_default();
+    keys.sort();
+    let mut by_stem: HashMap<String, Vec<String>> = HashMap::new();
+    for key in keys.into_iter().filter(|k| k.ends_with(".sql")).take(limit) {
+        if key.contains("/_versions/") {
+            continue;
+        }
+        let rel = key
+            .strip_prefix(&(base.clone() + "/"))
+            .unwrap_or(key.as_str())
+            .to_string();
+        let stem = std::path::Path::new(&rel)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if stem.is_empty() {
+            continue;
+        }
+        by_stem.entry(stem).or_default().push(rel);
+    }
+    let mut out: Vec<(String, Vec<String>)> = by_stem
+        .into_iter()
+        .filter_map(|(stem, mut rels)| {
+            rels.sort();
+            rels.dedup();
+            if rels.len() > 1 {
+                Some((stem, rels))
+            } else {
+                None
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
 async fn collect_staging_model_names_from_ymls(
     ctx: &AgentCtx,
     limit: usize,
@@ -517,6 +566,18 @@ pub async fn normalize_schema_artifacts_for_validate(ctx: &AgentCtx) -> Result<V
 /// - No `stg_*` models are defined in `models/schema.yml`
 /// - All test dicts under any `tests:` list are single-key mappings
 pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), String> {
+    let sql_name_collisions = collect_sql_model_name_collisions(ctx, 2000).await?;
+    if !sql_name_collisions.is_empty() {
+        let lines: Vec<String> = sql_name_collisions
+            .into_iter()
+            .map(|(name, rels)| format!("{name}: {}", rels.join(" | ")))
+            .collect();
+        return Err(format!(
+            "duplicate SQL model names detected under models/**/*.sql (dbt model-name collision):\n- {}\n\nKeep each model name in exactly one canonical path before dbt_validate.",
+            lines.join("\n- ")
+        ));
+    }
+
     let key = project_fs::join_storage_key(ctx, project_files::MODELS_SCHEMA_YML);
     let schema_map: Option<serde_yaml::Mapping> = match ctx.storage.get_bytes(&key).await {
         Ok(bytes) => {
@@ -810,6 +871,29 @@ mod tests {
         let err = prevalidate_dbt_schema_artifacts(&ctx).await.unwrap_err();
         assert!(err.contains("stg_test_raw_raw_orders"));
         assert!(err.contains("models/staging/stg_test_raw_raw_orders"));
+    }
+
+    #[tokio::test]
+    async fn prevalidate_detects_duplicate_sql_model_stems() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone());
+
+        let marts_key = project_fs::join_storage_key(&ctx, "models/marts/fct_orders.sql");
+        ctx.storage
+            .put_bytes(&marts_key, b"select 1 as id", "text/sql")
+            .await
+            .unwrap();
+        let core_key = project_fs::join_storage_key(&ctx, "models/core/fct_orders.sql");
+        ctx.storage
+            .put_bytes(&core_key, b"select 2 as id", "text/sql")
+            .await
+            .unwrap();
+
+        let err = prevalidate_dbt_schema_artifacts(&ctx).await.unwrap_err();
+        assert!(err.contains("duplicate SQL model names"));
+        assert!(err.contains("fct_orders"));
+        assert!(err.contains("models/marts/fct_orders.sql"));
+        assert!(err.contains("models/core/fct_orders.sql"));
     }
 }
 

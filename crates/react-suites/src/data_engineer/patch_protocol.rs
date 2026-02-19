@@ -365,7 +365,7 @@ pub async fn llm_patch_loop_single_file(
     max_iters: usize,
     llm_options: Option<LlmCallOptions>,
 ) -> Result<(project_fs::PatchOutcome, Vec<String>), String> {
-    let max_iters = max_iters.max(1).min(6);
+    let max_iters = max_iters.max(1).min(10);
     let enforce_analyst_notes_contract = sys_prompt.contains("ANALYST_NOTES_CONTRACT_V1");
 
     let base = ctx
@@ -400,7 +400,7 @@ pub async fn llm_patch_loop_single_file(
         "existing_content_with_line_numbers": existing_content_with_line_numbers,
         "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
         "input": user_payload_value,
-        "instruction": "Return a single JSON object matching schema patch_protocol.single_file.v1. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. Prefer replace_file when possible. The patch MUST modify ONLY expected_rel_path. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
+        "instruction": "Return a single JSON object matching schema patch_protocol.single_file.v1. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. Prefer replace_file when possible. The patch MUST modify ONLY expected_rel_path. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. If prior attempts produced no-op patches, switch to replace_file full rewrite. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
     })
     .to_string();
 
@@ -430,6 +430,8 @@ pub async fn llm_patch_loop_single_file(
 
     let mut last_err: Option<String> = None;
     let mut bumped_output_budget = false;
+    let mut no_op_failures = 0usize;
+    let no_op_breaker_threshold = 2usize;
     for attempt in 1..=max_iters {
         let resp = ctx.llm.chat(&messages, &call_opts);
         let resp_text = match resp {
@@ -657,6 +659,12 @@ pub async fn llm_patch_loop_single_file(
                 excerpt_for_error(&resp_text, 2000)
             ));
         } else {
+            if no_op_failures >= no_op_breaker_threshold && parsed.replace_file.is_none() {
+                last_err = Some(format!(
+                    "no-op patch breaker: {} consecutive no-op patches for '{}'. Return replace_file with a full rewritten file.",
+                    no_op_failures, expected_rel_path
+                ));
+            } else {
             // Optional content contract gates (opt-in via sys_prompt sentinel).
             let gate_err: Option<String> = if enforce_analyst_notes_contract {
                 has_required_analyst_notes(&parsed.notes).err()
@@ -678,7 +686,7 @@ pub async fn llm_patch_loop_single_file(
                     "existing_content_with_line_numbers": existing_content_with_line_numbers,
                     "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
                     "previous_response": parsed,
-                    "instruction": "Return ONLY corrected JSON. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. The patch MUST modify ONLY expected_rel_path. Prefer replace_file when possible. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
+                    "instruction": "Return ONLY corrected JSON. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. The patch MUST modify ONLY expected_rel_path. Prefer replace_file when possible. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. If prior attempts produced no-op patches, switch to replace_file full rewrite. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
                 })
                 .to_string();
                 messages.push(ChatMessage {
@@ -751,11 +759,22 @@ pub async fn llm_patch_loop_single_file(
                     )
                     .await
                     {
-                        Ok(outcome) => return Ok((outcome, parsed.notes)),
+                        Ok(outcome) => {
+                            if outcome.base_sha256 == outcome.new_sha256 {
+                                no_op_failures = no_op_failures.saturating_add(1);
+                                last_err = Some(format!(
+                                    "patch produced no file changes for '{}' (consecutive_noops={}).",
+                                    expected_rel_path, no_op_failures
+                                ));
+                            } else {
+                                return Ok((outcome, parsed.notes));
+                            }
+                        }
                         Err(e) => last_err = Some(e),
                     }
                 }
                 Err(e) => last_err = Some(e),
+            }
             }
         }
 
@@ -766,6 +785,7 @@ pub async fn llm_patch_loop_single_file(
         let repair = serde_json::json!({
             "attempt": attempt,
             "error": err,
+            "consecutive_noop_patches": no_op_failures,
             "expected_rel_path": expected_rel_path,
             "base_sha256": base_sha256,
             "base_exists": existed,
@@ -775,7 +795,7 @@ pub async fn llm_patch_loop_single_file(
             "existing_content_with_line_numbers": existing_content_with_line_numbers,
             "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
             "previous_response": parsed,
-            "instruction": "Return ONLY corrected JSON. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. The patch MUST modify ONLY expected_rel_path. Prefer replace_file when possible. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
+            "instruction": "Return ONLY corrected JSON. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. The patch MUST modify ONLY expected_rel_path. Prefer replace_file when possible. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. If consecutive_noop_patches >= 2, you MUST use replace_file and rewrite the full file content. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
         })
         .to_string();
         messages.push(ChatMessage {
