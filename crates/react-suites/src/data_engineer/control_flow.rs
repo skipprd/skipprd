@@ -595,6 +595,61 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
     out
 }
 
+fn is_cleanse_replan_backtrack(from: Phase, to: Phase) -> bool {
+    matches!(from, Phase::CleanseValidate | Phase::CleanseReview)
+        && matches!(to, Phase::CleansePlan | Phase::CleanseAuthor)
+}
+
+fn is_model_replan_backtrack(from: Phase, to: Phase) -> bool {
+    matches!(
+        from,
+        Phase::ModelValidate | Phase::ModelReview | Phase::PostPublishReview
+    ) && matches!(to, Phase::ModelPlan | Phase::ModelAuthor)
+}
+
+/// Count validate/review -> plan/author backtracks for the active track.
+///
+/// This is used to stop threads that repeatedly loop without meaningful phase progress.
+pub fn replan_backtrack_count_for_phase(log: Option<&ThreadLog>, phase: Phase) -> usize {
+    let Some(log) = log else { return 0 };
+    let mut count = 0usize;
+    for step in log.steps.iter() {
+        let ThreadStep::Phase {
+            phase: to_phase,
+            from_phase: Some(from_phase),
+            ..
+        } = step
+        else {
+            continue;
+        };
+        let Some(from) = Phase::from_str(from_phase) else {
+            continue;
+        };
+        let Some(to) = Phase::from_str(to_phase) else {
+            continue;
+        };
+        let hit = match phase {
+            Phase::CleansePlan
+            | Phase::CleanseAuthor
+            | Phase::CleanseValidate
+            | Phase::CleanseReview => is_cleanse_replan_backtrack(from, to),
+            Phase::ModelPlan
+            | Phase::ModelAuthor
+            | Phase::ModelValidate
+            | Phase::ModelReview
+            | Phase::PublishAwaitApproval
+            | Phase::Publish
+            | Phase::PostPublishReview
+            | Phase::Done => is_model_replan_backtrack(from, to),
+            Phase::Preflight => false,
+        };
+        if hit {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
 #[derive(Clone, Debug)]
 pub enum AuthoringGate {
     Allow,
@@ -1204,6 +1259,86 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(phase_from_log(Some(&log)), Phase::ModelAuthor);
+    }
+
+    #[test]
+    fn replan_backtrack_count_counts_cleanse_loopbacks_only() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"cleanse_author","from_phase":"cleanse_plan"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"cleanse_validate","from_phase":"cleanse_author"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"cleanse_author","from_phase":"cleanse_validate"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"cleanse_review","from_phase":"cleanse_validate"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"cleanse_plan","from_phase":"cleanse_review"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                // Forward progression to model should NOT be counted as a cleanse loopback.
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_plan","from_phase":"cleanse_review"}),
+                    serde_json::json!({"ok":true}),
+                ),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(replan_backtrack_count_for_phase(Some(&log), Phase::CleanseAuthor), 2);
+    }
+
+    #[test]
+    fn replan_backtrack_count_counts_model_loopbacks_only() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_author","from_phase":"model_plan"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_validate","from_phase":"model_author"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_author","from_phase":"model_validate"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_review","from_phase":"model_validate"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_plan","from_phase":"model_review"}),
+                    serde_json::json!({"ok":true}),
+                ),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(replan_backtrack_count_for_phase(Some(&log), Phase::ModelAuthor), 2);
+        assert_eq!(
+            replan_backtrack_count_for_phase(Some(&log), Phase::CleanseAuthor),
+            0
+        );
     }
 
     #[test]

@@ -2434,6 +2434,12 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
             .unwrap_or(60)
             .max(12)
             .min(400);
+        let max_replan_backtracks: usize = std::env::var("AGENT_MAX_REPLAN_BACKTRACKS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(4)
+            .max(2)
+            .min(20);
 
         let phase_index = |p: Phase| -> usize {
             match p {
@@ -2483,6 +2489,28 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                 Phase::CleansePlan | Phase::ModelPlan => true,
                 _ => Self::allow_ask_approval_in_phase(log.as_ref(), phase),
             };
+            let replan_backtracks =
+                control_flow::replan_backtrack_count_for_phase(log.as_ref(), phase);
+            if replan_backtracks >= max_replan_backtracks {
+                let stop_msg = format!(
+                    "failed to make progress for this thread: observed {} validate/review loopback(s) to plan/author in phase track '{}' (limit {}). Stopping this thread. Please inspect the latest validate/review errors and apply a targeted fix before rerunning.",
+                    replan_backtracks,
+                    phase.as_str(),
+                    max_replan_backtracks
+                );
+                let step = react_core::session::ThreadStep::GuardBlock {
+                    phase: phase.as_str().to_string(),
+                    kind: GuardBlockKind::BatchLocked,
+                    reason: stop_msg.clone(),
+                    observation: react_core::session::Observation::fail(vec![
+                        "progress_stalled".to_string(),
+                    ]),
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    agent: "agent".to_string(),
+                };
+                let _ = thread_store.append_step(thread_id, step).await;
+                return Err(stop_msg);
+            }
 
             // Helper: most recent dbt_validate error context (for prompt grounding).
             let mut last_validate_brief: Option<String> = None;
