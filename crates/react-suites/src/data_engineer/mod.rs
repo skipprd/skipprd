@@ -5700,6 +5700,45 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         }
                     };
 
+                    // Pre-validate normalization: dedupe/merge repeated model+test definitions to
+                    // avoid deterministic compile loops before dbt_validate.
+                    if let Err(e) =
+                        crate::data_engineer::schema_policy::normalize_schema_artifacts_for_validate(
+                            &actx,
+                        )
+                        .await
+                    {
+                        let reason = format!(
+                            "Pre-validation normalization failed; fix DBT YAML artifacts before re-validating.\n\n{e}"
+                        );
+                        let ts = chrono::Utc::now().to_rfc3339();
+                        let step = react_core::session::ThreadStep::GuardBlock {
+                            phase: phase.as_str().to_string(),
+                            kind: GuardBlockKind::PrecheckFailed,
+                            reason: reason.clone(),
+                            observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                            ts,
+                            agent: "agent".to_string(),
+                        };
+                        let _ = thread_store.append_step(thread_id, step).await;
+                        let to_phase = if phase == Phase::CleanseValidate {
+                            Phase::CleanseAuthor
+                        } else {
+                            Phase::ModelAuthor
+                        };
+                        let _ = control_flow::append_phase_with_reason(
+                            &thread_store,
+                            thread_id,
+                            Some("agent".to_string()),
+                            Some(phase),
+                            to_phase,
+                            Some(PhaseReasonCode::PrecheckFailed),
+                            Some(serde_json::json!({ "error": e })),
+                        )
+                        .await;
+                        continue;
+                    }
+
                     // Cheap structural prechecks: fail fast on malformed/duplicated schema artifacts
                     // instead of burning a full dbt_validate cycle.
                     if let Err(e) = crate::data_engineer::schema_policy::prevalidate_dbt_schema_artifacts(&actx).await {

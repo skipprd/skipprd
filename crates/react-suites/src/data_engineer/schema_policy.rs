@@ -51,6 +51,25 @@ fn extract_model_names_from_yml_text(yml_text: &str) -> Result<HashSet<String>, 
     Ok(out)
 }
 
+fn extract_declared_columns_from_model_entry(model: &YamlValue) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let Some(cols) = model.get("columns").and_then(|v| v.as_sequence()) else {
+        return out;
+    };
+    for c in cols.iter() {
+        let Some(n) = c
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        out.insert(n);
+    }
+    out
+}
+
 async fn collect_staging_model_names_from_ymls(
     ctx: &AgentCtx,
     limit: usize,
@@ -278,6 +297,219 @@ pub fn sanitize_models_schema_yml(
     Ok((out, warnings))
 }
 
+fn yaml_norm_key(v: &YamlValue) -> String {
+    serde_yaml::to_string(v).unwrap_or_else(|_| format!("{v:?}"))
+}
+
+fn dedupe_yaml_seq(seq: &mut Vec<YamlValue>) -> usize {
+    let mut seen: HashSet<String> = HashSet::new();
+    let before = seq.len();
+    seq.retain(|v| seen.insert(yaml_norm_key(v)));
+    before.saturating_sub(seq.len())
+}
+
+fn merge_model_entry(existing: &mut serde_yaml::Mapping, incoming: &serde_yaml::Mapping) {
+    // Merge model-level tests.
+    if let Some(YamlValue::Sequence(src_tests)) = incoming.get("tests") {
+        let dst = existing
+            .entry("tests".into())
+            .or_insert_with(|| YamlValue::Sequence(vec![]));
+        if let YamlValue::Sequence(dst_tests) = dst {
+            dst_tests.extend(src_tests.iter().cloned());
+            let _ = dedupe_yaml_seq(dst_tests);
+        }
+    }
+
+    // Merge columns by name; keep first-seen metadata, append/dedupe tests.
+    if let Some(YamlValue::Sequence(src_cols)) = incoming.get("columns") {
+        let dst = existing
+            .entry("columns".into())
+            .or_insert_with(|| YamlValue::Sequence(vec![]));
+        if let YamlValue::Sequence(dst_cols) = dst {
+            let mut by_name: HashMap<String, usize> = HashMap::new();
+            for (idx, c) in dst_cols.iter().enumerate() {
+                let name = c
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                if let Some(n) = name {
+                    by_name.entry(n).or_insert(idx);
+                }
+            }
+            for c in src_cols.iter() {
+                let Some(src_map) = c.as_mapping() else {
+                    continue;
+                };
+                let name = src_map
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                let Some(name) = name else {
+                    continue;
+                };
+                if let Some(&dst_idx) = by_name.get(&name) {
+                    let Some(dst_map) = dst_cols[dst_idx].as_mapping_mut() else {
+                        continue;
+                    };
+                    for k in ["description", "data_type"] {
+                        if !dst_map.contains_key(k) {
+                            if let Some(v) = src_map.get(k) {
+                                dst_map.insert(k.to_string().into(), v.clone());
+                            }
+                        }
+                    }
+                    if let Some(YamlValue::Sequence(src_tests)) = src_map.get("tests") {
+                        let dst_tests_v = dst_map
+                            .entry("tests".into())
+                            .or_insert_with(|| YamlValue::Sequence(vec![]));
+                        if let YamlValue::Sequence(dst_tests) = dst_tests_v {
+                            dst_tests.extend(src_tests.iter().cloned());
+                            let _ = dedupe_yaml_seq(dst_tests);
+                        }
+                    }
+                } else {
+                    dst_cols.push(c.clone());
+                    by_name.insert(name, dst_cols.len().saturating_sub(1));
+                }
+            }
+        }
+    }
+}
+
+fn normalize_model_yaml_doc_for_dedupe(
+    yml_text: &str,
+    rel_path: &str,
+) -> Result<(String, Vec<String>), String> {
+    let mut root: YamlValue =
+        serde_yaml::from_str(yml_text).map_err(|e| format!("{rel_path} parse error: {e}"))?;
+    let Some(map) = yaml_as_mapping_mut(&mut root) else {
+        return Ok((yml_text.to_string(), vec![]));
+    };
+    let Some(models_v) = map.get_mut("models") else {
+        return Ok((yml_text.to_string(), vec![]));
+    };
+    let Some(models_seq) = models_v.as_sequence_mut() else {
+        return Ok((yml_text.to_string(), vec![]));
+    };
+
+    let mut warnings: Vec<String> = Vec::new();
+    let mut out: Vec<YamlValue> = Vec::new();
+    let mut by_name: HashMap<String, usize> = HashMap::new();
+    for m in models_seq.drain(..) {
+        let Some(mm) = m.as_mapping() else {
+            out.push(m);
+            continue;
+        };
+        let name = mm
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let Some(name) = name else {
+            out.push(m);
+            continue;
+        };
+        if let Some(&idx) = by_name.get(&name) {
+            if let Some(dst_map) = out[idx].as_mapping_mut() {
+                merge_model_entry(dst_map, mm);
+                warnings.push(format!(
+                    "{rel_path}: merged duplicate model entry '{name}' under models[]"
+                ));
+            }
+        } else {
+            out.push(m);
+            by_name.insert(name, out.len().saturating_sub(1));
+        }
+    }
+
+    // Also dedupe test blocks inside each model/column.
+    for m in out.iter_mut() {
+        let Some(mm) = m.as_mapping_mut() else { continue };
+        if let Some(YamlValue::Sequence(tests)) = mm.get_mut("tests") {
+            let removed = dedupe_yaml_seq(tests);
+            if removed > 0 {
+                warnings.push(format!("{rel_path}: removed {removed} duplicate model-level test(s)"));
+            }
+        }
+        if let Some(YamlValue::Sequence(cols)) = mm.get_mut("columns") {
+            for c in cols.iter_mut() {
+                let Some(cm) = c.as_mapping_mut() else { continue };
+                if let Some(YamlValue::Sequence(tests)) = cm.get_mut("tests") {
+                    let removed = dedupe_yaml_seq(tests);
+                    if removed > 0 {
+                        let col = cm
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(unknown)");
+                        warnings.push(format!(
+                            "{rel_path}: removed {removed} duplicate test(s) for column '{col}'"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    *models_seq = out;
+    let rendered = serde_yaml::to_string(&root)
+        .map_err(|e| format!("failed to render {rel_path}: {e}"))?
+        .trim_start_matches("---\n")
+        .to_string();
+    Ok((rendered, warnings))
+}
+
+/// Normalize DBT schema YAML artifacts before validate/build to avoid deterministic compile loops
+/// from duplicate model/test definitions.
+pub async fn normalize_schema_artifacts_for_validate(ctx: &AgentCtx) -> Result<Vec<String>, String> {
+    let mut notes: Vec<String> = Vec::new();
+    let schema_rel = project_files::MODELS_SCHEMA_YML;
+    let schema_key = project_fs::join_storage_key(ctx, schema_rel);
+    if let Ok(bytes) = ctx.storage.get_bytes(&schema_key).await {
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let (normalized, mut warn) = normalize_model_yaml_doc_for_dedupe(&text, schema_rel)?;
+        if normalized != text {
+            ctx.storage
+                .put_bytes(&schema_key, normalized.as_bytes(), "text/yaml")
+                .await
+                .map_err(|e| format!("failed to write {schema_rel}: {e}"))?;
+            notes.push(format!("normalized duplicate model/test entries in {schema_rel}"));
+        }
+        notes.append(&mut warn);
+    }
+
+    let base = ctx
+        .keyspace
+        .dbt_prefix(&ctx.scope)
+        .trim_end_matches('/')
+        .to_string();
+    let pref = format!("{}/models/staging/", base);
+    let mut keys = ctx.storage.list_prefix(&pref).await.unwrap_or_default();
+    keys.sort();
+    for key in keys.into_iter().filter(|k| k.ends_with(".yml")) {
+        let rel = key
+            .strip_prefix(&(base.clone() + "/"))
+            .unwrap_or(key.as_str())
+            .to_string();
+        let bytes = match ctx.storage.get_bytes(&key).await {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let (normalized, mut warn) = normalize_model_yaml_doc_for_dedupe(&text, &rel)?;
+        if normalized != text {
+            ctx.storage
+                .put_bytes(&key, normalized.as_bytes(), "text/yaml")
+                .await
+                .map_err(|e| format!("failed to write {rel}: {e}"))?;
+            notes.push(format!("normalized duplicate model/test entries in {rel}"));
+        }
+        notes.append(&mut warn);
+    }
+    Ok(notes)
+}
+
 /// Cheap structural prechecks to avoid burning dbt_validate cycles on trivial YAML issues.
 ///
 /// Checks:
@@ -286,20 +518,26 @@ pub fn sanitize_models_schema_yml(
 /// - All test dicts under any `tests:` list are single-key mappings
 pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), String> {
     let key = project_fs::join_storage_key(ctx, project_files::MODELS_SCHEMA_YML);
-    let bytes = match ctx.storage.get_bytes(&key).await {
-        Ok(b) => b,
-        Err(_) => return Ok(()), // missing schema.yml is fine for early projects
-    };
-    let text = String::from_utf8_lossy(&bytes).to_string();
-    let root: YamlValue =
-        serde_yaml::from_str(&text).map_err(|e| format!("models/schema.yml parse error: {e}"))?;
-    let YamlValue::Mapping(map) = root else {
-        return Err("models/schema.yml root must be a mapping".to_string());
+    let schema_map: Option<serde_yaml::Mapping> = match ctx.storage.get_bytes(&key).await {
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            let root: YamlValue = serde_yaml::from_str(&text)
+                .map_err(|e| format!("models/schema.yml parse error: {e}"))?;
+            let YamlValue::Mapping(map) = root else {
+                return Err("models/schema.yml root must be a mapping".to_string());
+            };
+            Some(map)
+        }
+        Err(_) => None, // missing schema.yml is fine for early projects
     };
     let staging_yml_model_names =
         collect_staging_model_names_from_ymls(ctx, 200).await.unwrap_or_default();
     let mut schema_model_names: HashSet<String> = HashSet::new();
-    if let Some(YamlValue::Sequence(models)) = map.get("models") {
+    if let Some(models) = schema_map
+        .as_ref()
+        .and_then(|m| m.get("models"))
+        .and_then(|v| v.as_sequence())
+    {
         for m in models.iter() {
             let Some(name) = m
                 .get("name")
@@ -348,6 +586,78 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Stri
             "duplicate model definitions detected in both models/schema.yml and models/staging/*.yml: {}. Keep staging docs/tests in models/staging/*.yml and gold docs/tests in models/schema.yml only.",
             dup.join(", ")
         ));
+    }
+
+    // Staging schema guards: parse each staging YAML and ensure declared columns exist
+    // in the corresponding staging SQL output.
+    let base = ctx
+        .keyspace
+        .dbt_prefix(&ctx.scope)
+        .trim_end_matches('/')
+        .to_string();
+    let pref = format!("{}/models/staging/", base);
+    let mut keys = ctx.storage.list_prefix(&pref).await.unwrap_or_default();
+    keys.sort();
+    for key in keys.into_iter().filter(|k| k.ends_with(".yml")) {
+        let rel = key
+            .strip_prefix(&(base.clone() + "/"))
+            .unwrap_or(key.as_str())
+            .to_string();
+        let bytes = ctx
+            .storage
+            .get_bytes(&key)
+            .await
+            .map_err(|e| format!("failed to read {rel}: {e}"))?;
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let root: YamlValue =
+            serde_yaml::from_str(&text).map_err(|e| format!("invalid YAML in {rel}: {e}"))?;
+        let Some(models) = root.get("models").and_then(|v| v.as_sequence()) else {
+            continue;
+        };
+        for model in models.iter() {
+            let Some(name) = model
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let declared = extract_declared_columns_from_model_entry(model);
+            if declared.is_empty() {
+                continue;
+            }
+            let sql_rel = format!("models/staging/{name}.sql");
+            let sql_key = project_fs::join_storage_key(ctx, &sql_rel);
+            let sql_bytes = ctx.storage.get_bytes(&sql_key).await.map_err(|_| {
+                format!(
+                    "cannot validate {rel}: missing staging SQL {sql_rel} for model '{name}'"
+                )
+            })?;
+            let sql_text = String::from_utf8_lossy(&sql_bytes).to_string();
+            let allowed =
+                crate::data_engineer::tools::dbt_files::extract_final_select_output_columns(
+                    &sql_text,
+                )
+                .map_err(|e| {
+                    format!(
+                        "cannot validate {rel} against {sql_rel} (model '{name}'): {}",
+                        e.trim()
+                    )
+                })?;
+            let mut unknown: Vec<String> = declared
+                .into_iter()
+                .filter(|c| !allowed.contains(c))
+                .collect();
+            unknown.sort();
+            unknown.dedup();
+            if !unknown.is_empty() {
+                return Err(format!(
+                    "staging schema references unknown columns for model '{name}'.\nFile: {rel}\nStaging SQL: {sql_rel}\nUnknown columns:\n- {}\n\nFix: update staging SQL outputs or remove/rename these YAML columns before dbt_validate.",
+                    unknown.join("\n- ")
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -444,6 +754,62 @@ mod tests {
 
         let err = prevalidate_dbt_schema_artifacts(&ctx).await.unwrap_err();
         assert!(err.contains("duplicate model definitions"));
+    }
+
+    #[tokio::test]
+    async fn normalize_schema_artifacts_merges_duplicate_model_entries() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone());
+        let schema_key = project_fs::join_storage_key(&ctx, project_files::MODELS_SCHEMA_YML);
+        ctx.storage
+            .put_bytes(
+                &schema_key,
+                b"version: 2\nmodels:\n  - name: dim_orders\n    tests:\n      - not_null\n    columns:\n      - name: order_id\n        tests:\n          - not_null\n  - name: dim_orders\n    tests:\n      - not_null\n    columns:\n      - name: order_id\n        tests:\n          - not_null\n      - name: customer_id\n        tests:\n          - not_null\n",
+                "text/yaml",
+            )
+            .await
+            .unwrap();
+
+        let notes = normalize_schema_artifacts_for_validate(&ctx)
+            .await
+            .expect("normalize ok");
+        assert!(!notes.is_empty());
+
+        let got = String::from_utf8_lossy(&ctx.storage.get_bytes(&schema_key).await.unwrap()).to_string();
+        // Only one model stanza remains.
+        assert_eq!(got.matches("name: dim_orders").count(), 1);
+        assert!(got.contains("customer_id"));
+    }
+
+    #[tokio::test]
+    async fn prevalidate_detects_unknown_columns_in_staging_yml_against_sql() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone());
+
+        let sql_key =
+            project_fs::join_storage_key(&ctx, "models/staging/stg_test_raw_raw_orders.sql");
+        ctx.storage
+            .put_bytes(
+                &sql_key,
+                b"select 1 as order_id, 'x' as placed_at_raw",
+                "text/sql",
+            )
+            .await
+            .unwrap();
+        let yml_key =
+            project_fs::join_storage_key(&ctx, "models/staging/stg_test_raw_raw_orders.yml");
+        ctx.storage
+            .put_bytes(
+                &yml_key,
+                b"version: 2\nmodels:\n  - name: stg_test_raw_raw_orders\n    columns:\n      - name: order_id\n      - name: missing_col\n",
+                "text/yaml",
+            )
+            .await
+            .unwrap();
+
+        let err = prevalidate_dbt_schema_artifacts(&ctx).await.unwrap_err();
+        assert!(err.contains("stg_test_raw_raw_orders"));
+        assert!(err.contains("models/staging/stg_test_raw_raw_orders"));
     }
 }
 

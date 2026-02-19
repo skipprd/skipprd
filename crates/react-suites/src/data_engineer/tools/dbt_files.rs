@@ -949,6 +949,70 @@ fn validate_patch_args_shape(args: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn normalize_patch_contract_args(args: &Value) -> Result<Value, String> {
+    let mut root = args
+        .as_object()
+        .cloned()
+        .ok_or_else(|| patch_contract_error("args must be a JSON object"))?;
+    let fallback_path = root
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    fn normalize_entry(
+        v: &mut Value,
+        key: &str,
+        fallback_path: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(obj) = v.as_object_mut() else {
+            return Err(patch_contract_error(&format!(
+                "{key} must be an object or array of objects"
+            )));
+        };
+        // Backward compatibility for stale payloads: map base_sha256 -> expected_sha256.
+        if let Some(base) = obj
+            .remove("base_sha256")
+            .and_then(|x| x.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+        {
+            let needs_expected = obj
+                .get("expected_sha256")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true);
+            if needs_expected {
+                obj.insert("expected_sha256".to_string(), Value::String(base));
+            }
+        }
+        if !obj.contains_key("path") {
+            if let Some(p) = fallback_path {
+                obj.insert("path".to_string(), Value::String(p.to_string()));
+            } else {
+                return Err(patch_contract_error(&format!(
+                    "{key} item missing required field `path` (and no top-level path provided)"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    for key in ["replace_file", "replace_range", "replace_list"] {
+        let Some(v) = root.get_mut(key) else { continue };
+        if v.is_null() {
+            continue;
+        }
+        if let Some(arr) = v.as_array_mut() {
+            for it in arr.iter_mut() {
+                normalize_entry(it, key, fallback_path.as_deref())?;
+            }
+        } else {
+            normalize_entry(v, key, fallback_path.as_deref())?;
+        }
+    }
+    Ok(Value::Object(root))
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReplaceFileArgs {
@@ -1085,6 +1149,7 @@ impl Tool for DbtFilesTool {
             }
             "patch" => {
                 validate_patch_args_shape(&args)?;
+                let args = normalize_patch_contract_args(&args)?;
 
                 // Optional single-file guard: if provided, ensure the patch bundle targets exactly this rel path.
                 let want_rel_path = args
@@ -1627,6 +1692,51 @@ mod tests {
             .unwrap_err();
         assert!(err.to_lowercase().contains("contract violation"));
         assert!(err.to_lowercase().contains("replace_file"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_normalizes_base_sha256_to_expected_sha256() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let obs = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "replace_file": {
+                        "path": "models/x.sql",
+                        "new_text": "select 1\n",
+                        "base_sha256": "deadbeef"
+                    }
+                }),
+                &ctx,
+            )
+            .await;
+        let err = obs.unwrap_err();
+        assert!(err.contains("expected_sha256 mismatch"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_uses_top_level_path_for_missing_item_path() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let obs = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/x.sql",
+                    "replace_file": {
+                        "new_text": "select 1\n"
+                    }
+                }),
+                &ctx,
+            )
+            .await
+            .expect("patch ok");
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
     }
 
     #[tokio::test]

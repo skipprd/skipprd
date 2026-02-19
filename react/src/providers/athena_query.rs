@@ -467,12 +467,14 @@ impl WarehouseNaming for AthenaQueryProvider {
     fn sql_prompt_rules(&self) -> Vec<&'static str> {
         vec![
             "If Provider is athena (Trino SQL), DO NOT use initcap() (it is not registered). Avoid title-casing strings.",
+            "If Provider is athena (Trino SQL), DO NOT use try_to_timestamp() (it is not registered). Use try_cast(<expr> AS timestamp) instead.",
             "If Provider is athena (Trino SQL), never reference a SELECT-list alias inside another expression in the same SELECT list. If one derived field depends on another, split into CTE/subquery + outer SELECT.",
         ]
     }
 
     fn sql_remediation_rules(&self) -> Vec<&'static str> {
         vec![
+            "Trino/Athena function rule: try_to_timestamp() is not registered. Replace with try_cast(<expr> AS timestamp) (or CAST where strict parsing is intended).",
             "Trino/Athena rule: you cannot reference a SELECT-list alias in another expression in the same SELECT list. If one derived field depends on another, compute base fields in a CTE/subquery and use an outer SELECT.",
         ]
     }
@@ -482,6 +484,12 @@ impl WarehouseNaming for AthenaQueryProvider {
         if s.contains("initcap(") {
             return Some(
                 "initcap() is not supported on Athena/Trino; remove it (use trim/lower/upper, or leave casing unchanged)."
+                    .to_string(),
+            );
+        }
+        if s.contains("try_to_timestamp(") {
+            return Some(
+                "try_to_timestamp() is not supported on Athena/Trino; replace it with try_cast(<expr> AS timestamp) (or CAST for strict parsing)."
                     .to_string(),
             );
         }
