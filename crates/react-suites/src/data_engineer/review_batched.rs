@@ -250,7 +250,7 @@ Rules:
 - Be pragmatic, not pedantic. Focus on business correctness and usability.
 - Do NOT suggest edits in-line; just describe risks/gaps.
 - Keep notes concise and high-signal.
-- Tier focus (CRITICAL): this is a SILVER/staging (cleanse) review. Do NOT penalize missing GOLD/marts models.
+- Tier focus (CRITICAL): this is a SILVER (cleanse) review. Do NOT penalize missing GOLD models.
 - Insightfulness check (CRITICAL):
   - Call out whether the SILVER layer is usable as a stable, row-preserving cleanse foundation (explicit fields, safe casting, quality flags, stable naming).
   - If you mention GOLD at all, frame it as an optional future improvement, not a blocker."#
@@ -314,7 +314,7 @@ Rules:
 - Prefer concrete feedback tied to specific models/columns when visible.
 - IMPORTANT: Do NOT suggest adding/selecting fields that are not present in the provided authoritative schema.
   If a desired field is missing from the schema, call that out as a gap and suggest the nearest available alternative.
-- Tier focus (CRITICAL): this is a SILVER/staging (cleanse) review. Do NOT critique missing GOLD/marts models.
+- Tier focus (CRITICAL): this is a SILVER (cleanse) review. Do NOT critique missing GOLD models.
 - Each finding must be decision-oriented and include:
   - Impacted metric/decision.
   - Concrete evidence from provided SQL/schema.
@@ -388,7 +388,7 @@ Interpretation rules (CRITICAL):
   - If decision="patch_plan", final_review_text MUST be limited to describing the plan defect and the smallest fix to the plan/spec.
   - Do NOT propose implementation edits that deviate from the current plan/spec.
 
-Tier rules: this is a SILVER/staging (cleanse) review. Set tier="silver".
+Tier rules: this is a SILVER (cleanse) review. Set tier="silver".
 
 Unify requirements (CRITICAL):
 - Produce a concise, business-focused review that prioritizes decision usefulness.
@@ -757,7 +757,7 @@ async fn load_global_semantic_context_json(
 
 fn include_global_semantic_context(phase: Phase) -> bool {
     // Global semantic context is intended for GOLD model planning/review and post-publish review only.
-    // It must not be injected into cleanse (silver/staging) prompts.
+    // It must not be injected into cleanse (silver) prompts.
     matches!(phase, Phase::ModelReview | Phase::PostPublishReview)
 }
 

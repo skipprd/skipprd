@@ -100,7 +100,7 @@ fn build_gold_sys_prompt(
          \n\
          CRITICAL gold rules:\n\
          - You MUST write a SELECT-based dbt model.\n\
-         - Gold models MUST ONLY read from silver/staging models using ref('stg_*').\n\
+         - Gold models MUST ONLY read from silver models under models/staging/ using ref('stg_*').\n\
          - Gold models MUST NOT call source() anywhere.\n\
          - IMPORTANT: The user payload may include plan invariants/notes; invariants are hard requirements.\n\
          - Prefer minimal, stable columns for business use; do not invent fields.\n\
@@ -514,7 +514,7 @@ impl Tool for GoldModelTool {
             }
             if !naming::contains_ref_call(&outcome.content) {
                 errors.push(format!(
-                    "{name}: invalid gold SQL after patch apply: must reference at least one silver/staging model via ref('stg_*')."
+                    "{name}: invalid gold SQL after patch apply: must reference at least one silver model under models/staging/ via ref('stg_*')."
                 ));
                 continue;
             }

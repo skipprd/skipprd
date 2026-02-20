@@ -1403,18 +1403,18 @@ fn validate_model_sql_identity(rel: &str, content: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    // Staging/silver: enforce strict 1:1 mapping between model file and source().
+    // Silver: enforce strict 1:1 mapping between model file and source().
     if rel.starts_with("models/staging/") {
         let sources = naming::extract_source_calls(content);
         if sources.is_empty() {
             return Err(format!(
-                "invalid staging model SQL at '{}': staging models must contain exactly one dbt source() call and be written to the canonical path models/staging/stg_<source_schema>_<source_table>.sql",
+                "invalid silver model SQL at '{}': silver models under models/staging/ must contain exactly one dbt source() call and be written to the canonical path models/staging/stg_<source_schema>_<source_table>.sql",
                 rel
             ));
         }
         if sources.len() != 1 {
             return Err(format!(
-                "invalid staging model SQL at '{}': staging models must reference exactly ONE source(schema, table). Found: {:?}",
+                "invalid silver model SQL at '{}': silver models under models/staging/ must reference exactly ONE source(schema, table). Found: {:?}",
                 rel, sources
             ));
         }
@@ -1422,7 +1422,7 @@ fn validate_model_sql_identity(rel: &str, content: &str) -> Result<(), String> {
         let canonical = naming::canonical_staging_rel_path(schema, table);
         if rel != canonical {
             return Err(format!(
-                "invalid staging model path: staging model for source(\"{}\",\"{}\") must be written to '{}' (canonical), but attempted to write '{}'. Rename the file to the canonical path (no alternate naming schemes are permitted).",
+                "invalid silver model path: silver model for source(\"{}\",\"{}\") must be written to '{}' (canonical), but attempted to write '{}'. Rename the file to the canonical path (no alternate naming schemes are permitted).",
                 schema, table, canonical, rel
             ));
         }

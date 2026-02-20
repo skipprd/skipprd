@@ -133,7 +133,7 @@ fn build_staging_sys_prompt(
 ) -> String {
     format!(
         "You are an expert analytics engineer.\n\
-         Task: author a dbt *staging/silver* model for ONE source dataset.\n\
+         Task: author a dbt *silver* model (models/staging/) for ONE source dataset.\n\
          Provider: {provider}\n\
          Dialect: {dialect}\n\
          Requirements:\n\
@@ -165,7 +165,7 @@ fn build_staging_sys_prompt(
              - Keep NULLs and add quality flags (e.g. is_valid_*) where helpful.\n\
              - Recommend conditional dbt tests (with where:) only when raw input is present, and document why.\n\
            - IMPORTANT: Never recommend an unconditional not_null test on a try_cast-produced field; cast failures legitimately yield NULL.\n\
-         - Silver/staging must be row-preserving:\n\
+         - Silver must be row-preserving:\n\
            - Do NOT enforce grains/primary keys in silver (no deduping, no windowing row_number(), no filtering to non-null IDs).\n\
            - Do NOT add `*_pk` fields that imply enforced uniqueness; if you add canonical IDs, they must be nullable and accompanied by has_* flags.\n\
          - IMPORTANT: Do NOT include a dbt config block or alias; the suite enforces canonical config/alias deterministically.\n\

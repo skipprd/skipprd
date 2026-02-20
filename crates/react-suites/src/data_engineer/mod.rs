@@ -332,7 +332,7 @@ Rules:
 
         if kind == "cleanse_plan" {
             return format!(
-                "{base}\n\nFocus: SILVER/staging cleanse.\n\
+                "{base}\n\nFocus: SILVER cleanse (models/staging/).\n\
 - CRITICAL: row-preserving. No filtering, no dedup, no grain enforcement.\n\
 - `tasks[].implementation_spec` is REQUIRED and must be explicit.\n\
 - `implementation_spec.output_fields` must include:\n\
@@ -344,12 +344,88 @@ Rules:
             );
         }
         format!(
-            "{base}\n\nFocus: GOLD/core+marts.\n\
+            "{base}\n\nFocus: GOLD (models/core/ + models/marts/).\n\
 - `tasks[].implementation_spec` is REQUIRED and must be explicit.\n\
 - Must include grain + at least one metric or an explicit output schema with business meaning.\n\
 - Join contracts must be explicit (join_type, keys) and align with inputs.\n\
 - Metrics must have clear definitions + caveats.\n"
         )
+    }
+
+    fn normalize_plan_json_payload(expected_kind: &str, payload: &mut serde_json::Value) {
+        // Deterministic normalizer for common plan-shape drift from LLMs.
+        // Goal: avoid expensive/truncation-prone "plan_json_repair" loops.
+        let Some(obj) = payload.as_object_mut() else {
+            return;
+        };
+
+        // Normalize work_groups[].items[].checklist_item_id
+        if let Some(wgs) = obj.get_mut("work_groups").and_then(|v| v.as_array_mut()) {
+            for wg in wgs.iter_mut() {
+                let Some(wg_obj) = wg.as_object_mut() else {
+                    continue;
+                };
+                let Some(items) = wg_obj.get_mut("items").and_then(|v| v.as_array_mut()) else {
+                    continue;
+                };
+                for it in items.iter_mut() {
+                    let Some(it_obj) = it.as_object_mut() else {
+                        continue;
+                    };
+                    if it_obj.get("checklist_item_id").and_then(|v| v.as_str()).is_none() {
+                        // Legacy: checklist_item_ids: ["sql_model", ...]
+                        if let Some(arr) = it_obj.get("checklist_item_ids").and_then(|v| v.as_array())
+                        {
+                            if let Some(first) = arr.first().and_then(|v| v.as_str()) {
+                                it_obj.insert(
+                                    "checklist_item_id".to_string(),
+                                    serde_json::Value::String(first.to_string()),
+                                );
+                            }
+                        }
+                    }
+                    // Default: prefer sql_model so execution can proceed.
+                    let cid = it_obj
+                        .get("checklist_item_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if cid.is_empty() {
+                        it_obj.insert(
+                            "checklist_item_id".to_string(),
+                            serde_json::Value::String(
+                                crate::data_engineer::plan::CHECKLIST_SQL_MODEL.to_string(),
+                            ),
+                        );
+                    }
+                    it_obj.remove("checklist_item_ids");
+                }
+            }
+        }
+
+        // Normalize tasks[].checklist[].evidence to [] (planning/repair must not include evidence).
+        let tasks_key = match expected_kind {
+            "cleanse_plan" => "tasks",
+            "model_plan" => "tasks",
+            _ => "tasks",
+        };
+        if let Some(tasks) = obj.get_mut(tasks_key).and_then(|v| v.as_array_mut()) {
+            for t in tasks.iter_mut() {
+                let Some(t_obj) = t.as_object_mut() else {
+                    continue;
+                };
+                if let Some(ck) = t_obj.get_mut("checklist").and_then(|v| v.as_array_mut()) {
+                    for it in ck.iter_mut() {
+                        if let Some(it_obj) = it.as_object_mut() {
+                            it_obj.insert(
+                                "evidence".to_string(),
+                                serde_json::Value::Array(vec![]),
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     async fn critique_plan_design(
@@ -3191,7 +3267,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         )
                     } else {
                         format!(
-                            "Create a GOLD/model execution plan (batched in groups of 5) based ONLY on existing silver/staging models.\n\nOriginal goal:\n{}\n",
+                            "Create a GOLD/model execution plan (batched in groups of 5) based ONLY on existing silver models under models/staging/.\n\nOriginal goal:\n{}\n",
                             question
                         )
                     };
@@ -3470,49 +3546,47 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     }]);
                                 }
                                 let mut payload = result.payload.clone();
-                                let mut plan_opt: Option<crate::data_engineer::plan::CleansePlan> =
-                                    None;
-                                let mut last_err: Option<String> = None;
-                                for attempt in 1..=3 {
-                                    match serde_json::from_value::<
-                                        crate::data_engineer::plan::CleansePlan,
-                                    >(payload.clone())
-                                    {
-                                        Ok(p) => {
-                                            plan_opt = Some(p);
-                                            last_err = None;
-                                            break;
-                                        }
-                                        Err(e) => {
-                                            let err = format!("invalid cleanse plan JSON: {e}");
-                                            last_err = Some(err.clone());
-                                            // Ask the LLM to repair the plan JSON and re-emit it.
-                                            let repaired = Self::repair_plan_json_payload_via_llm(
-                                                &thread_store,
-                                                thread_id,
-                                                &actx,
-                                                phase,
-                                                "cleanse_plan",
-                                                &payload,
-                                                &err,
-                                                attempt,
-                                            )
-                                            .await?;
-                                            payload = repaired.payload;
-                                            // Loop again: we will re-try serde parsing on the repaired payload.
-                                        }
+                                Self::normalize_plan_json_payload("cleanse_plan", &mut payload);
+                                let mut plan = match serde_json::from_value::<
+                                    crate::data_engineer::plan::CleansePlan,
+                                >(payload.clone())
+                                {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        let err = format!("invalid cleanse plan JSON: {e}");
+                                        let ts = chrono::Utc::now().to_rfc3339();
+                                        let step = react_core::session::ThreadStep::GuardBlock {
+                                            phase: phase.as_str().to_string(),
+                                            kind: GuardBlockKind::PlanJsonInvalid,
+                                            reason: err.clone(),
+                                            observation: react_core::session::Observation::fail(vec![
+                                                err.clone(),
+                                            ]),
+                                            ts,
+                                            agent: "agent".to_string(),
+                                        };
+                                        let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                        control_flow::append_phase_with_reason(
+                                            &thread_store,
+                                            thread_id,
+                                            Some("agent".to_string()),
+                                            Some(phase),
+                                            phase,
+                                            Some(PhaseReasonCode::PhaseBlocked),
+                                            Some(serde_json::json!({
+                                                "kind": "plan_json_invalid",
+                                                "expected_kind": "cleanse_plan",
+                                                "error": err,
+                                            })),
+                                        )
+                                        .await?;
+                                        return Ok(vec![FlowFrame::AwaitUser {
+                                            prompt: format!(
+                                                "Plan JSON is invalid and could not be parsed.\n\nError:\n{e}\n\nPlease retry plan generation."
+                                            ),
+                                        }]);
                                     }
-                                }
-                                if let Some(e) = last_err {
-                                    return Ok(vec![FlowFrame::AwaitUser {
-                                        prompt: format!(
-                                            "Plan JSON is invalid and could not be repaired automatically.\n\nError:\n{e}\n\nPlease reply with a corrected final result where final.kind='cleanse_plan' and final.payload is the full plan object."
-                                        ),
-                                    }]);
-                                }
-                                let mut plan = plan_opt.ok_or_else(|| {
-                                    "plan json repair: no plan produced".to_string()
-                                })?;
+                                };
                                 // Planning/repair must not emit evidence; the deterministic runner adds it later.
                                 for t in plan.tasks.iter_mut() {
                                     for it in t.checklist.iter_mut() {
@@ -3636,7 +3710,15 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
 
                                 // Quality gate 1: semantic validity (includes implementation_spec requirements).
-                                let sem = crate::data_engineer::plan::validate_cleanse_plan_semantics(&plan);
+                                // Hard cutover: normalize conservative defaults before validating (no LLM repair).
+                                let sem = crate::data_engineer::plan::ensure_cleanse_plan_semantically_valid_or_repaired(
+                                    &actx,
+                                    &mut plan,
+                                )
+                                .await?;
+                                // Crash-safety: persist the normalized draft so resume/inspection reflects
+                                // what we actually validated (not just the initial parsed JSON).
+                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
                                 if !sem.ok {
                                     let reason = format!(
                                         "Plan failed semantic validation (design-first). Errors:\n- {}",
@@ -3668,108 +3750,8 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     continue;
                                 }
 
-                                // Quality gate 2: design critique (blockers must be resolved before approval).
-                                let plan_json = serde_json::to_value(&plan).unwrap_or(serde_json::Value::Null);
-                                let critique = Self::critique_plan_design(
-                                    sctx,
-                                    thread_id,
-                                    phase,
-                                    "cleanse_plan",
-                                    &plan_json,
-                                )
-                                .await?;
-                                if !critique.ok || !critique.blockers.is_empty() {
-                                    let round: usize = log
-                                        .as_ref()
-                                        .map(|l| {
-                                            let start = Self::phase_start_idx(l, phase).unwrap_or(0);
-                                            let mut n: usize = 0;
-                                            for s in l.steps.iter().skip(start + 1) {
-                                                if let react_core::session::ThreadStep::GuardBlock { kind, .. } = s {
-                                                    if *kind == GuardBlockKind::PlanDesignCritique {
-                                                        n = n.saturating_add(1);
-                                                    }
-                                                }
-                                            }
-                                            n.saturating_add(1)
-                                        })
-                                        .unwrap_or(1);
-                                    let mut reason = String::new();
-                                    reason.push_str("Plan design critique found blockers (must address before approval):\n");
-                                    for b in critique.blockers.iter().take(12) {
-                                        let t = b.trim();
-                                        if !t.is_empty() {
-                                            reason.push_str("- ");
-                                            reason.push_str(t);
-                                            reason.push('\n');
-                                        }
-                                    }
-                                    if !critique.fixes.is_empty() {
-                                        reason.push_str("\nSmallest fixes:\n");
-                                        for f in critique.fixes.iter().take(12) {
-                                            let t = f.trim();
-                                            if !t.is_empty() {
-                                                reason.push_str("- ");
-                                                reason.push_str(t);
-                                                reason.push('\n');
-                                            }
-                                        }
-                                    }
-                                    // Persist critique to storage (atomic) and reference it from the phase entry
-                                    // so subsequent plan prompts can always load it (like review_ref).
-                                    let critique_sha256 = react_core::llm_observability::sha256_hex_str(&reason);
-                                    let critique_bytes = reason.as_bytes().len() as u64;
-                                    let critique_key = {
-                                        let root = actx
-                                            .keyspace
-                                            .threads_prefix(&actx.scope)
-                                            .trim_end_matches("/threads")
-                                            .trim_end_matches('/')
-                                            .to_string();
-                                        let ts2 = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-                                        let sha8 = critique_sha256.chars().take(8).collect::<String>();
-                                        format!(
-                                            "{}/plan_critiques/{}/{}_cleanse_plan_{}_r{}.txt",
-                                            root, thread_id, ts2, sha8, round
-                                        )
-                                    };
-                                    let _ = actx
-                                        .storage
-                                        .put_bytes(&critique_key, reason.as_bytes(), "text/plain")
-                                        .await;
-                                    let ts = chrono::Utc::now().to_rfc3339();
-                                    let step = react_core::session::ThreadStep::GuardBlock {
-                                        phase: phase.as_str().to_string(),
-                                        kind: GuardBlockKind::PlanDesignCritique,
-                                        reason: reason.clone(),
-                                        observation: react_core::session::Observation::fail(vec![reason.clone()]),
-                                        ts,
-                                        agent: "agent".to_string(),
-                                    };
-                                    let _ = thread_store.append_step(thread_id, step.clone()).await;
-                                    control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        phase,
-                                        Some(PhaseReasonCode::PhaseBlocked),
-                                        Some(serde_json::json!({
-                                            "kind": "plan_design_critique",
-                                            "round": round,
-                                            "max_rounds": Self::MAX_PLAN_DESIGN_ROUNDS,
-                                            "critique_ref": {
-                                                "key": critique_key,
-                                                "sha256": critique_sha256,
-                                                "bytes": critique_bytes
-                                            },
-                                            "blockers": critique.blockers,
-                                            "fixes": critique.fixes
-                                        })),
-                                    )
-                                    .await?;
-                                    continue;
-                                }
+                                // Hard cutover: remove LLM "plan design critique" from the hot path.
+                                // We rely on deterministic semantic validation + conservative defaults instead.
 
                                 // Persist a small design-review marker for downstream review/UI.
                                 if plan.project_snapshot.is_null() {
@@ -3838,49 +3820,47 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     }]);
                                 }
                                 let mut payload = result.payload.clone();
-                                let mut plan_opt: Option<crate::data_engineer::plan::ModelPlan> =
-                                    None;
-                                let mut last_err: Option<String> = None;
-                                for attempt in 1..=3 {
-                                    match serde_json::from_value::<
-                                        crate::data_engineer::plan::ModelPlan,
-                                    >(payload.clone())
-                                    {
-                                        Ok(p) => {
-                                            plan_opt = Some(p);
-                                            last_err = None;
-                                            break;
-                                        }
-                                        Err(e) => {
-                                            let err = format!("invalid model plan JSON: {e}");
-                                            last_err = Some(err.clone());
-                                            // Ask the LLM to repair the plan JSON and re-emit it.
-                                            let repaired = Self::repair_plan_json_payload_via_llm(
-                                                &thread_store,
-                                                thread_id,
-                                                &actx,
-                                                phase,
-                                                "model_plan",
-                                                &payload,
-                                                &err,
-                                                attempt,
-                                            )
-                                            .await?;
-                                            payload = repaired.payload;
-                                            // Loop again: we will re-try serde parsing on the repaired payload.
-                                        }
+                                Self::normalize_plan_json_payload("model_plan", &mut payload);
+                                let mut plan = match serde_json::from_value::<
+                                    crate::data_engineer::plan::ModelPlan,
+                                >(payload.clone())
+                                {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        let err = format!("invalid model plan JSON: {e}");
+                                        let ts = chrono::Utc::now().to_rfc3339();
+                                        let step = react_core::session::ThreadStep::GuardBlock {
+                                            phase: phase.as_str().to_string(),
+                                            kind: GuardBlockKind::PlanJsonInvalid,
+                                            reason: err.clone(),
+                                            observation: react_core::session::Observation::fail(vec![
+                                                err.clone(),
+                                            ]),
+                                            ts,
+                                            agent: "agent".to_string(),
+                                        };
+                                        let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                        control_flow::append_phase_with_reason(
+                                            &thread_store,
+                                            thread_id,
+                                            Some("agent".to_string()),
+                                            Some(phase),
+                                            phase,
+                                            Some(PhaseReasonCode::PhaseBlocked),
+                                            Some(serde_json::json!({
+                                                "kind": "plan_json_invalid",
+                                                "expected_kind": "model_plan",
+                                                "error": err,
+                                            })),
+                                        )
+                                        .await?;
+                                        return Ok(vec![FlowFrame::AwaitUser {
+                                            prompt: format!(
+                                                "Plan JSON is invalid and could not be parsed.\n\nError:\n{e}\n\nPlease retry plan generation."
+                                            ),
+                                        }]);
                                     }
-                                }
-                                if let Some(e) = last_err {
-                                    return Ok(vec![FlowFrame::AwaitUser {
-                                        prompt: format!(
-                                            "Plan JSON is invalid and could not be repaired automatically.\n\nError:\n{e}\n\nPlease reply with a corrected final result where final.kind='model_plan' and final.payload is the full plan object."
-                                        ),
-                                    }]);
-                                }
-                                let mut plan = plan_opt.ok_or_else(|| {
-                                    "plan json repair: no plan produced".to_string()
-                                })?;
+                                };
                                 // Planning/repair must not emit evidence; the deterministic runner adds it later.
                                 for t in plan.tasks.iter_mut() {
                                     for it in t.checklist.iter_mut() {
@@ -3976,7 +3956,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 );
                                 if plan.tasks.is_empty() || plan.batches.is_empty() {
                                     return Ok(vec![FlowFrame::AwaitUser {
-                                        prompt: "Model plan contained no grounded tasks after enforcing gold-tier constraints (must reference existing staging/silver models only). Ensure staging models exist under models/staging/ and retry."
+                                        prompt: "Model plan contained no grounded tasks after enforcing gold-tier constraints (must reference existing silver models under models/staging/ only). Ensure silver models exist under models/staging/ and retry."
                                             .to_string(),
                                     }]);
                                 }
@@ -3985,7 +3965,16 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
 
                                 // Quality gate 1: semantic validity (includes implementation_spec requirements).
-                                let sem = crate::data_engineer::plan::validate_model_plan_semantics(&plan, Some(&stg.allowed_models));
+                                // Hard cutover: normalize conservative defaults before validating (no LLM repair).
+                                let sem = crate::data_engineer::plan::ensure_model_plan_semantically_valid_or_repaired(
+                                    &actx,
+                                    &mut plan,
+                                    &stg.allowed_models,
+                                )
+                                .await?;
+                                // Crash-safety: persist the normalized draft so resume/inspection reflects
+                                // what we actually validated (not just the initial parsed JSON).
+                                let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
                                 if !sem.ok {
                                     let reason = format!(
                                         "Plan failed semantic validation (design-first). Errors:\n- {}",
@@ -4017,108 +4006,8 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     continue;
                                 }
 
-                                // Quality gate 2: design critique (blockers must be resolved before approval).
-                                let plan_json = serde_json::to_value(&plan).unwrap_or(serde_json::Value::Null);
-                                let critique = Self::critique_plan_design(
-                                    sctx,
-                                    thread_id,
-                                    phase,
-                                    "model_plan",
-                                    &plan_json,
-                                )
-                                .await?;
-                                if !critique.ok || !critique.blockers.is_empty() {
-                                    let round: usize = log
-                                        .as_ref()
-                                        .map(|l| {
-                                            let start = Self::phase_start_idx(l, phase).unwrap_or(0);
-                                            let mut n: usize = 0;
-                                            for s in l.steps.iter().skip(start + 1) {
-                                                if let react_core::session::ThreadStep::GuardBlock { kind, .. } = s {
-                                                    if *kind == GuardBlockKind::PlanDesignCritique {
-                                                        n = n.saturating_add(1);
-                                                    }
-                                                }
-                                            }
-                                            n.saturating_add(1)
-                                        })
-                                        .unwrap_or(1);
-                                    let mut reason = String::new();
-                                    reason.push_str("Plan design critique found blockers (must address before approval):\n");
-                                    for b in critique.blockers.iter().take(12) {
-                                        let t = b.trim();
-                                        if !t.is_empty() {
-                                            reason.push_str("- ");
-                                            reason.push_str(t);
-                                            reason.push('\n');
-                                        }
-                                    }
-                                    if !critique.fixes.is_empty() {
-                                        reason.push_str("\nSmallest fixes:\n");
-                                        for f in critique.fixes.iter().take(12) {
-                                            let t = f.trim();
-                                            if !t.is_empty() {
-                                                reason.push_str("- ");
-                                                reason.push_str(t);
-                                                reason.push('\n');
-                                            }
-                                        }
-                                    }
-                                    // Persist critique to storage (atomic) and reference it from the phase entry
-                                    // so subsequent plan prompts can always load it (like review_ref).
-                                    let critique_sha256 = react_core::llm_observability::sha256_hex_str(&reason);
-                                    let critique_bytes = reason.as_bytes().len() as u64;
-                                    let critique_key = {
-                                        let root = actx
-                                            .keyspace
-                                            .threads_prefix(&actx.scope)
-                                            .trim_end_matches("/threads")
-                                            .trim_end_matches('/')
-                                            .to_string();
-                                        let ts2 = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-                                        let sha8 = critique_sha256.chars().take(8).collect::<String>();
-                                        format!(
-                                            "{}/plan_critiques/{}/{}_model_plan_{}_r{}.txt",
-                                            root, thread_id, ts2, sha8, round
-                                        )
-                                    };
-                                    let _ = actx
-                                        .storage
-                                        .put_bytes(&critique_key, reason.as_bytes(), "text/plain")
-                                        .await;
-                                    let ts = chrono::Utc::now().to_rfc3339();
-                                    let step = react_core::session::ThreadStep::GuardBlock {
-                                        phase: phase.as_str().to_string(),
-                                        kind: GuardBlockKind::PlanDesignCritique,
-                                        reason: reason.clone(),
-                                        observation: react_core::session::Observation::fail(vec![reason.clone()]),
-                                        ts,
-                                        agent: "agent".to_string(),
-                                    };
-                                    let _ = thread_store.append_step(thread_id, step.clone()).await;
-                                    control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        phase,
-                                        Some(PhaseReasonCode::PhaseBlocked),
-                                        Some(serde_json::json!({
-                                            "kind": "plan_design_critique",
-                                            "round": round,
-                                            "max_rounds": Self::MAX_PLAN_DESIGN_ROUNDS,
-                                            "critique_ref": {
-                                                "key": critique_key,
-                                                "sha256": critique_sha256,
-                                                "bytes": critique_bytes
-                                            },
-                                            "blockers": critique.blockers,
-                                            "fixes": critique.fixes
-                                        })),
-                                    )
-                                    .await?;
-                                    continue;
-                                }
+                                // Hard cutover: remove LLM "plan design critique" from the hot path.
+                                // We rely on deterministic semantic validation instead.
 
                                 // Persist a small design-review marker for downstream review/UI.
                                 if plan.project_snapshot.is_null() {
@@ -7192,7 +7081,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         prompt = format!(
                             "Auto-remediation attempt {}: dbt build failed at runtime (tests) AFTER a successful compile.\n\
                              Failing tests:\n{}\n{}\
-                             IMPORTANT: Your very next step MUST be a FIX to dbt artifacts (prefer fixing staging/silver models; do NOT relax/remove tests unless nullable-by-design is justified).\n\
+                             IMPORTANT: Your very next step MUST be a FIX to dbt artifacts (prefer fixing silver models under models/staging/; do NOT relax/remove tests unless nullable-by-design is justified).\n\
                              Recommended flow:\n\
                              - Use `dbt_files op=manifest_find` (or `dbt_files op=get_json`) to target `target/manifest.json` WITHOUT dumping the full file.\n\
                                - Find the failing test node(s) by name, then find the referenced model node via depends_on.\n\
@@ -7212,7 +7101,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         );
                     } else {
                         prompt = format!(
-                            "Auto-remediation attempt {}: dbt_validate/build failed.\n\nError summary:\n{}\n\nAutomatically fix the DBT project:\n- Prefer calling `staging_model` to update staging/silver models (nested fields, cleansing, naming).\n- Use dbt_files or artifacts to inspect/edit existing files.\n- Re-run dbt_validate with build=true.\nRepeat until compile_ok=true AND run_ok=true.",
+                            "Auto-remediation attempt {}: dbt_validate/build failed.\n\nError summary:\n{}\n\nAutomatically fix the DBT project:\n- Prefer calling `staging_model` to update silver models under models/staging/ (nested fields, cleansing, naming).\n- Use dbt_files or artifacts to inspect/edit existing files.\n- Re-run dbt_validate with build=true.\nRepeat until compile_ok=true AND run_ok=true.",
                             attempt + 1,
                             brief
                         );

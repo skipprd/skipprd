@@ -212,6 +212,27 @@ impl ToolObservation {
             Vec::new()
         };
 
+        // If this is a failure and we still have no errors, try legacy `error` field.
+        let mut errors = errors;
+        if !ok && errors.is_empty() {
+            if let Some(v) = extra.get("error") {
+                match v {
+                    Value::String(s) => {
+                        let t = s.trim();
+                        if !t.is_empty() {
+                            errors.push(t.to_string());
+                        }
+                    }
+                    other => {
+                        let s = other.to_string();
+                        if !s.trim().is_empty() {
+                            errors.push(s);
+                        }
+                    }
+                }
+            }
+        }
+
         // Remove canonical envelope keys from extra (and legacy `error`).
         extra.remove("ok");
         extra.remove("errors");
@@ -219,7 +240,6 @@ impl ToolObservation {
         extra.remove("error");
 
         // If this is a failure and we still have no errors, force one.
-        let mut errors = errors;
         if !ok && errors.is_empty() {
             errors.push("unknown error".to_string());
         }

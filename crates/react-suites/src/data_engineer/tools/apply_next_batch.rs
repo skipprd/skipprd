@@ -490,7 +490,7 @@ impl Tool for ApplyNextModelBatchTool {
             }));
         }
 
-        // Truth gating: gold/model must only rely on existing staging models (silver).
+        // Truth gating: gold/model must only rely on existing silver models under models/staging/.
         let mut gating_errors: Vec<String> = Vec::new();
         for n in batch_names.iter() {
             if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
@@ -506,7 +506,9 @@ impl Tool for ApplyNextModelBatchTool {
                         continue;
                     }
                     if !stg.allowed_models.contains(it) {
-                        gating_errors.push(format!("{n}: missing staging model input '{it}' (not present under models/staging/)"));
+                        gating_errors.push(format!(
+                            "{n}: missing silver model input '{it}' (not present under models/staging/)"
+                        ));
                     }
                 }
             }
@@ -515,7 +517,7 @@ impl Tool for ApplyNextModelBatchTool {
             mark_needs_update_model(
                 &mut plan,
                 &batch_names,
-                "gold inputs are not grounded in existing staging models",
+                "gold inputs are not grounded in existing silver models under models/staging/",
             );
             update_failure_counters(&mut plan.progress, false);
             let _ = plan::save_model_plan(ctx, &plan).await;

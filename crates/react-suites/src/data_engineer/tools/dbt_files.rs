@@ -914,6 +914,33 @@ fn normalize_patch_contract_args(args: &Value) -> Result<Value, String> {
         .map_err(|e| patch_contract_error(&e))
 }
 
+fn validate_sql_model_folder_policy(rel: &str) -> Result<(), String> {
+    let rl = rel.to_ascii_lowercase();
+    if !rl.starts_with("models/") || !rl.ends_with(".sql") {
+        return Ok(());
+    }
+    let ok = rl.starts_with("models/staging/")
+        || rl.starts_with("models/core/")
+        || rl.starts_with("models/marts/");
+    if ok {
+        return Ok(());
+    }
+    if rl.starts_with("models/silver/")
+        || rl.starts_with("models/gold/")
+        || rl.starts_with("models/stage/")
+        || rl.starts_with("models/warehouse/")
+    {
+        return Err(format!(
+            "invalid model folder '{}': this suite uses canonical tier folders only. Silver models must be under models/staging/, and gold models must be under models/core/ or models/marts/.",
+            rel
+        ));
+    }
+    Err(format!(
+        "invalid model folder '{}': SQL models must be written under models/staging/ (silver) or models/core/|models/marts/ (gold).",
+        rel
+    ))
+}
+
 fn extract_patch_paths_from_args(args: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
@@ -1167,6 +1194,7 @@ impl Tool for DbtFilesTool {
                 if !replace_range_ops.is_empty() {
                     for rr in replace_range_ops.iter() {
                         let rel = project_fs::normalize_rel_path(&rr.path)?;
+                        validate_sql_model_folder_policy(&rel)?;
                         let failures = recent_noop_patch_failures_for_path(ctx, &rel, 250).await;
                         if failures >= noop_breaker_threshold {
                             return Err(format!(
@@ -1179,6 +1207,7 @@ impl Tool for DbtFilesTool {
                 if !replace_list_ops.is_empty() {
                     for rl in replace_list_ops.iter() {
                         let rel = project_fs::normalize_rel_path(&rl.path)?;
+                        validate_sql_model_folder_policy(&rel)?;
                         let failures = recent_noop_patch_failures_for_path(ctx, &rel, 250).await;
                         if failures >= noop_breaker_threshold {
                             return Err(format!(
@@ -1195,6 +1224,7 @@ impl Tool for DbtFilesTool {
                 if !replace_file_ops.is_empty() {
                     for rf in replace_file_ops.into_iter() {
                         let rel = project_fs::normalize_rel_path(&rf.path)?;
+                        validate_sql_model_folder_policy(&rel)?;
                         if !seen.insert(rel.clone()) {
                             return Err(format!("replace_file contains duplicate path: {}", rel));
                         }
@@ -1235,6 +1265,7 @@ impl Tool for DbtFilesTool {
                 } else if !replace_range_ops.is_empty() {
                     for rr in replace_range_ops.into_iter() {
                         let rel = project_fs::normalize_rel_path(&rr.path)?;
+                        validate_sql_model_folder_policy(&rel)?;
                         if !seen.insert(rel.clone()) {
                             return Err(format!("replace_range contains duplicate path: {}", rel));
                         }
@@ -1278,6 +1309,7 @@ impl Tool for DbtFilesTool {
                 } else if !replace_list_ops.is_empty() {
                     for rl in replace_list_ops.into_iter() {
                         let rel = project_fs::normalize_rel_path(&rl.path)?;
+                        validate_sql_model_folder_policy(&rel)?;
                         if !seen.insert(rel.clone()) {
                             return Err(format!("replace_list contains duplicate path: {}", rel));
                         }
@@ -1618,7 +1650,7 @@ mod tests {
                 serde_json::json!({
                     "op": "patch",
                     "replace_file": {
-                        "path": "models/x.sql",
+                        "path": "models/core/x.sql",
                         "new_text": "select 1\n"
                     }
                 }),
@@ -1632,7 +1664,7 @@ mod tests {
             .get("applied_patch_text")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        assert!(applied.contains("diff --git a/models/x.sql b/models/x.sql"));
+        assert!(applied.contains("diff --git a/models/core/x.sql b/models/core/x.sql"));
 
         let written = obs
             .get("written_keys")
@@ -1660,7 +1692,7 @@ mod tests {
                 serde_json::json!({
                     "op": "patch",
                     "replace_file": {
-                        "path": "models/x.sql",
+                        "path": "models/core/x.sql",
                         "new_text": "select 1\n",
                         "preview_diff": true
                     }
@@ -1705,7 +1737,7 @@ mod tests {
                 serde_json::json!({
                     "op": "patch",
                     "replace_file": {
-                        "path": "models/x.sql",
+                        "path": "models/core/x.sql",
                         "new_text": "select 1\n",
                         "base_sha256": "deadbeef"
                     }
@@ -1727,7 +1759,7 @@ mod tests {
             .call(
                 serde_json::json!({
                     "op": "patch",
-                    "path": "models/x.sql",
+                    "path": "models/core/x.sql",
                     "replace_file": {
                         "new_text": "select 1\n"
                     }

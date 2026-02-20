@@ -664,10 +664,34 @@ pub async fn llm_patch_loop_single_file(
             ));
         } else {
             if no_op_failures >= no_op_breaker_threshold && parsed.replace_file.is_none() {
-                last_err = Some(format!(
+                // Deterministic convergence: do NOT apply more ranged edits once we have evidence
+                // they're producing no-ops. Force the model to switch to full rewrite.
+                let err = format!(
                     "no-op patch breaker: {} consecutive no-op patches for '{}'. Return replace_file with a full rewritten file.",
                     no_op_failures, expected_rel_path
-                ));
+                );
+                last_err = Some(err.clone());
+                let repair = serde_json::json!({
+                    "attempt": attempt,
+                    "error": err,
+                    "consecutive_noop_patches": no_op_failures,
+                    "expected_rel_path": expected_rel_path,
+                    "base_sha256": base_sha256,
+                    "base_exists": existed,
+                    "existing_line_count": existing_line_count,
+                    "existing_had_trailing_newline": existing_had_trailing_newline,
+                    "existing_content": existing,
+                    "existing_content_with_line_numbers": existing_content_with_line_numbers,
+                    "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
+                    "previous_response": parsed,
+                    "instruction": "Return ONLY corrected JSON. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. The patch MUST modify ONLY expected_rel_path. Prefer replace_file when possible. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. If consecutive_noop_patches >= 2, you MUST use replace_file and rewrite the full file content. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
+                })
+                .to_string();
+                messages.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: repair,
+                });
+                continue;
             } else {
             // Optional content contract gates (opt-in via sys_prompt sentinel).
             let gate_err: Option<String> = if enforce_analyst_notes_contract {
@@ -770,6 +794,16 @@ pub async fn llm_patch_loop_single_file(
                                     "patch produced no file changes for '{}' (consecutive_noops={}).",
                                     expected_rel_path, no_op_failures
                                 ));
+                                // If we already forced a full rewrite and STILL got a no-op, stop early.
+                                // This avoids burning attempts on a stuck file.
+                                if no_op_failures >= no_op_breaker_threshold
+                                    && parsed.replace_file.is_some()
+                                {
+                                    return Err(format!(
+                                        "LLM patch is stuck: replace_file still produced no changes for '{}' after {} no-op attempt(s).",
+                                        expected_rel_path, no_op_failures
+                                    ));
+                                }
                             } else {
                                 return Ok((outcome, parsed.notes));
                             }

@@ -131,7 +131,7 @@ fn update_failure_counters(progress: &mut plan::PlanProgress, ok: bool) {
 fn schema_yml_sys_prompt_staging() -> String {
     [
         "You are an expert analytics engineer.",
-        "Task: author a dbt *staging/silver schema* YAML for ONE staging model file.",
+        "Task: author a dbt *silver schema* YAML for ONE silver model file under models/staging/.",
         "Requirements:",
         "- Output MUST be valid JSON only.",
         "- Choose EXACTLY ONE patch primitive: replace_file OR replace_range OR replace_list.",

@@ -294,7 +294,7 @@ pub struct OutputFieldSpec {
 pub struct CleanseImplementationSpec {
     /// Schema version for the spec itself (not the overall plan). Enables future evolution.
     pub spec_version: i64,
-    /// Row-preserving is mandatory for SILVER/staging.
+    /// Row-preserving is mandatory for SILVER (models/staging/).
     pub row_preserving: bool,
     /// Explicit output field design for this staging model.
     pub output_fields: Vec<OutputFieldSpec>,
@@ -914,6 +914,83 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
     }
 }
 
+fn default_silver_passthrough_field_spec() -> OutputFieldSpec {
+    OutputFieldSpec {
+        name: "__all_source_columns__".to_string(),
+        kind: FieldKind::Raw,
+        source_columns: vec!["*".to_string()],
+        expression: "Pass through all raw/bronze source columns unchanged (do not drop columns); add cleaned/cast columns alongside raw as needed.".to_string(),
+        data_type: None,
+        nullable: true,
+        description: Some(
+            "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
+                .to_string(),
+        ),
+    }
+}
+
+fn ensure_silver_passthrough_present(output_fields: &mut Vec<OutputFieldSpec>) {
+    let has_star = output_fields.iter().any(|f| {
+        f.name.trim() == "__all_source_columns__"
+            || f.source_columns
+                .iter()
+                .any(|c| c.trim() == "*" || c.trim().eq_ignore_ascii_case("__all__"))
+    });
+    if !has_star {
+        output_fields.insert(0, default_silver_passthrough_field_spec());
+    }
+}
+
+fn normalize_cleanse_plan_defaults(plan: &mut CleansePlan) {
+    // Hard cutover: silver plans should be runnable by default.
+    // Insert a conservative default contract: preserve ALL raw columns + add cleaned columns
+    // (row-preserving). This avoids repeated plan gate loops.
+    for t in plan.tasks.iter_mut() {
+        t.implementation_spec.row_preserving = true;
+        if t.implementation_spec.spec_version <= 0 {
+            t.implementation_spec.spec_version = 1;
+        }
+        if t.implementation_spec.prohibited_ops.is_empty() {
+            t.implementation_spec.prohibited_ops = vec![
+                "no filtering".to_string(),
+                "no dedup".to_string(),
+                "no grain enforcement".to_string(),
+            ];
+        }
+        if t.implementation_spec.output_fields.is_empty() {
+            t.implementation_spec.output_fields = vec![default_silver_passthrough_field_spec()];
+        } else {
+            ensure_silver_passthrough_present(&mut t.implementation_spec.output_fields);
+        }
+
+        // Ensure expected_model_path exists when the task is runnable.
+        let sql_status = checklist_status(&t.checklist, CHECKLIST_SQL_MODEL);
+        if is_runnable_checklist_status(sql_status) {
+            let missing_path = t
+                .expected_model_path
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true);
+            if missing_path {
+                let parts: Vec<&str> = t.dataset_id.split('.').collect();
+                if parts.len() == 3 {
+                    t.expected_model_path = Some(crate::data_engineer::naming::canonical_staging_rel_path(
+                        parts[1],
+                        parts[2],
+                    ));
+                } else {
+                    let safe = t
+                        .dataset_id
+                        .replace('.', "_")
+                        .replace('/', "_")
+                        .replace('\\', "_");
+                    t.expected_model_path = Some(format!("models/staging/stg_{}.sql", safe));
+                }
+            }
+        }
+    }
+}
+
 pub fn validate_model_plan_semantics(
     plan: &ModelPlan,
     allowed_staging_models: Option<&std::collections::BTreeSet<String>>,
@@ -1141,23 +1218,14 @@ pub async fn ensure_cleanse_plan_semantically_valid_or_repaired(
     ctx: &AgentCtx,
     plan: &mut CleansePlan,
 ) -> Result<PlanSemanticValidation, String> {
+    normalize_cleanse_plan_defaults(plan);
     let v0 = validate_cleanse_plan_semantics(plan);
     if v0.ok {
         return Ok(v0);
     }
-    // One repair attempt only (bounded).
-    let repaired = repair_cleanse_plan_semantics_via_llm(ctx, plan, &v0.errors).await?;
-    *plan = repaired;
-    let v1 = validate_cleanse_plan_semantics(plan);
-    if v1.ok {
-        push_plan_mutation(
-            &mut plan.mutations,
-            "plan_repair_semantic",
-            serde_json::json!({ "kind": "cleanse", "errors": v0.errors }),
-        );
-        let _ = save_cleanse_plan(ctx, plan).await;
-    }
-    Ok(v1)
+    // Hard cutover: no LLM semantic repair in the hot path.
+    let _ = ctx;
+    Ok(v0)
 }
 
 pub async fn ensure_model_plan_semantically_valid_or_repaired(
@@ -1169,21 +1237,10 @@ pub async fn ensure_model_plan_semantically_valid_or_repaired(
     if v0.ok {
         return Ok(v0);
     }
-    // One repair attempt only (bounded).
-    let allowed: Vec<String> = allowed_staging_models.iter().cloned().collect();
-    let repaired =
-        repair_model_plan_semantics_via_llm(ctx, plan, &v0.errors, &allowed).await?;
-    *plan = repaired;
-    let v1 = validate_model_plan_semantics(plan, Some(allowed_staging_models));
-    if v1.ok {
-        push_plan_mutation(
-            &mut plan.mutations,
-            "plan_repair_semantic",
-            serde_json::json!({ "kind": "model", "errors": v0.errors }),
-        );
-        let _ = save_model_plan(ctx, plan).await;
-    }
-    Ok(v1)
+    // Hard cutover: no LLM semantic repair in the hot path.
+    let _ = ctx;
+    let _ = allowed_staging_models;
+    Ok(v0)
 }
 
 fn checklist_status(items: &[PlanChecklistItem], id: &str) -> ChecklistItemStatus {
