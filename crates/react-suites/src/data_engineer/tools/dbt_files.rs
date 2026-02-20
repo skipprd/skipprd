@@ -909,108 +909,9 @@ fn patch_contract_error(msg: &str) -> String {
     )
 }
 
-fn validate_patch_args_shape(args: &Value) -> Result<(), String> {
-    fn contains_key_recursive(v: &Value, key: &str) -> bool {
-        match v {
-            Value::Object(m) => m.contains_key(key) || m.values().any(|vv| contains_key_recursive(vv, key)),
-            Value::Array(a) => a.iter().any(|vv| contains_key_recursive(vv, key)),
-            _ => false,
-        }
-    }
-
-    if contains_key_recursive(args, "preview_diff") {
-        return Err(patch_contract_error(
-            "preview_diff is no longer supported; remove it from the request",
-        ));
-    }
-
-    // Keep explicit shape errors for common LLM mistakes.
-    if let Some(v) = args.get("replace_file") {
-        if v.is_string() {
-            return Err(patch_contract_error(
-                "replace_file must be an object or array (got string)",
-            ));
-        }
-    }
-    if let Some(v) = args.get("replace_range") {
-        if v.is_string() {
-            return Err(patch_contract_error(
-                "replace_range must be an object or array (got string)",
-            ));
-        }
-    }
-    if let Some(v) = args.get("replace_list") {
-        if v.is_string() {
-            return Err(patch_contract_error(
-                "replace_list must be an object or array (got string)",
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn normalize_patch_contract_args(args: &Value) -> Result<Value, String> {
-    let mut root = args
-        .as_object()
-        .cloned()
-        .ok_or_else(|| patch_contract_error("args must be a JSON object"))?;
-    let fallback_path = root
-        .get("path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    fn normalize_entry(
-        v: &mut Value,
-        key: &str,
-        fallback_path: Option<&str>,
-    ) -> Result<(), String> {
-        let Some(obj) = v.as_object_mut() else {
-            return Err(patch_contract_error(&format!(
-                "{key} must be an object or array of objects"
-            )));
-        };
-        // Backward compatibility for stale payloads: map base_sha256 -> expected_sha256.
-        if let Some(base) = obj
-            .remove("base_sha256")
-            .and_then(|x| x.as_str().map(|s| s.trim().to_string()))
-            .filter(|s| !s.is_empty())
-        {
-            let needs_expected = obj
-                .get("expected_sha256")
-                .and_then(|x| x.as_str())
-                .map(|s| s.trim().is_empty())
-                .unwrap_or(true);
-            if needs_expected {
-                obj.insert("expected_sha256".to_string(), Value::String(base));
-            }
-        }
-        if !obj.contains_key("path") {
-            if let Some(p) = fallback_path {
-                obj.insert("path".to_string(), Value::String(p.to_string()));
-            } else {
-                return Err(patch_contract_error(&format!(
-                    "{key} item missing required field `path` (and no top-level path provided)"
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    for key in ["replace_file", "replace_range", "replace_list"] {
-        let Some(v) = root.get_mut(key) else { continue };
-        if v.is_null() {
-            continue;
-        }
-        if let Some(arr) = v.as_array_mut() {
-            for it in arr.iter_mut() {
-                normalize_entry(it, key, fallback_path.as_deref())?;
-            }
-        } else {
-            normalize_entry(v, key, fallback_path.as_deref())?;
-        }
-    }
-    Ok(Value::Object(root))
+    crate::data_engineer::patch_normalize::normalize_dbt_files_patch_args(args)
+        .map_err(|e| patch_contract_error(&e))
 }
 
 fn extract_patch_paths_from_args(args: &Value) -> Vec<String> {
@@ -1223,7 +1124,6 @@ impl Tool for DbtFilesTool {
                 .await
             }
             "patch" => {
-                validate_patch_args_shape(&args)?;
                 let args = normalize_patch_contract_args(&args)?;
 
                 // Optional single-file guard: if provided, ensure the patch bundle targets exactly this rel path.

@@ -102,7 +102,10 @@ async fn maybe_advance_phase_on_done(
         Some(reason_code),
         Some(detail),
     )
-    .await;
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!("failed to append phase transition: {}", e);
+    });
 }
 
 #[derive(Clone)]

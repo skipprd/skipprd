@@ -11,6 +11,7 @@ use react_core::session::{Observation, ThreadLog, ThreadStep, ThreadStore, ToolO
 use react_core::tools::Tool;
 
 use crate::config;
+use crate::data_engineer::control_state::ControlState;
 use crate::data_engineer::tools::dbt_files::DbtFilesTool;
 use crate::dbt;
 
@@ -140,7 +141,29 @@ pub async fn append_phase_with_reason(
                 agent,
             },
         )
+        .await?;
+
+    // Hard-cutover state control: update compact control_state artifact on every phase transition.
+    // Thread log remains audit-only; decisioning uses control_state.
+    let mut st = ControlState::load(store, thread_id)
         .await
+        .unwrap_or_else(ControlState::new);
+    let next = phase.as_str().to_string();
+    let prev = from_phase.map(|p| p.as_str().to_string());
+    if let Some(ref p) = prev {
+        let p_l = p.to_ascii_lowercase();
+        let n_l = next.to_ascii_lowercase();
+        let from_is_reviewish = p_l.contains("validate") || p_l.contains("review");
+        let to_is_plan_or_author = n_l.contains("plan") || n_l.contains("author");
+        if from_is_reviewish && to_is_plan_or_author {
+            st.replan_backtracks = st.replan_backtracks.saturating_add(1);
+        }
+    }
+    st.current_phase = Some(next);
+    st.phase_reason_code = reason_code.map(|c| format!("{:?}", c));
+    st.save(store, thread_id).await?;
+
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1699,7 +1722,8 @@ mod tests {
             Some(PhaseReasonCode::PreflightOk),
             Some(serde_json::json!({"x": 1, "nested": {"y": "z"}})),
         )
-        .await;
+        .await
+        .expect("append ok");
 
         let log = store.get("tid").await.expect("thread log should exist");
         let last = log.steps.last().expect("last step exists");
@@ -1751,7 +1775,8 @@ mod tests {
             None,
             None,
         )
-        .await;
+        .await
+        .expect("append ok");
         let log = store.get("tid2").await.expect("thread log should exist");
         let last = log.steps.last().expect("last step exists");
         let ThreadStep::Phase {

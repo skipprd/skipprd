@@ -344,8 +344,12 @@ struct LlmPatchResponse {
     notes: Vec<String>,
 }
 
-fn parse_llm_patch_response(text: &str) -> Result<LlmPatchResponse, String> {
+fn parse_llm_patch_response(text: &str, expected_rel_path: &str) -> Result<LlmPatchResponse, String> {
     let v = parse_patch_json_from_llm(text)?;
+    let v = crate::data_engineer::patch_normalize::normalize_single_file_patch_response_value(
+        v,
+        expected_rel_path,
+    )?;
     serde_json::from_value(v).map_err(|e| format!("failed to parse patch response JSON: {}", e))
 }
 
@@ -628,7 +632,7 @@ pub async fn llm_patch_loop_single_file(
                     .await;
             }
         }
-        let parsed = match parse_llm_patch_response(&resp_text) {
+        let parsed = match parse_llm_patch_response(&resp_text, expected_rel_path) {
             Ok(v) => v,
             Err(e) => {
                 // FAIL FAST: structural/contract violation. Retrying wastes tokens and can lead to batch_locked.
@@ -827,7 +831,7 @@ mod tests {
             { "path": "models/schema.yml", "new_text": "version: 2\n" }
           ]
         }"#;
-        let parsed = parse_llm_patch_response(txt).expect("parse ok");
+        let parsed = parse_llm_patch_response(txt, "models/schema.yml").expect("parse ok");
         assert!(parsed.replace_file.is_some());
         assert!(parsed.replace_range.is_none());
         assert!(parsed.replace_list.is_none());
@@ -841,7 +845,7 @@ mod tests {
             { "path": "models/schema.yml", "new_text": "b" }
           ]
         }"#;
-        let err = parse_llm_patch_response(txt).unwrap_err();
+        let err = parse_llm_patch_response(txt, "models/schema.yml").unwrap_err();
         assert!(err.to_ascii_lowercase().contains("single"));
     }
 

@@ -579,6 +579,12 @@ impl ThreadStore {
             .unwrap_or_else(|_| format!("invalid/thread/{}.state.json", thread_id))
     }
 
+    fn artifact_key(&self, thread_id: &str, artifact_id: &str) -> String {
+        self.keyspace
+            .thread_artifact_key(&self.scope, thread_id, artifact_id)
+            .unwrap_or_else(|_| format!("invalid/thread/{}.{}.json", thread_id, artifact_id))
+    }
+
     fn list_prefix(&self) -> String {
         format!(
             "{}/",
@@ -649,6 +655,25 @@ impl ThreadStore {
         let key = self.state_key(thread_id);
         let v = serde_json::to_value(state).map_err(|e| e.to_string())?;
         self.storage.put_json(&key, &v).await
+    }
+
+    pub async fn get_thread_artifact_json(
+        &self,
+        thread_id: &str,
+        artifact_id: &str,
+    ) -> Result<Value, String> {
+        let key = self.artifact_key(thread_id, artifact_id);
+        self.storage.get_json(&key).await.map_err(|e| e.to_string())
+    }
+
+    pub async fn put_thread_artifact_json(
+        &self,
+        thread_id: &str,
+        artifact_id: &str,
+        value: &Value,
+    ) -> Result<(), String> {
+        let key = self.artifact_key(thread_id, artifact_id);
+        self.storage.put_json(&key, value).await
     }
 
     async fn materialize_thread_state(

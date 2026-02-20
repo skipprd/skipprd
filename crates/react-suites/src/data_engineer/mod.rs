@@ -18,17 +18,21 @@ use std::sync::Arc;
 pub struct DataEngineerSuite;
 
 pub mod control_flow;
+pub mod control_state;
 pub mod dataset_truth;
 pub mod dbt_error;
 pub mod dbt_repair;
 pub mod facts;
 pub mod naming;
 pub mod patch_protocol;
+pub mod patch_normalize;
 pub mod plan;
+pub mod prompt_packets;
 pub mod project_files;
 pub mod project_fs;
 pub mod schema_policy;
 pub mod prompts;
+pub mod repair_state;
 mod review_batched;
 pub mod tools;
 
@@ -1446,98 +1450,15 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
     }
 
     fn inject_review_question(question: &str) -> String {
-        format!(
-            "Review request: {}.\n\
-             Act as a read-only, practical reviewer for the current DBT project.\n\
-             - Stay read-only (no edits/publish).\n\
-             - Use artifacts and schema tools to ground feedback.\n\
-             - Prioritize business value over academic correctness; avoid pedantic nitpicks.\n\
-             - Recommend changes/tests only when they materially improve correctness, reduce business risk, or improve analyst usability.\n\
-             - Provide prioritized, dataset-scoped improvements (few, high-impact).\n\
-             - IMPORTANT: Re-check the CURRENT project state (prefer target/manifest.json + models/schema.yml). If your feedback is substantially unchanged from the prior iteration, set META.actionable=false (do not repeat the same advice).",
-            question
-        )
+        crate::prompts::shared::user_goal_line("Review request:", question)
     }
 
     fn inject_model_question(question: &str) -> String {
-        format!(
-            "Modeling goal: {}.\n\
-             Act as a proactive DBT Engineer with strong business domain focus.\n\
-             - Do NOT assume table names.\n\
-             - If embeddings/vect search yields no candidates, call sql_schema with no args to list tables.\n\
-             - Hybrid selection: propose a shortlist of tables (with brief reasons based on schema/stats), then ask_approval to confirm the table list before writing any artifacts.\n\
-             - Tiers:\n\
-               - Silver = DBT staging models (cleansed/normalized) written by `staging_model` and materialized into the configured Athena silver database.\n\
-               - Gold = DBT marts/final models materialized into the configured Athena gold database.\n\
-             - Gold focus: author ONLY gold/core/mart models in this phase, and only SELECT from silver/staging models (use ref('stg_*')).\n\
-             - Do NOT reference raw/bronze sources in gold model SQL.\n\
-             - You MAY investigate raw/bronze via sql_schema/sql_sample/sql_stats/vect_query/run_sql to detect missing data, but treat raw as discovery only.\n\
-             - If you find useful raw fields/tables missing in silver, request a silver expansion:\n\
-               - Use ask_approval to list the missing tables/fields to add to silver.\n\
-              - After approval, if deterministic plan-batched authoring is available in the current tool card, use that batch authoring tool to execute the next approved silver batch.\n\
-                Otherwise, use staging_model (or dbt_files op=patch) to add them to silver BEFORE continuing gold.\n\
-             - Search DBT examples (search_dbt_examples) and adopt conventions from the top match.\n\
-             - Model relationships and flow:\n\
-               - Identify join keys (user/profile/account/session/device identifiers) across the approved tables using sql_schema + sql_sample/sql_stats.\n\
-               - Identify event time fields and ordering semantics; do NOT assume the timestamp column name.\n\
-               - For event-style datasets, prefer building a core/funnel mart that sequences events per entity and computes step completion + step-to-step durations.\n\
-              - Add dbt tests (not_null/unique/relationships) for the chosen keys and important timestamps.\n\
-              - IMPORTANT: be data-aware and permissive: NEVER add unconditional not_null on parsed/cast timestamp fields produced via try_cast; instead use conditional tests with where: anchored on the raw value being present (and document why).\n\
-             - Batch scaffolding: use dbt_files op=patch to write MANY files, but keep each call small enough to fit the output limit.\n\
-               - If you need more files, do multiple dbt_files calls over multiple steps.\n\
-             - IMPORTANT: use `dbt_files op=patch` for ALL DBT project files (e.g. path='dbt_project.yml', 'packages.yml', 'models/schema.yml', and model SQL).\n\
-             - IMPORTANT (gold progress): you MUST author gold models under `models/marts/` or `models/core/` in this phase.\n\
-              - If deterministic plan-batched authoring is available in the current tool card, prefer that batch authoring tool so the suite executes the approved batch deterministically (do NOT supply items/dataset_ids).\n\
-               - Otherwise, prefer `gold_model` to write marts in batches of up to 5 models per call.\n\
-               - Gold models MUST ONLY select from silver/staging via ref('stg_*') and MUST NOT use source().\n\
-             - Staging/silver naming is STRICT and deterministic:\n\
-               - Staging models MUST be written to: 'models/staging/stg_<source_schema>_<source_table>.sql' (single underscores, sanitized).\n\
-               - Do NOT invent alternate naming schemes (no stg_<table>, no double-underscore variants). If a table already exists, you are updating it, not creating a new one.\n\
-             - NOTE: In suite agent-mode runs, validation/publish may be handled by deterministic suite phases. Follow the current tool card; if dbt_validate/publish are not available, focus on authoring and let the suite validate/publish later.\n\
-             - When validation is clean: call publish_dbt_to_provider to materialize curated relations in the active warehouse provider.\n\
-               - If publish returns await_approval: ask the user to approve; on approval, re-run publish_dbt_to_provider with confirm=true.\n\
-               - Default materialization is view; if you believe table or incremental is better, propose it with rationale and await approval before changing materializations.\n\
-             - Ask the user only when confidence is very low (≤0.4) and only for concrete details; after any clarification, write a considered, sentient update from a fastidious custodian of data governance via catalog_note (preview if material).",
-            question
-        )
+        crate::prompts::shared::user_goal_line("Modeling goal:", question)
     }
 
     fn inject_cleanse_question(question: &str) -> String {
-        format!(
-            "Cleansing goal: {}.\n\
-             Act as a proactive DBT Engineer focused on producing a curated silver tier.\n\
-             - Prefer DBT models over ad-hoc SQL; author staging models and tests.\n\
-             - If deterministic plan-batched authoring is available in the current tool card, prefer that batch authoring tool so the suite executes the approved batch deterministically (do NOT supply items/dataset_ids).\n\
-               Otherwise, use `staging_model` to author/update staging models (cleansing + nested field extraction). Treat user instructions as authoritative constraints.\n\
-             - Silver tier must land in the configured Athena silver database.\n\
-             - Do NOT assume table names.\n\
-             - If embeddings/vect search yields no candidates, call sql_schema with no args to list tables.\n\
-             - Hybrid selection: propose a shortlist of tables (with brief reasons based on schema/stats), then ask_approval to confirm the table list before writing any artifacts.\n\
-             - Coverage requirement: include ALL raw/bronze tables in scope by default, and include all valid fields from those tables in silver.\n\
-               - Do NOT drop columns; preserve raw values (e.g., *_raw) and add cleaned/cast columns alongside them.\n\
-               - If a field is unusable, keep the raw column and add a best-effort cleaned column with safe casting/normalization.\n\
-             - Row preservation (CRITICAL): silver/staging is a row-preserving cleanse layer.\n\
-               - Do NOT filter rows, deduplicate, or enforce grains/primary keys in silver.\n\
-               - If raw/bronze values are NULL/blank, it is valid for silver to produce NULL/blank after cleansing.\n\
-               - Prefer quality flags (has_*, is_valid_*) and conditional tests instead of row drops.\n\
-             - Model relationships and flow:\n\
-               - Identify join keys (user/profile/account/session/device identifiers) and timestamp fields using sql_schema + sql_sample/sql_stats.\n\
-               - Prefer staged normalization (consistent key/timestamp names) to make downstream joins reliable.\n\
-              - Add dbt tests for chosen keys and key timestamps (data-aware):\n\
-                - Prefer conditional tests with where: anchored on raw input presence.\n\
-                - Avoid unique tests in silver unless the raw source is proven unique and you intend to enforce it here.\n\
-              - IMPORTANT: be data-aware and permissive: NEVER add unconditional not_null on parsed/cast timestamp fields produced via try_cast; instead use conditional tests with where: anchored on the raw value being present (and document why).\n\
-             - Batch scaffolding: use dbt_files op=patch to write MANY files, but keep each call small enough to fit the output limit.\n\
-               - If you need more files, do multiple dbt_files calls over multiple steps.\n\
-             - Use `dbt_files op=patch` for ALL DBT project files (dbt_project.yml, packages.yml, models/schema.yml, and staging SQL).\n\
-             - Staging/silver naming is STRICT and deterministic:\n\
-               - Staging models MUST be written to: 'models/staging/stg_<source_schema>_<source_table>.sql' (single underscores, sanitized).\n\
-               - Do NOT invent alternate naming schemes (no stg_<table>, no double-underscore variants). If a table already exists, you are updating it, not creating a new one.\n\
-             - After saving artifacts: ALWAYS validate with dbt_validate. If validate fails, iterate (edit artifacts, re-validate) until clean.\n\
-             - When validation is clean: call publish_dbt_to_provider (views by default; propose tables/incremental with rationale and await approval).\n\
-             - Use catalog_note to record notable cleansing decisions and assumptions (preview if material).",
-            question
-        )
+        crate::prompts::shared::user_goal_line("Cleansing goal:", question)
     }
 
     fn build_tools(agent_type: &str, sctx: &SuiteCtx) -> Result<ToolRegistry, String> {
@@ -1894,7 +1815,99 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     ));
                                 }
                             }
-                            self.inner.call(args, ctx).await
+                            // Deterministic repair ladder enforcement (hard cutover).
+                            if let (Some(store), Some(thread_id), Some(want)) = (
+                                ctx.thread_store.as_ref(),
+                                ctx.thread_id.as_deref(),
+                                self.single_target_path.as_ref(),
+                            ) {
+                                if op == "patch" {
+                                    let rs = crate::data_engineer::repair_state::RepairState::load(
+                                        store,
+                                        thread_id,
+                                    )
+                                    .await
+                                    .unwrap_or_else(crate::data_engineer::repair_state::RepairState::new);
+
+                                    match rs.ladder_step {
+                                        crate::data_engineer::repair_state::RepairLadderStep::Stop => {
+                                            return Err(format!(
+                                                "deterministic repair ladder stop: '{}' did not converge after prior repair attempts. Stop and apply a manual fix for '{}' before re-running.",
+                                                want, want
+                                            ));
+                                        }
+                                        crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile => {
+                                            let has_replace_file = args.get("replace_file").is_some();
+                                            let has_other = args.get("replace_range").is_some()
+                                                || args.get("replace_list").is_some();
+                                            if !has_replace_file || has_other {
+                                                return Err(format!(
+                                                    "deterministic repair ladder step requires replace_file for '{}' (do not use replace_range/replace_list).",
+                                                    want
+                                                ));
+                                            }
+                                        }
+                                        crate::data_engineer::repair_state::RepairLadderStep::PatchTarget => {}
+                                    }
+                                }
+                            }
+
+                            let res = self.inner.call(args.clone(), ctx).await;
+
+                            // Update repair state after the attempt (best-effort, but should fail fast if persistence breaks).
+                            if let (Some(store), Some(thread_id), Some(want)) = (
+                                ctx.thread_store.as_ref(),
+                                ctx.thread_id.as_deref(),
+                                self.single_target_path.as_ref(),
+                            ) {
+                                if op == "patch" {
+                                    let mut rs = crate::data_engineer::repair_state::RepairState::load(
+                                        store,
+                                        thread_id,
+                                    )
+                                    .await
+                                    .unwrap_or_else(crate::data_engineer::repair_state::RepairState::new);
+                                    rs.target_path = Some(want.clone());
+                                    rs.attempt_count = rs.attempt_count.saturating_add(1);
+
+                                    match &res {
+                                        Ok(v) => {
+                                            let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                                            let mutated = v.get("mutated").and_then(|x| x.as_bool()).unwrap_or(false);
+                                            if ok && mutated {
+                                                // Progress made; reset ladder counters so we don't prematurely stop.
+                                                rs.attempt_count = 0;
+                                                rs.consecutive_noop_patches = 0;
+                                                rs.ladder_step = crate::data_engineer::repair_state::RepairLadderStep::PatchTarget;
+                                            } else if ok && !mutated {
+                                                rs.consecutive_noop_patches = rs.consecutive_noop_patches.saturating_add(1);
+                                                rs.ladder_step = if rs.attempt_count >= 2 {
+                                                    crate::data_engineer::repair_state::RepairLadderStep::Stop
+                                                } else {
+                                                    crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile
+                                                };
+                                            } else {
+                                                rs.ladder_step = if rs.attempt_count >= 2 {
+                                                    crate::data_engineer::repair_state::RepairLadderStep::Stop
+                                                } else {
+                                                    crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile
+                                                };
+                                            }
+                                        }
+                                        Err(_) => {
+                                            rs.ladder_step = if rs.attempt_count >= 2 {
+                                                crate::data_engineer::repair_state::RepairLadderStep::Stop
+                                            } else {
+                                                crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile
+                                            };
+                                        }
+                                    }
+                                    // Persist state; hard fail if we cannot persist during repair mode.
+                                    rs.save(store, thread_id).await?;
+                                }
+                            }
+
+                            res
                         }
                     }
                     reg.register(PutOnlyDbtFilesTool {
@@ -2831,10 +2844,10 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             "batches_len": p.batches.len(),
                                         })),
                                     )
-                                    .await;
+                                    .await?;
                                     continue;
                                 }
-                                let _ = control_flow::append_phase_with_reason(
+                                control_flow::append_phase_with_reason(
                                     &thread_store,
                                     thread_id,
                                     Some("agent".to_string()),
@@ -2845,7 +2858,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         serde_json::json!({ "status": format!("{:?}", p.status) }),
                                     ),
                                 )
-                                .await;
+                                .await?;
                                 continue;
                             }
                         }
@@ -2878,10 +2891,10 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             "batches_len": p.batches.len(),
                                         })),
                                     )
-                                    .await;
+                                    .await?;
                                     continue;
                                 }
-                                let _ = control_flow::append_phase_with_reason(
+                                control_flow::append_phase_with_reason(
                                     &thread_store,
                                     thread_id,
                                     Some("agent".to_string()),
@@ -2892,7 +2905,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         serde_json::json!({ "status": format!("{:?}", p.status) }),
                                     ),
                                 )
-                                .await;
+                                .await?;
                                 continue;
                             }
                         }
@@ -4284,7 +4297,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             "note": "authoring entered without an active cleanse plan; routing back to planning",
                                         })),
                                     )
-                                    .await;
+                                    .await?;
                                     continue;
                                 }
                             };
@@ -4308,15 +4321,21 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         "batches_len": plan.batches.len(),
                                     })),
                                 )
-                                .await;
+                                .await?;
                                 continue;
                             }
                             if let Some(ref l) = log {
-                                crate::data_engineer::plan::update_cleanse_progress_from_log(
-                                    &mut plan, l,
-                                );
-                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
+                                // In deterministic repair mode, the plan is frozen (reference-only).
+                                if !hard_mutation_repair_mode {
+                                    crate::data_engineer::plan::update_cleanse_progress_from_log(
+                                        &mut plan,
+                                        l,
+                                    );
+                                    let _ = crate::data_engineer::plan::save_cleanse_plan(
+                                        &actx, &plan,
+                                    )
                                     .await;
+                                }
                             }
 
                             // Explicit execution context for hierarchical UI (best-effort).
@@ -4387,7 +4406,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 Some(PhaseReasonCode::PlanNotApproved),
                                 Some(serde_json::json!({ "status": format!("{:?}", plan.status) })),
                             )
-                            .await;
+                            .await?;
                                 continue;
                             }
                             // Work-group driven selection (preferred). Fall back to batch scanning if work_groups
@@ -4579,7 +4598,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             Some(PhaseReasonCode::WorkGroupValidate),
                                             Some(serde_json::json!({ "plan_key": plan.plan_key })),
                                         )
-                                        .await;
+                                        .await?;
                                         continue;
                                     }
 
@@ -4659,7 +4678,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                                 Some(PhaseReasonCode::PlanTasksDone),
                                                 Some(serde_json::json!({ "plan_key": plan.plan_key })),
                                             )
-                                            .await;
+                                            .await?;
                                             continue;
                                         }
                                     }
@@ -4694,7 +4713,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             "note": "authoring entered without an active model plan; routing back to planning",
                                         })),
                                     )
-                                    .await;
+                                    .await?;
                                     continue;
                                 }
                             };
@@ -4718,15 +4737,21 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         "batches_len": plan.batches.len(),
                                     })),
                                 )
-                                .await;
+                                .await?;
                                 continue;
                             }
                             if let Some(ref l) = log {
-                                crate::data_engineer::plan::update_model_progress_from_log(
-                                    &mut plan, l,
-                                );
-                                let _ =
-                                    crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
+                                // In deterministic repair mode, the plan is frozen (reference-only).
+                                if !hard_mutation_repair_mode {
+                                    crate::data_engineer::plan::update_model_progress_from_log(
+                                        &mut plan,
+                                        l,
+                                    );
+                                    let _ = crate::data_engineer::plan::save_model_plan(
+                                        &actx, &plan,
+                                    )
+                                    .await;
+                                }
                             }
 
                             // Explicit execution context for hierarchical UI (best-effort).
@@ -4794,7 +4819,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 Some(PhaseReasonCode::PlanNotApproved),
                                 Some(serde_json::json!({ "status": format!("{:?}", plan.status) })),
                             )
-                            .await;
+                        .await?;
                                 continue;
                             }
                             // Work-group driven selection (preferred). Fall back to batch scanning if work_groups
@@ -5059,7 +5084,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             Some(PhaseReasonCode::WorkGroupValidate),
                                             Some(serde_json::json!({ "plan_key": plan.plan_key })),
                                         )
-                                        .await;
+                                        .await?;
                                         continue;
                                     }
 
@@ -5219,7 +5244,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             Some(PhaseReasonCode::PlanTasksDone),
                                             Some(serde_json::json!({ "plan_key": plan.plan_key })),
                                         )
-                                        .await;
+                                        .await?;
                                         continue;
                                     }
                                 }
@@ -5547,6 +5572,84 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         q.push_str("\n\nIMPORTANT: invariant failed: there are no DBT model SQL files yet. Your first task is to create at least one staging model under models/ using staging_model or dbt_files op=patch.");
                     }
 
+                    // Hard cutover: deterministic repair-mode mini-context.
+                    // When validate failed and we are in single-target repair mode, do NOT feed the model the full
+                    // accumulated authoring prompt (plan context, immutable facts, review text, etc).
+                    // Instead, provide a minimal packet: target file + failure brief + strict allowed operation.
+                    if hard_mutation_repair_mode
+                        && !prefer_schema_repairs
+                        && single_target_repair_path.as_ref().is_some()
+                    {
+                        let target = single_target_repair_path
+                            .as_ref()
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_default();
+                        let mut rs = crate::data_engineer::repair_state::RepairState::load(
+                            &thread_store,
+                            thread_id,
+                        )
+                        .await
+                        .unwrap_or_else(crate::data_engineer::repair_state::RepairState::new);
+                        if rs.target_path.as_deref().unwrap_or("").trim().is_empty() && !target.is_empty() {
+                            rs.target_path = Some(target.clone());
+                            let _ = rs.save(&thread_store, thread_id).await;
+                        }
+                        let ladder = rs.ladder_step.clone();
+
+                        let mut content = String::new();
+                        if !target.is_empty() {
+                            let base = actx
+                                .keyspace
+                                .dbt_prefix(&actx.scope)
+                                .trim_end_matches('/')
+                                .to_string();
+                            let key = format!("{}/{}", base, target);
+                            if let Ok(bytes) = actx.storage.get_bytes(&key).await {
+                                content = String::from_utf8_lossy(&bytes).to_string();
+                            }
+                        }
+
+                        let envelope = crate::data_engineer::prompt_packets::PromptEnvelope {
+                            phase: phase.as_str().to_string(),
+                            goal: question.trim().to_string(),
+                            plan: None,
+                            batch: None,
+                            repair: Some(crate::data_engineer::prompt_packets::RepairPacket {
+                                target_path: target.clone(),
+                                ladder_step: ladder.clone(),
+                                last_validate_brief: last_validate_brief.clone(),
+                                patch_contract: Some(
+                                    crate::prompts::patch_contract::dbt_files_patch_contract()
+                                        .to_string(),
+                                ),
+                            }),
+                        };
+                        let mut repair =
+                            crate::data_engineer::prompt_packets::render_envelope(&envelope);
+
+                        repair.push_str("\nRules:\n");
+                        repair.push_str("- You MUST call dbt_files op=patch next.\n");
+                        repair.push_str("- You MUST patch ONLY the target file above.\n");
+                        match ladder {
+                            crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile => {
+                                repair.push_str("- IMPORTANT: You MUST use replace_file (full rewritten file). Do NOT use replace_range/replace_list.\n");
+                            }
+                            crate::data_engineer::repair_state::RepairLadderStep::Stop => {
+                                repair.push_str("- STOP: prior repair attempts did not converge. Do not continue.\n");
+                            }
+                            crate::data_engineer::repair_state::RepairLadderStep::PatchTarget => {}
+                        }
+
+                        repair.push_str("\nCurrent target file content:\n```sql\n");
+                        repair.push_str(&content);
+                        if !content.ends_with('\n') {
+                            repair.push('\n');
+                        }
+                        repair.push_str("```\n");
+
+                        q = repair;
+                    }
+
                     let llm_options = if is_cleanse {
                         let author_max_tokens: u32 = std::env::var("LLM_AUTHOR_MAX_TOKENS_CLEANSE")
                             .ok()
@@ -5853,7 +5956,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             Some(PhaseReasonCode::PrecheckFailed),
                             Some(serde_json::json!({ "error": e })),
                         )
-                        .await;
+                        .await?;
                         continue;
                     }
 
@@ -5885,7 +5988,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             Some(PhaseReasonCode::PrecheckFailed),
                             Some(serde_json::json!({ "error": e })),
                         )
-                        .await;
+                        .await?;
                         continue;
                     }
 
@@ -6131,6 +6234,34 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         .unwrap_or(false);
                     let run_ok = obs.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     if ok && compile_ok && run_ok {
+                        // Update compact control state (hard-cutover: primary decision source).
+                        {
+                            let mut cs = crate::data_engineer::control_state::ControlState::load(
+                                &thread_store,
+                                thread_id,
+                            )
+                            .await
+                            .unwrap_or_else(crate::data_engineer::control_state::ControlState::new);
+                            cs.last_validate = Some(crate::data_engineer::control_state::LastValidateState {
+                                step_idx: None,
+                                ts: Some(chrono::Utc::now().to_rfc3339()),
+                                ok: Some(true),
+                                compile_ok: Some(true),
+                                run_ok: Some(true),
+                                brief: None,
+                                failed_models: Vec::new(),
+                                failure_class: None,
+                            });
+                            cs.hard_mutation_repair_mode = false;
+                            cs.single_target_repair_path = None;
+                            let _ = cs.save(&thread_store, thread_id).await;
+
+                            // Clear repair state on success (best-effort).
+                            let _ = crate::data_engineer::repair_state::RepairState::new()
+                                .save(&thread_store, thread_id)
+                                .await;
+                        }
+
                         // Mark the active plan completed only after validate passes.
                         let latest_log = thread_store.get(thread_id).await.ok();
                         if phase == Phase::CleanseValidate {
@@ -6183,7 +6314,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 "dbt_validate_step_idx": trigger_step_idx,
                             })),
                         )
-                        .await;
+                        .await?;
                         continue;
                     }
 
@@ -6213,7 +6344,69 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             &obs.get("logs").cloned().unwrap_or(serde_json::Value::Null),
                         );
                     let brief = dbt_error::compact_brief(&errs, 6, 1200);
-                    if !failing_models.is_empty() {
+
+                    // Update compact control+repair state from this validate failure (hard-cutover: primary decision source).
+                    {
+                        let entered_from_precheck_failed = false;
+                        let failure_class = classify_validate_failure(
+                            entered_from_precheck_failed,
+                            Some(&brief),
+                            None,
+                        );
+                        let failure_class_str = match failure_class {
+                            ValidateFailureClass::SqlOrRuntime => "sql_or_runtime",
+                            ValidateFailureClass::SchemaOrPrecheck => "schema_or_precheck",
+                            ValidateFailureClass::Unknown => "unknown",
+                        }
+                        .to_string();
+                        let primary_file =
+                            primary_failed_model_file(&failing_models).unwrap_or_default();
+
+                        let mut cs = crate::data_engineer::control_state::ControlState::load(
+                            &thread_store,
+                            thread_id,
+                        )
+                        .await
+                        .unwrap_or_else(crate::data_engineer::control_state::ControlState::new);
+                        cs.last_validate = Some(crate::data_engineer::control_state::LastValidateState {
+                            step_idx: None,
+                            ts: Some(chrono::Utc::now().to_rfc3339()),
+                            ok: Some(false),
+                            compile_ok: Some(compile_ok),
+                            run_ok: Some(run_ok),
+                            brief: Some(brief.clone()),
+                            failed_models: failing_models.clone(),
+                            failure_class: Some(failure_class_str.clone()),
+                        });
+                        cs.hard_mutation_repair_mode = true;
+                        cs.single_target_repair_path = if primary_file.trim().is_empty() {
+                            None
+                        } else {
+                            Some(primary_file.trim().to_string())
+                        };
+                        let _ = cs.save(&thread_store, thread_id).await;
+
+                        let mut rs = crate::data_engineer::repair_state::RepairState::load(
+                            &thread_store,
+                            thread_id,
+                        )
+                        .await
+                        .unwrap_or_else(crate::data_engineer::repair_state::RepairState::new);
+                        rs.target_path = cs.single_target_repair_path.clone();
+                        rs.last_failed_models = failing_models.clone();
+                        rs.last_error_class = Some(failure_class_str);
+                        rs.last_error_brief = Some(brief.clone());
+                        rs.ladder_step = crate::data_engineer::repair_state::RepairLadderStep::PatchTarget;
+                        rs.attempt_count = 0;
+                        rs.consecutive_noop_patches = 0;
+                        let _ = rs.save(&thread_store, thread_id).await;
+                    }
+
+                    // Hard cutover: during deterministic repair, the plan is treated as a frozen reference.
+                    // We do NOT mutate plan task state in response to validate failures; repair is driven by
+                    // (ControlState, RepairState) + single-target file edits instead.
+                    let freeze_plan_during_repair = true;
+                    if !freeze_plan_during_repair && !failing_models.is_empty() {
                         if phase == Phase::CleanseValidate {
                             if let Some(mut p) =
                                 crate::data_engineer::plan::load_cleanse_plan(&actx).await
@@ -6444,7 +6637,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             "facts_bundle": facts_bundle,
                         })),
                     )
-                    .await;
+                    .await?;
                     continue;
                 }
 
@@ -6551,7 +6744,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 Some(PhaseReasonCode::ReviewProceed),
                                 Some(reason_detail),
                             )
-                            .await;
+                            .await?;
                             continue;
                         }
                         ReviewDecision::PatchPlan => {
@@ -6569,7 +6762,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 Some(PhaseReasonCode::ReviewPatchPlan),
                                 Some(reason_detail),
                             )
-                            .await;
+                                        .await?;
                             continue;
                         }
                         ReviewDecision::PatchImpl => {
@@ -6588,7 +6781,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 Some(PhaseReasonCode::ReviewPatchImpl),
                                 Some(reason_detail),
                             )
-                            .await;
+                                            .await?;
                             continue;
                         }
                     }
@@ -6661,7 +6854,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 "publish_observation": obs,
                             })),
                         )
-                        .await;
+                            .await?;
                         continue;
                     }
                     if ok && stage == "await_approval" {
@@ -6684,7 +6877,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             "publish_observation": obs,
                         })),
                     )
-                    .await;
+                                        .await?;
                     continue;
                 }
 
@@ -6739,7 +6932,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 "publish_observation": obs,
                             })),
                         )
-                        .await;
+                                        .await?;
                         continue;
                     }
                     // Failed publish -> back to model authoring.
@@ -6754,7 +6947,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             "publish_observation": obs,
                         })),
                     )
-                    .await;
+                    .await?;
                     continue;
                 }
 

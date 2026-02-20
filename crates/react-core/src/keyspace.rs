@@ -4,6 +4,15 @@ pub trait Keyspace: Send + Sync {
     fn threads_prefix(&self, scope: &RequestScope) -> String;
     fn thread_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String>;
     fn thread_state_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String>;
+    /// Thread-scoped, small JSON artifacts (control state, repair state, summaries, etc).
+    ///
+    /// `artifact_id` must be a safe single path segment (no slashes, no `..`).
+    fn thread_artifact_key(
+        &self,
+        scope: &RequestScope,
+        thread_id: &str,
+        artifact_id: &str,
+    ) -> Result<String, String>;
 
     fn logs_prefix(&self, scope: &RequestScope) -> String;
     fn thread_log_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String>;
@@ -90,6 +99,23 @@ impl Keyspace for DefaultKeyspace {
         Ok(format!(
             "{}/{}/{}/threads/{}.state.json",
             scope.tenant, scope.workspace, scope.project_id, thread_id
+        ))
+    }
+
+    fn thread_artifact_key(
+        &self,
+        scope: &RequestScope,
+        thread_id: &str,
+        artifact_id: &str,
+    ) -> Result<String, String> {
+        Self::ensure_safe_segment(&scope.tenant)?;
+        Self::ensure_safe_segment(&scope.workspace)?;
+        Self::ensure_safe_segment(&scope.project_id)?;
+        Self::ensure_safe_segment(thread_id)?;
+        Self::ensure_safe_segment(artifact_id)?;
+        Ok(format!(
+            "{}/{}/{}/threads/{}.{}.json",
+            scope.tenant, scope.workspace, scope.project_id, thread_id, artifact_id
         ))
     }
 
@@ -214,6 +240,15 @@ impl Keyspace for LocalKeyspace {
         DefaultKeyspace { bucket: "".to_string() }.thread_state_key(scope, thread_id)
     }
 
+    fn thread_artifact_key(
+        &self,
+        scope: &RequestScope,
+        thread_id: &str,
+        artifact_id: &str,
+    ) -> Result<String, String> {
+        DefaultKeyspace { bucket: "".to_string() }.thread_artifact_key(scope, thread_id, artifact_id)
+    }
+
     fn logs_prefix(&self, scope: &RequestScope) -> String {
         DefaultKeyspace { bucket: "".to_string() }.logs_prefix(scope)
     }
@@ -286,6 +321,9 @@ mod tests {
         assert!(ks.thread_key(&scope, "../x").is_err());
         assert!(ks.thread_key(&scope, "a/b").is_err());
         assert!(ks.thread_key(&scope, "").is_err());
+        assert!(ks.thread_artifact_key(&scope, "123", "../x").is_err());
+        assert!(ks.thread_artifact_key(&scope, "123", "a/b").is_err());
+        assert!(ks.thread_artifact_key(&scope, "123", "").is_err());
     }
 
     #[test]
@@ -322,5 +360,17 @@ mod tests {
         };
         let k = ks.thread_log_key(&scope, "123").unwrap();
         assert_eq!(k, "t/w/p/logs/123.log");
+    }
+
+    #[test]
+    fn keyspace_builds_thread_artifact_key() {
+        let ks = DefaultKeyspace::new("b".to_string());
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let k = ks.thread_artifact_key(&scope, "123", "control").unwrap();
+        assert_eq!(k, "t/w/p/threads/123.control.json");
     }
 }

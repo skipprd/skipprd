@@ -5,6 +5,7 @@ pub mod patch_contract;
 pub mod plan;
 pub mod reference;
 pub mod review;
+pub mod shared;
 
 #[cfg(test)]
 mod tests {
