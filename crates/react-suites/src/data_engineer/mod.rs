@@ -87,6 +87,14 @@ fn classify_validate_failure(
     }
 }
 
+fn primary_failed_model_file(last_validate_failed_models: &[serde_json::Value]) -> Option<String> {
+    last_validate_failed_models
+        .iter()
+        .filter_map(|fm| fm.get("file").and_then(|v| v.as_str()))
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty() && s != "(unknown file)")
+}
+
 fn lock_prompt_for_plan(
     kind: &str,
     plan_key: &str,
@@ -1719,6 +1727,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
         _allow_ask_approval: bool,
         sctx: &SuiteCtx,
         allowed_batch: Option<AllowedBatch>,
+        single_target_repair_path: Option<String>,
     ) -> Result<(ToolRegistry, String), String> {
         use crate::data_engineer::tools::{
             artifacts::ArtifactsTool, dbt_files::DbtFilesTool, sql_run::SqlRunTool,
@@ -1815,6 +1824,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                     // Mutation-only dbt_files to avoid "read-only thrash" when we require a mutation next.
                     struct PutOnlyDbtFilesTool {
                         inner: DbtFilesTool,
+                        single_target_path: Option<String>,
                     }
                     #[async_trait::async_trait]
                     impl react_core::tools::Tool for PutOnlyDbtFilesTool {
@@ -1827,8 +1837,62 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             ctx: &react_core::agent::AgentCtx,
                         ) -> Result<serde_json::Value, String> {
                             let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                            if !matches!(op, "patch" | "rm" | "mv") {
+                            if self.single_target_path.is_some() && op != "patch" {
+                                return Err("dbt_files is in deterministic single-target repair mode; only op='patch' is allowed.".to_string());
+                            }
+                            if self.single_target_path.is_none() && !matches!(op, "patch" | "rm" | "mv") {
                                 return Err("dbt_files is mutation-only right now (a mutating fix is required before any further validation). Allowed ops: patch/rm/mv.".to_string());
+                            }
+                            if let Some(want) = self.single_target_path.as_ref() {
+                                fn collect_paths(v: &serde_json::Value) -> Vec<String> {
+                                    let mut out: Vec<String> = Vec::new();
+                                    if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
+                                        let p = p.trim();
+                                        if !p.is_empty() {
+                                            out.push(p.to_string());
+                                        }
+                                    }
+                                    for key in ["replace_file", "replace_range", "replace_list"] {
+                                        let Some(node) = v.get(key) else { continue };
+                                        let mut visit =
+                                            |obj: &serde_json::Map<String, serde_json::Value>| {
+                                                if let Some(p) =
+                                                    obj.get("path").and_then(|x| x.as_str())
+                                                {
+                                                    let p = p.trim();
+                                                    if !p.is_empty() {
+                                                        out.push(p.to_string());
+                                                    }
+                                                }
+                                            };
+                                        if let Some(arr) = node.as_array() {
+                                            for it in arr.iter() {
+                                                if let Some(obj) = it.as_object() {
+                                                    visit(obj);
+                                                }
+                                            }
+                                        } else if let Some(obj) = node.as_object() {
+                                            visit(obj);
+                                        }
+                                    }
+                                    out
+                                }
+                                let mut paths = collect_paths(&args);
+                                paths.sort();
+                                paths.dedup();
+                                if paths.is_empty() {
+                                    return Err(format!(
+                                        "dbt_files deterministic repair mode requires explicit path='{}'.",
+                                        want
+                                    ));
+                                }
+                                if paths.len() != 1 || paths[0] != *want {
+                                    return Err(format!(
+                                        "dbt_files deterministic single-target repair mode violation: only '{}' may be patched right now (got: {}).",
+                                        want,
+                                        paths.join(", ")
+                                    ));
+                                }
                             }
                             self.inner.call(args, ctx).await
                         }
@@ -1837,6 +1901,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         inner: DbtFilesTool {
                             datasets: sctx.datasets.clone(),
                         },
+                        single_target_path: single_target_repair_path.clone(),
                     });
 
                     // Keep targeted probes available: probe requirements can be asserted after runtime failures,
@@ -1873,6 +1938,9 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         "",
                         "Not available: read/explore tools, dbt_validate, publish_dbt_to_provider.",
                     ]);
+                    if single_target_repair_path.is_some() {
+                        tool_lines.push("Deterministic single-target repair mode is active: only dbt_files op=patch for the current failing model file is allowed.");
+                    }
                     tools_card_lines = tool_lines;
                 } else {
                     // Normal authoring: allow read/explore + probes.
@@ -2431,13 +2499,13 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
         let max_phase_steps: usize = std::env::var("AGENT_MAX_PHASE_STEPS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(60)
-            .max(12)
+            .unwrap_or(40)
+            .max(8)
             .min(400);
         let max_replan_backtracks: usize = std::env::var("AGENT_MAX_REPLAN_BACKTRACKS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(4)
+            .unwrap_or(3)
             .max(2)
             .min(20);
 
@@ -3094,8 +3162,14 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                     } else {
                         prompts::model_plan_system_prompt()
                     });
-                    let (registry, tools_card) =
-                        Self::build_tools_for_phase(phase, &guard, allow_ask_approval, sctx, None)?;
+                    let (registry, tools_card) = Self::build_tools_for_phase(
+                        phase,
+                        &guard,
+                        allow_ask_approval,
+                        sctx,
+                        None,
+                        None,
+                    )?;
 
                     let mut q = if is_cleanse {
                         format!(
@@ -5176,12 +5250,21 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             }
                         };
 
+                    let single_target_repair_path = if hard_mutation_repair_mode
+                        && !prefer_schema_repairs
+                    {
+                        primary_failed_model_file(&last_validate_failed_models)
+                    } else {
+                        None
+                    };
+
                     let (registry, tools_card) = Self::build_tools_for_phase(
                         phase,
                         &phase_guard,
                         allow_ask_approval,
                         sctx,
                         allowed_batch.clone(),
+                        single_target_repair_path.clone(),
                     )?;
 
                     // Ground the next authoring pass with last validation summary (if any) and guard state.
@@ -5355,6 +5438,13 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             q.push_str(")\n");
                         }
                         q.push_str("Fix these first (prefer patching the listed file paths).\n");
+                    }
+                    if let Some(ref target) = single_target_repair_path {
+                        q.push_str("\n\nDETERMINISTIC SINGLE-TARGET REPAIR MODE:\n");
+                        q.push_str("- You MUST patch ONLY this file path in your next mutation:\n");
+                        q.push_str("- ");
+                        q.push_str(target);
+                        q.push_str("\n- Do NOT patch, move, or remove any other file until this target validates.\n");
                     }
 
                     // When the suite is in hard_mutation_only, dbt_files is patch-only (no op=get),
@@ -7263,6 +7353,7 @@ mod tests {
             true,
             &sctx,
             None,
+            None,
         )
         .expect("build_tools_for_phase should succeed");
 
@@ -7318,6 +7409,7 @@ mod tests {
             Some(super::AllowedBatch::CleanseDatasetIds(vec![
                 "AwsDataCatalog.db.t1".to_string(),
             ])),
+            None,
         )
         .expect("build_tools_for_phase should succeed");
 
@@ -7329,6 +7421,48 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn hard_mutation_mode_single_target_repair_rejects_other_paths() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+
+        let guard = crate::data_engineer::control_flow::DerivedGuardState {
+            last_validate_failed: true,
+            mutated_since_fail: false,
+            patched_since_fail: false,
+            mutation_failures_since_validate: 0,
+            probe_required: false,
+            probe_satisfied: false,
+        };
+
+        let (reg, _card) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::ModelAuthor,
+            &guard,
+            true,
+            &sctx,
+            None,
+            Some("models/marts/fct_orders.sql".to_string()),
+        )
+        .expect("build_tools_for_phase should succeed");
+
+        let err = reg
+            .call(
+                "dbt_files",
+                serde_json::json!({
+                    "op":"patch",
+                    "replace_file": {
+                        "path":"models/marts/fct_customers.sql",
+                        "new_text":"select 1 as id\n"
+                    }
+                }),
+                &actx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("single-target repair mode violation"));
     }
 
     #[tokio::test]
@@ -7346,6 +7480,7 @@ mod tests {
             Some(super::AllowedBatch::CleanseDatasetIds(vec![
                 "AwsDataCatalog.db.t1".to_string(),
             ])),
+            None,
         )
         .expect("build_tools_for_phase should succeed");
 
@@ -7382,6 +7517,7 @@ mod tests {
             Some(super::AllowedBatch::ModelItemNames(vec![
                 "fct_orders".to_string()
             ])),
+            None,
         )
         .expect("build_tools_for_phase should succeed");
 
