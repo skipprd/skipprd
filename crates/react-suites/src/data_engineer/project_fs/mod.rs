@@ -33,7 +33,7 @@ pub enum PatchApplyKind {
     /// Apply a git-style unified diff (possibly with git preamble).
     UnifiedDiff,
     /// Overwrite the full file contents with the provided payload.
-    /// This is the deterministic fast-path used for structured primitives like replace_file.
+    /// Deterministic helper path for callers that already produced final file text.
     FullOverwrite,
 }
 
@@ -573,14 +573,14 @@ pub async fn apply_patch(
             // Safety guard: never allow "new file" semantics on an existing file. This commonly leads to
             // duplicated/concatenated content when LLMs attempt a full rewrite using a new-file diff.
             if existed && is_new_file_patch {
-                return Err("invalid patch: patch indicates new file creation ('--- /dev/null') but the file already exists; use structured patch primitives (replace_file/range/list) so the system can rewrite safely".to_string());
+                return Err("invalid patch: patch indicates new file creation ('--- /dev/null') but the file already exists; produce a normal edit patch against the existing path".to_string());
             }
             if existed
                 && patch_text
                     .lines()
                     .any(|l| l.trim_start().starts_with("new file mode "))
             {
-                return Err("invalid patch: patch indicates new file creation ('new file mode') but the file already exists; use structured patch primitives (replace_file/range/list)".to_string());
+                return Err("invalid patch: patch indicates new file creation ('new file mode') but the file already exists; produce a normal edit patch against the existing path".to_string());
             }
             if !existed && !is_new_file_patch {
                 return Err(
@@ -856,6 +856,9 @@ fn parse_patch_target_rel_path(patch_chunk: &str) -> Result<String, String> {
             if p == "/dev/null" {
                 continue;
             }
+            if p == "modified" || p == "original" {
+                return Err("invalid patch: expected git-style file header '+++ b/<path>' (got diffy-style +++ modified)".to_string());
+            }
             let p = p.strip_prefix("b/").unwrap_or(p);
             return normalize_rel_path(p);
         }
@@ -919,6 +922,11 @@ fn split_git_patch_bundle(patch_text: &str) -> Result<Vec<ParsedFilePatch>, Stri
         return Err("patch bundle contained no file diffs".to_string());
     }
     Ok(out)
+}
+
+pub fn patch_bundle_targets(patch_text: &str) -> Result<Vec<String>, String> {
+    let files = split_git_patch_bundle(patch_text)?;
+    Ok(files.into_iter().map(|f| f.rel_path).collect())
 }
 
 pub async fn apply_patch_bundle(
@@ -1047,10 +1055,47 @@ async fn postprocess_content(
     if rel == project_files::MODELS_SCHEMA_YML {
         return postprocess_schema_yml(ctx, datasets, content).await;
     }
+    if rel.starts_with("models/staging/") && rel.ends_with(".yml") {
+        return disable_contract_enforcement_in_schema_yml_text(content);
+    }
     if rel.starts_with("models/") && rel.ends_with(".sql") {
         return postprocess_model_sql(ctx, rel, content);
     }
     Ok(content.to_string())
+}
+
+fn disable_contract_enforcement_in_schema_yml_text(yml_text: &str) -> Result<String, String> {
+    let mut root: serde_yaml::Value =
+        serde_yaml::from_str(yml_text).map_err(|e| format!("invalid YAML: {}", e.to_string()))?;
+    let Some(models) = root
+        .as_mapping_mut()
+        .and_then(|m| m.get_mut(serde_yaml::Value::String("models".to_string())))
+        .and_then(|v| v.as_sequence_mut())
+    else {
+        // Nothing to do.
+        return Ok(yml_text.to_string());
+    };
+
+    for m in models.iter_mut() {
+        let Some(mm) = m.as_mapping_mut() else { continue };
+        let cfg = mm
+            .entry(serde_yaml::Value::String("config".to_string()))
+            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        let Some(cfgm) = cfg.as_mapping_mut() else { continue };
+        let contract = cfgm
+            .entry(serde_yaml::Value::String("contract".to_string()))
+            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        let Some(cm) = contract.as_mapping_mut() else { continue };
+        // Force it off (if present), but keep the structure stable for users who expect it.
+        cm.insert(
+            serde_yaml::Value::String("enforced".to_string()),
+            serde_yaml::Value::Bool(false),
+        );
+    }
+
+    serde_yaml::to_string(&root)
+        .map_err(|e| format!("failed to re-serialize YAML: {}", e.to_string()))
+        .map(|s| s.trim_start_matches("---\n").to_string())
 }
 
 /// Canonicalize `models/schema.yml` content.

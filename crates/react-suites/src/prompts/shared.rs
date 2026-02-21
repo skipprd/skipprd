@@ -54,7 +54,7 @@ pub fn tool_card_common_prefix() -> &'static str {
       | {op:"get", path:string, max_chars?:int}
       | {op:"get_json", path:string, pointer?:string}
       | {op:"manifest_find", path?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int}
-  | {op:"patch", path?:string, replace_file?:{path:string,new_text:string,expected_sha256?:string}|[{...}], replace_range?:{path:string,start_line:int,end_line:int,new_text:string,expected_sha256?:string}|[{...}], replace_list?:{path:string,edits:[{start_line:int,end_line:int,new_text:string}],expected_sha256?:string}|[{...}]}
+  | {op:"patch", patch_text:string, path?:string}
   )
 - vect_query(args:{scope:"dataset"|"field"|"doc"|"artifact"|"metric"|"model", query_text:string, k:int})
 - search_dbt_examples(args:{query:string, k?:int}) -> {"ok":true,"examples":[{project,path,s3_uri,preview,score}]}
@@ -75,7 +75,7 @@ pub fn tool_card_common_prefix() -> &'static str {
 Usage guidance:
 - Prefer batch scaffolding: use dbt_files op=patch to create dbt_project.yml, sources, and models in as few calls as possible.
 - Use `dbt_files op=patch` for ALL DBT project files, including model SQL under models/.
-- For `dbt_files op=patch`, provide EXACTLY ONE of: replace_file OR replace_range OR replace_list. The tool will compute and return `applied_patch_text` (canonical git-style diff) for audit.
+- For `dbt_files op=patch`, always provide `patch_text` as a git-style unified diff (single-file or multi-file bundle). The tool will compute and return `applied_patch_text` (canonical git-style diff) for audit.
 "#
 }
 

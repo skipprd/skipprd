@@ -1461,7 +1461,7 @@ mod tests {
                 // ok patch, but no-op (mutated=false)
                 step(
                     "dbt_files",
-                    serde_json::json!({"op":"patch","replace_file":{"path":"models/a.sql","new_text":"select 1\n"}}),
+                    serde_json::json!({"op":"patch","path":"models/a.sql","patch_text":"@@\n- select 1\n+ select 1\n"}),
                     serde_json::json!({"ok": true, "mutated": false}),
                 ),
             ],
@@ -1654,7 +1654,7 @@ mod tests {
                 ),
                 step(
                     "dbt_files",
-                    serde_json::json!({"op":"patch","replace_file": {"path":"models/x.sql","new_text":"select 1\n"}}),
+                    serde_json::json!({"op":"patch","path":"models/x.sql","patch_text":"@@\n- select 1\n+ select 1\n"}),
                     serde_json::json!({"ok": false, "errors":["invalid sql"]}),
                 ),
             ],

@@ -198,51 +198,10 @@ struct LlmRemediationResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LlmChange {
     key: String,
-    #[serde(default)]
-    replace_file: Option<ReplaceFile>,
-    #[serde(default)]
-    replace_range: Option<ReplaceRange>,
-    #[serde(default)]
-    replace_list: Option<ReplaceList>,
+    patch_text: String,
     #[serde(default)]
     reason: Option<String>,
 }
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ReplaceFile {
-    new_text: String,
-    #[serde(default)]
-    expected_sha256: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ReplaceRange {
-    start_line: usize,
-    end_line: usize,
-    new_text: String,
-    #[serde(default)]
-    expected_sha256: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ReplaceListEdit {
-    start_line: usize,
-    end_line: usize,
-    new_text: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ReplaceList {
-    #[serde(default)]
-    edits: Vec<ReplaceListEdit>,
-    #[serde(default)]
-    expected_sha256: Option<String>,
-}
-
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct LlmRemediationDecision {
@@ -565,10 +524,9 @@ pub async fn remediate_dbt_sql_keys_with_llm(
              - Do not invent new tables/columns.\n\
              - Output MUST be valid JSON only (no markdown, no commentary).\n\
              Output schema:\n\
-             {{\"changes\":[{{\"key\":\"...\",\"replace_file\":{{\"new_text\":\"...\"}}|null,\"replace_range\":{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}|null,\"replace_list\":{{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}]}}|null,\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+             {{\"changes\":[{{\"key\":\"...\",\"patch_text\":\"@@ ...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
              Rules:\n\
-             - For each change, choose EXACTLY ONE of replace_file / replace_range / replace_list (the others must be null).\n\
-             - Do NOT include expected_sha256; the suite enforces drift safety from grounded file content.\n\
+             - patch_text MUST be a unified diff for that file (Cursor-style hunks or git-style headers).\n\
              Only include a file in changes if you actually modify it.\n"
         );
         let user = serde_json::json!({
@@ -661,66 +619,30 @@ pub async fn remediate_dbt_sql_keys_with_llm(
                 .get(&ch.key)
                 .map(|s| sha256_hex(s))
                 .unwrap_or_else(|| String::new());
-            let existing = content_by_key.get(&ch.key).cloned().unwrap_or_default();
-            let mut provided = 0usize;
-            if ch.replace_file.is_some() {
-                provided += 1;
+            let mut patch_text = ch.patch_text.trim().to_string();
+            if patch_text.is_empty() {
+                return Err("remediation change patch_text is empty".to_string());
             }
-            if ch.replace_range.is_some() {
-                provided += 1;
-            }
-            if ch.replace_list.is_some() {
-                provided += 1;
-            }
-            if provided != 1 {
-                return Err(
-                    "remediation change must include exactly one of: replace_file | replace_range | replace_list"
-                        .to_string(),
+            let has_headers = patch_text
+                .lines()
+                .any(|l| l.trim_start().starts_with("--- "));
+            if !has_headers {
+                patch_text = format!(
+                    "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}",
+                    rel,
+                    patch_text
                 );
             }
-            let patch_text = if let Some(rf) = ch.replace_file.as_ref() {
-                crate::data_engineer::project_fs::create_git_patch_text(
-                    &existing,
-                    &rf.new_text,
-                    &rel,
-                    true,
-                )?
-            } else if let Some(rr) = ch.replace_range.as_ref() {
-                let new_text = crate::data_engineer::project_fs::apply_replace_range(
-                    &existing,
-                    rr.start_line,
-                    rr.end_line,
-                    &rr.new_text,
-                )?;
-                crate::data_engineer::project_fs::create_git_patch_text(
-                    &existing, &new_text, &rel, true,
-                )?
-            } else if let Some(rl) = ch.replace_list.as_ref() {
-                let edits: Vec<crate::data_engineer::project_fs::ReplaceListEdit> = rl
-                    .edits
-                    .iter()
-                    .map(|e| crate::data_engineer::project_fs::ReplaceListEdit {
-                        start_line: e.start_line,
-                        end_line: e.end_line,
-                        new_text: e.new_text.clone(),
-                    })
-                    .collect();
-                let new_text = crate::data_engineer::project_fs::apply_replace_list(
-                    &existing,
-                    &edits,
-                )?;
-                crate::data_engineer::project_fs::create_git_patch_text(
-                    &existing, &new_text, &rel, true,
-                )?
-            } else {
-                return Err("invalid remediation change".to_string());
-            };
             let outcome = crate::data_engineer::project_fs::apply_patch(
                 ctx,
                 None,
                 &rel,
                 &patch_text,
-                if expected_base.is_empty() { None } else { Some(expected_base.as_str()) },
+                if expected_base.is_empty() {
+                    None
+                } else {
+                    Some(expected_base.as_str())
+                },
                 Some(!expected_base.is_empty()),
                 crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
             )
@@ -773,12 +695,7 @@ struct GroundedRepairResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GroundedRepairChange {
     key: String,
-    #[serde(default)]
-    replace_file: Option<ReplaceFile>,
-    #[serde(default)]
-    replace_range: Option<ReplaceRange>,
-    #[serde(default)]
-    replace_list: Option<ReplaceList>,
+    patch_text: String,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -1105,10 +1022,9 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
          - If you are not absolutely sure the change is correct given the provided schema and data samples, return NO changes and explain what additional evidence would be required.\n\
          - Output MUST be valid JSON only (no markdown, no commentary).\n\
          Output schema:\n\
-        {{\"changes\":[{{\"key\":\"...\",\"replace_file\":{{\"new_text\":\"...\"}}|null,\"replace_range\":{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}|null,\"replace_list\":{{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}]}}|null,\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+        {{\"changes\":[{{\"key\":\"...\",\"patch_text\":\"@@ ...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
          Rules:\n\
-        - For each change, choose EXACTLY ONE of replace_file / replace_range / replace_list (the others must be null).\n\
-         - Do NOT include expected_sha256; the suite enforces drift safety from grounded file content.\n\
+         - patch_text MUST be a unified diff for that file (Cursor-style hunks or git-style headers).\n\
          Only include a file in changes if you actually modify it.\n"
     );
 
@@ -1218,57 +1134,20 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
             .to_string();
         let existing = content_by_key.get(&ch.key).cloned().unwrap_or_default();
         let expected_base = sha256_hex(&existing);
-        let mut provided = 0usize;
-        if ch.replace_file.is_some() {
-            provided += 1;
+        let mut patch_text = ch.patch_text.trim().to_string();
+        if patch_text.is_empty() {
+            return Err("grounded repair change patch_text is empty".to_string());
         }
-        if ch.replace_range.is_some() {
-            provided += 1;
-        }
-        if ch.replace_list.is_some() {
-            provided += 1;
-        }
-        if provided != 1 {
-            return Err(
-                "grounded repair change must include exactly one of: replace_file | replace_range | replace_list"
-                    .to_string(),
+        let has_headers = patch_text
+            .lines()
+            .any(|l| l.trim_start().starts_with("--- "));
+        if !has_headers {
+            patch_text = format!(
+                "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}",
+                rel,
+                patch_text
             );
         }
-        let patch_text = if let Some(rf) = ch.replace_file.as_ref() {
-            crate::data_engineer::project_fs::create_git_patch_text(
-                &existing,
-                &rf.new_text,
-                &rel,
-                true,
-            )?
-        } else if let Some(rr) = ch.replace_range.as_ref() {
-            let new_text = crate::data_engineer::project_fs::apply_replace_range(
-                &existing,
-                rr.start_line,
-                rr.end_line,
-                &rr.new_text,
-            )?;
-            crate::data_engineer::project_fs::create_git_patch_text(
-                &existing, &new_text, &rel, true,
-            )?
-        } else if let Some(rl) = ch.replace_list.as_ref() {
-            let edits: Vec<crate::data_engineer::project_fs::ReplaceListEdit> = rl
-                .edits
-                .iter()
-                .map(|e| crate::data_engineer::project_fs::ReplaceListEdit {
-                    start_line: e.start_line,
-                    end_line: e.end_line,
-                    new_text: e.new_text.clone(),
-                })
-                .collect();
-            let new_text =
-                crate::data_engineer::project_fs::apply_replace_list(&existing, &edits)?;
-            crate::data_engineer::project_fs::create_git_patch_text(
-                &existing, &new_text, &rel, true,
-            )?
-        } else {
-            return Err("invalid grounded repair change".to_string());
-        };
         let outcome = crate::data_engineer::project_fs::apply_patch(
             ctx,
             None,
@@ -1320,12 +1199,7 @@ struct LlmUnresolvedColumnsResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LlmUnresolvedColumnsChange {
     key: String,
-    #[serde(default)]
-    replace_file: Option<ReplaceFile>,
-    #[serde(default)]
-    replace_range: Option<ReplaceRange>,
-    #[serde(default)]
-    replace_list: Option<ReplaceList>,
+    patch_text: String,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -1515,7 +1389,7 @@ pub async fn remediate_unresolved_columns_with_llm(
         }));
     }
 
-    // Strict JSON-only contract. LLM returns structured patch primitives; we apply patches deterministically.
+    // Strict JSON-only contract; LLM returns patch_text unified diffs.
     let provider_dialect_rules = {
         let mut out = String::new();
         for rule in ctx.warehouse.sql_remediation_rules().into_iter() {
@@ -1538,10 +1412,9 @@ pub async fn remediate_unresolved_columns_with_llm(
 {provider_dialect_rules}\
          - Return ONLY valid JSON (no markdown, no commentary).\n\
         Output schema:\n\
-         {{\"changes\":[{{\"key\":\"...\",\"replace_file\":{{\"new_text\":\"...\",\"expected_sha256\":\"...\"}}|null,\"replace_range\":{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\",\"expected_sha256\":\"...\"}}|null,\"replace_list\":{{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}],\"expected_sha256\":\"...\"}}|null,\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+         {{\"changes\":[{{\"key\":\"...\",\"patch_text\":\"@@ ...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
          Rules:\n\
-         - For each change, choose EXACTLY ONE of replace_file / replace_range / replace_list (the others must be null).\n\
-         - expected_sha256 MUST match the sha256 of the provided file content for that key.\n\
+         - patch_text MUST be a unified diff for that file (Cursor-style hunks or git-style headers).\n\
          Only include a file in changes if you actually modify it.\n",
         provider_dialect_rules = provider_dialect_rules
     );
@@ -1656,57 +1529,20 @@ pub async fn remediate_unresolved_columns_with_llm(
 
         let existing = content_by_key.get(&ch.key).cloned().unwrap_or_default();
         let expected_base = sha256_hex(&existing);
-        let mut provided = 0usize;
-        if ch.replace_file.is_some() {
-            provided += 1;
+        let mut patch_text = ch.patch_text.trim().to_string();
+        if patch_text.is_empty() {
+            return Err("unresolved-columns repair change patch_text is empty".to_string());
         }
-        if ch.replace_range.is_some() {
-            provided += 1;
-        }
-        if ch.replace_list.is_some() {
-            provided += 1;
-        }
-        if provided != 1 {
-            return Err(
-                "unresolved-columns repair change must include exactly one of: replace_file | replace_range | replace_list"
-                    .to_string(),
+        let has_headers = patch_text
+            .lines()
+            .any(|l| l.trim_start().starts_with("--- "));
+        if !has_headers {
+            patch_text = format!(
+                "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}",
+                rel,
+                patch_text
             );
         }
-        let patch_text = if let Some(rf) = ch.replace_file.as_ref() {
-            crate::data_engineer::project_fs::create_git_patch_text(
-                &existing,
-                &rf.new_text,
-                &rel,
-                true,
-            )?
-        } else if let Some(rr) = ch.replace_range.as_ref() {
-            let new_text = crate::data_engineer::project_fs::apply_replace_range(
-                &existing,
-                rr.start_line,
-                rr.end_line,
-                &rr.new_text,
-            )?;
-            crate::data_engineer::project_fs::create_git_patch_text(
-                &existing, &new_text, &rel, true,
-            )?
-        } else if let Some(rl) = ch.replace_list.as_ref() {
-            let edits: Vec<crate::data_engineer::project_fs::ReplaceListEdit> = rl
-                .edits
-                .iter()
-                .map(|e| crate::data_engineer::project_fs::ReplaceListEdit {
-                    start_line: e.start_line,
-                    end_line: e.end_line,
-                    new_text: e.new_text.clone(),
-                })
-                .collect();
-            let new_text =
-                crate::data_engineer::project_fs::apply_replace_list(&existing, &edits)?;
-            crate::data_engineer::project_fs::create_git_patch_text(
-                &existing, &new_text, &rel, true,
-            )?
-        } else {
-            return Err("invalid unresolved-columns repair change".to_string());
-        };
         let outcome = crate::data_engineer::project_fs::apply_patch(
             ctx,
             None,
@@ -1919,7 +1755,7 @@ mod tests {
         let mock = MockLlm::default();
         *mock.chat_responses.lock().unwrap() = vec![serde_json::json!({
             "changes": [
-                {"key":"t/w/p/dbt/models/m.sql","replace_file":{"new_text":"select 2","expected_sha256": sha256_hex("select 1")},"reason":"minimal"}
+                {"key":"t/w/p/dbt/models/m.sql","patch_text":"@@ -1 +1 @@\n-select 1\n+select 2\n","reason":"minimal"}
             ],
             "notes": ["ok"]
         })

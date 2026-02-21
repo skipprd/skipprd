@@ -1,12 +1,9 @@
 use async_trait::async_trait;
 use serde::de::Deserializer;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
-
-use sha2::{Digest, Sha256};
 
 use react_core::agent::AgentCtx;
 use react_core::providers::DatasetCatalogProvider;
@@ -18,13 +15,6 @@ pub struct DbtFilesTool {
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
 }
 
-fn sha256_hex(s: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(s.as_bytes());
-    let out = hasher.finalize();
-    hex::encode(out)
-}
-
 fn deserialize_opt_nonempty_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -34,13 +24,6 @@ where
         let t = s.trim().to_string();
         if t.is_empty() { None } else { Some(t) }
     }))
-}
-
-fn file_stem(rel_path: &str) -> Option<String> {
-    std::path::Path::new(rel_path)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .filter(|s| !s.trim().is_empty())
 }
 
 fn strip_ident_quotes(s: &str) -> String {
@@ -614,40 +597,6 @@ fn yaml_collect_where_strings(v: &serde_yaml::Value, out: &mut Vec<String>) {
     }
 }
 
-fn disable_contract_enforcement_in_schema_yml_text(yml_text: &str) -> Result<String, String> {
-    let mut root: serde_yaml::Value =
-        serde_yaml::from_str(yml_text).map_err(|e| format!("invalid YAML: {}", e.to_string()))?;
-    let Some(models) = root
-        .as_mapping_mut()
-        .and_then(|m| m.get_mut(serde_yaml::Value::String("models".to_string())))
-        .and_then(|v| v.as_sequence_mut())
-    else {
-        // Nothing to do.
-        return Ok(yml_text.to_string());
-    };
-
-    for m in models.iter_mut() {
-        let Some(mm) = m.as_mapping_mut() else { continue };
-        let cfg = mm
-            .entry(serde_yaml::Value::String("config".to_string()))
-            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-        let Some(cfgm) = cfg.as_mapping_mut() else { continue };
-        let contract = cfgm
-            .entry(serde_yaml::Value::String("contract".to_string()))
-            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-        let Some(cm) = contract.as_mapping_mut() else { continue };
-        // Force it off (if present), but keep the structure stable for users who expect it.
-        cm.insert(
-            serde_yaml::Value::String("enforced".to_string()),
-            serde_yaml::Value::Bool(false),
-        );
-    }
-
-    serde_yaml::to_string(&root)
-        .map_err(|e| format!("failed to re-serialize YAML: {}", e.to_string()))
-        .map(|s| s.trim_start_matches("---\n").to_string())
-}
-
 pub(crate) async fn validate_staging_schema_ymls(
     ctx: &AgentCtx,
     outcomes: &[project_fs::PatchOutcome],
@@ -884,36 +833,6 @@ Staging SQL (defines required output columns): {}\n",
     Ok(())
 }
 
-fn parse_one_or_many<T: DeserializeOwned>(args: &Value, key: &str) -> Result<Vec<T>, String> {
-    let Some(v) = args.get(key) else {
-        return Ok(Vec::new());
-    };
-    if v.is_null() {
-        return Ok(Vec::new());
-    }
-    if v.is_array() {
-        serde_json::from_value::<Vec<T>>(v.clone())
-            .map_err(|e| patch_contract_error(&format!("{} parse error: {}", key, e)))
-    } else {
-        let one = serde_json::from_value::<T>(v.clone())
-            .map_err(|e| patch_contract_error(&format!("{} parse error: {}", key, e)))?;
-        Ok(vec![one])
-    }
-}
-
-fn patch_contract_error(msg: &str) -> String {
-    format!(
-        "dbt_files op=patch contract violation: {}\n\n{}",
-        msg,
-        crate::prompts::patch_contract::dbt_files_patch_contract()
-    )
-}
-
-fn normalize_patch_contract_args(args: &Value) -> Result<Value, String> {
-    crate::data_engineer::patch_normalize::normalize_dbt_files_patch_args(args)
-        .map_err(|e| patch_contract_error(&e))
-}
-
 fn validate_sql_model_folder_policy(rel: &str) -> Result<(), String> {
     let rl = rel.to_ascii_lowercase();
     if !rl.starts_with("models/") || !rl.ends_with(".sql") {
@@ -957,116 +876,12 @@ fn canonicalize_silver_folder_alias(rel: &str) -> (String, Option<String>) {
     (rel.to_string(), None)
 }
 
-fn extract_patch_paths_from_args(args: &Value) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-        let p = p.trim();
-        if !p.is_empty() {
-            out.push(p.to_string());
-        }
-    }
-    for key in ["replace_file", "replace_range", "replace_list"] {
-        let Some(v) = args.get(key) else { continue };
-        let mut visit = |obj: &serde_json::Map<String, Value>| {
-            if let Some(p) = obj.get("path").and_then(|v| v.as_str()) {
-                let p = p.trim();
-                if !p.is_empty() {
-                    out.push(p.to_string());
-                }
-            }
-        };
-        if let Some(arr) = v.as_array() {
-            for it in arr.iter() {
-                if let Some(obj) = it.as_object() {
-                    visit(obj);
-                }
-            }
-        } else if let Some(obj) = v.as_object() {
-            visit(obj);
-        }
-    }
-    out
-}
-
-async fn recent_noop_patch_failures_for_path(ctx: &AgentCtx, rel_path: &str, lookback: usize) -> usize {
-    let (Some(store), Some(thread_id)) = (ctx.thread_store.as_ref(), ctx.thread_id.as_deref()) else {
-        return 0;
-    };
-    let Ok(log) = store.get(thread_id).await else {
-        return 0;
-    };
-    let mut count = 0usize;
-    for step in log.steps.iter().rev().take(lookback) {
-        let react_core::session::ThreadStep::ToolEnd {
-            name,
-            args,
-            observation,
-            ..
-        } = step
-        else {
-            continue;
-        };
-        if name != "dbt_files" || observation.ok {
-            continue;
-        }
-        if !observation
-            .errors
-            .iter()
-            .any(|e| e.contains("patch produced no file changes"))
-        {
-            continue;
-        }
-        if args.get("op").and_then(|v| v.as_str()) != Some("patch") {
-            continue;
-        }
-        let step_paths = extract_patch_paths_from_args(args);
-        let hit = step_paths.into_iter().any(|p| {
-            project_fs::normalize_rel_path(&p)
-                .map(|rp| rp == rel_path)
-                .unwrap_or(false)
-        });
-        if hit {
-            count = count.saturating_add(1);
-        }
-    }
-    count
-}
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReplaceFileArgs {
-    path: String,
-    new_text: String,
+struct PatchTextArgs {
+    patch_text: String,
     #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
-    expected_sha256: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReplaceRangeArgs {
-    path: String,
-    start_line: usize,
-    end_line: usize,
-    new_text: String,
-    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
-    expected_sha256: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReplaceListEditArgs {
-    start_line: usize,
-    end_line: usize,
-    new_text: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReplaceListArgs {
-    path: String,
-    edits: Vec<ReplaceListEditArgs>,
-    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
-    expected_sha256: Option<String>,
+    path: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1167,220 +982,169 @@ impl Tool for DbtFilesTool {
                 .await
             }
             "patch" => {
-                let args = normalize_patch_contract_args(&args)?;
-
-                // Optional single-file guard: if provided, ensure the patch bundle targets exactly this rel path.
-                let want_rel_path = args
-                    .get("path")
-                    .and_then(|x| x.as_str())
-                    .map(project_fs::normalize_rel_path)
-                    .transpose()?;
-                let want_rel_path = want_rel_path.map(|p| canonicalize_silver_folder_alias(&p).0);
-
-                // Hard-removed: unified diffs are not accepted as input (too flaky for LLMs).
+                // Hard cutover: Cursor-like patch DSL only (git-style unified diff).
+                // We no longer accept patch primitives or full overwrites via new_text.
+                if args.get("replace_file").is_some()
+                    || args.get("replace_range").is_some()
+                    || args.get("replace_list").is_some()
+                    || args.get("new_text").is_some()
+                    || args.get("files").is_some()
+                {
+                    return Err("dbt_files op=patch contract violation: patch primitives and new_text/files overwrites are not supported. Provide {op:\"patch\", patch_text:\"<git-style unified diff / patch bundle>\", path?:\"<optional single-file guard>\"}.".to_string());
+                }
                 if args.get("unified_git_style_patch").is_some() {
-                    return Err(
-                        "dbt_files op=patch no longer accepts unified_git_style_patch. Use exactly one of: replace_file | replace_range | replace_list"
-                            .to_string(),
-                    );
+                    return Err("dbt_files op=patch contract violation: unified_git_style_patch is not supported. Use patch_text (git-style unified diff).".to_string());
                 }
-                let replace_file_ops: Vec<ReplaceFileArgs> =
-                    parse_one_or_many(&args, "replace_file")?;
-                let replace_range_ops: Vec<ReplaceRangeArgs> =
-                    parse_one_or_many(&args, "replace_range")?;
-                let replace_list_ops: Vec<ReplaceListArgs> =
-                    parse_one_or_many(&args, "replace_list")?;
-                let noop_breaker_threshold = 2usize;
-
-                let mut provided = 0usize;
-                if !replace_file_ops.is_empty() {
-                    provided += 1;
-                }
-                if !replace_range_ops.is_empty() {
-                    provided += 1;
-                }
-                if !replace_list_ops.is_empty() {
-                    provided += 1;
-                }
-                if provided != 1 {
-                    return Err(
-                        "dbt_files op=patch requires exactly one of: replace_file | replace_range | replace_list"
-                            .to_string(),
-                    );
-                }
-                if !replace_range_ops.is_empty() {
-                    for rr in replace_range_ops.iter() {
-                        let rel = project_fs::normalize_rel_path(&rr.path)?;
-                        validate_sql_model_folder_policy(&rel)?;
-                        let failures = recent_noop_patch_failures_for_path(ctx, &rel, 250).await;
-                        if failures >= noop_breaker_threshold {
-                            return Err(format!(
-                                "no-op patch breaker: '{}' already had {} no-op patch failures. Force `replace_file` with a full rewritten file (do not use replace_range/replace_list until the file content actually changes).",
-                                rel, failures
-                            ));
-                        }
-                    }
-                }
-                if !replace_list_ops.is_empty() {
-                    for rl in replace_list_ops.iter() {
-                        let rel = project_fs::normalize_rel_path(&rl.path)?;
-                        validate_sql_model_folder_policy(&rel)?;
-                        let failures = recent_noop_patch_failures_for_path(ctx, &rel, 250).await;
-                        if failures >= noop_breaker_threshold {
-                            return Err(format!(
-                                "no-op patch breaker: '{}' already had {} no-op patch failures. Force `replace_file` with a full rewritten file (do not use replace_range/replace_list until the file content actually changes).",
-                                rel, failures
-                            ));
-                        }
-                    }
+                if args.get("preview_diff").is_some() {
+                    return Err("dbt_files op=patch contract violation: preview_diff is not supported. Use patch_text (git-style unified diff).".to_string());
                 }
 
-                // Deterministic application: compute intended file contents and use FullOverwrite fast-path.
-                let mut outcomes: Vec<project_fs::PatchOutcome> = Vec::new();
-                let mut seen: HashSet<String> = HashSet::new();
-                let mut path_rewrites: Vec<(String, String)> = Vec::new();
-                if !replace_file_ops.is_empty() {
-                    for rf in replace_file_ops.into_iter() {
-                        let rel0 = project_fs::normalize_rel_path(&rf.path)?;
-                        let (rel, from_opt) = canonicalize_silver_folder_alias(&rel0);
-                        validate_sql_model_folder_policy(&rel)?;
-                        if !seen.insert(rel.clone()) {
-                            return Err(format!("replace_file contains duplicate path: {}", rel));
-                        }
-                        let key = project_fs::join_storage_key(ctx, &rel);
-                        let existing_opt = ctx
-                            .storage
-                            .get_bytes(&key)
-                            .await
-                            .ok()
-                            .map(|b| String::from_utf8_lossy(&b).to_string());
-                        let existed = existing_opt.is_some();
-                        let old = existing_opt.unwrap_or_default();
-                        let base_sha256 = sha256_hex(&old);
-                        if let Some(expected) = rf.expected_sha256.as_deref() {
-                            if expected != base_sha256 {
-                                return Err(format!(
-                                    "expected_sha256 mismatch for {}: expected {}, current {}",
-                                    rel, expected, base_sha256
-                                ));
-                            }
-                        }
-                        let mut new_text = rf.new_text;
-                        if rel.starts_with("models/staging/") && rel.ends_with(".yml") {
-                            new_text = disable_contract_enforcement_in_schema_yml_text(&new_text)?;
-                        }
-                        let out = project_fs::apply_patch(
-                            ctx,
-                            self.datasets.as_ref(),
-                            &rel,
-                            &new_text,
-                            if existed { Some(base_sha256.as_str()) } else { None },
-                            Some(existed),
-                            project_fs::PatchApplyKind::FullOverwrite,
-                        )
-                        .await?;
-                        outcomes.push(out);
-                        if let Some(from) = from_opt {
-                            if from != rel {
-                                path_rewrites.push((from, rel.clone()));
-                            }
-                        }
-                    }
-                } else if !replace_range_ops.is_empty() {
-                    for rr in replace_range_ops.into_iter() {
-                        let rel = project_fs::normalize_rel_path(&rr.path)?;
-                        validate_sql_model_folder_policy(&rel)?;
-                        if !seen.insert(rel.clone()) {
-                            return Err(format!("replace_range contains duplicate path: {}", rel));
-                        }
-                        let key = project_fs::join_storage_key(ctx, &rel);
-                        let existing = ctx
-                            .storage
-                            .get_bytes(&key)
-                            .await
-                            .map_err(|_| format!("not found: {}", rel))
-                            .map(|b| String::from_utf8_lossy(&b).to_string())?;
-                        let base_sha256 = sha256_hex(&existing);
-                        if let Some(expected) = rr.expected_sha256.as_deref() {
-                            if expected != base_sha256 {
-                                return Err(format!(
-                                    "expected_sha256 mismatch for {}: expected {}, current {}",
-                                    rel, expected, base_sha256
-                                ));
-                            }
-                        }
-                        let mut new_text = project_fs::apply_replace_range(
-                            &existing,
-                            rr.start_line,
-                            rr.end_line,
-                            &rr.new_text,
-                        )?;
-                        if rel.starts_with("models/staging/") && rel.ends_with(".yml") {
-                            new_text = disable_contract_enforcement_in_schema_yml_text(&new_text)?;
-                        }
-                        let out = project_fs::apply_patch(
-                            ctx,
-                            self.datasets.as_ref(),
-                            &rel,
-                            &new_text,
-                            Some(base_sha256.as_str()),
-                            Some(true),
-                            project_fs::PatchApplyKind::FullOverwrite,
-                        )
-                        .await?;
-                        outcomes.push(out);
-                    }
-                } else if !replace_list_ops.is_empty() {
-                    for rl in replace_list_ops.into_iter() {
-                        let rel = project_fs::normalize_rel_path(&rl.path)?;
-                        validate_sql_model_folder_policy(&rel)?;
-                        if !seen.insert(rel.clone()) {
-                            return Err(format!("replace_list contains duplicate path: {}", rel));
-                        }
-                        let key = project_fs::join_storage_key(ctx, &rel);
-                        let existing = ctx
-                            .storage
-                            .get_bytes(&key)
-                            .await
-                            .map_err(|_| format!("not found: {}", rel))
-                            .map(|b| String::from_utf8_lossy(&b).to_string())?;
-                        let base_sha256 = sha256_hex(&existing);
-                        if let Some(expected) = rl.expected_sha256.as_deref() {
-                            if expected != base_sha256 {
-                                return Err(format!(
-                                    "expected_sha256 mismatch for {}: expected {}, current {}",
-                                    rel, expected, base_sha256
-                                ));
-                            }
-                        }
-                        let edits: Vec<project_fs::ReplaceListEdit> = rl
-                            .edits
-                            .into_iter()
-                            .map(|e| project_fs::ReplaceListEdit {
-                                start_line: e.start_line,
-                                end_line: e.end_line,
-                                new_text: e.new_text,
-                            })
-                            .collect();
-                        let mut new_text = project_fs::apply_replace_list(&existing, &edits)?;
-                        if rel.starts_with("models/staging/") && rel.ends_with(".yml") {
-                            new_text = disable_contract_enforcement_in_schema_yml_text(&new_text)?;
-                        }
-                        let out = project_fs::apply_patch(
-                            ctx,
-                            self.datasets.as_ref(),
-                            &rel,
-                            &new_text,
-                            Some(base_sha256.as_str()),
-                            Some(true),
-                            project_fs::PatchApplyKind::FullOverwrite,
-                        )
-                        .await?;
-                        outcomes.push(out);
-                    }
-                } else {
-                    return Err("invalid patch request".to_string());
+                let args_wo_op = args
+                    .as_object()
+                    .cloned()
+                    .map(|mut m| {
+                        m.remove("op");
+                        Value::Object(m)
+                    })
+                    .unwrap_or_else(|| args.clone());
+
+                let parsed = serde_json::from_value::<PatchTextArgs>(args_wo_op.clone()).map_err(|e| {
+                    format!(
+                        "dbt_files op=patch contract violation: {}\n\nExpected args: {{\"op\":\"patch\",\"patch_text\":\"...\",\"path?\":\"...\"}}",
+                        e
+                    )
+                })?;
+                let patch_in = parsed.patch_text.trim();
+                if patch_in.is_empty() {
+                    return Err("dbt_files op=patch contract violation: patch_text is empty".to_string());
                 }
+
+                fn rewrite_patch_header_paths_for_silver_aliases(
+                    patch_text: &str,
+                ) -> (String, Vec<(String, String)>) {
+                    let mut out_lines: Vec<String> = Vec::new();
+                    let mut rewrites: Vec<(String, String)> = Vec::new();
+                    for line in patch_text.lines() {
+                        let t = line.trim_end_matches('\r');
+                        let rewritten = if let Some(rest) = t.strip_prefix("diff --git ") {
+                            let parts: Vec<&str> = rest.split_whitespace().collect();
+                            if parts.len() >= 2 {
+                                let a = parts[0].trim();
+                                let b = parts[1].trim();
+                                let ap = a.strip_prefix("a/").unwrap_or(a);
+                                let bp = b.strip_prefix("b/").unwrap_or(b);
+                                let (a2, a_from) = canonicalize_silver_folder_alias(ap);
+                                let (b2, b_from) = canonicalize_silver_folder_alias(bp);
+                                if let Some(from) = a_from {
+                                    rewrites.push((from, a2.clone()));
+                                }
+                                if let Some(from) = b_from {
+                                    rewrites.push((from, b2.clone()));
+                                }
+                                format!("diff --git a/{a2} b/{b2}")
+                            } else {
+                                t.to_string()
+                            }
+                        } else if let Some(rest) = t.strip_prefix("--- ") {
+                            let p = rest.trim();
+                            if p == "/dev/null" {
+                                t.to_string()
+                            } else if p == "original" || p == "modified" {
+                                // Reject diffy-style patches at parse time; don't rewrite them here.
+                                t.to_string()
+                            } else {
+                                let p2 = p.strip_prefix("a/").unwrap_or(p);
+                                let (canon, from_opt) = canonicalize_silver_folder_alias(p2);
+                                if let Some(from) = from_opt {
+                                    rewrites.push((from, canon.clone()));
+                                }
+                                format!("--- a/{canon}")
+                            }
+                        } else if let Some(rest) = t.strip_prefix("+++ ") {
+                            let p = rest.trim();
+                            if p == "/dev/null" {
+                                t.to_string()
+                            } else if p == "modified" || p == "original" {
+                                // Reject diffy-style patches at parse time; don't rewrite them here.
+                                t.to_string()
+                            } else {
+                                let p2 = p.strip_prefix("b/").unwrap_or(p);
+                                let (canon, from_opt) = canonicalize_silver_folder_alias(p2);
+                                if let Some(from) = from_opt {
+                                    rewrites.push((from, canon.clone()));
+                                }
+                                format!("+++ b/{canon}")
+                            }
+                        } else {
+                            t.to_string()
+                        };
+                        out_lines.push(rewritten);
+                    }
+                    (out_lines.join("\n"), rewrites)
+                }
+
+                let (mut patch_text, mut path_rewrites) =
+                    rewrite_patch_header_paths_for_silver_aliases(patch_in);
+                // Targets are derived from the patch itself (after header rewrites).
+                // Also accept Cursor-style "hunks only" patches when `path` is provided:
+                // - patch_text starts at `@@` and omits ---/+++ headers.
+                let has_file_headers = patch_text
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("--- "));
+                let mut targets = match project_fs::patch_bundle_targets(&patch_text) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        if !has_file_headers {
+                            let want = parsed.path.as_deref().ok_or_else(|| {
+                                format!(
+                                    "dbt_files op=patch contract violation: patch_text is missing file headers (---/+++). Provide args.path for single-file Cursor-style hunks-only patches, or include git-style headers. Parse error: {}",
+                                    e
+                                )
+                            })?;
+                            let want0 = project_fs::normalize_rel_path(want)?;
+                            let (want_rel, from_opt) = canonicalize_silver_folder_alias(&want0);
+                            if let Some(from) = from_opt {
+                                if from != want_rel {
+                                    path_rewrites.push((from, want_rel.clone()));
+                                }
+                            }
+                            // Synthesize a minimal git-style header so diffy can parse/apply.
+                            patch_text = format!(
+                                "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}",
+                                want_rel,
+                                patch_text.trim_start()
+                            );
+                            vec![want_rel]
+                        } else {
+                            return Err(format!("dbt_files op=patch invalid patch_text: {}", e));
+                        }
+                    }
+                };
+                targets.sort();
+                targets.dedup();
+                if targets.is_empty() {
+                    return Err("dbt_files op=patch contract violation: patch bundle contained no file diffs".to_string());
+                }
+
+                if let Some(want) = parsed.path.as_deref() {
+                    let want0 = project_fs::normalize_rel_path(want)?;
+                    let (want_rel, _from_opt) = canonicalize_silver_folder_alias(&want0);
+                    if targets.len() != 1 || targets[0] != want_rel {
+                        return Err(format!(
+                            "dbt_files op=patch contract violation: path guard '{}' requires a single-file patch targeting exactly that path; patch targets: {}",
+                            want_rel,
+                            targets.join(", ")
+                        ));
+                    }
+                }
+
+                for rel in targets.iter() {
+                    validate_sql_model_folder_policy(rel)?;
+                }
+
+                // Apply as a unified-diff bundle (Cursor-like).
+                let mut outcomes =
+                    project_fs::apply_patch_bundle(ctx, self.datasets.as_ref(), &patch_text).await?;
                 if outcomes.is_empty() {
                     return Err("patch produced no file changes".to_string());
                 }
@@ -1389,18 +1153,6 @@ impl Tool for DbtFilesTool {
                 });
                 if !any_mutation {
                     return Err("patch produced no file changes".to_string());
-                }
-
-                if let Some(want) = want_rel_path.as_ref() {
-                    let matches: Vec<&project_fs::PatchOutcome> =
-                        outcomes.iter().filter(|o| &o.rel_path == want).collect();
-                    if matches.len() != 1 || outcomes.len() != 1 {
-                        return Err(format!(
-                            "patch must target exactly one file '{}' when args.path is provided (got {} file diffs)",
-                            want,
-                            outcomes.len()
-                        ));
-                    }
                 }
 
                 // Canonical applied patch: based on *postprocessed* file content actually produced by apply_patch.
@@ -1441,6 +1193,8 @@ impl Tool for DbtFilesTool {
                 // Best-effort cleanup: if the patch targeted an alias path like models/silver/,
                 // delete the alias object after writing the canonical object.
                 let mut rewrites_json: Vec<Value> = Vec::new();
+                path_rewrites.sort();
+                path_rewrites.dedup();
                 for (from, to) in path_rewrites.iter() {
                     rewrites_json.push(serde_json::json!({ "from": from, "to": to }));
                     if from != to {
@@ -1637,7 +1391,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dbt_files_patch_rejects_patch_text_key() {
+    async fn dbt_files_patch_rejects_new_text_key() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage);
         let tool = DbtFilesTool { datasets: None };
@@ -1646,13 +1400,14 @@ mod tests {
             .call(
                 serde_json::json!({
                     "op": "patch",
-                    "patch_text": "diff --git a/models/x.sql b/models/x.sql\n--- /dev/null\n+++ b/models/x.sql\n@@\n+select 1\n"
+                    "path": "models/x.sql",
+                    "new_text": "select 1\n"
                 }),
                 &ctx,
             )
             .await
             .unwrap_err();
-        assert!(err.contains("replace_file"));
+        assert!(err.to_lowercase().contains("contract violation"));
     }
 
     #[tokio::test]
@@ -1671,12 +1426,12 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_lowercase().contains("no longer accepts"));
-        assert!(err.contains("replace_file"));
+        assert!(err.to_lowercase().contains("contract violation"));
+        assert!(err.to_lowercase().contains("unified_git_style_patch"));
     }
 
     #[tokio::test]
-    async fn dbt_files_patch_replace_file_writes_and_returns_canonical_patch() {
+    async fn dbt_files_patch_writes_and_returns_canonical_patch() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage.clone());
         let tool = DbtFilesTool { datasets: None };
@@ -1685,10 +1440,7 @@ mod tests {
             .call(
                 serde_json::json!({
                     "op": "patch",
-                    "replace_file": {
-                        "path": "models/core/x.sql",
-                        "new_text": "select 1\n"
-                    }
+                    "patch_text": "diff --git a/models/core/x.sql b/models/core/x.sql\nnew file mode 100644\n--- /dev/null\n+++ b/models/core/x.sql\n@@ -0,0 +1 @@\n+select 1\n"
                 }),
                 &ctx,
             )
@@ -1727,11 +1479,8 @@ mod tests {
             .call(
                 serde_json::json!({
                     "op": "patch",
-                    "replace_file": {
-                        "path": "models/core/x.sql",
-                        "new_text": "select 1\n",
-                        "preview_diff": true
-                    }
+                    "patch_text": "diff --git a/models/core/x.sql b/models/core/x.sql\nnew file mode 100644\n--- /dev/null\n+++ b/models/core/x.sql\n@@ -0,0 +1 @@\n+select 1\n",
+                    "preview_diff": true
                 }),
                 &ctx,
             )
@@ -1739,11 +1488,11 @@ mod tests {
             .unwrap_err();
         assert!(err.to_lowercase().contains("contract violation"));
         assert!(err.to_lowercase().contains("preview_diff"));
-        assert!(err.to_lowercase().contains("no longer supported"));
+        assert!(err.to_lowercase().contains("not supported"));
     }
 
     #[tokio::test]
-    async fn dbt_files_patch_rejects_replace_file_as_string() {
+    async fn dbt_files_patch_rejects_patch_primitives_after_cutover() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage);
         let tool = DbtFilesTool { datasets: None };
@@ -1759,52 +1508,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_lowercase().contains("contract violation"));
-        assert!(err.to_lowercase().contains("replace_file"));
+        assert!(err.to_lowercase().contains("patch primitives"));
     }
 
     #[tokio::test]
-    async fn dbt_files_patch_normalizes_base_sha256_to_expected_sha256() {
+    async fn dbt_files_patch_rejects_base_sha256_after_cutover() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage);
         let tool = DbtFilesTool { datasets: None };
 
-        let obs = tool
+        let err = tool
             .call(
                 serde_json::json!({
                     "op": "patch",
-                    "replace_file": {
-                        "path": "models/core/x.sql",
-                        "new_text": "select 1\n",
-                        "base_sha256": "deadbeef"
-                    }
-                }),
-                &ctx,
-            )
-            .await;
-        let err = obs.unwrap_err();
-        assert!(err.contains("expected_sha256 mismatch"));
-    }
-
-    #[tokio::test]
-    async fn dbt_files_patch_uses_top_level_path_for_missing_item_path() {
-        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
-        let ctx = make_ctx(storage);
-        let tool = DbtFilesTool { datasets: None };
-
-        let obs = tool
-            .call(
-                serde_json::json!({
-                    "op": "patch",
-                    "path": "models/core/x.sql",
-                    "replace_file": {
-                        "new_text": "select 1\n"
-                    }
+                    "patch_text": "diff --git a/models/core/x.sql b/models/core/x.sql\nnew file mode 100644\n--- /dev/null\n+++ b/models/core/x.sql\n@@ -0,0 +1 @@\n+select 1\n",
+                    "base_sha256": "deadbeef"
                 }),
                 &ctx,
             )
             .await
-            .expect("patch ok");
-        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("contract violation"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_requires_patch_text() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/core/x.sql"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("contract violation"));
     }
 
     #[tokio::test]
@@ -1817,10 +1560,23 @@ mod tests {
         tool.call(
             serde_json::json!({
                 "op": "patch",
-                "replace_file": {
-                    "path": "models/staging/stg_test_raw_raw_orders.sql",
-                    "new_text": "with source as (\n  select\n    '2020-01-01 00:00:00' as placed_at_raw,\n    try_cast('2020-01-01 00:00:00' as timestamp) as placed_at\n  from {{ source('test_raw','raw_orders') }}\n)\n\nselect\n  placed_at_raw,\n  placed_at\nfrom source\n"
-                }
+                "patch_text": r#"diff --git a/models/staging/stg_test_raw_raw_orders.sql b/models/staging/stg_test_raw_raw_orders.sql
+new file mode 100644
+--- /dev/null
++++ b/models/staging/stg_test_raw_raw_orders.sql
+@@ -0,0 +1,12 @@
++with source as (
++  select
++    '2020-01-01 00:00:00' as placed_at_raw,
++    try_cast('2020-01-01 00:00:00' as timestamp) as placed_at
++  from {{ source('test_raw','raw_orders') }}
++)
++
++select
++  placed_at_raw,
++  placed_at
++from source
+"#
             }),
             &ctx,
         )
@@ -1832,10 +1588,23 @@ mod tests {
             .call(
                 serde_json::json!({
                     "op": "patch",
-                    "replace_file": {
-                        "path": "models/staging/stg_test_raw_raw_orders.yml",
-                        "new_text": "version: 2\nmodels:\n  - name: stg_test_raw_raw_orders\n    columns:\n      - name: created_at_raw\n        tests:\n          - not_null\n      - name: placed_at\n        tests:\n          - not_null:\n              where: \"updated_at_raw is not null\"\n"
-                    }
+                    "patch_text": r#"diff --git a/models/staging/stg_test_raw_raw_orders.yml b/models/staging/stg_test_raw_raw_orders.yml
+new file mode 100644
+--- /dev/null
++++ b/models/staging/stg_test_raw_raw_orders.yml
+@@ -0,0 +1,12 @@
++version: 2
++models:
++  - name: stg_test_raw_raw_orders
++    columns:
++      - name: created_at_raw
++        tests:
++          - not_null
++      - name: placed_at
++        tests:
++          - not_null:
++              where: "updated_at_raw is not null"
+"#
                 }),
                 &ctx,
             )
@@ -1858,10 +1627,23 @@ mod tests {
         tool.call(
             serde_json::json!({
                 "op": "patch",
-                "replace_file": {
-                    "path": "models/staging/stg_test_raw_raw_orders.sql",
-                    "new_text": "with source as (\n  select\n    '2020-01-01 00:00:00' as placed_at_raw,\n    try_cast('2020-01-01 00:00:00' as timestamp) as placed_at\n  from {{ source('test_raw','raw_orders') }}\n)\n\nselect\n  placed_at_raw,\n  placed_at\nfrom source\n"
-                }
+                "patch_text": r#"diff --git a/models/staging/stg_test_raw_raw_orders.sql b/models/staging/stg_test_raw_raw_orders.sql
+new file mode 100644
+--- /dev/null
++++ b/models/staging/stg_test_raw_raw_orders.sql
+@@ -0,0 +1,12 @@
++with source as (
++  select
++    '2020-01-01 00:00:00' as placed_at_raw,
++    try_cast('2020-01-01 00:00:00' as timestamp) as placed_at
++  from {{ source('test_raw','raw_orders') }}
++)
++
++select
++  placed_at_raw,
++  placed_at
++from source
+"#
             }),
             &ctx,
         )
@@ -1872,10 +1654,22 @@ mod tests {
             .call(
                 serde_json::json!({
                     "op": "patch",
-                    "replace_file": {
-                        "path": "models/staging/stg_test_raw_raw_orders.yml",
-                        "new_text": "version: 2\nmodels:\n  - name: stg_test_raw_raw_orders\n    columns:\n      - name: placed_at_raw\n        tests: []\n      - name: placed_at\n        tests:\n          - not_null:\n              where: \"placed_at_raw is not null\"\n"
-                    }
+                    "patch_text": r#"diff --git a/models/staging/stg_test_raw_raw_orders.yml b/models/staging/stg_test_raw_raw_orders.yml
+new file mode 100644
+--- /dev/null
++++ b/models/staging/stg_test_raw_raw_orders.yml
+@@ -0,0 +1,10 @@
++version: 2
++models:
++  - name: stg_test_raw_raw_orders
++    columns:
++      - name: placed_at_raw
++        tests: []
++      - name: placed_at
++        tests:
++          - not_null:
++              where: "placed_at_raw is not null"
+"#
                 }),
                 &ctx,
             )

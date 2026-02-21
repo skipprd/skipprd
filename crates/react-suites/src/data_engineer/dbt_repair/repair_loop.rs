@@ -794,7 +794,7 @@ mod tests {
             chat_responses: Mutex::new(vec![
                 serde_json::json!({
                     "changes": [
-                        {"key": base_key, "replace_file": {"new_text": fixed_sql}, "reason": "quote literal dotted column"}
+                        {"key": base_key, "patch_text": format!("@@ -1 +1 @@\n-{}\n+{}\n", old_sql, fixed_sql), "reason": "quote literal dotted column"}
                     ],
                     "notes": ["applied quoted identifier for dotted column"]
                 })

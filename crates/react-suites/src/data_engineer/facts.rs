@@ -91,7 +91,7 @@ pub struct FactsBundle {
     pub targets: TargetFacts,
     #[serde(default)]
     pub relations: Vec<RelationFacts>,
-    /// Canonical tool contracts for patch primitives.
+    /// Canonical tool contracts.
     pub tool_contracts: Value,
 }
 
@@ -105,28 +105,20 @@ fn dbt_files_patch_contract_value() -> Value {
                     "top_level_args": {
                         "op": "patch",
                         "path": "optional string (single-file guard)",
-                        "replace_file": "{path,new_text,expected_sha256?} or array of those",
-                        "replace_range": "{path,start_line,end_line,new_text,expected_sha256?} or array of those",
-                        "replace_list": "{path,edits:[{start_line,end_line,new_text}...],expected_sha256?} or array of those"
+                        "patch_text": "string (Cursor-style unified diff; single-file hunks or multi-file bundle)"
                     },
                     "rules": [
                         "args.op MUST equal \"patch\"",
-                        "Provide EXACTLY ONE of replace_file OR replace_range OR replace_list",
-                        "replace_file object keys MUST be exactly: path, new_text, expected_sha256 (optional)",
-                        "replace_range object keys MUST be exactly: path, start_line, end_line, new_text, expected_sha256 (optional)",
-                        "replace_list object keys MUST be exactly: path, edits, expected_sha256 (optional)",
-                        "replace_list.edits items MUST have exactly: start_line, end_line, new_text",
-                        "When expected_sha256 is present, it MUST match the current file content sha256"
+                        "Provide patch_text only (legacy patch primitives are not allowed)",
+                        "If path is provided, patch_text MUST target exactly that one path",
+                        "patch_text may be git-style (---/+++ headers) or Cursor-style hunks-only when path is provided"
                     ],
-                    "example_replace_file": {
+                    "example": {
                         "action": "dbt_files",
                         "args": {
                             "op": "patch",
-                            "replace_file": {
-                                "path": "models/marts/fct_example.sql",
-                                "new_text": "-- sql...",
-                                "expected_sha256": "<sha256 optional>"
-                            }
+                            "path": "models/marts/fct_example.sql",
+                            "patch_text": "@@ ...\n- old\n+ new\n"
                         }
                     }
                 },

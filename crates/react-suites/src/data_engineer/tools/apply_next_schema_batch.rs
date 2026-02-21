@@ -134,8 +134,8 @@ fn schema_yml_sys_prompt_staging() -> String {
         "Task: author a dbt *silver schema* YAML for ONE silver model file under models/staging/.",
         "Requirements:",
         "- Output MUST be valid JSON only.",
-        "- Choose EXACTLY ONE patch primitive: replace_file OR replace_range OR replace_list.",
-        "- Patch MUST modify ONLY expected_rel_path.",
+        "- Return a single-file patch as `patch_text` unified diff hunks (Cursor-style preferred).",
+        "- Patch MUST modify ONLY expected_rel_path (no other files).",
         "- Do NOT add or reference columns not present in allowed_columns.",
         "- IMPORTANT: contract enforcement is disabled. Do NOT set models[].config.contract.enforced=true.",
         "- Prefer including all allowed_columns under models[].columns, but it is OK if some are missing while iterating.",
@@ -153,8 +153,8 @@ fn schema_yml_sys_prompt_models_schema_yml() -> String {
         "Task: update models/schema.yml to add or update dbt model documentation/tests for a small set of gold models.",
         "Requirements:",
         "- Output MUST be valid JSON only.",
-        "- Choose EXACTLY ONE patch primitive: replace_file OR replace_range OR replace_list.",
-        "- Patch MUST modify ONLY expected_rel_path.",
+        "- Return a single-file patch as `patch_text` unified diff hunks (Cursor-style preferred).",
+        "- Patch MUST modify ONLY expected_rel_path (no other files).",
         "- Do NOT create additional YAML files; use models/schema.yml only.",
         "- IMPORTANT (ownership): do NOT add staging (stg_*) models to models/schema.yml. Staging docs/tests must be in models/staging/*.yml.",
         "- IMPORTANT (grounding): For each model, you will be given allowed_columns derived from its SQL. Do NOT create tests or where: predicates that reference columns not in allowed_columns.",
@@ -759,10 +759,8 @@ mod tests {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
             replies: Mutex::new(vec![serde_json::json!({
-                "replace_file": {
-                    "path": "models/staging/stg_test_raw_raw_customers.yml",
-                    "new_text": "version: 2\n\nmodels:\n  - name: stg_test_raw_raw_customers\n    columns:\n      - name: customer_id_raw\n      - name: email_raw\n"
-                }
+                "path": "models/staging/stg_test_raw_raw_customers.yml",
+                "patch_text": "@@ -0,0 +1,6 @@\n+version: 2\n+\n+models:\n+  - name: stg_test_raw_raw_customers\n+    columns:\n+      - name: customer_id_raw\n+      - name: email_raw\n"
             }).to_string()]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
@@ -869,10 +867,8 @@ mod tests {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
             replies: Mutex::new(vec![serde_json::json!({
-                "replace_file": {
-                    "path": "models/staging/stg_test_raw_raw_customers.yml",
-                    "new_text": "version: 2\n\nmodels:\n  - name: stg_test_raw_raw_customers\n    columns:\n      - name: customer_id_raw\n      - name: email_raw\n"
-                }
+                "path": "models/staging/stg_test_raw_raw_customers.yml",
+                "patch_text": "@@ -0,0 +1,6 @@\n+version: 2\n+\n+models:\n+  - name: stg_test_raw_raw_customers\n+    columns:\n+      - name: customer_id_raw\n+      - name: email_raw\n"
             })
             .to_string()]),
         });
@@ -995,10 +991,8 @@ mod tests {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
             replies: Mutex::new(vec![serde_json::json!({
-                "replace_file": {
-                    "path": "models/schema.yml",
-                    "new_text": "version: 2\n\nmodels:\n  - name: dim_customers\n    columns: []\n"
-                }
+                "path": "models/schema.yml",
+                "patch_text": "@@ -0,0 +1,5 @@\n+version: 2\n+\n+models:\n+  - name: dim_customers\n+    columns: []\n"
             }).to_string()]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
@@ -1104,10 +1098,8 @@ mod tests {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
             replies: Mutex::new(vec![serde_json::json!({
-                "replace_file": {
-                    "path": "models/schema.yml",
-                    "new_text": "version: 2\n\nmodels:\n  - name: dim_customers\n    columns: []\n"
-                }
+                "path": "models/schema.yml",
+                "patch_text": "@@ -0,0 +1,5 @@\n+version: 2\n+\n+models:\n+  - name: dim_customers\n+    columns: []\n"
             })
             .to_string()]),
         });
@@ -1234,10 +1226,8 @@ mod tests {
     async fn apply_next_model_schema_batch_includes_allowed_columns_in_payload() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let reply = serde_json::json!({
-            "replace_file": {
-                "path": "models/schema.yml",
-                "new_text": "version: 2\n\nmodels:\n  - name: dim_customers\n    columns: []\n"
-            }
+            "path": "models/schema.yml",
+            "patch_text": "@@ -0,0 +1,5 @@\n+version: 2\n+\n+models:\n+  - name: dim_customers\n+    columns: []\n"
         })
         .to_string();
         let llm = Arc::new(InspectingLlm {
@@ -1357,10 +1347,8 @@ mod tests {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
             replies: Mutex::new(vec![serde_json::json!({
-                "replace_file": {
-                    "path": "models/schema.yml",
-                    "new_text": "version: 2\n\nmodels:\n  - name: stg_test_raw_raw_customers\n    columns: []\n  - name: dim_customers\n    columns: []\n"
-                }
+                "path": "models/schema.yml",
+                "patch_text": "@@ -0,0 +1,7 @@\n+version: 2\n+\n+models:\n+  - name: stg_test_raw_raw_customers\n+    columns: []\n+  - name: dim_customers\n+    columns: []\n"
             }).to_string()]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));

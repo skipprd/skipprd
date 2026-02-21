@@ -1,4 +1,3 @@
-use serde::de::{Deserializer, Error as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -96,7 +95,7 @@ Include each as a separate notes entry prefixed like:\n\
 }
 
 fn split_lines_preserve_trailing_newline_for_prompt(s: &str) -> (Vec<String>, bool) {
-    // Keep semantics aligned with project_fs::apply_replace_range.
+    // Keep prompt line counting deterministic.
     let had_trailing_newline = s.ends_with('\n');
     let mut lines: Vec<String> = s.split('\n').map(|x| x.to_string()).collect();
     // `split('\n')` produces a trailing empty segment when the string ends with '\n'.
@@ -154,7 +153,7 @@ fn parse_json_from_llm(text: &str) -> Result<Value, String> {
 
 fn looks_like_patch_object(v: &Value) -> bool {
     let Some(m) = v.as_object() else { return false };
-    m.contains_key("replace_file") || m.contains_key("replace_range") || m.contains_key("replace_list")
+    m.contains_key("patch_text")
 }
 
 fn parse_patch_json_from_llm(text: &str) -> Result<Value, String> {
@@ -250,115 +249,38 @@ fn extract_all_json_values(s: &str, max: usize) -> Vec<String> {
     out
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-enum OneOrMany<T> {
-    One(T),
-    Many(Vec<T>),
-}
-
-fn deserialize_opt_single_or_array<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    let v: Option<OneOrMany<T>> = Option::deserialize(deserializer)?;
-    match v {
-        None => Ok(None),
-        Some(OneOrMany::One(x)) => Ok(Some(x)),
-        Some(OneOrMany::Many(mut xs)) => {
-            if xs.len() == 1 {
-                Ok(xs.pop())
-            } else {
-                Err(D::Error::custom(
-                    "expected a single object or a single-element array",
-                ))
-            }
-        }
-    }
-}
-
-fn deserialize_opt_nonempty_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let v: Option<String> = Option::deserialize(deserializer)?;
-    Ok(v.and_then(|s| {
-        let t = s.trim().to_string();
-        if t.is_empty() { None } else { Some(t) }
-    }))
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ReplaceFile {
-    #[serde(default)]
-    path: Option<String>,
-    new_text: String,
-    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
-    expected_sha256: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ReplaceRange {
-    #[serde(default)]
-    path: Option<String>,
-    start_line: usize,
-    end_line: usize,
-    new_text: String,
-    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
-    expected_sha256: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ReplaceListEdit {
-    start_line: usize,
-    end_line: usize,
-    new_text: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ReplaceList {
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    edits: Vec<ReplaceListEdit>,
-    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
-    expected_sha256: Option<String>,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct LlmPatchResponse {
-    /// Preferred structured primitives: the suite/tool will canonicalize into a git-style patch deterministically.
-    #[serde(default, deserialize_with = "deserialize_opt_single_or_array")]
-    replace_file: Option<ReplaceFile>,
-    #[serde(default, deserialize_with = "deserialize_opt_single_or_array")]
-    replace_range: Option<ReplaceRange>,
-    #[serde(default, deserialize_with = "deserialize_opt_single_or_array")]
-    replace_list: Option<ReplaceList>,
+    #[serde(default)]
+    path: Option<String>,
+    patch_text: String,
     #[serde(default)]
     notes: Vec<String>,
 }
 
 fn parse_llm_patch_response(text: &str, expected_rel_path: &str) -> Result<LlmPatchResponse, String> {
     let v = parse_patch_json_from_llm(text)?;
-    let v = crate::data_engineer::patch_normalize::normalize_single_file_patch_response_value(
-        v,
-        expected_rel_path,
-    )?;
-    serde_json::from_value(v).map_err(|e| format!("failed to parse patch response JSON: {}", e))
+    let parsed: LlmPatchResponse =
+        serde_json::from_value(v).map_err(|e| format!("failed to parse patch response JSON: {}", e))?;
+    if parsed.patch_text.trim().is_empty() {
+        return Err("patch_text is empty".to_string());
+    }
+    if let Some(p) = parsed.path.as_deref() {
+        let rel = project_fs::normalize_rel_path(p)?;
+        if rel != expected_rel_path {
+            return Err(format!(
+                "path '{}' did not match expected_rel_path '{}'",
+                rel, expected_rel_path
+            ));
+        }
+    }
+    Ok(parsed)
 }
 
 /// Ask the LLM for a patch for one expected file, apply it in-memory, and retry on patch errors.
 ///
-    /// - The LLM must return JSON and choose EXACTLY ONE patch primitive:
-///   - replace_file, OR
-///   - replace_range
-///   - replace_list
+/// - The LLM must return JSON containing `patch_text`.
 /// - The patch must target exactly `expected_rel_path` (no other files).
 pub async fn llm_patch_loop_single_file(
     ctx: &AgentCtx,
@@ -387,7 +309,7 @@ pub async fn llm_patch_loop_single_file(
     let existed = existing_opt.is_some();
     let existing = existing_opt.unwrap_or_default();
     let base_sha256 = sha256_hex(&existing);
-    // Prompt facts: line_count is the authoritative upper bound for replace_range end_line.
+    // Prompt facts used to help the LLM produce stable hunks.
     // We cap numbered content to avoid doubling prompt size for large files.
     let (existing_content_with_line_numbers, existing_content_with_line_numbers_truncated, existing_line_count, existing_had_trailing_newline) =
         format_with_line_numbers(&existing, 200_000);
@@ -404,7 +326,7 @@ pub async fn llm_patch_loop_single_file(
         "existing_content_with_line_numbers": existing_content_with_line_numbers,
         "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
         "input": user_payload_value,
-        "instruction": "Return a single JSON object matching schema patch_protocol.single_file.v1. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. Prefer replace_file when possible. The patch MUST modify ONLY expected_rel_path. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. If prior attempts produced no-op patches, switch to replace_file full rewrite. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
+        "instruction": "Return a single JSON object with patch_text (unified diff). Prefer Cursor-style hunks-only patch_text starting with '@@' and omitting ---/+++ headers. The patch MUST modify ONLY expected_rel_path. If prior attempts produced no-op patches, rewrite the entire file using a single large hunk."
     })
     .to_string();
 
@@ -419,15 +341,13 @@ pub async fn llm_patch_loop_single_file(
         },
     ];
 
-    let mut call_opts = llm_options.unwrap_or_else(|| react_core::llm::LlmCallOptions::new(
-        "data_engineer.patch_protocol.llm_patch_loop",
-        react_core::llm::LlmExpectedFormat::JsonSchema(
-            react_core::schema_registry::SchemaId::PatchSingleFileV1,
-        ),
-    ));
-    call_opts.expected_format = react_core::llm::LlmExpectedFormat::JsonSchema(
-        react_core::schema_registry::SchemaId::PatchSingleFileV1,
-    );
+    let mut call_opts = llm_options.unwrap_or_else(|| {
+        react_core::llm::LlmCallOptions::new(
+            "data_engineer.patch_protocol.llm_patch_loop",
+            react_core::llm::LlmExpectedFormat::JsonObject,
+        )
+    });
+    call_opts.expected_format = react_core::llm::LlmExpectedFormat::JsonObject;
     if call_opts.max_output_tokens.is_none() {
         call_opts.max_output_tokens = Some(default_patch_loop_max_output_tokens());
     }
@@ -645,175 +565,110 @@ pub async fn llm_patch_loop_single_file(
             }
         };
 
-        let mut provided = 0usize;
-        if parsed.replace_file.is_some() {
-            provided += 1;
+        if no_op_failures >= no_op_breaker_threshold {
+            let err = format!(
+                "no-op patch breaker: {} consecutive no-op patches for '{}'. Return patch_text that rewrites the entire file (single large hunk).",
+                no_op_failures, expected_rel_path
+            );
+            last_err = Some(err.clone());
+            let repair = serde_json::json!({
+                "attempt": attempt,
+                "error": err,
+                "consecutive_noop_patches": no_op_failures,
+                "expected_rel_path": expected_rel_path,
+                "base_sha256": base_sha256,
+                "base_exists": existed,
+                "existing_line_count": existing_line_count,
+                "existing_had_trailing_newline": existing_had_trailing_newline,
+                "existing_content": existing,
+                "existing_content_with_line_numbers": existing_content_with_line_numbers,
+                "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
+                "previous_response": parsed,
+                "instruction": "Return ONLY corrected JSON with patch_text (unified diff). Prefer Cursor-style hunks-only patch_text starting with '@@'. The patch MUST modify ONLY expected_rel_path. Rewrite the entire file using one large hunk if needed."
+            })
+            .to_string();
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: repair,
+            });
+            continue;
         }
-        if parsed.replace_range.is_some() {
-            provided += 1;
-        }
-        if parsed.replace_list.is_some() {
-            provided += 1;
-        }
-        if provided != 1 {
-            // FAIL FAST: structural/contract violation.
-            return Err(format!(
-                "LLM response must include exactly one of: replace_file | replace_range | replace_list\n\nExpected patch contract:\n{}\n\nResponse excerpt:\n{}",
-                crate::prompts::patch_contract::llm_patch_response_contract(),
-                excerpt_for_error(&resp_text, 2000)
-            ));
+
+        // Optional content contract gates (opt-in via sys_prompt sentinel).
+        let gate_err: Option<String> = if enforce_analyst_notes_contract {
+            has_required_analyst_notes(&parsed.notes).err()
         } else {
-            if no_op_failures >= no_op_breaker_threshold && parsed.replace_file.is_none() {
-                // Deterministic convergence: do NOT apply more ranged edits once we have evidence
-                // they're producing no-ops. Force the model to switch to full rewrite.
-                let err = format!(
-                    "no-op patch breaker: {} consecutive no-op patches for '{}'. Return replace_file with a full rewritten file.",
-                    no_op_failures, expected_rel_path
+            None
+        };
+        if let Some(e) = gate_err {
+            // Skip patch application; let the existing repair loop prompt the model.
+            let err = e;
+            let repair = serde_json::json!({
+                "attempt": attempt,
+                "error": err,
+                "expected_rel_path": expected_rel_path,
+                "base_sha256": base_sha256,
+                "base_exists": existed,
+                "existing_line_count": existing_line_count,
+                "existing_had_trailing_newline": existing_had_trailing_newline,
+                "existing_content": existing,
+                "existing_content_with_line_numbers": existing_content_with_line_numbers,
+                "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
+                "previous_response": parsed,
+                "instruction": "Return ONLY corrected JSON with notes + patch_text."
+            })
+            .to_string();
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: repair,
+            });
+            continue;
+        }
+
+        // Apply patch_text (unified diff). If patch_text is hunks-only, synthesize a minimal git header.
+        let mut patch_text = parsed.patch_text.clone();
+        let has_headers = patch_text
+            .lines()
+            .any(|l| l.trim_start().starts_with("--- "));
+        if !has_headers {
+            if existed {
+                patch_text = format!(
+                    "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}",
+                    expected_rel_path,
+                    patch_text.trim_start()
                 );
-                last_err = Some(err.clone());
-                let repair = serde_json::json!({
-                    "attempt": attempt,
-                    "error": err,
-                    "consecutive_noop_patches": no_op_failures,
-                    "expected_rel_path": expected_rel_path,
-                    "base_sha256": base_sha256,
-                    "base_exists": existed,
-                    "existing_line_count": existing_line_count,
-                    "existing_had_trailing_newline": existing_had_trailing_newline,
-                    "existing_content": existing,
-                    "existing_content_with_line_numbers": existing_content_with_line_numbers,
-                    "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
-                    "previous_response": parsed,
-                    "instruction": "Return ONLY corrected JSON. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. The patch MUST modify ONLY expected_rel_path. Prefer replace_file when possible. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. If consecutive_noop_patches >= 2, you MUST use replace_file and rewrite the full file content. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
-                })
-                .to_string();
-                messages.push(ChatMessage {
-                    role: "user".to_string(),
-                    content: repair,
-                });
-                continue;
             } else {
-            // Optional content contract gates (opt-in via sys_prompt sentinel).
-            let gate_err: Option<String> = if enforce_analyst_notes_contract {
-                has_required_analyst_notes(&parsed.notes).err()
-            } else {
-                None
-            };
-            if let Some(e) = gate_err {
-                // Skip patch application; let the existing repair loop prompt the model.
-                let err = e;
-                let repair = serde_json::json!({
-                    "attempt": attempt,
-                    "error": err,
-                    "expected_rel_path": expected_rel_path,
-                    "base_sha256": base_sha256,
-                    "base_exists": existed,
-                    "existing_line_count": existing_line_count,
-                    "existing_had_trailing_newline": existing_had_trailing_newline,
-                    "existing_content": existing,
-                    "existing_content_with_line_numbers": existing_content_with_line_numbers,
-                    "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
-                    "previous_response": parsed,
-                    "instruction": "Return ONLY corrected JSON. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. The patch MUST modify ONLY expected_rel_path. Prefer replace_file when possible. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. If prior attempts produced no-op patches, switch to replace_file full rewrite. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
-                })
-                .to_string();
-                messages.push(ChatMessage {
-                    role: "user".to_string(),
-                    content: repair,
-                });
-                continue;
+                patch_text = format!(
+                    "diff --git a/{0} b/{0}\n--- /dev/null\n+++ b/{0}\n{1}",
+                    expected_rel_path,
+                    patch_text.trim_start()
+                );
             }
+        }
 
-            // Build the intended final file contents deterministically from the selected primitive.
-            // We avoid unified diff application entirely for structured primitives (too flaky).
-            let new_text_res: Result<String, String> = if let Some(rf) =
-                parsed.replace_file.as_ref()
-            {
-                if let Some(p) = rf.path.as_ref() {
-                    let rel = project_fs::normalize_rel_path(p)?;
-                    if rel != expected_rel_path {
-                        return Err(format!(
-                            "replace_file.path '{}' did not match expected_rel_path '{}'",
-                            rel, expected_rel_path
-                        ));
-                    }
+        match project_fs::apply_patch(
+            ctx,
+            datasets,
+            expected_rel_path,
+            &patch_text,
+            Some(base_sha256.as_str()),
+            Some(existed),
+            project_fs::PatchApplyKind::UnifiedDiff,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                if outcome.base_sha256 == outcome.new_sha256 {
+                    no_op_failures = no_op_failures.saturating_add(1);
+                    last_err = Some(format!(
+                        "patch produced no file changes for '{}' (consecutive_noops={}).",
+                        expected_rel_path, no_op_failures
+                    ));
+                } else {
+                    return Ok((outcome, parsed.notes));
                 }
-                Ok(rf.new_text.clone())
-            } else if let Some(rr) = parsed.replace_range.as_ref() {
-                if let Some(p) = rr.path.as_ref() {
-                    let rel = project_fs::normalize_rel_path(p)?;
-                    if rel != expected_rel_path {
-                        return Err(format!(
-                            "replace_range.path '{}' did not match expected_rel_path '{}'",
-                            rel, expected_rel_path
-                        ));
-                    }
-                }
-                project_fs::apply_replace_range(&existing, rr.start_line, rr.end_line, &rr.new_text)
-            } else if let Some(rl) = parsed.replace_list.as_ref() {
-                if let Some(p) = rl.path.as_ref() {
-                    let rel = project_fs::normalize_rel_path(p)?;
-                    if rel != expected_rel_path {
-                        return Err(format!(
-                            "replace_list.path '{}' did not match expected_rel_path '{}'",
-                            rel, expected_rel_path
-                        ));
-                    }
-                }
-                let edits: Vec<project_fs::ReplaceListEdit> = rl
-                    .edits
-                    .iter()
-                    .map(|e| project_fs::ReplaceListEdit {
-                        start_line: e.start_line,
-                        end_line: e.end_line,
-                        new_text: e.new_text.clone(),
-                    })
-                    .collect();
-                project_fs::apply_replace_list(&existing, &edits)
-            } else {
-                Err("invalid patch response".to_string())
-            };
-
-            match new_text_res {
-                Ok(new_text) => {
-                    match project_fs::apply_patch(
-                        ctx,
-                        datasets,
-                        expected_rel_path,
-                        &new_text,
-                        if existed { Some(base_sha256.as_str()) } else { None },
-                        Some(existed),
-                        project_fs::PatchApplyKind::FullOverwrite,
-                    )
-                    .await
-                    {
-                        Ok(outcome) => {
-                            if outcome.base_sha256 == outcome.new_sha256 {
-                                no_op_failures = no_op_failures.saturating_add(1);
-                                last_err = Some(format!(
-                                    "patch produced no file changes for '{}' (consecutive_noops={}).",
-                                    expected_rel_path, no_op_failures
-                                ));
-                                // If we already forced a full rewrite and STILL got a no-op, stop early.
-                                // This avoids burning attempts on a stuck file.
-                                if no_op_failures >= no_op_breaker_threshold
-                                    && parsed.replace_file.is_some()
-                                {
-                                    return Err(format!(
-                                        "LLM patch is stuck: replace_file still produced no changes for '{}' after {} no-op attempt(s).",
-                                        expected_rel_path, no_op_failures
-                                    ));
-                                }
-                            } else {
-                                return Ok((outcome, parsed.notes));
-                            }
-                        }
-                        Err(e) => last_err = Some(e),
-                    }
-                }
-                Err(e) => last_err = Some(e),
             }
-            }
+            Err(e) => last_err = Some(e),
         }
 
         // Repair prompt: feed back the failing patch + error + expected file + current content.
@@ -833,7 +688,7 @@ pub async fn llm_patch_loop_single_file(
             "existing_content_with_line_numbers": existing_content_with_line_numbers,
             "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
             "previous_response": parsed,
-            "instruction": "Return ONLY corrected JSON. Choose EXACTLY ONE patch primitive: replace_file | replace_range | replace_list. The patch MUST modify ONLY expected_rel_path. Prefer replace_file when possible. For replace_range/replace_list edits, end_line MUST be <= existing_line_count; if replacing to end-of-file, use end_line = existing_line_count. If consecutive_noop_patches >= 2, you MUST use replace_file and rewrite the full file content. Do NOT include expected_sha256; the suite enforces drift safety from base_sha256/base_exists."
+            "instruction": "Return ONLY corrected JSON with patch_text (unified diff). Prefer Cursor-style hunks-only patch_text starting with '@@'. The patch MUST modify ONLY expected_rel_path. If repeated no-ops occur, rewrite the entire file using one large hunk."
         })
         .to_string();
         messages.push(ChatMessage {
@@ -859,28 +714,26 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn parse_llm_patch_response_accepts_single_element_replace_file_array() {
+    fn parse_llm_patch_response_accepts_patch_text() {
         let txt = r#"{
-          "replace_file": [
-            { "path": "models/schema.yml", "new_text": "version: 2\n" }
-          ]
+          "path": "models/schema.yml",
+          "patch_text": "@@\n- a\n+ b\n",
+          "notes": ["ok"]
         }"#;
         let parsed = parse_llm_patch_response(txt, "models/schema.yml").expect("parse ok");
-        assert!(parsed.replace_file.is_some());
-        assert!(parsed.replace_range.is_none());
-        assert!(parsed.replace_list.is_none());
+        assert_eq!(parsed.path.as_deref(), Some("models/schema.yml"));
+        assert!(parsed.patch_text.contains("@@"));
+        assert_eq!(parsed.notes, vec!["ok".to_string()]);
     }
 
     #[test]
-    fn parse_llm_patch_response_rejects_multi_element_replace_file_array() {
+    fn parse_llm_patch_response_rejects_wrong_path() {
         let txt = r#"{
-          "replace_file": [
-            { "path": "models/schema.yml", "new_text": "a" },
-            { "path": "models/schema.yml", "new_text": "b" }
-          ]
+          "path": "models/other.yml",
+          "patch_text": "@@\n- a\n+ b\n"
         }"#;
         let err = parse_llm_patch_response(txt, "models/schema.yml").unwrap_err();
-        assert!(err.to_ascii_lowercase().contains("single"));
+        assert!(err.contains("expected_rel_path"));
     }
 
     fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {
@@ -956,13 +809,15 @@ mod tests {
             replies: Mutex::new(vec![
                 // First attempt: valid patch primitive, but missing required notes -> should trigger repair retry.
                 serde_json::json!({
-                    "replace_file": { "path": "models/schema.yml", "new_text": "version: 2\n\nmodels: []\n" },
+                    "path": "models/schema.yml",
+                    "patch_text": "diff --git a/models/schema.yml b/models/schema.yml\n--- /dev/null\n+++ b/models/schema.yml\n@@ -0,0 +1,3 @@\n+version: 2\n+\n+models: []\n",
                     "notes": []
                 })
                 .to_string(),
                 // Second attempt: same patch, now with required notes -> should succeed.
                 serde_json::json!({
-                    "replace_file": { "path": "models/schema.yml", "new_text": "version: 2\n\nmodels: []\n" },
+                    "path": "models/schema.yml",
+                    "patch_text": "diff --git a/models/schema.yml b/models/schema.yml\n--- /dev/null\n+++ b/models/schema.yml\n@@ -0,0 +1,3 @@\n+version: 2\n+\n+models: []\n",
                     "notes": [
                         "Business question: x",
                         "Entity definition: x",

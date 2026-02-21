@@ -73,25 +73,10 @@ fn extract_dbt_files_paths(op: &str, args: &Value) -> Vec<String> {
                 }
             }
 
-            // Structured patch primitives can embed paths.
-            for key in ["replace_file", "replace_range", "replace_list"] {
-                let Some(v) = args.get(key) else { continue };
-                let mut visit = |obj: &serde_json::Map<String, Value>| {
-                    if let Some(p) = obj.get("path").and_then(|v| v.as_str()) {
-                        let p = p.trim();
-                        if !p.is_empty() {
-                            out.push(p.to_string());
-                        }
-                    }
-                };
-                if let Some(arr) = v.as_array() {
-                    for it in arr.iter() {
-                        if let Some(obj) = it.as_object() {
-                            visit(obj);
-                        }
-                    }
-                } else if let Some(obj) = v.as_object() {
-                    visit(obj);
+            // Patch bundle targets.
+            if let Some(pt) = args.get("patch_text").and_then(|v| v.as_str()) {
+                if let Ok(paths) = crate::data_engineer::project_fs::patch_bundle_targets(pt) {
+                    out.extend(paths);
                 }
             }
         }
@@ -2937,29 +2922,39 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                         plan.progress.last_applied_step_idx = idx + 1;
                         continue;
                     };
-                    // Best-effort: extract schema.yml new_text when provided via replace_file.
+                    // Best-effort: recover updated models/schema.yml content from patch_text and
+                    // mark checklist done for model names present in that YAML.
                     let mut schema_text: Option<String> = None;
-                    if let Some(v) = args.get("replace_file") {
-                        let mut visit = |obj: &serde_json::Map<String, Value>| {
-                            if schema_text.is_some() {
-                                return;
+                    if let Some(pt) = args.get("patch_text").and_then(|v| v.as_str()) {
+                        let guarded_schema = args
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .map(|p| p.trim().replace('\\', "/") == "models/schema.yml")
+                            .unwrap_or(false);
+                        let has_diff_git = pt.lines().any(|l| l.trim_start().starts_with("diff --git "));
+                        let mut in_target = guarded_schema && !has_diff_git;
+                        let mut added: Vec<String> = Vec::new();
+                        for line in pt.lines() {
+                            let t = line.trim_end_matches('\r');
+                            if t.trim_start().starts_with("diff --git ") {
+                                let low = t.to_ascii_lowercase();
+                                in_target = low.contains(" b/models/schema.yml");
+                                continue;
                             }
-                            let p = obj.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
-                            if p.replace('\\', "/") != "models/schema.yml" {
-                                return;
+                            if !in_target {
+                                continue;
                             }
-                            if let Some(nt) = obj.get("new_text").and_then(|v| v.as_str()) {
-                                schema_text = Some(nt.to_string());
+                            if t.starts_with("--- ") || t.starts_with("+++ ") || t.starts_with("@@ ") || t == "@@" {
+                                continue;
                             }
-                        };
-                        if let Some(arr) = v.as_array() {
-                            for it in arr.iter() {
-                                if let Some(obj) = it.as_object() {
-                                    visit(obj);
+                            if let Some(rest) = t.strip_prefix('+') {
+                                if !t.starts_with("+++") {
+                                    added.push(rest.to_string());
                                 }
                             }
-                        } else if let Some(obj) = v.as_object() {
-                            visit(obj);
+                        }
+                        if !added.is_empty() {
+                            schema_text = Some(added.join("\n"));
                         }
                     }
                     if let Some(text) = schema_text {
@@ -3586,26 +3581,12 @@ mod tests {
             progress: PlanProgress::default(),
         };
 
-        let schema_yml = r#"version: 2
-models:
-  - name: dim_customers
-    description: "Customer dimension."
-    columns:
-      - name: customer_id
-        tests:
-          - not_null
-          - unique
-sources:
-  - name: test_raw
-    schema: test_raw
-"#;
-
         let log = ThreadLog {
             steps: vec![step_with_ctx(
                 "dbt_files",
                 serde_json::json!({
                     "op":"patch",
-                    "replace_file": {"path":"models/schema.yml","new_text": schema_yml}
+                    "patch_text": "diff --git a/models/schema.yml b/models/schema.yml\n--- /dev/null\n+++ b/models/schema.yml\n@@ -0,0 +1,8 @@\n+version: 2\n+\n+models:\n+  - name: dim_customers\n+    columns:\n+      - name: customer_id\n+sources:\n+  - name: test_raw\n"
                 }),
                 serde_json::json!({"ok": true}),
                 Some(ExecutionContext {
@@ -3849,7 +3830,7 @@ sources:
                 "dbt_files",
                 serde_json::json!({
                     "op":"patch",
-                    "replace_file": {"path":"models/staging/stg_test_raw_raw_customers.sql","new_text":"select 1\n"}
+                    "patch_text":"diff --git a/models/staging/stg_test_raw_raw_customers.sql b/models/staging/stg_test_raw_raw_customers.sql\n--- /dev/null\n+++ b/models/staging/stg_test_raw_raw_customers.sql\n@@ -0,0 +1 @@\n+select 1\n"
                 }),
                 serde_json::json!({"ok": true, "mutated": true}),
             )],

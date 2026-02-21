@@ -192,7 +192,6 @@ mod tests {
     use react_core::providers::DbtProvider;
     use react_core::scope::RequestScope;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
-    use sha2::Digest;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -281,10 +280,10 @@ mod tests {
     fn dbt_validate_mock_change_does_not_require_expected_sha256() {
         // Ensure unit tests do not require LLM echo of sha (suite enforces drift safety internally).
         let v = serde_json::json!({
-            "replace_file": {"new_text": "select 2"},
+            "patch_text": "@@\n- select 1\n+ select 2\n",
             "notes": []
         });
-        assert!(v.get("replace_file").unwrap().get("new_text").is_some());
+        assert!(v.get("patch_text").and_then(|x| x.as_str()).is_some());
     }
 
     fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {
@@ -331,12 +330,6 @@ mod tests {
         })
     }
 
-    fn sha256_hex(s: &str) -> String {
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(s.as_bytes());
-        hex::encode(hasher.finalize())
-    }
-
     #[tokio::test]
     async fn dbt_validate_retries_once_after_remediation_on_sql_failure() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
@@ -352,10 +345,7 @@ mod tests {
                 serde_json::json!({
                     "changes": [{
                         "key":"t/w/p/dbt/models/m.sql",
-                        "replace_file": {
-                            "new_text": "select 1\\n",
-                            "expected_sha256": sha256_hex("select 1")
-                        },
+                        "patch_text": "@@ -1 +1 @@\\n-select 1\\n+select 1 -- remediation\\n",
                         "reason":"minimal change to trigger retry"
                     }],
                     "notes": []

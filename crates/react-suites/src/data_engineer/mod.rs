@@ -25,7 +25,6 @@ pub mod dbt_repair;
 pub mod facts;
 pub mod naming;
 pub mod patch_protocol;
-pub mod patch_normalize;
 pub mod plan;
 pub mod prompt_packets;
 pub mod project_files;
@@ -1844,33 +1843,21 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             if let Some(want) = self.single_target_path.as_ref() {
                                 fn collect_paths(v: &serde_json::Value) -> Vec<String> {
                                     let mut out: Vec<String> = Vec::new();
-                                    if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
-                                        let p = p.trim();
-                                        if !p.is_empty() {
-                                            out.push(p.to_string());
+                                    if let Some(pt) = v.get("patch_text").and_then(|x| x.as_str()) {
+                                        if let Ok(mut paths) =
+                                            crate::data_engineer::project_fs::patch_bundle_targets(pt)
+                                        {
+                                            out.append(&mut paths);
                                         }
                                     }
-                                    for key in ["replace_file", "replace_range", "replace_list"] {
-                                        let Some(node) = v.get(key) else { continue };
-                                        let mut visit =
-                                            |obj: &serde_json::Map<String, serde_json::Value>| {
-                                                if let Some(p) =
-                                                    obj.get("path").and_then(|x| x.as_str())
-                                                {
-                                                    let p = p.trim();
-                                                    if !p.is_empty() {
-                                                        out.push(p.to_string());
-                                                    }
-                                                }
-                                            };
-                                        if let Some(arr) = node.as_array() {
-                                            for it in arr.iter() {
-                                                if let Some(obj) = it.as_object() {
-                                                    visit(obj);
-                                                }
+                                    // Fallback: if a single-file guard is present, treat it as the intended path.
+                                    // (dbt_files will still validate patch_text targets.)
+                                    if out.is_empty() {
+                                        if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
+                                            let p = p.trim();
+                                            if !p.is_empty() {
+                                                out.push(p.to_string());
                                             }
-                                        } else if let Some(obj) = node.as_object() {
-                                            visit(obj);
                                         }
                                     }
                                     out
@@ -1914,12 +1901,19 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             ));
                                         }
                                         crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile => {
-                                            let has_replace_file = args.get("replace_file").is_some();
-                                            let has_other = args.get("replace_range").is_some()
-                                                || args.get("replace_list").is_some();
-                                            if !has_replace_file || has_other {
+                                            // Hard cutover: Cursor-like patch DSL only (git-style unified diff).
+                                            // Require patch_text and a single-file guard path.
+                                            let has_patch_text =
+                                                args.get("patch_text").and_then(|v| v.as_str()).is_some();
+                                            let guard_path_ok = args
+                                                .get("path")
+                                                .and_then(|v| v.as_str())
+                                                .map(|p| p.trim() == want)
+                                                .unwrap_or(false);
+                                            if !has_patch_text || !guard_path_ok {
                                                 return Err(format!(
-                                                    "deterministic repair ladder step requires replace_file for '{}' (do not use replace_range/replace_list).",
+                                                    "deterministic repair ladder step requires a guarded single-file patch for '{}': args must include path='{}' + patch_text (git-style unified diff).",
+                                                    want,
                                                     want
                                                 ));
                                             }
@@ -2020,7 +2014,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                     }
                     tool_lines.extend_from_slice(&[
                         "- dbt_files(args:{op:\"patch\"|\"rm\"|\"mv\", ...})",
-                        "  - op=patch args: {replace_file?|replace_range?|replace_list?, path?:string(single-file guard)}",
+                        "  - op=patch args: {patch_text:string, path?:string} (git-style unified diff; path is optional single-file guard)",
                         "  - op=rm args: {path:string, expected_sha256?:string}",
                         "  - op=mv args: {from:string, to:string, expected_sha256?:string}",
                         "- run_sql(args:{sql:string}) (targeted probes; required after runtime failures)",
@@ -2089,7 +2083,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_cleanse_batch(args:{instructions?:string})",
 							"- apply_next_cleanse_schema_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, from?:string, to?:string, expected_sha256?:string, limit?:int, max_chars?:int})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", prefix?:string, path?:string, patch_text?:string, from?:string, to?:string, expected_sha256?:string, limit?:int, max_chars?:int})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -2102,7 +2096,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_model_batch(args:{instructions?:string})",
 							"- apply_next_model_schema_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, from?:string, to?:string, expected_sha256?:string, limit?:int, max_chars?:int})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", prefix?:string, path?:string, patch_text?:string, from?:string, to?:string, expected_sha256?:string, limit?:int, max_chars?:int})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -2123,7 +2117,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 							"  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
 							"- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})",
 							"  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, from?:string, to?:string, expected_sha256?:string, limit?:int, max_chars?:int})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", prefix?:string, path?:string, patch_text?:string, from?:string, to?:string, expected_sha256?:string, limit?:int, max_chars?:int})",
 							"- ask_user(args:{prompt:string})",
 							"",
 							"Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).",
@@ -4316,7 +4310,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
                                 // Even if schema checklist work remains, fix failing SQL targets first.
                                 let mut ctx = format!(
-                                    "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call dbt_files op=patch (replace_file/replace_range/replace_list) to fix the failing SQL target(s) below. Keep changes minimal.\n\nRepair targets:\n",
+                                    "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call dbt_files op=patch with path + patch_text (Cursor-style unified diff) to fix the failing DBT artifact(s) below. Keep changes minimal.\n\nRepair targets:\n",
                                     plan.plan_key
                                 );
                                 if !last_validate_failed_models.is_empty() {
@@ -4408,7 +4402,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         (ctx, None)
                                     } else {
                                 let mut ctx = format!(
-                                "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
+                                "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor-style patch_text):\n",
                                 plan.plan_key
                             );
                                 if !last_validate_failed_models.is_empty() {
@@ -4496,7 +4490,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     // Run a repair authoring pass grounded in the failing model/file evidence.
                                     if guard.last_validate_failed {
                                         let mut ctx = format!(
-                                        "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
+                                        "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor-style patch_text):\n",
                                         plan.plan_key
                                     );
                                         if !last_validate_failed_models.is_empty() {
@@ -4728,7 +4722,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
                                 // Even if schema checklist work remains, fix failing SQL targets first.
                                 let mut ctx = format!(
-                                    "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call dbt_files op=patch (replace_file/replace_range/replace_list) to fix the failing SQL target(s) below. Keep changes minimal.\n\nRepair targets:\n",
+                                    "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call dbt_files op=patch with path + patch_text (Cursor-style unified diff) to fix the failing DBT artifact(s) below. Keep changes minimal.\n\nRepair targets:\n",
                                     plan.plan_key
                                 );
                                 if !last_validate_failed_models.is_empty() {
@@ -4819,7 +4813,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         (ctx, None)
                                     } else {
                                 let mut ctx = format!(
-                                "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
+                                "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor-style patch_text):\n",
                                 plan.plan_key
                             );
                                 if !last_validate_failed_models.is_empty() {
@@ -4981,7 +4975,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     if guard.last_validate_failed {
                                     // Same repair-mode behavior as cleanse: run authoring to patch failing files.
                                     let mut ctx = format!(
-                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
+                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor-style patch_text):\n",
                                     plan.plan_key
                                 );
                                     if !last_validate_failed_models.is_empty() {
@@ -5522,7 +5516,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         repair.push_str("- You MUST patch ONLY the target file above.\n");
                         match ladder {
                             crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile => {
-                                repair.push_str("- IMPORTANT: You MUST use replace_file (full rewritten file). Do NOT use replace_range/replace_list.\n");
+                                repair.push_str("- IMPORTANT: You MUST provide a guarded single-file patch: args.path + args.patch_text (Cursor-style unified diff hunks or git-style). Do NOT patch any other file.\n");
                             }
                             crate::data_engineer::repair_state::RepairLadderStep::Stop => {
                                 repair.push_str("- STOP: prior repair attempts did not converge. Do not continue.\n");
@@ -7440,8 +7434,8 @@ mod tests {
         )
         .expect("build_tools_for_phase should succeed");
 
-        // Tool card should advertise patch primitives (not apply_next_* tools).
-        assert!(card.contains("replace_file"));
+        // Tool card should advertise direct overwrite patching (not apply_next_* tools).
+        assert!(card.contains("patch_text"));
         assert!(!card.contains("apply_next_model_batch"));
 
         // run_sql should not be available in hard mutation-only mode
@@ -7496,7 +7490,7 @@ mod tests {
         )
         .expect("build_tools_for_phase should succeed");
 
-        assert!(card.contains("replace_file"));
+        assert!(card.contains("patch_text"));
         assert!(!card.contains("apply_next_cleanse_batch"));
 
         let err = reg
@@ -7536,10 +7530,8 @@ mod tests {
                 "dbt_files",
                 serde_json::json!({
                     "op":"patch",
-                    "replace_file": {
-                        "path":"models/marts/fct_customers.sql",
-                        "new_text":"select 1 as id\n"
-                    }
+                    "path":"models/marts/fct_customers.sql",
+                    "patch_text":"@@\n- select 1 as id\n+ select 1 as id\n"
                 }),
                 &actx,
             )
