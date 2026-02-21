@@ -725,7 +725,12 @@ impl Tool for StagingModelTool {
             let plan_instr = render_plan_driven_instructions(&plan_invariants, &plan_checklist);
             let effective_instructions = combine_instructions(&user_instructions, &plan_instr);
 
-            let user = serde_json::json!({
+            let cols_for_sql: Vec<String> = cols
+                .iter()
+                .map(|(n, _t)| ctx.warehouse.quote_ident(n))
+                .collect();
+
+            let user_value = serde_json::json!({
                 "dataset_id": ds,
                 "schema_columns": cols_json,
                 "user_instructions": effective_instructions,
@@ -741,27 +746,12 @@ impl Tool for StagingModelTool {
                     "materialize_source_macro": format!("{{{{ source(\"{}\", \"{}\") }}}}", expected_db, expected_table),
                     "goal": "Return plain SQL that is safe + row-preserving. Keep output bounded; prefer explicit select list.",
                 }
-            })
-            .to_string();
+            });
 
             // SQL-first: draft plain SQL, validate against warehouse, then materialize to dbt SQL.
-            let mut draft = match sql_first::llm_draft_sql_json(
-                ctx,
-                sys,
-                user,
-                "data_engineer.tools.staging_model.sql_first",
-                3200,
-                0.08,
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    errors.push(format!("{ds}: sql draft failed: {e}"));
-                    continue;
-                }
-            };
-
+            let sys0 = sys;
+            let max_tokens = sql_first::sql_first_max_output_tokens(6000);
+            let max_attempts = sql_first::sql_first_max_repair_attempts(4);
             let mut repl = std::collections::HashMap::new();
             let dsid = match ctx.warehouse.parse_dataset_fqn(ds) {
                 Ok(id) => id,
@@ -770,46 +760,104 @@ impl Tool for StagingModelTool {
                     continue;
                 }
             };
-            let quoted = ctx.warehouse.quote_fqn(&dsid);
-            repl.insert("__SOURCE__".to_string(), quoted);
+            repl.insert("__SOURCE__".to_string(), ctx.warehouse.quote_fqn(&dsid));
 
-            // One repair attempt: if validation fails, give the error back and retry.
-            let validate_res = sql_first::validate_sql_quick(ctx, &draft.sql, &repl).await;
-            if let Err(err) = validate_res {
-                if let Some(h) = athena_alias_reuse_hint(&err, &rel_path, ds) {
-                    remediation_hints.push(h);
+            let mut last_err = String::new();
+            let mut prev_sql: Option<String> = None;
+            let mut draft: Option<sql_first::SqlFirstDraft> = None;
+            let mut ok = false;
+            for attempt in 1..=max_attempts {
+                let mut v = user_value.clone();
+                if attempt > 1 {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("attempt".to_string(), serde_json::json!(attempt));
+                        obj.insert(
+                            "previous_sql".to_string(),
+                            serde_json::json!(prev_sql.clone().unwrap_or_default()),
+                        );
+                        obj.insert("error".to_string(), serde_json::json!(last_err.clone()));
+                        obj.insert("instruction".to_string(), serde_json::json!("Fix the SQL. Output JSON only: {\"sql\":\"...\",\"notes\":[...]}. Must use FROM __SOURCE__. Must be row-preserving (do not filter rows; avoid joins that can multiply rows). Must not reference columns outside schema_columns. Prefer explicit select list; avoid SELECT *."));
+                    }
                 }
-                let repair_user = serde_json::json!({
-                    "dataset_id": ds,
-                    "error": err,
-                    "previous_sql": draft.sql,
-                    "instruction": "Fix the SQL. Output JSON only: {\"sql\":\"...\",\"notes\":[...]}. Must use FROM __SOURCE__ and must not reference columns outside schema_columns."
-                })
-                .to_string();
-                match sql_first::llm_draft_sql_json(
+
+                let sys_msg = if attempt == 1 {
+                    sys0.clone()
+                } else {
+                    build_staging_sys_prompt(
+                        provider_name,
+                        &dialect,
+                        &expected_db,
+                        &expected_table,
+                        &provider_prompt_rules,
+                    )
+                };
+                let prompt_id = if attempt == 1 {
+                    "data_engineer.tools.staging_model.sql_first"
+                } else {
+                    "data_engineer.tools.staging_model.sql_first_repair"
+                };
+                let temp = if attempt == 1 { 0.08 } else { 0.05 };
+                let user_json = v.to_string();
+
+                let mut d = match sql_first::llm_draft_sql_json(
                     ctx,
-                    build_staging_sys_prompt(provider_name, &dialect, &expected_db, &expected_table, &provider_prompt_rules),
-                    repair_user,
-                    "data_engineer.tools.staging_model.sql_first_repair",
-                    3200,
-                    0.05,
+                    sys_msg,
+                    user_json,
+                    prompt_id,
+                    max_tokens,
+                    temp,
                 )
                 .await
                 {
-                    Ok(v) => draft = v,
+                    Ok(v) => v,
                     Err(e) => {
-                        errors.push(format!("{ds}: sql validation failed and repair draft failed: {e}"));
+                        last_err = e;
+                        if attempt >= max_attempts {
+                            errors.push(format!("{ds}: sql draft failed: {last_err}"));
+                        }
+                        continue;
+                    }
+                };
+
+                if !d.sql.contains("__SOURCE__") {
+                    last_err = "draft SQL must reference __SOURCE__ placeholder".to_string();
+                    prev_sql = Some(d.sql.clone());
+                    if attempt >= max_attempts {
+                        errors.push(format!("{ds}: sql draft invalid: {last_err}"));
+                    }
+                    continue;
+                }
+
+                // Deterministic SELECT * expansion (simple passthrough only).
+                if let Some(s) =
+                    sql_first::expand_select_star_from_placeholder(&d.sql, "__SOURCE__", &cols_for_sql)
+                {
+                    d.sql = s;
+                }
+
+                match sql_first::validate_sql_quick(ctx, &d.sql, &repl).await {
+                    Ok(()) => {
+                        draft = Some(d);
+                        ok = true;
+                        break;
+                    }
+                    Err(err) => {
+                        last_err = err.clone();
+                        prev_sql = Some(d.sql.clone());
+                        if let Some(h) = athena_alias_reuse_hint(&err, &rel_path, ds) {
+                            remediation_hints.push(h);
+                        }
+                        if attempt >= max_attempts {
+                            errors.push(format!("{ds}: sql validation failed: {err}"));
+                        }
                         continue;
                     }
                 }
-                if let Err(err2) = sql_first::validate_sql_quick(ctx, &draft.sql, &repl).await {
-                    if let Some(h) = athena_alias_reuse_hint(&err2, &rel_path, ds) {
-                        remediation_hints.push(h);
-                    }
-                    errors.push(format!("{ds}: sql validation failed: {err2}"));
-                    continue;
-                }
             }
+            if !ok {
+                continue;
+            }
+            let draft = draft.expect("ok implies draft");
 
             // Materialize: replace __SOURCE__ with dbt source().
             let dbt_sql = draft

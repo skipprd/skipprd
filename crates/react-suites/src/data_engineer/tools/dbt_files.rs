@@ -941,6 +941,22 @@ fn validate_sql_model_folder_policy(rel: &str) -> Result<(), String> {
     ))
 }
 
+fn canonicalize_silver_folder_alias(rel: &str) -> (String, Option<String>) {
+    // Some prompts historically used "models/silver/" or "models/stage/" for silver.
+    // Hard cutover: we store silver models under models/staging/ only.
+    let low = rel.to_ascii_lowercase();
+    for bad_prefix in ["models/silver/", "models/stage/"] {
+        if low.starts_with(bad_prefix) {
+            let suffix = &rel[bad_prefix.len()..];
+            let canon = format!("models/staging/{}", suffix);
+            if canon != rel {
+                return (canon, Some(rel.to_string()));
+            }
+        }
+    }
+    (rel.to_string(), None)
+}
+
 fn extract_patch_paths_from_args(args: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
@@ -1159,6 +1175,7 @@ impl Tool for DbtFilesTool {
                     .and_then(|x| x.as_str())
                     .map(project_fs::normalize_rel_path)
                     .transpose()?;
+                let want_rel_path = want_rel_path.map(|p| canonicalize_silver_folder_alias(&p).0);
 
                 // Hard-removed: unified diffs are not accepted as input (too flaky for LLMs).
                 if args.get("unified_git_style_patch").is_some() {
@@ -1221,9 +1238,11 @@ impl Tool for DbtFilesTool {
                 // Deterministic application: compute intended file contents and use FullOverwrite fast-path.
                 let mut outcomes: Vec<project_fs::PatchOutcome> = Vec::new();
                 let mut seen: HashSet<String> = HashSet::new();
+                let mut path_rewrites: Vec<(String, String)> = Vec::new();
                 if !replace_file_ops.is_empty() {
                     for rf in replace_file_ops.into_iter() {
-                        let rel = project_fs::normalize_rel_path(&rf.path)?;
+                        let rel0 = project_fs::normalize_rel_path(&rf.path)?;
+                        let (rel, from_opt) = canonicalize_silver_folder_alias(&rel0);
                         validate_sql_model_folder_policy(&rel)?;
                         if !seen.insert(rel.clone()) {
                             return Err(format!("replace_file contains duplicate path: {}", rel));
@@ -1261,6 +1280,11 @@ impl Tool for DbtFilesTool {
                         )
                         .await?;
                         outcomes.push(out);
+                        if let Some(from) = from_opt {
+                            if from != rel {
+                                path_rewrites.push((from, rel.clone()));
+                            }
+                        }
                     }
                 } else if !replace_range_ops.is_empty() {
                     for rr in replace_range_ops.into_iter() {
@@ -1414,11 +1438,23 @@ impl Tool for DbtFilesTool {
                     }));
                 }
 
+                // Best-effort cleanup: if the patch targeted an alias path like models/silver/,
+                // delete the alias object after writing the canonical object.
+                let mut rewrites_json: Vec<Value> = Vec::new();
+                for (from, to) in path_rewrites.iter() {
+                    rewrites_json.push(serde_json::json!({ "from": from, "to": to }));
+                    if from != to {
+                        let old_key = project_fs::join_storage_key(ctx, from);
+                        let _ = ctx.storage.delete_object(&old_key).await;
+                    }
+                }
+
                 Ok(serde_json::json!({
                     "ok": true,
                     "mutated": mutated_any,
                     "applied_patch_text": applied_patch_text,
                     "written_keys": written_keys,
+                    "path_rewrites": rewrites_json,
                     "results": results
                 }))
             }
