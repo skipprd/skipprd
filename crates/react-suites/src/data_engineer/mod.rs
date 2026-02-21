@@ -2083,7 +2083,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_cleanse_batch(args:{instructions?:string})",
 							"- apply_next_cleanse_schema_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", prefix?:string, path?:string, patch_text?:string, from?:string, to?:string, expected_sha256?:string, limit?:int, max_chars?:int})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", prefix?:string, path?:string, patch_text?:string, from?:string, to?:string, limit?:int, max_chars?:int})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -2096,7 +2096,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_model_batch(args:{instructions?:string})",
 							"- apply_next_model_schema_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", prefix?:string, path?:string, patch_text?:string, from?:string, to?:string, expected_sha256?:string, limit?:int, max_chars?:int})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", prefix?:string, path?:string, patch_text?:string, from?:string, to?:string, limit?:int, max_chars?:int})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -2117,7 +2117,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 							"  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
 							"- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})",
 							"  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", prefix?:string, path?:string, patch_text?:string, from?:string, to?:string, expected_sha256?:string, limit?:int, max_chars?:int})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", prefix?:string, path?:string, patch_text?:string, from?:string, to?:string, limit?:int, max_chars?:int})",
 							"- ask_user(args:{prompt:string})",
 							"",
 							"Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).",
@@ -3416,7 +3416,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         let plan_max_tokens_cleanse: u32 = std::env::var("LLM_PLAN_MAX_TOKENS_CLEANSE")
                             .ok()
                             .and_then(|s| s.parse::<u32>().ok())
-                            .unwrap_or(18_000)
+                            .unwrap_or(48_000)
                             .max(4_000)
                             .min(64_000);
                         let reasoning_effort = parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT_CLEANSE")
@@ -3437,7 +3437,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         let plan_max_tokens_model: u32 = std::env::var("LLM_PLAN_MAX_TOKENS_MODEL")
                             .ok()
                             .and_then(|s| s.parse::<u32>().ok())
-                            .unwrap_or(24_000)
+                            .unwrap_or(64_000)
                             .max(8_000)
                             .min(64_000);
                         let reasoning_effort = parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT_MODEL")
@@ -5538,7 +5538,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         let author_max_tokens: u32 = std::env::var("LLM_AUTHOR_MAX_TOKENS_CLEANSE")
                             .ok()
                             .and_then(|s| s.parse::<u32>().ok())
-                            .unwrap_or(12_000)
+                            .unwrap_or(24_000)
                             .max(2_000)
                             .min(64_000);
                         LlmCallOptions {
@@ -5554,7 +5554,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         let author_max_tokens: u32 = std::env::var("LLM_AUTHOR_MAX_TOKENS_MODEL")
                             .ok()
                             .and_then(|s| s.parse::<u32>().ok())
-                            .unwrap_or(16_000)
+                            .unwrap_or(32_000)
                             .max(2_000)
                             .min(64_000);
                         LlmCallOptions {

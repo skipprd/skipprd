@@ -68,7 +68,7 @@ struct HttpRetryPolicy {
 
 impl HttpRetryPolicy {
     fn from_env() -> Self {
-        let request_timeout_secs: u64 = Config::getenv("LLM_HTTP_TIMEOUT_SECS", "420")
+        let request_timeout_secs: u64 = Config::getenv("LLM_HTTP_TIMEOUT_SECS", "1200")
             .parse()
             .unwrap_or(420)
             .max(30)
@@ -652,7 +652,7 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
             .unwrap_or(2)
             .max(1)
             .min(30);
-        let max_wait_secs: u64 = Config::getenv("LLM_BACKGROUND_MAX_WAIT_SECS", "900")
+        let max_wait_secs: u64 = Config::getenv("LLM_BACKGROUND_MAX_WAIT_SECS", "3600")
             .parse()
             .unwrap_or(900)
             .max(30)

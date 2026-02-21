@@ -75,7 +75,11 @@ pub fn tool_card_common_prefix() -> &'static str {
 Usage guidance:
 - Prefer batch scaffolding: use dbt_files op=patch to create dbt_project.yml, sources, and models in as few calls as possible.
 - Use `dbt_files op=patch` for ALL DBT project files, including model SQL under models/.
-- For `dbt_files op=patch`, always provide `patch_text` as a git-style unified diff (single-file or multi-file bundle). The tool will compute and return `applied_patch_text` (canonical git-style diff) for audit.
+- For `dbt_files op=patch`, provide `patch_text` as unified diff:
+  - Preferred: Cursor-style hunks-only with `args.path` guard.
+  - Also valid: git-style unified diff (single-file or multi-file bundle with ---/+++ headers).
+  - Hunks MUST use valid unified headers (`@@ -a,b +c,d @@`).
+  The tool will compute and return `applied_patch_text` (canonical git-style diff) for audit.
 "#
 }
 

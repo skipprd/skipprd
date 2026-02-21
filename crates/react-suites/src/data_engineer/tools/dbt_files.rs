@@ -1109,9 +1109,18 @@ impl Tool for DbtFilesTool {
                                 }
                             }
                             // Synthesize a minimal git-style header so diffy can parse/apply.
+                            // If the target does not exist, express creation via /dev/null.
+                            let want_key = project_fs::join_storage_key(ctx, &want_rel);
+                            let want_exists = ctx.storage.get_bytes(&want_key).await.is_ok();
+                            let old_header = if want_exists {
+                                format!("a/{want_rel}")
+                            } else {
+                                "/dev/null".to_string()
+                            };
                             patch_text = format!(
-                                "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}",
+                                "diff --git a/{0} b/{0}\n--- {1}\n+++ b/{0}\n{2}",
                                 want_rel,
+                                old_header,
                                 patch_text.trim_start()
                             );
                             vec![want_rel]

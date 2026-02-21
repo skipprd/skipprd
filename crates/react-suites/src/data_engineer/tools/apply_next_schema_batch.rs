@@ -275,9 +275,31 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             let allowed_cols = match dbt_files::extract_final_select_output_columns(&sql_text) {
                 Ok(s) => s.into_iter().collect::<Vec<_>>(),
                 Err(e) => {
-                    failed.push(ds.clone());
-                    errors.push(format!("{ds}: cannot parse allowed output columns from {sql_rel}: {e}"));
-                    continue;
+                    // High-signal fallback for SELECT * loops:
+                    // when SQL parsing cannot infer final columns, use the approved cleanse-plan
+                    // output field names to keep schema generation moving deterministically.
+                    let from_plan = plan
+                        .tasks
+                        .iter()
+                        .find(|t| t.dataset_id == *ds)
+                        .map(|t| {
+                            t.implementation_spec
+                                .output_fields
+                                .iter()
+                                .map(|f| f.name.trim().to_string())
+                                .filter(|n| !n.is_empty())
+                                .collect::<Vec<String>>()
+                        })
+                        .unwrap_or_default();
+                    if e.contains("staging SQL uses '*' in final SELECT") && !from_plan.is_empty() {
+                        from_plan
+                    } else {
+                        failed.push(ds.clone());
+                        errors.push(format!(
+                            "{ds}: cannot parse allowed output columns from {sql_rel}: {e}"
+                        ));
+                        continue;
+                    }
                 }
             };
             let mut allowed_cols = allowed_cols;
