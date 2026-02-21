@@ -326,7 +326,7 @@ pub async fn llm_patch_loop_single_file(
         "existing_content_with_line_numbers": existing_content_with_line_numbers,
         "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
         "input": user_payload_value,
-        "instruction": "Return a single JSON object with patch_text (unified diff). Prefer Cursor-style hunks-only patch_text starting with '@@' and omitting ---/+++ headers. Every hunk MUST use a valid unified header: '@@ -<start>[,<count>] +<start>[,<count>] @@'. The patch MUST modify ONLY expected_rel_path. If prior attempts produced no-op patches, rewrite the entire file using a single large hunk."
+        "instruction": "Return a single JSON object with patch_text (unified diff). Prefer Cursor-style hunks-only patch_text starting with '@@' and omitting ---/+++ headers. Hunk headers may be canonical ('@@ -a,b +c,d @@') or Cursor/Aider style ('@@ ... @@'). The patch MUST modify ONLY expected_rel_path. If prior attempts produced no-op patches, rewrite the entire file using a single large hunk."
     })
     .to_string();
 
@@ -584,7 +584,7 @@ pub async fn llm_patch_loop_single_file(
                 "existing_content_with_line_numbers": existing_content_with_line_numbers,
                 "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
                 "previous_response": parsed,
-                "instruction": "Return ONLY corrected JSON with patch_text (unified diff). Prefer Cursor-style hunks-only patch_text starting with '@@'. Every hunk MUST use a valid unified header: '@@ -<start>[,<count>] +<start>[,<count>] @@'. The patch MUST modify ONLY expected_rel_path. Rewrite the entire file using one large hunk if needed."
+                "instruction": "Return ONLY corrected JSON with patch_text (unified diff). Prefer Cursor-style hunks-only patch_text starting with '@@'. Hunk headers may be canonical ('@@ -a,b +c,d @@') or Cursor/Aider style ('@@ ... @@'). The patch MUST modify ONLY expected_rel_path. Rewrite the entire file using one large hunk if needed."
             })
             .to_string();
             messages.push(ChatMessage {
@@ -688,7 +688,7 @@ pub async fn llm_patch_loop_single_file(
             "existing_content_with_line_numbers": existing_content_with_line_numbers,
             "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
             "previous_response": parsed,
-            "instruction": "Return ONLY corrected JSON with patch_text (unified diff). Prefer Cursor-style hunks-only patch_text starting with '@@'. Every hunk MUST use a valid unified header: '@@ -<start>[,<count>] +<start>[,<count>] @@'. The patch MUST modify ONLY expected_rel_path. If repeated no-ops occur, rewrite the entire file using one large hunk."
+            "instruction": "Return ONLY corrected JSON with patch_text (unified diff). Prefer Cursor-style hunks-only patch_text starting with '@@'. Hunk headers may be canonical ('@@ -a,b +c,d @@') or Cursor/Aider style ('@@ ... @@'). The patch MUST modify ONLY expected_rel_path. If repeated no-ops occur, rewrite the entire file using one large hunk."
         })
         .to_string();
         messages.push(ChatMessage {

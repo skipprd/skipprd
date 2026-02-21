@@ -595,6 +595,7 @@ pub async fn apply_patch(
             // diffy::Patch borrows from the patch text, so keep any repaired patch text alive
             // for the duration of parsing + apply.
             let mut patch_src: Cow<'_, str> = Cow::Borrowed(&unified);
+            let mut parse_error_fallback_content: Option<String> = None;
             let patch = match Patch::from_str(patch_src.as_ref()) {
                 Ok(p) => p,
                 Err(e) => {
@@ -607,25 +608,53 @@ pub async fn apply_patch(
                     let fixed = repair_unified_hunk_headers(&unified);
                     if fixed != unified {
                         patch_src = Cow::Owned(fixed);
-                        Patch::from_str(patch_src.as_ref())
-                            .map_err(|e2| format!("invalid patch: {}", e2))?
+                        match Patch::from_str(patch_src.as_ref()) {
+                            Ok(p) => p,
+                            Err(e2) => {
+                                if let Some(repl) =
+                                    try_apply_unified_hunks_flexible(patch_src.as_ref(), &old)
+                                {
+                                    parse_error_fallback_content = Some(repl);
+                                    Patch::from_str(
+                                        "--- a/x\n+++ b/x\n@@ -1,0 +1,0 @@\n",
+                                    )
+                                    .map_err(|_| format!("invalid patch: {}", e2))?
+                                } else {
+                                    return Err(format!("invalid patch: {}", e2));
+                                }
+                            }
+                        }
                     } else {
-                        return Err(format!("invalid patch: {}", emsg));
+                        if let Some(repl) = try_apply_unified_hunks_flexible(&unified, &old) {
+                            parse_error_fallback_content = Some(repl);
+                            Patch::from_str("--- a/x\n+++ b/x\n@@ -1,0 +1,0 @@\n")
+                                .map_err(|_| format!("invalid patch: {}", emsg))?
+                        } else {
+                            return Err(format!("invalid patch: {}", emsg));
+                        }
                     }
                 }
             };
-            match diffy::apply(&old, &patch) {
-                Ok(c) => c,
-                Err(e) => {
-                    // Fallback: if the patch looks like a full-file rewrite (single hunk replacing the full file),
-                    // reconstruct the new content directly from the hunk body. This is much more robust for
-                    // large/chaotic files where context matching often fails.
-                    if let Some(repl) =
-                        try_reconstruct_full_file_replacement(patch_src.as_ref(), &old)
-                    {
-                        repl
-                    } else {
-                        return Err(format!("patch apply failed: {}", e));
+            if let Some(repl) = parse_error_fallback_content {
+                repl
+            } else {
+                match diffy::apply(&old, &patch) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        // Fallbacks (in order):
+                        // 1) full-file rewrite reconstruction from hunk body
+                        // 2) flexible Cursor/Aider-style hunk search/replace
+                        if let Some(repl) =
+                            try_reconstruct_full_file_replacement(patch_src.as_ref(), &old)
+                        {
+                            repl
+                        } else if let Some(repl) =
+                            try_apply_unified_hunks_flexible(patch_src.as_ref(), &old)
+                        {
+                            repl
+                        } else {
+                            return Err(format!("patch apply failed: {}", e));
+                        }
                     }
                 }
             }
@@ -732,6 +761,204 @@ fn try_reconstruct_full_file_replacement(unified: &str, old: &str) -> Option<Str
         j += 1;
     }
     Some(out_lines.join("\n"))
+}
+
+fn leading_ws_width(s: &str) -> usize {
+    s.chars().take_while(|c| *c == ' ' || *c == '\t').count()
+}
+
+fn strip_common_leading_ws(lines: &[String]) -> Vec<String> {
+    let min_ws = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| leading_ws_width(l))
+        .min()
+        .unwrap_or(0);
+    lines
+        .iter()
+        .map(|l| {
+            if l.len() <= min_ws {
+                String::new()
+            } else {
+                l.chars().skip(min_ws).collect::<String>()
+            }
+        })
+        .collect()
+}
+
+fn find_block_index_exact(hay: &[String], needle: &[String]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if needle.len() > hay.len() {
+        return None;
+    }
+    for i in 0..=(hay.len() - needle.len()) {
+        if hay[i..i + needle.len()] == *needle {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn find_block_index_trimmed(hay: &[String], needle: &[String]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if needle.len() > hay.len() {
+        return None;
+    }
+    let needle_t: Vec<String> = needle.iter().map(|s| s.trim_end().to_string()).collect();
+    for i in 0..=(hay.len() - needle.len()) {
+        let cand: Vec<String> = hay[i..i + needle.len()]
+            .iter()
+            .map(|s| s.trim_end().to_string())
+            .collect();
+        if cand == needle_t {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn find_block_index_relative_ws(hay: &[String], needle: &[String]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if needle.len() > hay.len() {
+        return None;
+    }
+    let needle_d = strip_common_leading_ws(needle);
+    for i in 0..=(hay.len() - needle.len()) {
+        let cand: Vec<String> = hay[i..i + needle.len()].to_vec();
+        if strip_common_leading_ws(&cand) == needle_d {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn find_block_index_flexible(hay: &[String], needle: &[String]) -> Option<usize> {
+    find_block_index_exact(hay, needle)
+        .or_else(|| find_block_index_trimmed(hay, needle))
+        .or_else(|| find_block_index_relative_ws(hay, needle))
+}
+
+fn apply_hunk_search_replace_flexible(
+    current: &str,
+    old_block: &[String],
+    new_block: &[String],
+) -> Option<String> {
+    let (mut lines, had_trailing_newline) = split_lines_preserve_trailing_newline(current);
+    let old_side = old_block.to_vec();
+    let new_side = new_block.to_vec();
+    if old_side.is_empty() && new_side.is_empty() {
+        return Some(current.to_string());
+    }
+
+    if let Some(idx) = find_block_index_flexible(&lines, &old_side) {
+        lines.splice(idx..idx + old_side.len(), new_side);
+        return Some(join_lines_preserve_trailing_newline(
+            &lines,
+            had_trailing_newline,
+        ));
+    }
+
+    // Aider-like permissive fallback: trim unchanged context and retry.
+    let mut prefix = 0usize;
+    let mut suffix = 0usize;
+    while prefix < old_side.len()
+        && prefix < new_side.len()
+        && old_side[prefix] == new_side[prefix]
+    {
+        prefix += 1;
+    }
+    while suffix + prefix < old_side.len()
+        && suffix + prefix < new_side.len()
+        && old_side[old_side.len().saturating_sub(1 + suffix)]
+            == new_side[new_side.len().saturating_sub(1 + suffix)]
+    {
+        suffix += 1;
+    }
+    if prefix > 0 || suffix > 0 {
+        let old_core_end = old_side.len().saturating_sub(suffix);
+        let new_core_end = new_side.len().saturating_sub(suffix);
+        if prefix <= old_core_end && prefix <= new_core_end {
+            let old_core = old_side[prefix..old_core_end].to_vec();
+            let new_core = new_side[prefix..new_core_end].to_vec();
+            if let Some(idx) = find_block_index_flexible(&lines, &old_core) {
+                lines.splice(idx..idx + old_core.len(), new_core);
+                return Some(join_lines_preserve_trailing_newline(
+                    &lines,
+                    had_trailing_newline,
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Best-effort Cursor/Aider-style hunk applier.
+///
+/// Interprets each hunk body as search/replace:
+/// - old/search side: ' ' + '-'
+/// - new/replace side: ' ' + '+'
+/// - accepts malformed lines without marker as shared context on both sides
+fn try_apply_unified_hunks_flexible(unified: &str, old: &str) -> Option<String> {
+    let lines: Vec<&str> = unified.lines().collect();
+    if !lines.iter().any(|l| l.starts_with("@@")) {
+        return None;
+    }
+    let mut out = old.to_string();
+    let mut i = 0usize;
+    let mut applied_any = false;
+    while i < lines.len() {
+        if !lines[i].starts_with("@@") {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let mut old_block: Vec<String> = Vec::new();
+        let mut new_block: Vec<String> = Vec::new();
+        let mut changed = false;
+        while i < lines.len() && !lines[i].starts_with("@@") {
+            let l = lines[i];
+            if l.starts_with('\\') {
+                i += 1;
+                continue;
+            }
+            match l.chars().next().unwrap_or(' ') {
+                '-' => {
+                    old_block.push(l[1..].to_string());
+                    changed = true;
+                }
+                '+' => {
+                    new_block.push(l[1..].to_string());
+                    changed = true;
+                }
+                ' ' => {
+                    old_block.push(l[1..].to_string());
+                    new_block.push(l[1..].to_string());
+                }
+                _ => {
+                    old_block.push(l.to_string());
+                    new_block.push(l.to_string());
+                }
+            }
+            i += 1;
+        }
+        if !changed {
+            continue;
+        }
+        let next = apply_hunk_search_replace_flexible(&out, &old_block, &new_block)?;
+        out = next;
+        applied_any = true;
+    }
+    if applied_any {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 /// Repair unified diff hunks by recomputing their line counts from the hunk bodies.
@@ -2063,5 +2290,79 @@ packages:
         .await
         .unwrap_err();
         assert!(err.contains("base_sha256 mismatch"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_accepts_cursor_hunk_header_ellipsis() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone(), None);
+        let rel = "macros/helpers.sql";
+        let key = join_storage_key(&ctx, rel);
+        ctx.storage
+            .put_bytes(&key, b"select 1\n", "text/sql")
+            .await
+            .expect("seed");
+        let patch_text = [
+            "diff --git a/macros/helpers.sql b/macros/helpers.sql",
+            "--- a/macros/helpers.sql",
+            "+++ b/macros/helpers.sql",
+            "@@ ... @@",
+            "-select 1",
+            "+select 2",
+        ]
+        .join("\n");
+        let out = apply_patch(
+            &ctx,
+            None,
+            rel,
+            &patch_text,
+            None,
+            None,
+            PatchApplyKind::UnifiedDiff,
+        )
+        .await
+        .expect("apply");
+        assert!(out.content.contains("select 2"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_flexible_hunk_matching_handles_indent_drift() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone(), None);
+        let rel = "macros/helpers.sql";
+        let key = join_storage_key(&ctx, rel);
+        let seed = "fn x() {\n    if ok {\n        return 1;\n    }\n}\n";
+        ctx.storage
+            .put_bytes(&key, seed.as_bytes(), "text/sql")
+            .await
+            .expect("seed");
+        // Hunk body is outdented (common LLM defect). Flexible matcher should still apply.
+        let patch_text = [
+            "diff --git a/macros/helpers.sql b/macros/helpers.sql",
+            "--- a/macros/helpers.sql",
+            "+++ b/macros/helpers.sql",
+            "@@ ... @@",
+            " fn x() {",
+            "-    if ok {",
+            "-        return 1;",
+            "-    }",
+            "+if ok {",
+            "+    return 2;",
+            "+}",
+            " }",
+        ]
+        .join("\n");
+        let out = apply_patch(
+            &ctx,
+            None,
+            rel,
+            &patch_text,
+            None,
+            None,
+            PatchApplyKind::UnifiedDiff,
+        )
+        .await
+        .expect("apply");
+        assert!(out.content.contains("return 2;"));
     }
 }
