@@ -78,7 +78,7 @@ Usage guidance:
 - For `dbt_files op=patch`, provide `patch_text` as unified diff:
   - Preferred: Cursor-style hunks-only with `args.path` guard.
   - Also valid: git-style unified diff (single-file or multi-file bundle with ---/+++ headers).
-  - Hunk headers may be canonical (`@@ -a,b +c,d @@`) or Cursor/Aider style (`@@ ... @@`).
+  - Use Cursor/Aider hunk headers only: `@@ ... @@` (no line-number headers).
   The tool will compute and return `applied_patch_text` (canonical git-style diff) for audit.
 "#
 }

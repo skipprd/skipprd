@@ -266,6 +266,17 @@ fn parse_llm_patch_response(text: &str, expected_rel_path: &str) -> Result<LlmPa
     if parsed.patch_text.trim().is_empty() {
         return Err("patch_text is empty".to_string());
     }
+    // Hard-cut: LLM patch responses must use Cursor/Aider-style hunk headers (`@@ ... @@`),
+    // never numeric unified headers (`@@ -a,b +c,d @@`).
+    for line in parsed.patch_text.lines() {
+        let t = line.trim_start();
+        if !t.starts_with("@@") {
+            continue;
+        }
+        if t.starts_with("@@ -") {
+            return Err("patch_text must use Cursor/Aider-style hunk headers ('@@ ... @@'), not line-number headers ('@@ -a,b +c,d @@')".to_string());
+        }
+    }
     if let Some(p) = parsed.path.as_deref() {
         let rel = project_fs::normalize_rel_path(p)?;
         if rel != expected_rel_path {
@@ -326,7 +337,7 @@ pub async fn llm_patch_loop_single_file(
         "existing_content_with_line_numbers": existing_content_with_line_numbers,
         "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
         "input": user_payload_value,
-        "instruction": "Return a single JSON object with patch_text (unified diff). Prefer Cursor-style hunks-only patch_text starting with '@@' and omitting ---/+++ headers. Hunk headers may be canonical ('@@ -a,b +c,d @@') or Cursor/Aider style ('@@ ... @@'). The patch MUST modify ONLY expected_rel_path. If prior attempts produced no-op patches, rewrite the entire file using a single large hunk."
+        "instruction": "Return a single JSON object with patch_text (unified diff). Use Cursor/Aider-style hunks-only patch_text starting with '@@ ... @@' and omitting ---/+++ headers. Do NOT use line-number hunk headers like '@@ -a,b +c,d @@'. The patch MUST modify ONLY expected_rel_path. If prior attempts produced no-op patches, rewrite the entire file using a single large hunk."
     })
     .to_string();
 
@@ -584,7 +595,7 @@ pub async fn llm_patch_loop_single_file(
                 "existing_content_with_line_numbers": existing_content_with_line_numbers,
                 "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
                 "previous_response": parsed,
-                "instruction": "Return ONLY corrected JSON with patch_text (unified diff). Prefer Cursor-style hunks-only patch_text starting with '@@'. Hunk headers may be canonical ('@@ -a,b +c,d @@') or Cursor/Aider style ('@@ ... @@'). The patch MUST modify ONLY expected_rel_path. Rewrite the entire file using one large hunk if needed."
+                "instruction": "Return ONLY corrected JSON with patch_text (unified diff). Use Cursor/Aider-style hunks-only patch_text starting with '@@ ... @@'. Do NOT use line-number hunk headers like '@@ -a,b +c,d @@'. The patch MUST modify ONLY expected_rel_path. Rewrite the entire file using one large hunk if needed."
             })
             .to_string();
             messages.push(ChatMessage {
@@ -688,7 +699,7 @@ pub async fn llm_patch_loop_single_file(
             "existing_content_with_line_numbers": existing_content_with_line_numbers,
             "existing_content_with_line_numbers_truncated": existing_content_with_line_numbers_truncated,
             "previous_response": parsed,
-            "instruction": "Return ONLY corrected JSON with patch_text (unified diff). Prefer Cursor-style hunks-only patch_text starting with '@@'. Hunk headers may be canonical ('@@ -a,b +c,d @@') or Cursor/Aider style ('@@ ... @@'). The patch MUST modify ONLY expected_rel_path. If repeated no-ops occur, rewrite the entire file using one large hunk."
+            "instruction": "Return ONLY corrected JSON with patch_text (unified diff). Use Cursor/Aider-style hunks-only patch_text starting with '@@ ... @@'. Do NOT use line-number hunk headers like '@@ -a,b +c,d @@'. The patch MUST modify ONLY expected_rel_path. If repeated no-ops occur, rewrite the entire file using one large hunk."
         })
         .to_string();
         messages.push(ChatMessage {
@@ -734,6 +745,16 @@ mod tests {
         }"#;
         let err = parse_llm_patch_response(txt, "models/schema.yml").unwrap_err();
         assert!(err.contains("expected_rel_path"));
+    }
+
+    #[test]
+    fn parse_llm_patch_response_rejects_line_number_hunks() {
+        let txt = r#"{
+          "path": "models/schema.yml",
+          "patch_text": "@@ -1,1 +1,1 @@\n- a\n+ b\n"
+        }"#;
+        let err = parse_llm_patch_response(txt, "models/schema.yml").unwrap_err();
+        assert!(err.contains("Cursor/Aider-style hunk headers"));
     }
 
     fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {
@@ -810,14 +831,14 @@ mod tests {
                 // First attempt: valid patch primitive, but missing required notes -> should trigger repair retry.
                 serde_json::json!({
                     "path": "models/schema.yml",
-                    "patch_text": "diff --git a/models/schema.yml b/models/schema.yml\n--- /dev/null\n+++ b/models/schema.yml\n@@ -0,0 +1,3 @@\n+version: 2\n+\n+models: []\n",
+                    "patch_text": "diff --git a/models/schema.yml b/models/schema.yml\n--- /dev/null\n+++ b/models/schema.yml\n@@ ... @@\n+version: 2\n+\n+models: []\n",
                     "notes": []
                 })
                 .to_string(),
                 // Second attempt: same patch, now with required notes -> should succeed.
                 serde_json::json!({
                     "path": "models/schema.yml",
-                    "patch_text": "diff --git a/models/schema.yml b/models/schema.yml\n--- /dev/null\n+++ b/models/schema.yml\n@@ -0,0 +1,3 @@\n+version: 2\n+\n+models: []\n",
+                    "patch_text": "diff --git a/models/schema.yml b/models/schema.yml\n--- /dev/null\n+++ b/models/schema.yml\n@@ ... @@\n+version: 2\n+\n+models: []\n",
                     "notes": [
                         "Business question: x",
                         "Entity definition: x",

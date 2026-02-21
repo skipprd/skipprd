@@ -13,7 +13,7 @@ pub fn llm_patch_response_contract() -> &'static str {
 - patch_text allowed forms:
   - Cursor-style hunks-only (preferred):
     - Starts with '@@' and contains only hunks with -/+ lines (no ---/+++ headers).
-    - Hunk headers may be either canonical ('@@ -a,b +c,d @@') or Cursor/Aider style ('@@ ... @@').
+    - Hunk headers MUST be Cursor/Aider style: '@@ ... @@' (no line numbers).
   - Git-style unified diff (also OK):
     - Includes file headers (--- a/<path>, +++ b/<path>) and optional preamble (diff --git ...).
 - The patch MUST modify ONLY expected_rel_path (no other files).
@@ -39,7 +39,7 @@ op="patch":
       - New file:      '--- /dev/null' and '+++ b/<path>'
     - Form B (Cursor-style hunks-only): ONLY when args.path is provided AND patch_text starts with '@@' hunks and omits ---/+++ headers.
       - The system will synthesize headers using args.path.
-      - Hunk headers may be canonical ('@@ -a,b +c,d @@') or Cursor/Aider style ('@@ ... @@').
+      - Hunk headers MUST be Cursor/Aider style: '@@ ... @@' (no line numbers).
   - For Form A, patch_text MAY include git preamble lines like 'diff --git ...', 'index ...', 'new file mode ...'.
   - patch_text MUST NOT be diffy-style ('--- original' / '+++ modified').
 Example args (single-file):
