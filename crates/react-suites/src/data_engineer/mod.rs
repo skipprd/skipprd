@@ -31,6 +31,7 @@ pub mod prompt_packets;
 pub mod project_files;
 pub mod project_fs;
 pub mod schema_policy;
+pub mod sql_first;
 pub mod prompts;
 pub mod repair_state;
 mod review_batched;

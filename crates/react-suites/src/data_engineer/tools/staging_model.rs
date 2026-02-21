@@ -4,16 +4,24 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::info;
 
+use sha2::{Digest, Sha256};
+
 use crate::data_engineer::dbt_repair::remediate::active_provider_dialect;
 use crate::data_engineer::naming::{canonical_staging_model_name, contains_expected_source_call};
-use crate::data_engineer::patch_protocol;
 use crate::data_engineer::plan;
 use crate::data_engineer::project_files;
 use crate::data_engineer::project_fs;
+use crate::data_engineer::sql_first;
 use react_core::agent::AgentCtx;
-use react_core::llm::LlmCallOptions;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
+
+fn sha256_hex(s: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    let out = hasher.finalize();
+    hex::encode(out)
+}
 
 fn extract_string_arg(args: &Value, key: &str) -> Option<String> {
     args.get(key)
@@ -127,20 +135,20 @@ fn matching_staging_rel_paths_by_source(
 fn build_staging_sys_prompt(
     provider: &str,
     dialect: &str,
-    expected_db: &str,
-    expected_table: &str,
+    _expected_db: &str,
+    _expected_table: &str,
     provider_rules: &str,
 ) -> String {
     format!(
         "You are an expert analytics engineer.\n\
-         Task: author a dbt *silver* model (models/staging/) for ONE source dataset.\n\
+         Task: write a SILVER model query as PLAIN SQL (no dbt config, no Jinja).\n\
          Provider: {provider}\n\
          Dialect: {dialect}\n\
          Requirements:\n\
-         - Output MUST be valid JSON only.\n\
-         - You MUST choose EXACTLY ONE patch primitive to modify the expected_model_path.\n\
-           Prefer structured primitives (replace_file / replace_range / replace_list) over unified diffs.\n\
-         - CRITICAL: You MUST read from: FROM {{{{ source(\"{expected_db}\", \"{expected_table}\") }}}} (do not invent any other source name).\n\
+         - Output MUST be valid JSON only: {{\"sql\":\"...\", \"notes\":[...]}}.\n\
+         - Your SQL MUST read from the placeholder table name: FROM __SOURCE__\n\
+           - Do NOT use source() / ref() / Jinja in this step.\n\
+           - The system will replace __SOURCE__ with the real raw table for validation, then with dbt source() for materialization.\n\
          - This is SILVER: include sensible cleansing/normalization and stable column naming.\n\
          - IMPORTANT: The user payload may include plan invariants/notes; invariants are hard requirements.\n\
          - Dialect/provider compatibility:\n\
@@ -174,13 +182,8 @@ fn build_staging_sys_prompt(
            - If schema_columns contains an EXACT column name with dots (e.g. context.session.id), treat it as a literal column name and reference it as a single quoted identifier like \"context.session.id\".\n\
            - Only use struct dereference (e.g. context.session.id) when schema_columns indicates a struct/row parent exists (e.g. context) AND there is no exact dotted column name.\n\
          - If a column name is reserved (e.g. timestamp), quote the identifier (\"timestamp\"). For literal dotted column names, quote the entire identifier (\"context.session.id\").\n\
-         - Keep changes aligned with the user's instructions, even if they are unconventional.\n\
-         {patch_contract}\n\
-         Patch rules:\n\
-         - The patch MUST modify ONLY the expected_model_path.\n\
-         - Do NOT include a dbt config block; the suite injects schema/alias deterministically.\n"
+         - Keep changes aligned with the user's instructions, even if they are unconventional.\n"
         ,
-        patch_contract = crate::prompts::patch_contract::llm_patch_response_contract(),
         provider_rules = provider_rules
     )
 }
@@ -732,67 +735,127 @@ impl Tool for StagingModelTool {
                 "plan_expected_model_path": plan_expected_model_path,
                 "expected_model_path": rel_path,
                 "existing_model_sql": existing_sql,
+                "sql_first": {
+                    "source_placeholder": "__SOURCE__",
+                    "raw_dataset_fqn": ds,
+                    "materialize_source_macro": format!("{{{{ source(\"{}\", \"{}\") }}}}", expected_db, expected_table),
+                    "goal": "Return plain SQL that is safe + row-preserving. Keep output bounded; prefer explicit select list.",
+                }
             })
             .to_string();
 
-            let (outcome, llm_notes) = match patch_protocol::llm_patch_loop_single_file(
+            // SQL-first: draft plain SQL, validate against warehouse, then materialize to dbt SQL.
+            let mut draft = match sql_first::llm_draft_sql_json(
                 ctx,
-                None,
                 sys,
                 user,
-                &rel_path,
-                6,
-                Some(LlmCallOptions {
-                    prompt_id: "data_engineer.tools.staging_model.patch_loop",
-                    thread_id: ctx.thread_id.clone(),
-                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                    temperature: Some(0.05),
-                    top_p: Some(1.0),
-                    max_output_tokens: Some(
-                        patch_protocol::default_patch_loop_max_output_tokens(),
-                    ),
-                    reasoning_effort: None,
-                }),
+                "data_engineer.tools.staging_model.sql_first",
+                3200,
+                0.08,
             )
             .await
             {
                 Ok(v) => v,
                 Err(e) => {
-                    errors.push(format!("{ds}: patch authoring/apply failed: {e}"));
+                    errors.push(format!("{ds}: sql draft failed: {e}"));
                     continue;
                 }
             };
 
-            // Sanity check: ensure the resulting SQL still references the expected source.
-            if !contains_expected_source_call(&outcome.content, &expected_db, &expected_table) {
-                errors.push(format!(
-                    "{ds}: patched model does not contain expected source(\"{expected_db}\",\"{expected_table}\") after apply"
-                ));
-                continue;
-            }
-            if let Some(msg) = ctx.warehouse.unsupported_sql_reason(&outcome.content) {
-                errors.push(format!(
-                    "{ds}: unsupported SQL for provider '{provider_name}': {msg}"
-                ));
-                if let Some(h) = athena_alias_reuse_hint(&msg, &rel_path, ds) {
+            let mut repl = std::collections::HashMap::new();
+            let dsid = match ctx.warehouse.parse_dataset_fqn(ds) {
+                Ok(id) => id,
+                Err(e) => {
+                    errors.push(format!("{ds}: invalid dataset fqn: {e}"));
+                    continue;
+                }
+            };
+            let quoted = ctx.warehouse.quote_fqn(&dsid);
+            repl.insert("__SOURCE__".to_string(), quoted);
+
+            // One repair attempt: if validation fails, give the error back and retry.
+            let validate_res = sql_first::validate_sql_quick(ctx, &draft.sql, &repl).await;
+            if let Err(err) = validate_res {
+                if let Some(h) = athena_alias_reuse_hint(&err, &rel_path, ds) {
                     remediation_hints.push(h);
                 }
-                continue;
+                let repair_user = serde_json::json!({
+                    "dataset_id": ds,
+                    "error": err,
+                    "previous_sql": draft.sql,
+                    "instruction": "Fix the SQL. Output JSON only: {\"sql\":\"...\",\"notes\":[...]}. Must use FROM __SOURCE__ and must not reference columns outside schema_columns."
+                })
+                .to_string();
+                match sql_first::llm_draft_sql_json(
+                    ctx,
+                    build_staging_sys_prompt(provider_name, &dialect, &expected_db, &expected_table, &provider_prompt_rules),
+                    repair_user,
+                    "data_engineer.tools.staging_model.sql_first_repair",
+                    3200,
+                    0.05,
+                )
+                .await
+                {
+                    Ok(v) => draft = v,
+                    Err(e) => {
+                        errors.push(format!("{ds}: sql validation failed and repair draft failed: {e}"));
+                        continue;
+                    }
+                }
+                if let Err(err2) = sql_first::validate_sql_quick(ctx, &draft.sql, &repl).await {
+                    if let Some(h) = athena_alias_reuse_hint(&err2, &rel_path, ds) {
+                        remediation_hints.push(h);
+                    }
+                    errors.push(format!("{ds}: sql validation failed: {err2}"));
+                    continue;
+                }
             }
 
+            // Materialize: replace __SOURCE__ with dbt source().
+            let dbt_sql = draft
+                .sql
+                .replace("__SOURCE__", &format!("{{{{ source(\"{}\", \"{}\") }}}}", expected_db, expected_table));
+            if !contains_expected_source_call(&dbt_sql, &expected_db, &expected_table) {
+                errors.push(format!(
+                    "{ds}: materialized sql missing expected source(\"{expected_db}\",\"{expected_table}\")"
+                ));
+                continue;
+            }
+            let base_sha256 = if existing_sql.is_empty() {
+                None
+            } else {
+                Some(sha256_hex(&existing_sql))
+            };
+            let outcome = match project_fs::apply_patch(
+                ctx,
+                None,
+                &rel_path,
+                &dbt_sql,
+                base_sha256.as_deref(),
+                Some(!existing_sql.is_empty()),
+                project_fs::PatchApplyKind::FullOverwrite,
+            )
+            .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    errors.push(format!("{ds}: materialize apply_patch failed: {e}"));
+                    continue;
+                }
+            };
             if let Err(e) = ctx
                 .storage
                 .put_bytes(&key, outcome.content.as_bytes(), "text/sql")
                 .await
             {
                 emit_trace(ctx, format!("failed to save {}: {}", rel_path, e));
-                errors.push(format!("{ds}: failed to write staging model: {e}"));
+                errors.push(format!("{ds}: failed to write silver model: {e}"));
                 continue;
             }
             emit_trace(ctx, format!("saved {}", rel_path));
             written.push(key);
             succeeded_dataset_ids.push(ds.clone());
-            for n in llm_notes {
+            for n in draft.notes {
                 if !n.trim().is_empty() {
                     notes.push(format!("{}: {}", ds, n));
                 }
@@ -1164,7 +1227,11 @@ mod tests {
         #[async_trait]
         impl QueryProvider for MockWarehouse {
             async fn query(&self, _sql: &str) -> Result<QueryResult, String> {
-                Err("not used".to_string())
+                Ok(QueryResult {
+                    header: vec![],
+                    rows: vec![],
+                    meta: None,
+                })
             }
             async fn schema(&self, dataset_fqn: &str) -> Result<Vec<(String, String)>, String> {
                 if dataset_fqn == "AwsDataCatalog.test_raw.raw_orders" {
@@ -1256,8 +1323,7 @@ mod tests {
                     .unwrap_or_default();
                 if let Ok(v) = serde_json::from_str::<Value>(&user) {
                     let instr = v
-                        .get("input")
-                        .and_then(|x| x.get("user_instructions"))
+                        .get("user_instructions")
                         .and_then(|x| x.as_str())
                         .map(|s| s.to_string());
                     if let Ok(mut g) = self.captured_user_instructions.lock() {
@@ -1319,7 +1385,7 @@ mod tests {
         let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let llm = Arc::new(CapturingLlm {
             resp: serde_json::json!({
-                "replace_file": { "path": "models/staging/stg_test_raw_raw_orders.sql", "new_text": "select * from {{ source('test_raw','raw_orders') }}" },
+                "sql": "select order_id, created_at from __SOURCE__",
                 "notes": []
             })
             .to_string(),

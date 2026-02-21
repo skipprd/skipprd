@@ -5,17 +5,25 @@ use std::collections::{HashMap, HashSet};
 use tokio::task::JoinSet;
 use tracing::info;
 
+use sha2::{Digest, Sha256};
+
 use react_core::agent::AgentCtx;
-use react_core::llm::LlmCallOptions;
 use react_core::tools::Tool;
 
 use crate::data_engineer::dbt_repair::remediate::active_provider_dialect;
-use crate::data_engineer::{naming, patch_protocol, plan};
+use crate::data_engineer::{naming, plan, project_fs, sql_first};
 
 fn emit_trace(ctx: &AgentCtx, line: impl Into<String>) {
     if let Some(tx) = ctx.trace_tx.as_ref() {
         let _ = tx.send(line.into());
     }
+}
+
+fn sha256_hex(s: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    let out = hasher.finalize();
+    hex::encode(out)
 }
 
 fn normalize_folder(folder: Option<&str>) -> String {
@@ -90,13 +98,13 @@ fn build_gold_sys_prompt(
 ) -> String {
     format!(
         "You are an expert analytics engineer.\n\
-         Task: author dbt GOLD mart model(s) for a warehouse project.\n\
+         Task: write GOLD model query as PLAIN SQL (no dbt config, no Jinja).\n\
          Provider: {provider}\n\
          Dialect: {dialect}\n\
-         Output MUST be valid JSON only.\n\
-         You MUST choose EXACTLY ONE patch primitive to modify the provided model_path.\n\
-         Use structured primitives only (replace_file / replace_range / replace_list).\n\
-         {patch_contract}\n\
+         Output MUST be valid JSON only: {{\"sql\":\"...\", \"notes\":[...]}}.\n\
+         You MUST reference inputs ONLY via the provided placeholders (e.g. __INPUT_0__).\n\
+           - Do NOT use ref() / source() / Jinja in this step.\n\
+           - The system will replace placeholders with real silver relations for validation, then with dbt ref() for materialization.\n\
          \n\
          CRITICAL gold rules:\n\
          - You MUST write a SELECT-based dbt model.\n\
@@ -125,12 +133,8 @@ fn build_gold_sys_prompt(
          - Dialect/provider compatibility:\n\
 {provider_rules}\
          - Batch throughput: you will be asked to create up to {max_items} models per call.\n\
-         - Do NOT include a dbt config block; the suite injects schema/alias deterministically.\n\
-         Patch rules:\n\
-         - The patch MUST modify ONLY the provided model_path.\n\
          \n"
         ,
-        patch_contract = crate::prompts::patch_contract::llm_patch_response_contract(),
         provider_rules = provider_rules
     )
 }
@@ -475,50 +479,129 @@ impl Tool for GoldModelTool {
                     .ok()
                     .map(|b| String::from_utf8_lossy(&b).to_string())
                     .unwrap_or_default()
+                ,
+                "sql_first": {
+                    "input_placeholders": it.inputs.iter().enumerate().map(|(i, inp)| {
+                        serde_json::json!({
+                            "input": inp,
+                            "placeholder": format!("__INPUT_{}__", i),
+                            "materialize_ref": if inp.trim().contains('/') || inp.trim().ends_with(".sql") { String::new() } else { format!("{{{{ ref('{}') }}}}", inp.trim()) }
+                        })
+                    }).collect::<Vec<Value>>()
+                }
             })
             .to_string();
 
-            let (outcome, llm_notes) = match patch_protocol::llm_patch_loop_single_file(
+            let mut draft = match sql_first::llm_draft_sql_json(
                 ctx,
-                None,
                 sys.clone(),
                 user,
-                &rel_path,
-                6,
-                Some(LlmCallOptions {
-                    prompt_id: "data_engineer.tools.gold_model.patch_loop",
-                    thread_id: ctx.thread_id.clone(),
-                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                    temperature: Some(0.12),
-                    top_p: Some(1.0),
-                    max_output_tokens: Some(
-                        patch_protocol::default_patch_loop_max_output_tokens(),
-                    ),
-                    reasoning_effort: None,
-                }),
+                "data_engineer.tools.gold_model.sql_first",
+                3600,
+                0.12,
             )
             .await
             {
                 Ok(v) => v,
                 Err(e) => {
-                    errors.push(format!("{name}: patch authoring/apply failed: {e}"));
+                    errors.push(format!("{name}: sql draft failed: {e}"));
                     continue;
                 }
             };
 
-            if naming::contains_source_call(&outcome.content) {
+            // Build placeholder replacement map for validation (placeholders -> quoted silver relations).
+            let mut repl_validate: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            let mut repl_materialize: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for (idx, inp) in it.inputs.iter().enumerate() {
+                let ph = format!("__INPUT_{}__", idx);
+                // Find derived_relation_fqn for this input (from input_blocks).
+                let derived_fqn = input_blocks
+                    .iter()
+                    .find(|b| b.get("input").and_then(|v| v.as_str()) == Some(inp.as_str()))
+                    .and_then(|b| b.get("derived_relation_fqn").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if derived_fqn.is_empty() {
+                    errors.push(format!("{name}: cannot validate gold SQL: missing derived_relation_fqn for input '{inp}' (ensure silver models exist and are queryable)"));
+                    continue;
+                }
+                let id = match ctx.warehouse.parse_dataset_fqn(&derived_fqn) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        errors.push(format!("{name}: invalid derived_relation_fqn '{derived_fqn}' for input '{inp}': {e}"));
+                        continue;
+                    }
+                };
+                repl_validate.insert(ph.clone(), ctx.warehouse.quote_fqn(&id));
+                // Materialize: ref('stg_*') only for named inputs; path-like inputs are invalid for gold.
+                if inp.trim().contains('/') || inp.trim().ends_with(".sql") {
+                    errors.push(format!("{name}: gold inputs must be stg_* names, not paths ('{inp}')"));
+                    continue;
+                }
+                repl_materialize.insert(ph.clone(), format!("{{{{ ref('{}') }}}}", inp.trim()));
+            }
+            if errors.iter().any(|e| e.starts_with(&format!("{name}: gold inputs must")) || e.starts_with(&format!("{name}: cannot validate"))) {
+                continue;
+            }
+
+            // Validate (one repair attempt).
+            let validate_res = sql_first::validate_sql_quick(ctx, &draft.sql, &repl_validate).await;
+            if let Err(err) = validate_res {
+                if let Some(h) = athena_alias_reuse_hint(&err, &rel_path, name) {
+                    remediation_hints.push(h);
+                }
+                let repair_user = serde_json::json!({
+                    "model_name": name,
+                    "error": err,
+                    "previous_sql": draft.sql,
+                    "instruction": "Fix the SQL. Output JSON only: {\"sql\":\"...\",\"notes\":[...]}. Must only use __INPUT_n__ placeholders and must not reference columns outside inputs[].schema_columns."
+                })
+                .to_string();
+                match sql_first::llm_draft_sql_json(
+                    ctx,
+                    build_gold_sys_prompt(provider_name, &dialect, max_items, &provider_prompt_rules),
+                    repair_user,
+                    "data_engineer.tools.gold_model.sql_first_repair",
+                    3600,
+                    0.08,
+                )
+                .await
+                {
+                    Ok(v) => draft = v,
+                    Err(e) => {
+                        errors.push(format!("{name}: sql validation failed and repair draft failed: {e}"));
+                        continue;
+                    }
+                }
+                if let Err(err2) =
+                    sql_first::validate_sql_quick(ctx, &draft.sql, &repl_validate).await
+                {
+                    if let Some(h) = athena_alias_reuse_hint(&err2, &rel_path, name) {
+                        remediation_hints.push(h);
+                    }
+                    errors.push(format!("{name}: sql validation failed: {err2}"));
+                    continue;
+                }
+            }
+
+            // Materialize: replace placeholders with ref().
+            let dbt_sql = sql_first::apply_placeholders(&draft.sql, &repl_materialize);
+            if naming::contains_source_call(&dbt_sql) {
                 errors.push(format!(
-                    "{name}: invalid gold SQL after patch apply: contains source(). Gold must only read from silver via ref('stg_*')."
+                    "{name}: invalid gold SQL: contains source(). Gold must only read from silver via ref('stg_*')."
                 ));
                 continue;
             }
-            if !naming::contains_ref_call(&outcome.content) {
+            if !naming::contains_ref_call(&dbt_sql) {
                 errors.push(format!(
-                    "{name}: invalid gold SQL after patch apply: must reference at least one silver model under models/staging/ via ref('stg_*')."
+                    "{name}: invalid gold SQL: must reference at least one silver model via ref('stg_*')."
                 ));
                 continue;
             }
-            if let Some(msg) = ctx.warehouse.unsupported_sql_reason(&outcome.content) {
+            if let Some(msg) = ctx.warehouse.unsupported_sql_reason(&dbt_sql) {
                 errors.push(format!(
                     "{name}: unsupported SQL for provider '{provider_name}': {msg}"
                 ));
@@ -527,6 +610,36 @@ impl Tool for GoldModelTool {
                 }
                 continue;
             }
+
+            let existing_sql = ctx
+                .storage
+                .get_bytes(&format!("{}/{}", base, rel_path))
+                .await
+                .ok()
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            let base_sha256 = if existing_sql.is_empty() {
+                None
+            } else {
+                Some(sha256_hex(&existing_sql))
+            };
+            let outcome = match project_fs::apply_patch(
+                ctx,
+                None,
+                &rel_path,
+                &dbt_sql,
+                base_sha256.as_deref(),
+                Some(!existing_sql.is_empty()),
+                project_fs::PatchApplyKind::FullOverwrite,
+            )
+            .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    errors.push(format!("{name}: materialize apply_patch failed: {e}"));
+                    continue;
+                }
+            };
             if let Err(e) = ctx
                 .storage
                 .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
@@ -540,7 +653,7 @@ impl Tool for GoldModelTool {
             written.push(outcome.key);
             succeeded_item_names.push(name.to_string());
 
-            for n in llm_notes {
+            for n in draft.notes {
                 let nt = n.trim();
                 if !nt.is_empty() {
                     notes.push(format!("{name}: {nt}"));
@@ -582,12 +695,87 @@ impl Tool for GoldModelTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use react_core::keyspace::{DefaultKeyspace, Keyspace};
     use react_core::llm::ChatMessage;
     use react_core::llm::LargeLanguageModel;
+    use react_core::providers::{QueryProvider, QueryResult};
     use react_core::scope::RequestScope;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
     use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct MockWarehouse;
+
+    #[async_trait]
+    impl QueryProvider for MockWarehouse {
+        async fn query(&self, _sql: &str) -> Result<QueryResult, String> {
+            Ok(QueryResult {
+                header: vec![],
+                rows: vec![],
+                meta: None,
+            })
+        }
+        async fn schema(&self, _dataset_fqn: &str) -> Result<Vec<(String, String)>, String> {
+            Ok(vec![("order_id".to_string(), "string".to_string())])
+        }
+        async fn sample(
+            &self,
+            _dataset_fqn: &str,
+            _limit: usize,
+        ) -> Result<Vec<Vec<String>>, String> {
+            Ok(vec![])
+        }
+    }
+
+    #[async_trait]
+    impl react_core::providers::DatasetCatalogProvider for MockWarehouse {
+        async fn list_datasets(&self) -> Result<Vec<react_core::providers::DatasetId>, String> {
+            Ok(vec![])
+        }
+        async fn get_dataset_schema(
+            &self,
+            dataset: &react_core::providers::DatasetId,
+        ) -> Result<Vec<(String, String)>, String> {
+            self.schema(&dataset.fqn()).await
+        }
+        async fn get_dataset_stats(
+            &self,
+            _dataset: &react_core::providers::DatasetId,
+            _max_fields: usize,
+        ) -> Result<
+            (
+                react_core::discover::stats::DatasetFieldStats,
+                react_core::providers::catalog::types::DatasetStats,
+            ),
+            String,
+        > {
+            Err("not used".to_string())
+        }
+    }
+
+    impl react_core::providers::WarehouseNaming for MockWarehouse {
+        fn kind(&self) -> &'static str {
+            "mock"
+        }
+        fn parse_dataset_fqn(
+            &self,
+            dataset_fqn: &str,
+        ) -> Result<react_core::providers::DatasetId, String> {
+            let parts: Vec<&str> = dataset_fqn.split('.').collect();
+            if parts.len() != 3 {
+                return Err("invalid fqn".to_string());
+            }
+            Ok(react_core::providers::DatasetId {
+                catalog: parts[0].to_string(),
+                database: parts[1].to_string(),
+                table: parts[2].to_string(),
+            })
+        }
+        fn quote_ident(&self, ident: &str) -> String {
+            format!("\"{}\"", ident.replace('"', "\"\""))
+        }
+    }
 
     #[derive(Default)]
     struct MockLlm {
@@ -673,7 +861,7 @@ mod tests {
             scope: scope.clone(),
             keyspace,
             query: None,
-            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
+            warehouse: Arc::new(MockWarehouse::default()),
             dbt: None,
             vector: None,
             thread_store: None,
@@ -722,7 +910,7 @@ mod tests {
 
         let llm = Arc::new(MockLlm {
             resp: serde_json::json!({
-                "replace_file": { "path": "models/marts/fct_orders.sql", "new_text": "select * from {{ ref('stg_test_raw_raw_orders') }}" },
+                "sql": "select * from __INPUT_0__",
                 "notes": analyst_notes()
             })
             .to_string(),
@@ -745,7 +933,11 @@ mod tests {
             .await
             .expect("tool call");
 
-        assert!(out.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        assert!(
+            out.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "out={}",
+            out
+        );
         let written = out
             .get("written_keys")
             .and_then(|v| v.as_array())
@@ -779,7 +971,7 @@ mod tests {
 
         let llm = Arc::new(MockLlm {
             resp: serde_json::json!({
-                "replace_file": { "path": "models/marts/fct_orders.sql", "new_text": "select * from {{ source('test_raw','raw_orders') }}" },
+                "sql": "select * from {{ source('test_raw','raw_orders') }}",
                 "notes": analyst_notes()
             })
             .to_string(),
@@ -802,7 +994,11 @@ mod tests {
             .await
             .expect("tool call");
 
-        assert!(!out.get("ok").and_then(|v| v.as_bool()).unwrap_or(true));
+        assert!(
+            !out.get("ok").and_then(|v| v.as_bool()).unwrap_or(true),
+            "out={}",
+            out
+        );
         let errs = out
             .get("errors")
             .and_then(|v| v.as_array())
@@ -833,7 +1029,7 @@ mod tests {
 
         let llm = Arc::new(MockLlm {
             resp: serde_json::json!({
-                "replace_file": { "path": "models/marts/fct_orders.sql", "new_text": "select * from {{ ref('stg_test_raw_raw_orders') }}" },
+                "sql": "select * from __INPUT_0__",
                 "notes": analyst_notes()
             })
             .to_string(),
@@ -889,8 +1085,7 @@ mod tests {
                     .unwrap_or_default();
                 if let Ok(v) = serde_json::from_str::<Value>(&user) {
                     let instr = v
-                        .get("input")
-                        .and_then(|x| x.get("instructions"))
+                        .get("instructions")
                         .and_then(|x| x.as_str())
                         .map(|s| s.to_string());
                     if let Ok(mut g) = self.captured_instructions.lock() {
@@ -916,7 +1111,7 @@ mod tests {
         let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let llm = Arc::new(CapturingLlm {
             resp: serde_json::json!({
-                "replace_file": { "path": "models/marts/fct_orders.sql", "new_text": "select * from {{ ref('stg_test_raw_raw_orders') }}" },
+                "sql": "select * from __INPUT_0__",
                 "notes": analyst_notes()
             })
             .to_string(),
