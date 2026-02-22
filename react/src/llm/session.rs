@@ -84,6 +84,20 @@ impl RouterModel {
     }
 }
 
+fn apply_hard_cap_max_output_tokens(requested: Option<u32>) -> Option<u32> {
+    // Keep per-call budgets flexible, but enforce one global hard ceiling so a
+    // bad prompt cannot explode token usage.
+    let cap = crate::helpers::configuration::Config::getenv(
+        "LLM_MAX_OUTPUT_TOKENS_HARD_CAP",
+        "256000",
+    )
+    .parse::<u32>()
+    .ok()
+    .filter(|v| *v > 0)
+    .unwrap_or(256000);
+    requested.map(|v| v.min(cap))
+}
+
 impl LargeLanguageModel for RouterModel {
     fn chat(&self, messages: &[ChatMessage], options: &LlmCallOptions) -> Result<String, String> {
         let model = crate::helpers::configuration::Config::llm_chat_model()
@@ -102,7 +116,8 @@ impl LargeLanguageModel for RouterModel {
             .parse()
             .ok();
 
-        let max_output_tokens = options.max_output_tokens.or(default_max_output_tokens);
+        let max_output_tokens =
+            apply_hard_cap_max_output_tokens(options.max_output_tokens.or(default_max_output_tokens));
         let temperature = options.temperature.or(default_temperature);
         let top_p = options.top_p.or(default_top_p);
         let reasoning_effort = match options.reasoning_effort.unwrap_or(ReasoningEffort::Low) {
