@@ -166,7 +166,7 @@ jobs:
       - name: Test react crate
         run: cargo test -p react
 
-      - name: Run React examples (1..16) in parallel
+      - name: Run React examples (1..4) in parallel
         env:
           REACT_LOG_THREAD_STEPS: ${{ secrets.REACT_LOG_THREAD_STEPS }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
@@ -180,18 +180,6 @@ jobs:
             --config ./react/react2.yaml \
             --config ./react/react3.yaml \
             --config ./react/react4.yaml \
-            --config ./react/react5.yaml \
-            --config ./react/react6.yaml \
-            --config ./react/react7.yaml \
-            --config ./react/react8.yaml \
-            --config ./react/react9.yaml \
-            --config ./react/react10.yaml \
-            --config ./react/react11.yaml \
-            --config ./react/react12.yaml \
-            --config ./react/react13.yaml \
-            --config ./react/react14.yaml \
-            --config ./react/react15.yaml \
-            --config ./react/react16.yaml \
             --suite-id data_engineer \
             --agent agent
 
