@@ -9,6 +9,7 @@ use react_core::agent::AgentCtx;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
+use crate::data_engineer::patch_contract::{SingleFilePatchArgs, normalize_hunks_only_patch_text};
 use crate::data_engineer::project_fs;
 
 pub struct DbtFilesTool {
@@ -878,13 +879,6 @@ fn canonicalize_silver_folder_alias(rel: &str) -> (String, Option<String>) {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PatchTextArgs {
-    patch_text: String,
-    path: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RemoveFileArgs {
     op: String,
     path: String,
@@ -1007,16 +1001,12 @@ impl Tool for DbtFilesTool {
                     })
                     .unwrap_or_else(|| args.clone());
 
-                let parsed = serde_json::from_value::<PatchTextArgs>(args_wo_op.clone()).map_err(|e| {
+                let parsed = serde_json::from_value::<SingleFilePatchArgs>(args_wo_op.clone()).map_err(|e| {
                     format!(
                         "dbt_files op=patch contract violation: {}\n\nExpected args: {{\"op\":\"patch\",\"path\":\"...\",\"patch_text\":\"...\"}}",
                         e
                     )
                 })?;
-                let patch_in = parsed.patch_text.trim();
-                if patch_in.is_empty() {
-                    return Err("dbt_files op=patch contract violation: patch_text is empty".to_string());
-                }
                 let want0 = project_fs::normalize_rel_path(parsed.path.as_str())?;
                 let (want_rel, from_opt) = canonicalize_silver_folder_alias(&want0);
                 let mut path_rewrites: Vec<(String, String)> = Vec::new();
@@ -1026,26 +1016,10 @@ impl Tool for DbtFilesTool {
                     }
                 }
 
-                // Strict: hunks-only, no file headers/preamble.
-                let trimmed = patch_in.trim_start();
-                if !trimmed.starts_with("@@") {
-                    return Err("dbt_files op=patch contract violation: patch_text must be Cursor/Aider hunks-only and start with '@@'".to_string());
-                }
-                for line in patch_in.lines() {
-                    let t = line.trim_start();
-                    if t.starts_with("diff --git ")
-                        || t.starts_with("--- ")
-                        || t.starts_with("+++ ")
-                        || t.starts_with("index ")
-                        || t.starts_with("new file mode ")
-                        || t.starts_with("deleted file mode ")
-                    {
-                        return Err("dbt_files op=patch contract violation: patch_text must be hunks-only (no diff --git/---/+++ headers or git metadata lines)".to_string());
-                    }
-                    if t.starts_with("@@ -") {
-                        return Err("dbt_files op=patch contract violation: hunk headers must be Cursor/Aider style '@@ ... @@' (no line-number headers like '@@ -a,b +c,d @@')".to_string());
-                    }
-                }
+                let normalized = normalize_hunks_only_patch_text(parsed.patch_text.as_str()).map_err(|e| {
+                    format!("dbt_files op=patch contract violation: {}", e)
+                })?;
+                let patch_in = normalized.patch_text;
 
                 validate_sql_model_folder_policy(&want_rel)?;
 
@@ -1053,7 +1027,7 @@ impl Tool for DbtFilesTool {
                     ctx,
                     self.datasets.as_ref(),
                     &want_rel,
-                    patch_in,
+                    patch_in.as_str(),
                     None,
                     None,
                     project_fs::PatchApplyKind::UnifiedDiff,
@@ -1090,6 +1064,9 @@ impl Tool for DbtFilesTool {
                     "mutated": outcome.base_sha256 != outcome.new_sha256,
                     "applied_patch_text": outcome.git_patch.trim_end().to_string(),
                     "written_keys": [outcome.key.clone()],
+                    "patch_normalization": {
+                        "line_number_headers_rewritten": normalized.line_number_headers_rewritten
+                    },
                     "path_rewrites": rewrites_json,
                     "results": [{
                         "path": outcome.rel_path,
@@ -1101,7 +1078,9 @@ impl Tool for DbtFilesTool {
                         "git_patch": outcome.git_patch,
                         "diff": outcome.diff,
                         "lines_added": outcome.lines_added,
-                        "lines_removed": outcome.lines_removed
+                        "lines_removed": outcome.lines_removed,
+                        "apply_result_code": outcome.apply_result_code,
+                        "apply_repairs": outcome.apply_repairs
                     }]
                 }))
             }
@@ -1361,6 +1340,33 @@ mod tests {
         assert!(!content.contains("config(schema="));
         assert!(content.contains("alias=\"x\""));
         assert!(content.to_ascii_lowercase().contains("select 1"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_normalizes_line_number_hunk_headers() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let obs = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/core/y.sql",
+                    "patch_text": "@@ -1,0 +1,1 @@\n+select 1\n"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("patch ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        let rewrites = obs
+            .get("patch_normalization")
+            .and_then(|v| v.get("line_number_headers_rewritten"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert_eq!(rewrites, 1);
     }
 
     #[tokio::test]

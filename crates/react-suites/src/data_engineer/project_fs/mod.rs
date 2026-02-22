@@ -11,6 +11,7 @@ use react_core::agent::AgentCtx;
 use react_core::providers::{DatasetCatalogProvider, DatasetId};
 
 use crate::data_engineer::naming;
+use crate::data_engineer::patch_contract::normalize_hunks_only_patch_text;
 use crate::data_engineer::project_files;
 
 #[derive(Debug)]
@@ -26,6 +27,18 @@ pub struct PatchOutcome {
     pub lines_added: usize,
     pub lines_removed: usize,
     pub content: String,
+    pub apply_result_code: PatchApplyResultCode,
+    pub apply_repairs: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatchApplyResultCode {
+    AppliedUnifiedDirect,
+    AppliedHunksFlexible,
+    AppliedUnifiedAfterHeaderRepair,
+    AppliedUnifiedByFullReplacementReconstruction,
+    AppliedUnifiedByFlexibleFallback,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -570,6 +583,8 @@ pub async fn apply_patch(
         }
     }
 
+    let mut apply_result_code = PatchApplyResultCode::AppliedUnifiedDirect;
+    let mut apply_repairs: Vec<String> = Vec::new();
     let mut new_content = match kind {
         PatchApplyKind::UnifiedDiff => {
             let patch_text = payload;
@@ -580,17 +595,20 @@ pub async fn apply_patch(
 
             // Cursor/Aider hunks-only patches: no file headers; apply using flexible search/replace.
             if has_hunks && !has_file_headers {
-                // Enforce Aider-style headers for hunks-only mode.
-                for line in patch_text.lines() {
-                    let t = line.trim_start();
-                    if t.starts_with("@@ -") {
-                        return Err("invalid patch: hunks-only patch_text must use Cursor/Aider-style hunk headers ('@@ ... @@'), not line-number headers ('@@ -a,b +c,d @@')".to_string());
-                    }
+                let normalized = normalize_hunks_only_patch_text(patch_text).map_err(|e| {
+                    format!("invalid patch: {}", e)
+                })?;
+                if normalized.line_number_headers_rewritten > 0 {
+                    apply_repairs.push(format!(
+                        "normalized_line_number_hunk_headers={}",
+                        normalized.line_number_headers_rewritten
+                    ));
                 }
-                if let Some(repl) = try_apply_unified_hunks_flexible(patch_text, &old) {
+                if let Some(repl) = try_apply_unified_hunks_flexible(normalized.patch_text.as_str(), &old) {
+                    apply_result_code = PatchApplyResultCode::AppliedHunksFlexible;
                     repl
                 } else {
-                    return Err("invalid patch: hunks-only patch could not be applied to current file content".to_string());
+                    return Err("patch_hunk_context_miss: hunks-only patch could not be applied to current file content".to_string());
                 }
             } else {
                 let is_new_file_patch = patch_text.lines().any(|l| l.trim() == "--- /dev/null");
@@ -626,12 +644,14 @@ pub async fn apply_patch(
                     let fixed = repair_unified_hunk_headers(&unified);
                     if fixed != unified {
                         patch_src = Cow::Owned(fixed);
+                        apply_repairs.push("repaired_unified_hunk_headers".to_string());
                         match Patch::from_str(patch_src.as_ref()) {
                             Ok(p) => p,
                             Err(e2) => {
                                 if let Some(repl) =
                                     try_apply_unified_hunks_flexible(patch_src.as_ref(), &old)
                                 {
+                                    apply_result_code = PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
                                     parse_error_fallback_content = Some(repl);
                                     Patch::from_str(
                                         "--- a/x\n+++ b/x\n@@ -1,0 +1,0 @@\n",
@@ -644,6 +664,7 @@ pub async fn apply_patch(
                         }
                     } else {
                         if let Some(repl) = try_apply_unified_hunks_flexible(&unified, &old) {
+                            apply_result_code = PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
                             parse_error_fallback_content = Some(repl);
                             Patch::from_str("--- a/x\n+++ b/x\n@@ -1,0 +1,0 @@\n")
                                 .map_err(|_| format!("invalid patch: {}", emsg))?
@@ -657,7 +678,17 @@ pub async fn apply_patch(
                 repl
             } else {
                 match diffy::apply(&old, &patch) {
-                    Ok(c) => c,
+                    Ok(c) => {
+                        if apply_repairs
+                            .iter()
+                            .any(|x| x == "repaired_unified_hunk_headers")
+                        {
+                            apply_result_code = PatchApplyResultCode::AppliedUnifiedAfterHeaderRepair;
+                        } else {
+                            apply_result_code = PatchApplyResultCode::AppliedUnifiedDirect;
+                        }
+                        c
+                    }
                     Err(e) => {
                         // Fallbacks (in order):
                         // 1) full-file rewrite reconstruction from hunk body
@@ -665,10 +696,13 @@ pub async fn apply_patch(
                         if let Some(repl) =
                             try_reconstruct_full_file_replacement(patch_src.as_ref(), &old)
                         {
+                            apply_result_code =
+                                PatchApplyResultCode::AppliedUnifiedByFullReplacementReconstruction;
                             repl
                         } else if let Some(repl) =
                             try_apply_unified_hunks_flexible(patch_src.as_ref(), &old)
                         {
+                            apply_result_code = PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
                             repl
                         } else {
                             return Err(format!("patch apply failed: {}", e));
@@ -696,6 +730,8 @@ pub async fn apply_patch(
         lines_added,
         lines_removed,
         content: new_content,
+        apply_result_code,
+        apply_repairs,
     })
 }
 
@@ -2318,5 +2354,35 @@ packages:
         .await
         .expect("apply");
         assert!(out.content.to_ascii_lowercase().contains("select 2"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_hunks_only_normalizes_line_number_headers() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone(), None);
+        let rel = "models/core/x.sql";
+        let key = join_storage_key(&ctx, rel);
+        ctx.storage
+            .put_bytes(&key, b"select 1\n", "text/sql")
+            .await
+            .expect("seed");
+        let patch_text = "@@ -1,1 +1,1 @@\n-select 1\n+select 2\n";
+        let out = apply_patch(
+            &ctx,
+            None,
+            rel,
+            patch_text,
+            None,
+            None,
+            PatchApplyKind::UnifiedDiff,
+        )
+        .await
+        .expect("apply");
+        assert!(out.content.to_ascii_lowercase().contains("select 2"));
+        assert_eq!(out.apply_result_code, PatchApplyResultCode::AppliedHunksFlexible);
+        assert!(out
+            .apply_repairs
+            .iter()
+            .any(|r| r.starts_with("normalized_line_number_hunk_headers=")));
     }
 }

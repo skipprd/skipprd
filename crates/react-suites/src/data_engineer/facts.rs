@@ -114,14 +114,13 @@ fn dbt_files_patch_contract_value() -> Value {
                         "patch_text MUST start with '@@' and MUST NOT include git file headers (---/+++), diff --git preamble, or diffy-style headers (--- original / +++ modified)",
                         "Hunk headers MUST be Cursor/Aider style: '@@ ... @@' (no line numbers; never '@@ -a,b +c,d @@')"
                     ],
-                    "example": {
-                        "action": "dbt_files",
-                        "args": {
-                            "op": "patch",
-                            "path": "models/marts/fct_example.sql",
-                            "patch_text": "@@ ... @@\n- old\n+ new\n"
-                        }
-                    }
+                    "example": serde_json::from_str::<Value>(
+                        crate::data_engineer::patch_contract::single_file_patch_good_example_json()
+                    ).unwrap_or_else(|_| serde_json::json!({
+                        "op": "patch",
+                        "path": "models/staging/stg_example.sql",
+                        "patch_text": "@@ ... @@\n- old\n+ new\n"
+                    }))
                 },
                 "rm": {
                     "top_level_args": {

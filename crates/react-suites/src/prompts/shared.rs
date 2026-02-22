@@ -101,7 +101,7 @@ pub fn build_common_tool_card(extra_tool_lines: &str, extra_guidance: &str) -> S
         s.push_str(extra_tool_lines.trim_end());
         s.push('\n');
     }
-    s.push_str(crate::prompts::patch_contract::dbt_files_patch_contract());
+    s.push_str(&crate::prompts::patch_contract::dbt_files_patch_contract());
     s.push_str(tool_card_common_suffix());
     if !extra_guidance.trim().is_empty() {
         s.push_str(extra_guidance.trim_end());

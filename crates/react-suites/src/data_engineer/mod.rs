@@ -24,6 +24,7 @@ pub mod dbt_error;
 pub mod dbt_repair;
 pub mod facts;
 pub mod naming;
+pub mod patch_contract;
 pub mod patch_protocol;
 pub mod plan;
 pub mod prompt_packets;
@@ -4407,8 +4408,9 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
                                 // Even if schema checklist work remains, fix failing SQL targets first.
                                 let mut ctx = format!(
-                                    "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call dbt_files op=patch with path + patch_text (Cursor-style unified diff) to fix the failing DBT artifact(s) below. Keep changes minimal.\n\nRepair targets:\n",
-                                    plan.plan_key
+                                    "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call dbt_files op=patch with path + patch_text. patch_text MUST be Cursor/Aider hunks-only ('@@ ... @@', no line-number headers, no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
+                                    plan.plan_key,
+                                    crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                 );
                                 if !last_validate_failed_models.is_empty() {
                                     for fm in last_validate_failed_models.iter().take(6) {
@@ -4499,8 +4501,9 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         (ctx, None)
                                     } else {
                                 let mut ctx = format!(
-                                "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor-style patch_text):\n",
-                                plan.plan_key
+                                "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                plan.plan_key,
+                                crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                             );
                                 if !last_validate_failed_models.is_empty() {
                                     for fm in last_validate_failed_models.iter().take(6) {
@@ -4587,8 +4590,9 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     // Run a repair authoring pass grounded in the failing model/file evidence.
                                     if guard.last_validate_failed {
                                         let mut ctx = format!(
-                                        "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor-style patch_text):\n",
-                                        plan.plan_key
+                                        "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                        plan.plan_key,
+                                        crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                     );
                                         if !last_validate_failed_models.is_empty() {
                                             for fm in last_validate_failed_models.iter().take(6) {
@@ -4819,8 +4823,9 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
                                 // Even if schema checklist work remains, fix failing SQL targets first.
                                 let mut ctx = format!(
-                                    "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call dbt_files op=patch with path + patch_text (Cursor-style unified diff) to fix the failing DBT artifact(s) below. Keep changes minimal.\n\nRepair targets:\n",
-                                    plan.plan_key
+                                    "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call dbt_files op=patch with path + patch_text. patch_text MUST be Cursor/Aider hunks-only ('@@ ... @@', no line-number headers, no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
+                                    plan.plan_key,
+                                    crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                 );
                                 if !last_validate_failed_models.is_empty() {
                                     for fm in last_validate_failed_models.iter().take(6) {
@@ -4910,8 +4915,9 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                         (ctx, None)
                                     } else {
                                 let mut ctx = format!(
-                                "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor-style patch_text):\n",
-                                plan.plan_key
+                                "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                plan.plan_key,
+                                crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                             );
                                 if !last_validate_failed_models.is_empty() {
                                     for fm in last_validate_failed_models.iter().take(6) {
@@ -5072,8 +5078,9 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     if guard.last_validate_failed {
                                     // Same repair-mode behavior as cleanse: run authoring to patch failing files.
                                     let mut ctx = format!(
-                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor-style patch_text):\n",
-                                    plan.plan_key
+                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                    plan.plan_key,
+                                    crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                 );
                                     if !last_validate_failed_models.is_empty() {
                                         for fm in last_validate_failed_models.iter().take(6) {

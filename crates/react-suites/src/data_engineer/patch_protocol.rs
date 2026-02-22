@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -10,6 +9,9 @@ use react_core::providers::DatasetCatalogProvider;
 use react_core::session::{Observation, ThreadStep};
 
 use crate::data_engineer::project_fs;
+use crate::data_engineer::patch_contract::{
+    LlmSingleFilePatchResponse, normalize_hunks_only_patch_text,
+};
 
 fn sha256_hex(s: &str) -> String {
     use sha2::Digest;
@@ -249,22 +251,13 @@ fn extract_all_json_values(s: &str, max: usize) -> Vec<String> {
     out
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct LlmPatchResponse {
-    path: String,
-    patch_text: String,
-    #[serde(default)]
-    notes: Vec<String>,
-}
-
-fn parse_llm_patch_response(text: &str, expected_rel_path: &str) -> Result<LlmPatchResponse, String> {
+fn parse_llm_patch_response(
+    text: &str,
+    expected_rel_path: &str,
+) -> Result<LlmSingleFilePatchResponse, String> {
     let v = parse_patch_json_from_llm(text)?;
-    let parsed: LlmPatchResponse =
+    let mut parsed: LlmSingleFilePatchResponse =
         serde_json::from_value(v).map_err(|e| format!("failed to parse patch response JSON: {}", e))?;
-    if parsed.patch_text.trim().is_empty() {
-        return Err("patch_text is empty".to_string());
-    }
     let rel = project_fs::normalize_rel_path(parsed.path.as_str())?;
     if rel != expected_rel_path {
         return Err(format!(
@@ -272,17 +265,8 @@ fn parse_llm_patch_response(text: &str, expected_rel_path: &str) -> Result<LlmPa
             rel, expected_rel_path
         ));
     }
-    // Hard-cut: LLM patch responses must use Cursor/Aider-style hunk headers (`@@ ... @@`),
-    // never numeric unified headers (`@@ -a,b +c,d @@`).
-    for line in parsed.patch_text.lines() {
-        let t = line.trim_start();
-        if !t.starts_with("@@") {
-            continue;
-        }
-        if t.starts_with("@@ -") {
-            return Err("patch_text must use Cursor/Aider-style hunk headers ('@@ ... @@'), not line-number headers ('@@ -a,b +c,d @@')".to_string());
-        }
-    }
+    let normalized = normalize_hunks_only_patch_text(parsed.patch_text.as_str())?;
+    parsed.patch_text = normalized.patch_text;
     Ok(parsed)
 }
 
@@ -363,6 +347,8 @@ pub async fn llm_patch_loop_single_file(
     let mut last_err: Option<String> = None;
     let mut bumped_output_budget = false;
     let mut no_op_failures = 0usize;
+    let mut seen_patch_signatures: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
     let no_op_breaker_threshold = 2usize;
     for attempt in 1..=max_iters {
         let resp = ctx.llm.chat(&messages, &call_opts);
@@ -633,6 +619,21 @@ pub async fn llm_patch_loop_single_file(
             continue;
         }
 
+        // Deterministic idempotence guard: if the model repeats the same patch against the same
+        // base for actual apply attempts, stop early to avoid churn loops.
+        let patch_sig = format!(
+            "{}:{}:{}",
+            expected_rel_path,
+            base_sha256,
+            sha256_hex(parsed.patch_text.as_str())
+        );
+        if !seen_patch_signatures.insert(patch_sig) {
+            return Err(format!(
+                "patch_idempotence_guard: repeated identical patch_text for path='{}' and base_sha256='{}'; refusing to retry the same patch to avoid churn",
+                expected_rel_path, base_sha256
+            ));
+        }
+
         match project_fs::apply_patch(
             ctx,
             datasets,
@@ -724,13 +725,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_llm_patch_response_rejects_line_number_hunks() {
+    fn parse_llm_patch_response_normalizes_line_number_hunks() {
         let txt = r#"{
           "path": "models/schema.yml",
           "patch_text": "@@ -1,1 +1,1 @@\n- a\n+ b\n"
         }"#;
-        let err = parse_llm_patch_response(txt, "models/schema.yml").unwrap_err();
-        assert!(err.contains("Cursor/Aider-style hunk headers"));
+        let parsed = parse_llm_patch_response(txt, "models/schema.yml").expect("parse ok");
+        assert!(parsed.patch_text.starts_with("@@ ... @@"));
     }
 
     fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {
