@@ -121,6 +121,33 @@ pub fn apply_placeholders(sql: &str, replacements: &HashMap<String, String>) -> 
     out
 }
 
+fn normalize_output_column_name(name: &str) -> String {
+    let t = name.trim().trim_matches('"').trim_matches('`').trim();
+    t.to_ascii_lowercase()
+}
+
+fn duplicate_output_columns(header: &[String]) -> Vec<String> {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut first_seen: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for h in header.iter() {
+        let norm = normalize_output_column_name(h);
+        if norm.is_empty() {
+            continue;
+        }
+        *counts.entry(norm.clone()).or_insert(0) += 1;
+        first_seen.entry(norm).or_insert_with(|| h.trim().to_string());
+    }
+    counts
+        .into_iter()
+        .filter_map(|(k, n)| if n > 1 { Some(k) } else { None })
+        .map(|k| first_seen.get(&k).cloned().unwrap_or(k))
+        .collect()
+}
+
+pub fn detect_duplicate_output_columns(header: &[String]) -> Vec<String> {
+    duplicate_output_columns(header)
+}
+
 pub fn wrap_sql_for_validation(sql: &str, limit: usize) -> String {
     let cleaned = strip_trailing_semicolon(sql);
     // Avoid double LIMIT guessing. Wrapping is the most robust across dialects.
@@ -196,6 +223,33 @@ pub async fn validate_sql_quick(
         return Err(msg);
     }
     let probe = wrap_sql_for_validation(&expanded, 1);
-    ctx.warehouse.query(&probe).await.map(|_| ()).map_err(|e| e)
+    let res = ctx.warehouse.query(&probe).await?;
+    let dups = duplicate_output_columns(&res.header);
+    if !dups.is_empty() {
+        return Err(format!(
+            "duplicate_output_columns: query projects duplicate output column name(s): {}. \
+Use unique aliases and avoid patterns like `SELECT *` plus re-defining an existing column in the same projection.",
+            dups.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::duplicate_output_columns;
+
+    #[test]
+    fn duplicate_output_columns_is_case_insensitive_and_quote_tolerant() {
+        let header = vec![
+            "order_id".to_string(),
+            "\"Order_ID\"".to_string(),
+            "customer_id".to_string(),
+            "  `customer_id`  ".to_string(),
+            "placed_at".to_string(),
+        ];
+        let dups = duplicate_output_columns(&header);
+        assert_eq!(dups, vec!["customer_id".to_string(), "order_id".to_string()]);
+    }
 }
 
