@@ -8,19 +8,16 @@
 pub fn llm_patch_response_contract() -> &'static str {
     r#"Patch JSON schema (MUST follow exactly; structs are strict):
 - Return ONE JSON object with optional notes and EXACTLY ONE patch payload.
-- You MUST return `patch_text` as a unified diff.
-- You MAY include `path`, but if present it MUST equal expected_rel_path.
-- patch_text allowed forms:
-  - Cursor-style hunks-only (preferred):
-    - Starts with '@@' and contains only hunks with -/+ lines (no ---/+++ headers).
-    - Hunk headers MUST be Cursor/Aider style: '@@ ... @@' (no line numbers).
-  - Git-style unified diff (also OK):
-    - Includes file headers (--- a/<path>, +++ b/<path>) and optional preamble (diff --git ...).
-- The patch MUST modify ONLY expected_rel_path (no other files).
+- You MUST return `path` and it MUST equal expected_rel_path.
+- You MUST return `patch_text` as Cursor/Aider-style hunks-only unified diff:
+  - Starts with '@@'
+  - Contains only hunks with -/+ lines (no git file headers like ---/+++ and no diff --git preamble)
+  - Hunk headers MUST be Cursor/Aider style: '@@ ... @@' (no line numbers; never '@@ -a,b +c,d @@')
+- The patch MUST modify ONLY expected_rel_path.
 Output schema:
 {
   "notes": ["..."],
-  "path": "<expected_rel_path>" | null,
+  "path": "<expected_rel_path>",
   "patch_text": "@@ ...\n- old\n+ new\n"
 }"#
 }
@@ -30,26 +27,13 @@ pub fn dbt_files_patch_contract() -> &'static str {
 - args.op MUST be one of: "patch" | "rm" | "mv"
 
 op="patch":
-- Hard cutover: Cursor-like patch DSL ONLY. You MUST provide `patch_text` as a unified diff (single-file or multi-file bundle).
-- args: {op:"patch", patch_text:string, path?:string}
-  - If path is provided, it is a guard: patch_text MUST target exactly that one file.
-  - patch_text is allowed in TWO forms:
-    - Form A (bundle / explicit headers): git-style file headers per file:
-      - Existing file: '--- a/<path>' and '+++ b/<path>'
-      - New file:      '--- /dev/null' and '+++ b/<path>'
-    - Form B (Cursor-style hunks-only): ONLY when args.path is provided AND patch_text starts with '@@' hunks and omits ---/+++ headers.
-      - The system will synthesize headers using args.path.
-      - Hunk headers MUST be Cursor/Aider style: '@@ ... @@' (no line numbers).
-  - For Form A, patch_text MAY include git preamble lines like 'diff --git ...', 'index ...', 'new file mode ...'.
-  - patch_text MUST NOT be diffy-style ('--- original' / '+++ modified').
-Example args (single-file):
-{"op":"patch","patch_text":"diff --git a/models/staging/stg_example.sql b/models/staging/stg_example.sql\\n--- a/models/staging/stg_example.sql\\n+++ b/models/staging/stg_example.sql\\n@@ ..."}
-Example args (guarded single-file):
-{"op":"patch","path":"models/staging/stg_example.sql","patch_text":"diff --git a/models/staging/stg_example.sql b/models/staging/stg_example.sql\\n--- a/models/staging/stg_example.sql\\n+++ b/models/staging/stg_example.sql\\n@@ ..."}
-Example args (Cursor-style hunks-only):
-{"op":"patch","path":"models/staging/stg_example.sql","patch_text":"@@ ...\\n- old\\n+ new\\n"}
-Example args (multi-file bundle):
-{"op":"patch","patch_text":"diff --git a/models/schema.yml b/models/schema.yml\\n--- a/models/schema.yml\\n+++ b/models/schema.yml\\n@@ ...\\n\\ndiff --git a/models/staging/stg_x.sql b/models/staging/stg_x.sql\\n--- /dev/null\\n+++ b/models/staging/stg_x.sql\\n@@ ..."}
+- Hard cutover: Cursor/Aider hunks-only unified diff ONLY.
+- args: {op:"patch", path:string, patch_text:string}
+  - args.path MUST be the single file to mutate.
+  - patch_text MUST start with '@@' and MUST NOT include git file headers (---/+++), diff --git preamble, or diffy-style headers ('--- original' / '+++ modified').
+  - Hunk headers MUST be Cursor/Aider style: '@@ ... @@' (no line numbers; never '@@ -a,b +c,d @@').
+Example args:
+{"op":"patch","path":"models/staging/stg_example.sql","patch_text":"@@ ... @@\\n- old\\n+ new\\n"}
 
 op="rm":
 - args: {path:string, expected_sha256?:string}

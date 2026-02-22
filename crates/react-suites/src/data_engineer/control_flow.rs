@@ -635,8 +635,37 @@ fn is_model_replan_backtrack(from: Phase, to: Phase) -> bool {
 /// This is used to stop threads that repeatedly loop without meaningful phase progress.
 pub fn replan_backtrack_count_for_phase(log: Option<&ThreadLog>, phase: Phase) -> usize {
     let Some(log) = log else { return 0 };
+    // Guard tuning: only count loopbacks since the most recent *successful* dbt_validate.
+    // Once validate succeeds, we consider the backtrack loop "resolved" for hard-stop purposes.
+    let mut last_successful_validate_idx: Option<usize> = None;
+    let mut cur_phase: Option<Phase> = None;
+    for (i, step) in log.steps.iter().enumerate() {
+        match step {
+            ThreadStep::Phase { phase, .. } => {
+                cur_phase = Phase::from_str(phase);
+            }
+            ThreadStep::ToolEnd {
+                name,
+                observation,
+                ..
+            } => {
+                if name == "dbt_validate"
+                    && observation.ok
+                    && matches!(cur_phase, Some(Phase::CleanseValidate | Phase::ModelValidate))
+                {
+                    last_successful_validate_idx = Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    let start_idx = last_successful_validate_idx.unwrap_or(0);
+
     let mut count = 0usize;
-    for step in log.steps.iter() {
+    for (i, step) in log.steps.iter().enumerate() {
+        if i <= start_idx {
+            continue;
+        }
         let ThreadStep::Phase {
             phase: to_phase,
             from_phase: Some(from_phase),
@@ -1365,6 +1394,47 @@ mod tests {
     }
 
     #[test]
+    fn replan_backtrack_count_resets_after_successful_dbt_validate() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_author","from_phase":"model_plan"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_validate","from_phase":"model_author"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                // Loopback (validate -> author) prior to a successful validate.
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_author","from_phase":"model_validate"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"model_validate","from_phase":"model_author"}),
+                    serde_json::json!({"ok":true}),
+                ),
+                // Successful validate should reset the hard-stop counter.
+                step("dbt_validate", serde_json::json!({}), serde_json::json!({"ok":true})),
+                step(
+                    "phase",
+                    serde_json::json!({"phase":"publish_await_approval","from_phase":"model_validate"}),
+                    serde_json::json!({"ok":true}),
+                ),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            replan_backtrack_count_for_phase(Some(&log), Phase::PublishAwaitApproval),
+            0
+        );
+    }
+
+    #[test]
     fn guard_blocks_validate_until_mutation_after_failure() {
         let log = ThreadLog {
             steps: vec![
@@ -1394,7 +1464,7 @@ mod tests {
                 ),
                 step(
                     "dbt_files",
-                    serde_json::json!({"op":"patch","path":"models/a.sql","content":"select 1"}),
+                    serde_json::json!({"op":"patch","path":"models/a.sql","patch_text":"@@ ... @@\n+select 1\n"}),
                     serde_json::json!({"ok": true, "mutated": true}),
                 ),
             ],
@@ -1461,7 +1531,7 @@ mod tests {
                 // ok patch, but no-op (mutated=false)
                 step(
                     "dbt_files",
-                    serde_json::json!({"op":"patch","path":"models/a.sql","patch_text":"@@\n- select 1\n+ select 1\n"}),
+                    serde_json::json!({"op":"patch","path":"models/a.sql","patch_text":"@@ ... @@\n- select 1\n+ select 1\n"}),
                     serde_json::json!({"ok": true, "mutated": false}),
                 ),
             ],
@@ -1552,7 +1622,7 @@ mod tests {
                 ),
                 step(
                     "dbt_files",
-                    serde_json::json!({"op":"patch","path":"models/x.sql","content":"select 1"}),
+                    serde_json::json!({"op":"patch","path":"models/x.sql","patch_text":"@@ ... @@\n+select 1\n"}),
                     serde_json::json!({"ok": false, "error": "tool timeout"}),
                 ),
             ],
@@ -1654,7 +1724,7 @@ mod tests {
                 ),
                 step(
                     "dbt_files",
-                    serde_json::json!({"op":"patch","path":"models/x.sql","patch_text":"@@\n- select 1\n+ select 1\n"}),
+                    serde_json::json!({"op":"patch","path":"models/x.sql","patch_text":"@@ ... @@\n- select 1\n+ select 1\n"}),
                     serde_json::json!({"ok": false, "errors":["invalid sql"]}),
                 ),
             ],

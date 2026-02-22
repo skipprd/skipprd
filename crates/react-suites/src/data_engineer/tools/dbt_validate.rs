@@ -341,13 +341,20 @@ mod tests {
 
         let llm: Arc<dyn react_core::llm::LargeLanguageModel> = Arc::new(MockLlm {
             chat_responses: Mutex::new(vec![
-                // Grounded remediation response: apply a minimal formatting change so the repair loop makes progress.
+                // 1) grounded remediation selects file + provides brief instructions
                 serde_json::json!({
                     "changes": [{
                         "key":"t/w/p/dbt/models/m.sql",
-                        "patch_text": "@@ -1 +1 @@\\n-select 1\\n+select 1 -- remediation\\n",
+                        "instructions": "Append `-- remediation` to the query to produce a minimal change.",
                         "reason":"minimal change to trigger retry"
                     }],
+                    "notes": []
+                })
+                .to_string(),
+                // 2) single-file patch authored via llm_patch_loop_single_file
+                serde_json::json!({
+                    "path": "models/m.sql",
+                    "patch_text": "@@ ... @@\n-select 1\n+select 1 -- remediation\n",
                     "notes": []
                 })
                 .to_string(),
@@ -397,7 +404,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            obs.get("ok").and_then(|v| v.as_bool()),
+            Some(true),
+            "expected dbt_validate ok after one remediation retry; got: {}",
+            serde_json::to_string_pretty(&obs).unwrap_or_default()
+        );
         // Repair report should exist (best-effort)
         let _r: Option<crate::data_engineer::dbt_repair::repair_loop::RepairReport> = obs
             .get("repair_report")

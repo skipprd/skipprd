@@ -49,7 +49,7 @@ Finalization:
 pub fn tool_card() -> String {
     r#"Tools:
 - artifacts(args:{op:"list", dataset_id?:string, type?:"model"|"metric", limit?:int} | {op:"get", dataset_id:string, type:"model"|"metric", name:string})
-- dbt_files(args:{op:"list"|"get", prefix?:string, path?:string, limit?:int})
+- dbt_files(args:{op:"list", prefix?:string, limit?:int} | {op:"get", path:string, max_chars?:int} | {op:"get_json", path:string, pointer?:string} | {op:"manifest_find", path?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})
 - vect_query(args:{scope:"dataset"|"field"|"doc"|"artifact"|"metric"|"model", query_text:string, k:int})
 - sql_schema(args:{table?:string}) -> {"ok":true,"tables":[...]} or {"ok":true,"columns":[{"name":string,"type":string}]}
 - sql_stats(args:{table:string, field:string}) -> {"ok":true,"stats":{...}}

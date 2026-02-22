@@ -198,7 +198,11 @@ struct LlmRemediationResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LlmChange {
     key: String,
-    patch_text: String,
+    /// Brief, file-specific edit instructions (NOT a patch/diff).
+    ///
+    /// The actual patch is authored/applied via `llm_patch_loop_single_file` so we have one
+    /// retry/no-op breaker path for all LLM-driven mutations.
+    instructions: String,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -513,7 +517,7 @@ pub async fn remediate_dbt_sql_keys_with_llm(
             content_by_key.insert(k.clone(), c.clone());
         }
 
-        // Strict JSON-only contract so we can apply changes deterministically.
+        // Strict JSON-only contract: select files + provide brief per-file instructions.
         let sys = format!(
             "You are a meticulous SQL dialect remediation assistant.\n\
              Task: rewrite dbt SQL files so they are valid for the configured warehouse dialect.\n\
@@ -524,9 +528,9 @@ pub async fn remediate_dbt_sql_keys_with_llm(
              - Do not invent new tables/columns.\n\
              - Output MUST be valid JSON only (no markdown, no commentary).\n\
              Output schema:\n\
-             {{\"changes\":[{{\"key\":\"...\",\"patch_text\":\"@@ ...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+             {{\"changes\":[{{\"key\":\"...\",\"instructions\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
              Rules:\n\
-             - patch_text MUST be a unified diff for that file (Cursor-style hunks or git-style headers).\n\
+             - instructions MUST be brief and file-specific (not a patch/diff).\n\
              Only include a file in changes if you actually modify it.\n"
         );
         let user = serde_json::json!({
@@ -619,34 +623,54 @@ pub async fn remediate_dbt_sql_keys_with_llm(
                 .get(&ch.key)
                 .map(|s| sha256_hex(s))
                 .unwrap_or_else(|| String::new());
-            let mut patch_text = ch.patch_text.trim().to_string();
-            if patch_text.is_empty() {
-                return Err("remediation change patch_text is empty".to_string());
+            if ch.instructions.trim().is_empty() {
+                return Err("remediation change instructions is empty".to_string());
             }
-            let has_headers = patch_text
-                .lines()
-                .any(|l| l.trim_start().starts_with("--- "));
-            if !has_headers {
-                patch_text = format!(
-                    "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}",
-                    rel,
-                    patch_text
-                );
+
+            let sys_prompt = format!(
+                "You are a meticulous SQL dialect remediation patch author.\n\
+                 Dialect: {dialect}\n\
+                 Target file: {rel}\n\
+                 Make the smallest edit needed to make the SQL valid for the dialect.\n\
+                 Do not change business logic.\n\
+                 IMPORTANT: follow the patch JSON contract exactly.\n"
+            );
+            let user_payload = serde_json::json!({
+                "phase": phase,
+                "dialect": dialect,
+                "target_rel_path": rel,
+                "instructions": ch.instructions,
+                "reason": ch.reason
+            })
+            .to_string();
+
+            let (outcome, _notes) =
+                crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
+                    ctx,
+                    None,
+                    sys_prompt,
+                    user_payload,
+                    &rel,
+                    4,
+                    Some(LlmCallOptions {
+                        prompt_id: "data_engineer.dbt_dialect_remediation_patch",
+                        thread_id: ctx.thread_id.clone(),
+                        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                        max_output_tokens: None,
+                        temperature: Some(0.0),
+                        top_p: Some(1.0),
+                        reasoning_effort: None,
+                    }),
+                )
+                .await?;
+
+            if !expected_base.is_empty() && outcome.base_sha256 != expected_base {
+                return Err(format!(
+                    "dialect remediation patch base mismatch for {}: expected {}, got {}",
+                    rel, expected_base, outcome.base_sha256
+                ));
             }
-            let outcome = crate::data_engineer::project_fs::apply_patch(
-                ctx,
-                None,
-                &rel,
-                &patch_text,
-                if expected_base.is_empty() {
-                    None
-                } else {
-                    Some(expected_base.as_str())
-                },
-                Some(!expected_base.is_empty()),
-                crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
-            )
-            .await?;
+
             ctx.storage
                 .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
                 .await?;
@@ -695,7 +719,11 @@ struct GroundedRepairResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GroundedRepairChange {
     key: String,
-    patch_text: String,
+    /// Brief, file-specific edit instructions (NOT a patch/diff).
+    ///
+    /// The actual patch is authored/applied via `llm_patch_loop_single_file` so we have one
+    /// retry/no-op breaker path for all LLM-driven mutations.
+    instructions: String,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -1022,9 +1050,9 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
          - If you are not absolutely sure the change is correct given the provided schema and data samples, return NO changes and explain what additional evidence would be required.\n\
          - Output MUST be valid JSON only (no markdown, no commentary).\n\
          Output schema:\n\
-        {{\"changes\":[{{\"key\":\"...\",\"patch_text\":\"@@ ...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+        {{\"changes\":[{{\"key\":\"...\",\"instructions\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
          Rules:\n\
-         - patch_text MUST be a unified diff for that file (Cursor-style hunks or git-style headers).\n\
+         - instructions MUST be brief and file-specific (not a patch/diff).\n\
          Only include a file in changes if you actually modify it.\n"
     );
 
@@ -1079,7 +1107,7 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         },
     ];
     let call_opts = LlmCallOptions {
-        prompt_id: "data_engineer.dbt_find_missing_sources",
+        prompt_id: "data_engineer.dbt_grounded_repair_plan",
         thread_id: ctx.thread_id.clone(),
         expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
         temperature: Some(0.0),
@@ -1134,30 +1162,57 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
             .to_string();
         let existing = content_by_key.get(&ch.key).cloned().unwrap_or_default();
         let expected_base = sha256_hex(&existing);
-        let mut patch_text = ch.patch_text.trim().to_string();
-        if patch_text.is_empty() {
-            return Err("grounded repair change patch_text is empty".to_string());
+        if ch.instructions.trim().is_empty() {
+            return Err("grounded repair change instructions is empty".to_string());
         }
-        let has_headers = patch_text
-            .lines()
-            .any(|l| l.trim_start().starts_with("--- "));
-        if !has_headers {
-            patch_text = format!(
-                "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}",
-                rel,
-                patch_text
-            );
+
+        // One repair path: route every mutation through the single-file patch loop.
+        let sys_prompt = format!(
+            "You are a meticulous dbt auto-repair patch author.\n\
+             Dialect: {dialect}\n\
+             Target file: {rel}\n\
+             Make the smallest correct change needed.\n\
+             IMPORTANT: follow the patch JSON contract exactly.\n"
+        );
+        let user_payload = serde_json::json!({
+            "dialect": dialect,
+            "target_rel_path": rel,
+            "errors": errors,
+            "instructions": ch.instructions,
+            "reason": ch.reason,
+            "sources": sources,
+            "ref_models": ref_models
+        })
+        .to_string();
+
+        let (outcome, _notes) =
+            crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
+                ctx,
+                None,
+                sys_prompt,
+                user_payload,
+                &rel,
+                4,
+                Some(LlmCallOptions {
+                    prompt_id: "data_engineer.dbt_grounded_repair_patch",
+                    thread_id: ctx.thread_id.clone(),
+                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                    max_output_tokens: None,
+                    temperature: Some(0.0),
+                    top_p: Some(1.0),
+                    reasoning_effort: None,
+                }),
+            )
+            .await?;
+
+        // Safety: ensure the file we patched matches the base we scoped this remediation to.
+        if outcome.base_sha256 != expected_base {
+            return Err(format!(
+                "grounded repair patch base mismatch for {}: expected {}, got {}",
+                rel, expected_base, outcome.base_sha256
+            ));
         }
-        let outcome = crate::data_engineer::project_fs::apply_patch(
-            ctx,
-            None,
-            &rel,
-            &patch_text,
-            Some(expected_base.as_str()),
-            Some(true),
-            crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
-        )
-        .await?;
+
         ctx.storage
             .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
             .await?;
@@ -1199,7 +1254,11 @@ struct LlmUnresolvedColumnsResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LlmUnresolvedColumnsChange {
     key: String,
-    patch_text: String,
+    /// Brief, file-specific edit instructions (NOT a patch/diff).
+    ///
+    /// The actual patch is authored/applied via `llm_patch_loop_single_file` so we have one
+    /// retry/no-op breaker path for all LLM-driven mutations.
+    instructions: String,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -1389,7 +1448,7 @@ pub async fn remediate_unresolved_columns_with_llm(
         }));
     }
 
-    // Strict JSON-only contract; LLM returns patch_text unified diffs.
+    // Strict JSON-only contract: select files + provide brief per-file instructions.
     let provider_dialect_rules = {
         let mut out = String::new();
         for rule in ctx.warehouse.sql_remediation_rules().into_iter() {
@@ -1412,9 +1471,9 @@ pub async fn remediate_unresolved_columns_with_llm(
 {provider_dialect_rules}\
          - Return ONLY valid JSON (no markdown, no commentary).\n\
         Output schema:\n\
-         {{\"changes\":[{{\"key\":\"...\",\"patch_text\":\"@@ ...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+         {{\"changes\":[{{\"key\":\"...\",\"instructions\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
          Rules:\n\
-         - patch_text MUST be a unified diff for that file (Cursor-style hunks or git-style headers).\n\
+         - instructions MUST be brief and file-specific (not a patch/diff).\n\
          Only include a file in changes if you actually modify it.\n",
         provider_dialect_rules = provider_dialect_rules
     );
@@ -1529,30 +1588,57 @@ pub async fn remediate_unresolved_columns_with_llm(
 
         let existing = content_by_key.get(&ch.key).cloned().unwrap_or_default();
         let expected_base = sha256_hex(&existing);
-        let mut patch_text = ch.patch_text.trim().to_string();
-        if patch_text.is_empty() {
-            return Err("unresolved-columns repair change patch_text is empty".to_string());
+        if ch.instructions.trim().is_empty() {
+            return Err("unresolved-columns repair change instructions is empty".to_string());
         }
-        let has_headers = patch_text
-            .lines()
-            .any(|l| l.trim_start().starts_with("--- "));
-        if !has_headers {
-            patch_text = format!(
-                "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}",
-                rel,
-                patch_text
-            );
+
+        let sys_prompt = format!(
+            "You are a meticulous dbt unresolved-column repair patch author.\n\
+             Dialect: {dialect}\n\
+             Target file: {rel}\n\
+             Follow the provided schema facts strictly.\n\
+             Make the smallest correct change to resolve the error.\n\
+             IMPORTANT: follow the patch JSON contract exactly.\n"
+        );
+        let user_payload = serde_json::json!({
+            "phase": phase,
+            "dialect": dialect,
+            "target_rel_path": rel,
+            "dbt_error_brief": error_brief,
+            "unresolved_columns": unresolved_columns,
+            "instructions": ch.instructions,
+            "reason": ch.reason,
+            "ref_models": ref_models
+        })
+        .to_string();
+
+        let (outcome, _notes) =
+            crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
+                ctx,
+                None,
+                sys_prompt,
+                user_payload,
+                &rel,
+                4,
+                Some(LlmCallOptions {
+                    prompt_id: "data_engineer.dbt_resolve_missing_columns_patch",
+                    thread_id: ctx.thread_id.clone(),
+                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                    max_output_tokens: None,
+                    temperature: Some(0.0),
+                    top_p: Some(1.0),
+                    reasoning_effort: None,
+                }),
+            )
+            .await?;
+
+        if outcome.base_sha256 != expected_base {
+            return Err(format!(
+                "unresolved-columns repair patch base mismatch for {}: expected {}, got {}",
+                rel, expected_base, outcome.base_sha256
+            ));
         }
-        let outcome = crate::data_engineer::project_fs::apply_patch(
-            ctx,
-            None,
-            &rel,
-            &patch_text,
-            Some(expected_base.as_str()),
-            Some(true),
-            crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
-        )
-        .await?;
+
         ctx.storage
             .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
             .await?;
@@ -1753,13 +1839,23 @@ mod tests {
     async fn remediation_applies_llm_changes_to_storage() {
         let storage = Arc::new(InMemoryStorageAdapter::default());
         let mock = MockLlm::default();
-        *mock.chat_responses.lock().unwrap() = vec![serde_json::json!({
-            "changes": [
-                {"key":"t/w/p/dbt/models/m.sql","patch_text":"@@ -1 +1 @@\n-select 1\n+select 2\n","reason":"minimal"}
-            ],
-            "notes": ["ok"]
-        })
-        .to_string()];
+        *mock.chat_responses.lock().unwrap() = vec![
+            // 1) select files + provide brief per-file instructions
+            serde_json::json!({
+                "changes": [
+                    {"key":"t/w/p/dbt/models/m.sql","instructions":"Change `select 1` to `select 2`.","reason":"minimal"}
+                ],
+                "notes": ["ok"]
+            })
+            .to_string(),
+            // 2) single-file patch authored via llm_patch_loop_single_file
+            serde_json::json!({
+                "path":"models/m.sql",
+                "patch_text":"@@ ... @@\n-select 1\n+select 2\n",
+                "notes":[]
+            })
+            .to_string(),
+        ];
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(mock);
         let ctx = make_ctx(storage.clone(), llm);
         storage

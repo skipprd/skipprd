@@ -54,7 +54,7 @@ pub fn tool_card_common_prefix() -> &'static str {
       | {op:"get", path:string, max_chars?:int}
       | {op:"get_json", path:string, pointer?:string}
       | {op:"manifest_find", path?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int}
-  | {op:"patch", patch_text:string, path?:string}
+  | {op:"patch", path:string, patch_text:string}
   )
 - vect_query(args:{scope:"dataset"|"field"|"doc"|"artifact"|"metric"|"model", query_text:string, k:int})
 - search_dbt_examples(args:{query:string, k?:int}) -> {"ok":true,"examples":[{project,path,s3_uri,preview,score}]}
@@ -73,11 +73,11 @@ pub fn tool_card_common_prefix() -> &'static str {
   # - dataset_ids with exactly one item (len==1).
 
 Usage guidance:
-- Prefer batch scaffolding: use dbt_files op=patch to create dbt_project.yml, sources, and models in as few calls as possible.
+- Prefer batch scaffolding: use batch tools when available; for dbt_files op=patch, patch one file per call.
 - Use `dbt_files op=patch` for ALL DBT project files, including model SQL under models/.
-- For `dbt_files op=patch`, provide `patch_text` as unified diff:
-  - Preferred: Cursor-style hunks-only with `args.path` guard.
-  - Also valid: git-style unified diff (single-file or multi-file bundle with ---/+++ headers).
+- For `dbt_files op=patch`, provide `patch_text` as Cursor/Aider hunks-only unified diff:
+  - args.path is REQUIRED and is the single file to mutate.
+  - patch_text MUST start with `@@` and MUST NOT include git file headers (`---`/`+++`), `diff --git` preamble, or diffy-style headers (`--- original` / `+++ modified`).
   - Use Cursor/Aider hunk headers only: `@@ ... @@` (no line-number headers).
   The tool will compute and return `applied_patch_text` (canonical git-style diff) for audit.
 "#

@@ -355,6 +355,43 @@ Rules:
     fn normalize_plan_json_payload(expected_kind: &str, payload: &mut serde_json::Value) {
         // Deterministic normalizer for common plan-shape drift from LLMs.
         // Goal: avoid expensive/truncation-prone "plan_json_repair" loops.
+        // 0) Unwrap common wrapper shapes:
+        // - { "<kind>": { ...plan... } }
+        // - { "plan": { ...plan... } } / { "payload": { ...plan... } }
+        // - { "work_groups": { ...plan... } } (LLM mistakenly nests the whole plan here)
+        //
+        // We only unwrap when the inner object looks like a plan root (has `tasks`).
+        if payload.as_object().is_some() && payload.get("tasks").is_none() {
+            for k in [expected_kind, "plan", "payload", "final"] {
+                if let Some(inner) = payload.get(k).cloned() {
+                    if inner.get("tasks").is_some() && inner.is_object() {
+                        *payload = inner;
+                        Self::normalize_plan_json_payload(expected_kind, payload);
+                        return;
+                    }
+                }
+            }
+            if let Some(inner) = payload.get("work_groups").cloned() {
+                if inner.get("tasks").is_some() && inner.is_object() {
+                    *payload = inner;
+                    Self::normalize_plan_json_payload(expected_kind, payload);
+                    return;
+                }
+                // Another common drift: work_groups: [ { ...plan... } ]
+                if let Some(arr) = inner.as_array() {
+                    if arr.len() == 1 {
+                        if let Some(one) = arr.get(0).cloned() {
+                            if one.get("tasks").is_some() && one.is_object() {
+                                *payload = one;
+                                Self::normalize_plan_json_payload(expected_kind, payload);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let Some(obj) = payload.as_object_mut() else {
             return;
         };
@@ -403,6 +440,43 @@ Rules:
             }
         }
 
+        // If the LLM accidentally put plan-like objects inside `work_groups`, drop them so we
+        // can still parse the rest of the plan deterministically.
+        if let Some(wgs) = obj.get_mut("work_groups").and_then(|v| v.as_array_mut()) {
+            wgs.retain(|wg| wg.get("group_id").is_some() || wg.get("items").is_some());
+        } else if obj.get("work_groups").is_some() {
+            // Wrong type: prefer an empty default over a hard parse failure.
+            obj.insert("work_groups".to_string(), serde_json::Value::Array(vec![]));
+        }
+
+        // Plan root defaults / normalization (required by serde without #[serde(default)]).
+        let status_norm = obj
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| matches!(s.as_str(), "draft" | "approved" | "completed" | "cancelled"))
+            .unwrap_or_else(|| "draft".to_string());
+        obj.insert("status".to_string(), serde_json::Value::String(status_norm));
+        if obj.get("plan_key").and_then(|v| v.as_str()).is_none() {
+            obj.insert("plan_key".to_string(), serde_json::Value::String(String::new()));
+        }
+        if obj.get("project_snapshot").is_none() {
+            obj.insert("project_snapshot".to_string(), serde_json::Value::Object(Default::default()));
+        }
+        if obj.get("mutations").and_then(|v| v.as_array()).is_none() {
+            obj.insert("mutations".to_string(), serde_json::Value::Array(vec![]));
+        }
+        if obj.get("progress").and_then(|v| v.as_object()).is_none() {
+            obj.insert(
+                "progress".to_string(),
+                serde_json::json!({
+                    "last_applied_step_idx": 0,
+                    "consecutive_batch_failures": 0,
+                    "total_batch_failures": 0
+                }),
+            );
+        }
+
         // Normalize tasks[].checklist[].evidence to [] (planning/repair must not include evidence).
         let tasks_key = match expected_kind {
             "cleanse_plan" => "tasks",
@@ -425,6 +499,35 @@ Rules:
                     }
                 }
             }
+        }
+
+        // Ensure batches exist (required field). If absent, derive deterministically from tasks.
+        if obj.get("batches").and_then(|v| v.as_array()).is_none() {
+            let mut batch_items: Vec<String> = Vec::new();
+            if let Some(tasks) = obj.get("tasks").and_then(|v| v.as_array()) {
+                for t in tasks.iter() {
+                    if expected_kind == "cleanse_plan" {
+                        if let Some(id) = t.get("dataset_id").and_then(|v| v.as_str()) {
+                            let id = id.trim();
+                            if !id.is_empty() {
+                                batch_items.push(id.to_string());
+                            }
+                        }
+                    } else {
+                        if let Some(name) = t.get("name").and_then(|v| v.as_str()) {
+                            let name = name.trim();
+                            if !name.is_empty() {
+                                batch_items.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            let mut batches: Vec<Vec<String>> = Vec::new();
+            for chunk in batch_items.chunks(5) {
+                batches.push(chunk.to_vec());
+            }
+            obj.insert("batches".to_string(), serde_json::json!(batches));
         }
     }
 
@@ -1798,7 +1901,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 
                 tools_card_lines = vec![
                     "Allowed tools (plan phase, read-only):",
-                    "- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\", path?:string, prefix?:string, pointer?:string, limit?:int, max_chars?:int})",
+                    "- dbt_files(args:{op:\"list\", prefix?:string, limit?:int} | {op:\"get\", path:string, max_chars?:int} | {op:\"get_json\", path:string, pointer?:string} | {op:\"manifest_find\", path?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})",
                     "  - IMPORTANT: use args.op (NOT args.type). For list use args.prefix (NOT path:\".\").",
                     "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
                     "- run_sql (targeted probes)",
@@ -1843,21 +1946,11 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             if let Some(want) = self.single_target_path.as_ref() {
                                 fn collect_paths(v: &serde_json::Value) -> Vec<String> {
                                     let mut out: Vec<String> = Vec::new();
-                                    if let Some(pt) = v.get("patch_text").and_then(|x| x.as_str()) {
-                                        if let Ok(mut paths) =
-                                            crate::data_engineer::project_fs::patch_bundle_targets(pt)
-                                        {
-                                            out.append(&mut paths);
-                                        }
-                                    }
-                                    // Fallback: if a single-file guard is present, treat it as the intended path.
-                                    // (dbt_files will still validate patch_text targets.)
-                                    if out.is_empty() {
-                                        if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
-                                            let p = p.trim();
-                                            if !p.is_empty() {
-                                                out.push(p.to_string());
-                                            }
+                                    // Single-file target (required by the patch contract).
+                                    if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
+                                        let p = p.trim();
+                                        if !p.is_empty() {
+                                            out.push(p.to_string());
                                         }
                                     }
                                     out
@@ -1901,10 +1994,14 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             ));
                                         }
                                         crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile => {
-                                            // Hard cutover: Cursor-like patch DSL only (git-style unified diff).
-                                            // Require patch_text and a single-file guard path.
-                                            let has_patch_text =
-                                                args.get("patch_text").and_then(|v| v.as_str()).is_some();
+                                            // Hard cutover: Cursor/Aider hunks-only patches only.
+                                            // Require patch_text + single-file path guard.
+                                            let patch_text = args
+                                                .get("patch_text")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            let has_patch_text = !patch_text.trim().is_empty()
+                                                && patch_text.trim_start().starts_with("@@");
                                             let guard_path_ok = args
                                                 .get("path")
                                                 .and_then(|v| v.as_str())
@@ -1912,7 +2009,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                                 .unwrap_or(false);
                                             if !has_patch_text || !guard_path_ok {
                                                 return Err(format!(
-                                                    "deterministic repair ladder step requires a guarded single-file patch for '{}': args must include path='{}' + patch_text (git-style unified diff).",
+                                                    "deterministic repair ladder step requires a guarded single-file patch for '{}': args must include path='{}' + patch_text starting with '@@' (Cursor/Aider hunks-only; no ---/+++ headers).",
                                                     want,
                                                     want
                                                 ));
@@ -2014,7 +2111,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                     }
                     tool_lines.extend_from_slice(&[
                         "- dbt_files(args:{op:\"patch\"|\"rm\"|\"mv\", ...})",
-                        "  - op=patch args: {patch_text:string, path?:string} (git-style unified diff; path is optional single-file guard)",
+                        "  - op=patch args: {path:string, patch_text:string} (Cursor/Aider hunks-only; patch_text starts with '@@' and MUST NOT include ---/+++ or diff --git)",
                         "  - op=rm args: {path:string, expected_sha256?:string}",
                         "  - op=mv args: {from:string, to:string, expected_sha256?:string}",
                         "- run_sql(args:{sql:string}) (targeted probes; required after runtime failures)",
@@ -2083,7 +2180,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_cleanse_batch(args:{instructions?:string})",
 							"- apply_next_cleanse_schema_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", prefix?:string, path?:string, patch_text?:string, from?:string, to?:string, limit?:int, max_chars?:int})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\", prefix?:string, path?:string, pointer?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -2096,7 +2193,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_model_batch(args:{instructions?:string})",
 							"- apply_next_model_schema_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", prefix?:string, path?:string, patch_text?:string, from?:string, to?:string, limit?:int, max_chars?:int})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\", prefix?:string, path?:string, pointer?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -2117,7 +2214,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
 							"  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
 							"- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})",
 							"  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\"|\"rm\"|\"mv\", prefix?:string, path?:string, patch_text?:string, from?:string, to?:string, limit?:int, max_chars?:int})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\", prefix?:string, path?:string, pointer?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})",
 							"- ask_user(args:{prompt:string})",
 							"",
 							"Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).",
@@ -5516,7 +5613,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         repair.push_str("- You MUST patch ONLY the target file above.\n");
                         match ladder {
                             crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile => {
-                                repair.push_str("- IMPORTANT: You MUST provide a guarded single-file patch: args.path + args.patch_text (Cursor-style unified diff hunks or git-style). Do NOT patch any other file.\n");
+                                repair.push_str("- IMPORTANT: You MUST provide a guarded single-file patch: args.path + args.patch_text. patch_text MUST be Cursor/Aider hunks-only (starts with '@@ ... @@'; no diff --git/---/+++ headers). Do NOT patch any other file.\n");
                             }
                             crate::data_engineer::repair_state::RepairLadderStep::Stop => {
                                 repair.push_str("- STOP: prior repair attempts did not converge. Do not continue.\n");
@@ -7343,6 +7440,40 @@ mod tests {
         ) -> Result<Vec<Vec<String>>, String> {
             Ok(vec![])
         }
+    }
+
+    #[test]
+    fn normalize_plan_json_payload_unwraps_plan_nested_in_work_groups() {
+        let mut payload = serde_json::json!({
+            "work_groups": [{
+                "tasks": [{"dataset_id":"c.s.t"}]
+            }]
+        });
+        DataEngineerSuite::normalize_plan_json_payload("cleanse_plan", &mut payload);
+        assert!(payload.get("tasks").is_some(), "expected tasks at plan root");
+        assert_eq!(payload.get("status").and_then(|v| v.as_str()), Some("draft"));
+        assert_eq!(
+            payload.get("batches").cloned(),
+            Some(serde_json::json!([["c.s.t"]])),
+            "expected derived batches"
+        );
+    }
+
+    #[test]
+    fn normalize_plan_json_payload_drops_plan_like_objects_inside_work_groups_array() {
+        let mut payload = serde_json::json!({
+            "status": "draft",
+            "tasks": [],
+            "batches": [],
+            "work_groups": [
+                {"tasks": [{"dataset_id":"c.s.t"}]},
+                {"group_id":"wg1","label":"x","kind":"author_sql","items":[]}
+            ]
+        });
+        DataEngineerSuite::normalize_plan_json_payload("cleanse_plan", &mut payload);
+        let wgs = payload.get("work_groups").and_then(|v| v.as_array()).cloned().unwrap();
+        assert_eq!(wgs.len(), 1);
+        assert_eq!(wgs[0].get("group_id").and_then(|v| v.as_str()), Some("wg1"));
     }
 
     #[tokio::test]

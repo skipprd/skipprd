@@ -65,18 +65,11 @@ fn extract_dbt_files_paths(op: &str, args: &Value) -> Vec<String> {
 
     match op {
         "patch" => {
-            // Optional single-file guard.
+            // Single-file target (required by the patch contract).
             if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
                 let p = p.trim();
                 if !p.is_empty() {
                     out.push(p.to_string());
-                }
-            }
-
-            // Patch bundle targets.
-            if let Some(pt) = args.get("patch_text").and_then(|v| v.as_str()) {
-                if let Ok(paths) = crate::data_engineer::project_fs::patch_bundle_targets(pt) {
-                    out.extend(paths);
                 }
             }
         }
@@ -3586,7 +3579,8 @@ mod tests {
                 "dbt_files",
                 serde_json::json!({
                     "op":"patch",
-                    "patch_text": "diff --git a/models/schema.yml b/models/schema.yml\n--- /dev/null\n+++ b/models/schema.yml\n@@ -0,0 +1,8 @@\n+version: 2\n+\n+models:\n+  - name: dim_customers\n+    columns:\n+      - name: customer_id\n+sources:\n+  - name: test_raw\n"
+                    "path": "models/schema.yml",
+                    "patch_text": "@@ ... @@\n+version: 2\n+\n+models:\n+  - name: dim_customers\n+    columns:\n+      - name: customer_id\n+sources:\n+  - name: test_raw\n"
                 }),
                 serde_json::json!({"ok": true}),
                 Some(ExecutionContext {
@@ -3830,7 +3824,8 @@ mod tests {
                 "dbt_files",
                 serde_json::json!({
                     "op":"patch",
-                    "patch_text":"diff --git a/models/staging/stg_test_raw_raw_customers.sql b/models/staging/stg_test_raw_raw_customers.sql\n--- /dev/null\n+++ b/models/staging/stg_test_raw_raw_customers.sql\n@@ -0,0 +1 @@\n+select 1\n"
+                    "path": "models/staging/stg_test_raw_raw_customers.sql",
+                    "patch_text":"@@ ... @@\n+select 1\n"
                 }),
                 serde_json::json!({"ok": true, "mutated": true}),
             )],

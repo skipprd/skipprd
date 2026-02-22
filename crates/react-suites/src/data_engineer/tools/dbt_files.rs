@@ -880,8 +880,7 @@ fn canonicalize_silver_folder_alias(rel: &str) -> (String, Option<String>) {
 #[serde(deny_unknown_fields)]
 struct PatchTextArgs {
     patch_text: String,
-    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
-    path: Option<String>,
+    path: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -982,21 +981,21 @@ impl Tool for DbtFilesTool {
                 .await
             }
             "patch" => {
-                // Hard cutover: Cursor-like patch DSL only (git-style unified diff).
-                // We no longer accept patch primitives or full overwrites via new_text.
+                // Hard cutover: ONE patch input shape.
+                // args MUST be {op:"patch", path:"<single file>", patch_text:"<Cursor/Aider hunks-only>"}.
                 if args.get("replace_file").is_some()
                     || args.get("replace_range").is_some()
                     || args.get("replace_list").is_some()
                     || args.get("new_text").is_some()
                     || args.get("files").is_some()
                 {
-                    return Err("dbt_files op=patch contract violation: patch primitives and new_text/files overwrites are not supported. Provide {op:\"patch\", patch_text:\"<git-style unified diff / patch bundle>\", path?:\"<optional single-file guard>\"}.".to_string());
+                    return Err("dbt_files op=patch contract violation: patch primitives and new_text/files overwrites are not supported. Provide {op:\"patch\", path:\"<single file>\", patch_text:\"<Cursor/Aider hunks-only unified diff>\"}.".to_string());
                 }
                 if args.get("unified_git_style_patch").is_some() {
-                    return Err("dbt_files op=patch contract violation: unified_git_style_patch is not supported. Use patch_text (git-style unified diff).".to_string());
+                    return Err("dbt_files op=patch contract violation: unified_git_style_patch is not supported. Use patch_text (Cursor/Aider hunks-only).".to_string());
                 }
                 if args.get("preview_diff").is_some() {
-                    return Err("dbt_files op=patch contract violation: preview_diff is not supported. Use patch_text (git-style unified diff).".to_string());
+                    return Err("dbt_files op=patch contract violation: preview_diff is not supported. Use patch_text (Cursor/Aider hunks-only).".to_string());
                 }
 
                 let args_wo_op = args
@@ -1010,7 +1009,7 @@ impl Tool for DbtFilesTool {
 
                 let parsed = serde_json::from_value::<PatchTextArgs>(args_wo_op.clone()).map_err(|e| {
                     format!(
-                        "dbt_files op=patch contract violation: {}\n\nExpected args: {{\"op\":\"patch\",\"patch_text\":\"...\",\"path?\":\"...\"}}",
+                        "dbt_files op=patch contract violation: {}\n\nExpected args: {{\"op\":\"patch\",\"path\":\"...\",\"patch_text\":\"...\"}}",
                         e
                     )
                 })?;
@@ -1018,186 +1017,60 @@ impl Tool for DbtFilesTool {
                 if patch_in.is_empty() {
                     return Err("dbt_files op=patch contract violation: patch_text is empty".to_string());
                 }
-
-                fn rewrite_patch_header_paths_for_silver_aliases(
-                    patch_text: &str,
-                ) -> (String, Vec<(String, String)>) {
-                    let mut out_lines: Vec<String> = Vec::new();
-                    let mut rewrites: Vec<(String, String)> = Vec::new();
-                    for line in patch_text.lines() {
-                        let t = line.trim_end_matches('\r');
-                        let rewritten = if let Some(rest) = t.strip_prefix("diff --git ") {
-                            let parts: Vec<&str> = rest.split_whitespace().collect();
-                            if parts.len() >= 2 {
-                                let a = parts[0].trim();
-                                let b = parts[1].trim();
-                                let ap = a.strip_prefix("a/").unwrap_or(a);
-                                let bp = b.strip_prefix("b/").unwrap_or(b);
-                                let (a2, a_from) = canonicalize_silver_folder_alias(ap);
-                                let (b2, b_from) = canonicalize_silver_folder_alias(bp);
-                                if let Some(from) = a_from {
-                                    rewrites.push((from, a2.clone()));
-                                }
-                                if let Some(from) = b_from {
-                                    rewrites.push((from, b2.clone()));
-                                }
-                                format!("diff --git a/{a2} b/{b2}")
-                            } else {
-                                t.to_string()
-                            }
-                        } else if let Some(rest) = t.strip_prefix("--- ") {
-                            let p = rest.trim();
-                            if p == "/dev/null" {
-                                t.to_string()
-                            } else if p == "original" || p == "modified" {
-                                // Reject diffy-style patches at parse time; don't rewrite them here.
-                                t.to_string()
-                            } else {
-                                let p2 = p.strip_prefix("a/").unwrap_or(p);
-                                let (canon, from_opt) = canonicalize_silver_folder_alias(p2);
-                                if let Some(from) = from_opt {
-                                    rewrites.push((from, canon.clone()));
-                                }
-                                format!("--- a/{canon}")
-                            }
-                        } else if let Some(rest) = t.strip_prefix("+++ ") {
-                            let p = rest.trim();
-                            if p == "/dev/null" {
-                                t.to_string()
-                            } else if p == "modified" || p == "original" {
-                                // Reject diffy-style patches at parse time; don't rewrite them here.
-                                t.to_string()
-                            } else {
-                                let p2 = p.strip_prefix("b/").unwrap_or(p);
-                                let (canon, from_opt) = canonicalize_silver_folder_alias(p2);
-                                if let Some(from) = from_opt {
-                                    rewrites.push((from, canon.clone()));
-                                }
-                                format!("+++ b/{canon}")
-                            }
-                        } else {
-                            t.to_string()
-                        };
-                        out_lines.push(rewritten);
-                    }
-                    (out_lines.join("\n"), rewrites)
-                }
-
-                let (mut patch_text, mut path_rewrites) =
-                    rewrite_patch_header_paths_for_silver_aliases(patch_in);
-                // Targets are derived from the patch itself (after header rewrites).
-                // Also accept Cursor-style "hunks only" patches when `path` is provided:
-                // - patch_text starts at `@@` and omits ---/+++ headers.
-                let has_file_headers = patch_text
-                    .lines()
-                    .any(|l| l.trim_start().starts_with("--- "));
-                let mut targets = match project_fs::patch_bundle_targets(&patch_text) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        if !has_file_headers {
-                            let want = parsed.path.as_deref().ok_or_else(|| {
-                                format!(
-                                    "dbt_files op=patch contract violation: patch_text is missing file headers (---/+++). Provide args.path for single-file Cursor-style hunks-only patches, or include git-style headers. Parse error: {}",
-                                    e
-                                )
-                            })?;
-                            let want0 = project_fs::normalize_rel_path(want)?;
-                            let (want_rel, from_opt) = canonicalize_silver_folder_alias(&want0);
-                            if let Some(from) = from_opt {
-                                if from != want_rel {
-                                    path_rewrites.push((from, want_rel.clone()));
-                                }
-                            }
-                            // Synthesize a minimal git-style header so diffy can parse/apply.
-                            // If the target does not exist, express creation via /dev/null.
-                            let want_key = project_fs::join_storage_key(ctx, &want_rel);
-                            let want_exists = ctx.storage.get_bytes(&want_key).await.is_ok();
-                            let old_header = if want_exists {
-                                format!("a/{want_rel}")
-                            } else {
-                                "/dev/null".to_string()
-                            };
-                            patch_text = format!(
-                                "diff --git a/{0} b/{0}\n--- {1}\n+++ b/{0}\n{2}",
-                                want_rel,
-                                old_header,
-                                patch_text.trim_start()
-                            );
-                            vec![want_rel]
-                        } else {
-                            return Err(format!("dbt_files op=patch invalid patch_text: {}", e));
-                        }
-                    }
-                };
-                targets.sort();
-                targets.dedup();
-                if targets.is_empty() {
-                    return Err("dbt_files op=patch contract violation: patch bundle contained no file diffs".to_string());
-                }
-
-                if let Some(want) = parsed.path.as_deref() {
-                    let want0 = project_fs::normalize_rel_path(want)?;
-                    let (want_rel, _from_opt) = canonicalize_silver_folder_alias(&want0);
-                    if targets.len() != 1 || targets[0] != want_rel {
-                        return Err(format!(
-                            "dbt_files op=patch contract violation: path guard '{}' requires a single-file patch targeting exactly that path; patch targets: {}",
-                            want_rel,
-                            targets.join(", ")
-                        ));
+                let want0 = project_fs::normalize_rel_path(parsed.path.as_str())?;
+                let (want_rel, from_opt) = canonicalize_silver_folder_alias(&want0);
+                let mut path_rewrites: Vec<(String, String)> = Vec::new();
+                if let Some(from) = from_opt {
+                    if from != want_rel {
+                        path_rewrites.push((from, want_rel.clone()));
                     }
                 }
 
-                for rel in targets.iter() {
-                    validate_sql_model_folder_policy(rel)?;
+                // Strict: hunks-only, no file headers/preamble.
+                let trimmed = patch_in.trim_start();
+                if !trimmed.starts_with("@@") {
+                    return Err("dbt_files op=patch contract violation: patch_text must be Cursor/Aider hunks-only and start with '@@'".to_string());
+                }
+                for line in patch_in.lines() {
+                    let t = line.trim_start();
+                    if t.starts_with("diff --git ")
+                        || t.starts_with("--- ")
+                        || t.starts_with("+++ ")
+                        || t.starts_with("index ")
+                        || t.starts_with("new file mode ")
+                        || t.starts_with("deleted file mode ")
+                    {
+                        return Err("dbt_files op=patch contract violation: patch_text must be hunks-only (no diff --git/---/+++ headers or git metadata lines)".to_string());
+                    }
+                    if t.starts_with("@@ -") {
+                        return Err("dbt_files op=patch contract violation: hunk headers must be Cursor/Aider style '@@ ... @@' (no line-number headers like '@@ -a,b +c,d @@')".to_string());
+                    }
                 }
 
-                // Apply as a unified-diff bundle (Cursor-like).
-                let mut outcomes =
-                    project_fs::apply_patch_bundle(ctx, self.datasets.as_ref(), &patch_text).await?;
-                if outcomes.is_empty() {
-                    return Err("patch produced no file changes".to_string());
-                }
-                let any_mutation = outcomes.iter().any(|o| {
-                    o.base_sha256 != o.new_sha256 || (o.lines_added + o.lines_removed) > 0
-                });
-                if !any_mutation {
+                validate_sql_model_folder_policy(&want_rel)?;
+
+                let outcome = project_fs::apply_patch(
+                    ctx,
+                    self.datasets.as_ref(),
+                    &want_rel,
+                    patch_in,
+                    None,
+                    None,
+                    project_fs::PatchApplyKind::UnifiedDiff,
+                )
+                .await?;
+
+                if outcome.base_sha256 == outcome.new_sha256 && (outcome.lines_added + outcome.lines_removed) == 0 {
                     return Err("patch produced no file changes".to_string());
                 }
 
-                // Canonical applied patch: based on *postprocessed* file content actually produced by apply_patch.
-                outcomes.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
                 // Safety: reject staging schema YAML that references columns not produced by
                 // the sibling staging SQL output (prevents COLUMN_NOT_FOUND runtime errors).
-                validate_staging_schema_ymls(ctx, &outcomes).await?;
-                let applied_patch_text = outcomes
-                    .iter()
-                    .map(|o| o.git_patch.trim_end().to_string())
-                    .collect::<Vec<String>>()
-                    .join("\n\n");
+                validate_staging_schema_ymls(ctx, std::slice::from_ref(&outcome)).await?;
 
-                let mut results: Vec<Value> = Vec::new();
-                let mut written_keys: Vec<String> = Vec::new();
-                let mut mutated_any = false;
-                for outcome in outcomes.into_iter() {
-                    let mutated = outcome.base_sha256 != outcome.new_sha256;
-                    mutated_any = mutated_any || mutated;
-                    ctx.storage
-                        .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/plain")
-                        .await?;
-                    written_keys.push(outcome.key.clone());
-                    results.push(serde_json::json!({
-                        "path": outcome.rel_path,
-                        "key": outcome.key,
-                        "exists": outcome.existed,
-                        "mutated": mutated,
-                        "base_sha256": outcome.base_sha256,
-                        "new_sha256": outcome.new_sha256,
-                        "git_patch": outcome.git_patch,
-                        "diff": outcome.diff,
-                        "lines_added": outcome.lines_added,
-                        "lines_removed": outcome.lines_removed
-                    }));
-                }
+                ctx.storage
+                    .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/plain")
+                    .await?;
 
                 // Best-effort cleanup: if the patch targeted an alias path like models/silver/,
                 // delete the alias object after writing the canonical object.
@@ -1214,11 +1087,22 @@ impl Tool for DbtFilesTool {
 
                 Ok(serde_json::json!({
                     "ok": true,
-                    "mutated": mutated_any,
-                    "applied_patch_text": applied_patch_text,
-                    "written_keys": written_keys,
+                    "mutated": outcome.base_sha256 != outcome.new_sha256,
+                    "applied_patch_text": outcome.git_patch.trim_end().to_string(),
+                    "written_keys": [outcome.key.clone()],
                     "path_rewrites": rewrites_json,
-                    "results": results
+                    "results": [{
+                        "path": outcome.rel_path,
+                        "key": outcome.key,
+                        "exists": outcome.existed,
+                        "mutated": outcome.base_sha256 != outcome.new_sha256,
+                        "base_sha256": outcome.base_sha256,
+                        "new_sha256": outcome.new_sha256,
+                        "git_patch": outcome.git_patch,
+                        "diff": outcome.diff,
+                        "lines_added": outcome.lines_added,
+                        "lines_removed": outcome.lines_removed
+                    }]
                 }))
             }
             _ => Err(
@@ -1449,7 +1333,8 @@ mod tests {
             .call(
                 serde_json::json!({
                     "op": "patch",
-                    "patch_text": "diff --git a/models/core/x.sql b/models/core/x.sql\nnew file mode 100644\n--- /dev/null\n+++ b/models/core/x.sql\n@@ -0,0 +1 @@\n+select 1\n"
+                    "path": "models/core/x.sql",
+                    "patch_text": "@@ ... @@\n+select 1\n"
                 }),
                 &ctx,
             )
@@ -1488,7 +1373,8 @@ mod tests {
             .call(
                 serde_json::json!({
                     "op": "patch",
-                    "patch_text": "diff --git a/models/core/x.sql b/models/core/x.sql\nnew file mode 100644\n--- /dev/null\n+++ b/models/core/x.sql\n@@ -0,0 +1 @@\n+select 1\n",
+                    "path": "models/core/x.sql",
+                    "patch_text": "@@ ... @@\n+select 1\n",
                     "preview_diff": true
                 }),
                 &ctx,
@@ -1530,7 +1416,8 @@ mod tests {
             .call(
                 serde_json::json!({
                     "op": "patch",
-                    "patch_text": "diff --git a/models/core/x.sql b/models/core/x.sql\nnew file mode 100644\n--- /dev/null\n+++ b/models/core/x.sql\n@@ -0,0 +1 @@\n+select 1\n",
+                    "path": "models/core/x.sql",
+                    "patch_text": "@@ ... @@\n+select 1\n",
                     "base_sha256": "deadbeef"
                 }),
                 &ctx,
@@ -1569,11 +1456,8 @@ mod tests {
         tool.call(
             serde_json::json!({
                 "op": "patch",
-                "patch_text": r#"diff --git a/models/staging/stg_test_raw_raw_orders.sql b/models/staging/stg_test_raw_raw_orders.sql
-new file mode 100644
---- /dev/null
-+++ b/models/staging/stg_test_raw_raw_orders.sql
-@@ -0,0 +1,12 @@
+                "path": "models/staging/stg_test_raw_raw_orders.sql",
+                "patch_text": r#"@@ ... @@
 +with source as (
 +  select
 +    '2020-01-01 00:00:00' as placed_at_raw,
@@ -1597,11 +1481,8 @@ new file mode 100644
             .call(
                 serde_json::json!({
                     "op": "patch",
-                    "patch_text": r#"diff --git a/models/staging/stg_test_raw_raw_orders.yml b/models/staging/stg_test_raw_raw_orders.yml
-new file mode 100644
---- /dev/null
-+++ b/models/staging/stg_test_raw_raw_orders.yml
-@@ -0,0 +1,12 @@
+                    "path": "models/staging/stg_test_raw_raw_orders.yml",
+                    "patch_text": r#"@@ ... @@
 +version: 2
 +models:
 +  - name: stg_test_raw_raw_orders
@@ -1636,11 +1517,8 @@ new file mode 100644
         tool.call(
             serde_json::json!({
                 "op": "patch",
-                "patch_text": r#"diff --git a/models/staging/stg_test_raw_raw_orders.sql b/models/staging/stg_test_raw_raw_orders.sql
-new file mode 100644
---- /dev/null
-+++ b/models/staging/stg_test_raw_raw_orders.sql
-@@ -0,0 +1,12 @@
+                "path": "models/staging/stg_test_raw_raw_orders.sql",
+                "patch_text": r#"@@ ... @@
 +with source as (
 +  select
 +    '2020-01-01 00:00:00' as placed_at_raw,
@@ -1663,11 +1541,8 @@ new file mode 100644
             .call(
                 serde_json::json!({
                     "op": "patch",
-                    "patch_text": r#"diff --git a/models/staging/stg_test_raw_raw_orders.yml b/models/staging/stg_test_raw_raw_orders.yml
-new file mode 100644
---- /dev/null
-+++ b/models/staging/stg_test_raw_raw_orders.yml
-@@ -0,0 +1,10 @@
+                    "path": "models/staging/stg_test_raw_raw_orders.yml",
+                    "patch_text": r#"@@ ... @@
 +version: 2
 +models:
 +  - name: stg_test_raw_raw_orders

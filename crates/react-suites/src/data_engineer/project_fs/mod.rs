@@ -32,13 +32,32 @@ pub struct PatchOutcome {
 pub enum PatchApplyKind {
     /// Apply a git-style unified diff (possibly with git preamble).
     UnifiedDiff,
-    /// Overwrite the full file contents with the provided payload.
-    /// Deterministic helper path for callers that already produced final file text.
-    FullOverwrite,
 }
 
 pub fn create_patch_text(old: &str, new: &str) -> String {
     diffy::create_patch(old, new).to_string()
+}
+
+/// Create a Cursor/Aider-style hunks-only "full replacement" patch.
+///
+/// This avoids line-number hunks entirely and is intended for deterministic/internal authors that
+/// already produced final file text but still want to go through the unified patch apply path.
+pub fn hunks_only_full_replace_patch(old: &str, new: &str) -> String {
+    let (old_lines, _old_nl) = split_lines_preserve_trailing_newline(old);
+    let (new_lines, _new_nl) = split_lines_preserve_trailing_newline(new);
+    let mut out = String::new();
+    out.push_str("@@ ... @@\n");
+    for l in old_lines {
+        out.push('-');
+        out.push_str(&l);
+        out.push('\n');
+    }
+    for l in new_lines {
+        out.push('+');
+        out.push_str(&l);
+        out.push('\n');
+    }
+    out
 }
 
 /// Create a git-style unified diff for a single file.
@@ -53,26 +72,12 @@ pub fn create_git_patch_text(
 ) -> Result<String, String> {
     let rel = normalize_rel_path(rel_path)?;
     let base = diffy::create_patch(old, new).to_string();
-    let mut lines: Vec<&str> = base.lines().collect();
-    if lines.len() < 2 {
+    if base.lines().take(2).count() < 2 {
         return Err("failed to generate patch: missing header lines".to_string());
     }
 
     // diffy uses: "--- original" and "+++ modified"
     // Replace with git-style file headers.
-    lines[0] = if existed {
-        // NOTE: path prefix is informational only; apply logic keys off the rel_path we pass around.
-        // Keep a/ and b/ to match standard diffs.
-        // (apply_patch_bundle strips preamble but keeps these lines)
-        // Example: --- a/models/foo.sql
-        //          +++ b/models/foo.sql
-        // This also keeps patches compatible with git tooling for debugging.
-        // We do not attempt to preserve timestamps.
-        ""
-    } else {
-        ""
-    };
-
     // Build final output explicitly rather than trying to mutate &str slices.
     let header_old = if existed {
         format!("--- a/{}", rel)
@@ -566,32 +571,45 @@ pub async fn apply_patch(
     }
 
     let mut new_content = match kind {
-        PatchApplyKind::FullOverwrite => payload.to_string(),
         PatchApplyKind::UnifiedDiff => {
             let patch_text = payload;
-            let is_new_file_patch = patch_text.lines().any(|l| l.trim() == "--- /dev/null");
-            // Safety guard: never allow "new file" semantics on an existing file. This commonly leads to
-            // duplicated/concatenated content when LLMs attempt a full rewrite using a new-file diff.
-            if existed && is_new_file_patch {
-                return Err("invalid patch: patch indicates new file creation ('--- /dev/null') but the file already exists; produce a normal edit patch against the existing path".to_string());
-            }
-            if existed
-                && patch_text
-                    .lines()
-                    .any(|l| l.trim_start().starts_with("new file mode "))
-            {
-                return Err("invalid patch: patch indicates new file creation ('new file mode') but the file already exists; produce a normal edit patch against the existing path".to_string());
-            }
-            if !existed && !is_new_file_patch {
-                return Err(
-                    "file does not exist; creation must be expressed in the patch (git-style): include '--- /dev/null' and '+++ b/<path>'"
-                        .to_string(),
-                );
-            }
+            let has_file_headers = patch_text
+                .lines()
+                .any(|l| l.trim_start().starts_with("--- ") || l.trim_start().starts_with("+++ "));
+            let has_hunks = patch_text.lines().any(|l| l.trim_start().starts_with("@@"));
 
-            // Accept git-style patches (with optional preamble) by stripping down to the unified diff section
-            // (`---`/`+++` + hunks) before feeding into diffy.
-            let unified = strip_git_preamble_to_unified(patch_text)?;
+            // Cursor/Aider hunks-only patches: no file headers; apply using flexible search/replace.
+            if has_hunks && !has_file_headers {
+                // Enforce Aider-style headers for hunks-only mode.
+                for line in patch_text.lines() {
+                    let t = line.trim_start();
+                    if t.starts_with("@@ -") {
+                        return Err("invalid patch: hunks-only patch_text must use Cursor/Aider-style hunk headers ('@@ ... @@'), not line-number headers ('@@ -a,b +c,d @@')".to_string());
+                    }
+                }
+                if let Some(repl) = try_apply_unified_hunks_flexible(patch_text, &old) {
+                    repl
+                } else {
+                    return Err("invalid patch: hunks-only patch could not be applied to current file content".to_string());
+                }
+            } else {
+                let is_new_file_patch = patch_text.lines().any(|l| l.trim() == "--- /dev/null");
+                // Safety guard: never allow "new file" semantics on an existing file. This commonly leads to
+                // duplicated/concatenated content when LLMs attempt a full rewrite using a new-file diff.
+                if existed && is_new_file_patch {
+                    return Err("invalid patch: patch indicates new file creation ('--- /dev/null') but the file already exists; produce a normal edit patch against the existing path".to_string());
+                }
+                if existed
+                    && patch_text
+                        .lines()
+                        .any(|l| l.trim_start().starts_with("new file mode "))
+                {
+                    return Err("invalid patch: patch indicates new file creation ('new file mode') but the file already exists; produce a normal edit patch against the existing path".to_string());
+                }
+
+                // Accept git-style patches (with optional preamble) by stripping down to the unified diff section
+                // (`---`/`+++` + hunks) before feeding into diffy.
+                let unified = strip_git_preamble_to_unified(patch_text)?;
             // diffy::Patch borrows from the patch text, so keep any repaired patch text alive
             // for the duration of parsing + apply.
             let mut patch_src: Cow<'_, str> = Cow::Borrowed(&unified);
@@ -658,6 +676,7 @@ pub async fn apply_patch(
                     }
                 }
             }
+            }
         }
     };
     new_content = postprocess_content(ctx, datasets, &rel, &new_content).await?;
@@ -678,12 +697,6 @@ pub async fn apply_patch(
         lines_removed,
         content: new_content,
     })
-}
-
-#[derive(Clone, Debug)]
-struct ParsedFilePatch {
-    rel_path: String,
-    patch_text: String,
 }
 
 fn parse_hunk_range(part: &str, sign: char) -> Option<(usize, usize)> {
@@ -1072,111 +1085,6 @@ fn strip_git_preamble_to_unified(patch_chunk: &str) -> Result<String, String> {
         );
     }
     Ok(out.join("\n"))
-}
-
-fn parse_patch_target_rel_path(patch_chunk: &str) -> Result<String, String> {
-    // Prefer the +++ header (git-style uses +++ b/<path>).
-    for line in patch_chunk.lines() {
-        let t = line.trim_end_matches('\r');
-        if let Some(rest) = t.strip_prefix("+++ ") {
-            let p = rest.trim();
-            if p == "/dev/null" {
-                continue;
-            }
-            if p == "modified" || p == "original" {
-                return Err("invalid patch: expected git-style file header '+++ b/<path>' (got diffy-style +++ modified)".to_string());
-            }
-            let p = p.strip_prefix("b/").unwrap_or(p);
-            return normalize_rel_path(p);
-        }
-    }
-    // Fallback: diff --git a/<path> b/<path>
-    for line in patch_chunk.lines() {
-        let t = line.trim_end_matches('\r');
-        if let Some(rest) = t.strip_prefix("diff --git ") {
-            let parts: Vec<&str> = rest.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let b = parts[1].trim();
-                let b = b.strip_prefix("b/").unwrap_or(b);
-                return normalize_rel_path(b);
-            }
-        }
-    }
-    Err("invalid patch bundle: could not determine target path (missing +++ b/<path> or diff --git ...)".to_string())
-}
-
-fn split_git_patch_bundle(patch_text: &str) -> Result<Vec<ParsedFilePatch>, String> {
-    let s = patch_text.trim();
-    if s.is_empty() {
-        return Err("patch_text is empty".to_string());
-    }
-
-    // If we see explicit git file separators, split by them. Otherwise treat as a single-file patch.
-    let has_diff_git = s.lines().any(|l| l.trim_start().starts_with("diff --git "));
-    if !has_diff_git {
-        let rel = parse_patch_target_rel_path(s)?;
-        let unified = strip_git_preamble_to_unified(s)?;
-        return Ok(vec![ParsedFilePatch {
-            rel_path: rel,
-            patch_text: unified,
-        }]);
-    }
-
-    let mut chunks: Vec<String> = Vec::new();
-    let mut cur: Vec<String> = Vec::new();
-    for line in s.lines() {
-        let is_sep = line.trim_start().starts_with("diff --git ");
-        if is_sep && !cur.is_empty() {
-            chunks.push(cur.join("\n"));
-            cur.clear();
-        }
-        cur.push(line.to_string());
-    }
-    if !cur.is_empty() {
-        chunks.push(cur.join("\n"));
-    }
-
-    let mut out: Vec<ParsedFilePatch> = Vec::new();
-    for ch in chunks {
-        let rel = parse_patch_target_rel_path(&ch)?;
-        let unified = strip_git_preamble_to_unified(&ch)?;
-        out.push(ParsedFilePatch {
-            rel_path: rel,
-            patch_text: unified,
-        });
-    }
-    if out.is_empty() {
-        return Err("patch bundle contained no file diffs".to_string());
-    }
-    Ok(out)
-}
-
-pub fn patch_bundle_targets(patch_text: &str) -> Result<Vec<String>, String> {
-    let files = split_git_patch_bundle(patch_text)?;
-    Ok(files.into_iter().map(|f| f.rel_path).collect())
-}
-
-pub async fn apply_patch_bundle(
-    ctx: &AgentCtx,
-    datasets: Option<&std::sync::Arc<dyn DatasetCatalogProvider>>,
-    patch_text: &str,
-) -> Result<Vec<PatchOutcome>, String> {
-    let files = split_git_patch_bundle(patch_text)?;
-    let mut outcomes: Vec<PatchOutcome> = Vec::new();
-    for f in files {
-        let out = apply_patch(
-            ctx,
-            datasets,
-            &f.rel_path,
-            &f.patch_text,
-            None,
-            None,
-            PatchApplyKind::UnifiedDiff,
-        )
-        .await?;
-        outcomes.push(out);
-    }
-    Ok(outcomes)
 }
 
 pub fn compute_unified_diff(old: &str, new: &str) -> String {
@@ -2364,5 +2272,51 @@ packages:
         .await
         .expect("apply");
         assert!(out.content.contains("return 2;"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_accepts_hunks_only_for_new_file() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage, None);
+        let rel = "models/core/x.sql";
+        let patch_text = "@@ ... @@\n+select 1\n";
+        let out = apply_patch(
+            &ctx,
+            None,
+            rel,
+            patch_text,
+            None,
+            None,
+            PatchApplyKind::UnifiedDiff,
+        )
+        .await
+        .expect("apply");
+        assert!(out.content.to_ascii_lowercase().contains("select 1"));
+        assert!(out.content.contains("config(alias=\"x\""));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_accepts_hunks_only_for_existing_file() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone(), None);
+        let rel = "models/core/x.sql";
+        let key = join_storage_key(&ctx, rel);
+        ctx.storage
+            .put_bytes(&key, b"select 1\n", "text/sql")
+            .await
+            .expect("seed");
+        let patch_text = "@@ ... @@\n-select 1\n+select 2\n";
+        let out = apply_patch(
+            &ctx,
+            None,
+            rel,
+            patch_text,
+            None,
+            None,
+            PatchApplyKind::UnifiedDiff,
+        )
+        .await
+        .expect("apply");
+        assert!(out.content.to_ascii_lowercase().contains("select 2"));
     }
 }

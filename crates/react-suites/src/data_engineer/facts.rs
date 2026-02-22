@@ -104,21 +104,22 @@ fn dbt_files_patch_contract_value() -> Value {
                 "patch": {
                     "top_level_args": {
                         "op": "patch",
-                        "path": "optional string (single-file guard)",
-                        "patch_text": "string (Cursor-style unified diff; single-file hunks or multi-file bundle)"
+                        "path": "string (single target file; required)",
+                        "patch_text": "string (Cursor/Aider hunks-only unified diff; starts with '@@'; no file headers)"
                     },
                     "rules": [
                         "args.op MUST equal \"patch\"",
                         "Provide patch_text only (legacy patch primitives are not allowed)",
-                        "If path is provided, patch_text MUST target exactly that one path",
-                        "patch_text may be git-style (---/+++ headers) or Cursor-style hunks-only when path is provided"
+                        "args.path MUST be provided and patch_text MUST target exactly that one path",
+                        "patch_text MUST start with '@@' and MUST NOT include git file headers (---/+++), diff --git preamble, or diffy-style headers (--- original / +++ modified)",
+                        "Hunk headers MUST be Cursor/Aider style: '@@ ... @@' (no line numbers; never '@@ -a,b +c,d @@')"
                     ],
                     "example": {
                         "action": "dbt_files",
                         "args": {
                             "op": "patch",
                             "path": "models/marts/fct_example.sql",
-                            "patch_text": "@@ ...\n- old\n+ new\n"
+                            "patch_text": "@@ ... @@\n- old\n+ new\n"
                         }
                     }
                 },

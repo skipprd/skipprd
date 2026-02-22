@@ -792,11 +792,19 @@ mod tests {
             r#"select "context.session.id" as session_id from {{ source('src','events') }}"#;
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(MockLlm {
             chat_responses: Mutex::new(vec![
+                // 1) select files + provide brief per-file instructions
                 serde_json::json!({
                     "changes": [
-                        {"key": base_key, "patch_text": format!("@@ -1 +1 @@\n-{}\n+{}\n", old_sql, fixed_sql), "reason": "quote literal dotted column"}
+                        {"key": base_key, "instructions": "Quote the literal dotted column name as a single identifier (\"context.session.id\") instead of struct dereference.", "reason": "quote literal dotted column"}
                     ],
                     "notes": ["applied quoted identifier for dotted column"]
+                })
+                .to_string(),
+                // 2) single-file patch authored via llm_patch_loop_single_file
+                serde_json::json!({
+                    "path": "models/staging/stg_src_events.sql",
+                    "patch_text": format!("@@ ... @@\n-{}\n+{}\n", old_sql, fixed_sql),
+                    "notes": []
                 })
                 .to_string(),
             ]),

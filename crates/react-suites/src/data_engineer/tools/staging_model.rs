@@ -378,14 +378,15 @@ impl Tool for StagingModelTool {
         };
         if existing_schema.is_none() {
             let seed = "version: 2\n".to_string();
+            let patch_text = project_fs::hunks_only_full_replace_patch("", &seed);
             let outcome = match project_fs::apply_patch(
                 ctx,
                 self.datasets.as_ref(),
                 &schema_rel,
-                &seed,
+                &patch_text,
                 None,
                 None,
-                project_fs::PatchApplyKind::FullOverwrite,
+                project_fs::PatchApplyKind::UnifiedDiff,
             )
             .await
             {
@@ -434,14 +435,15 @@ impl Tool for StagingModelTool {
                     }
                 };
             if canonical != existing {
+                let patch_text = project_fs::hunks_only_full_replace_patch(existing, &canonical);
                 let outcome = match project_fs::apply_patch(
                     ctx,
                     self.datasets.as_ref(),
                     &schema_rel,
-                    &canonical,
+                    &patch_text,
                     None,
                     None,
-                    project_fs::PatchApplyKind::FullOverwrite,
+                    project_fs::PatchApplyKind::UnifiedDiff,
                 )
                 .await
                 {
@@ -614,16 +616,16 @@ impl Tool for StagingModelTool {
                 .await
                 .ok()
                 .map(|b| String::from_utf8_lossy(&b).to_string());
-            let _existed = existing_opt.is_some();
-            let _existing = existing_opt.unwrap_or_default();
+            let old_text = existing_opt.unwrap_or_default();
+            let patch_text = project_fs::hunks_only_full_replace_patch(&old_text, &sql_out);
             let outcome = project_fs::apply_patch(
                 ctx,
                 None,
                 &rel_path,
-                &sql_out,
+                &patch_text,
                 None,
                 None,
-                project_fs::PatchApplyKind::FullOverwrite,
+                project_fs::PatchApplyKind::UnifiedDiff,
             )
             .await?;
             if let Err(e) = ctx
@@ -874,14 +876,15 @@ impl Tool for StagingModelTool {
             } else {
                 Some(sha256_hex(&existing_sql))
             };
+            let patch_text = project_fs::hunks_only_full_replace_patch(&existing_sql, &dbt_sql);
             let outcome = match project_fs::apply_patch(
                 ctx,
                 None,
                 &rel_path,
-                &dbt_sql,
+                &patch_text,
                 base_sha256.as_deref(),
                 Some(!existing_sql.is_empty()),
-                project_fs::PatchApplyKind::FullOverwrite,
+                project_fs::PatchApplyKind::UnifiedDiff,
             )
             .await
             {

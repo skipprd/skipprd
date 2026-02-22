@@ -642,14 +642,15 @@ impl Tool for GoldModelTool {
             } else {
                 Some(sha256_hex(&existing_sql))
             };
+            let patch_text = project_fs::hunks_only_full_replace_patch(&existing_sql, &dbt_sql);
             let outcome = match project_fs::apply_patch(
                 ctx,
                 None,
                 &rel_path,
-                &dbt_sql,
+                &patch_text,
                 base_sha256.as_deref(),
                 Some(!existing_sql.is_empty()),
-                project_fs::PatchApplyKind::FullOverwrite,
+                project_fs::PatchApplyKind::UnifiedDiff,
             )
             .await
             {

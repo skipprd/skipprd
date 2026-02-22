@@ -908,6 +908,11 @@ impl Agent {
             let prompt =
                 Self::prompt_from_transcript(ctx, &mut transcript, &output_contract_line);
             let mut raw = Self::llm_chat_once(ctx, prompt, llm_options.clone()).await?;
+            // If the provider returned a deterministic error payload as "text", do not enter the
+            // invalid-JSON repair ladder (it only wastes tokens and repeats the same failure).
+            if raw.trim_start().starts_with("LLM_ERROR:") {
+                return Err(raw.trim().to_string());
+            }
             let step = match Self::parse_agent_step(&raw) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1563,6 +1568,80 @@ mod tests {
             }
             _ => panic!("expected final outcome"),
         }
+    }
+
+    #[tokio::test]
+    async fn llm_error_text_does_not_trigger_invalid_json_retries() {
+        let replies = Arc::new(Mutex::new(vec![
+            // Provider-side failure surfaced as plain text (common in some router layers).
+            "LLM_ERROR: You exceeded your current quota".to_string(),
+            // If the agent incorrectly retries, it would consume this.
+            "{\"type\":\"tool\",\"name\":\"noop\",\"args\":\"{}\",\"final\":null}".to_string(),
+        ]));
+        let llm = Arc::new(ScriptedModel { replies: replies.clone() });
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+
+        let mut reg = ToolRegistry::new();
+        reg.register(NoopTool);
+
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 8,
+            thread_id: Some("tid".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(DefaultPolicy),
+            llm,
+            storage,
+            scope,
+            keyspace,
+            query: None,
+            warehouse: Arc::new(crate::providers::NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            exec_ctx: None,
+            runtime: None,
+        };
+
+        let res = Agent::run_until_block(
+            &reg,
+            &ctx,
+            "sys",
+            "tools",
+            "q",
+            crate::llm::LlmCallOptions {
+                prompt_id: "react_core.agent.tests.llm_error_no_retry",
+                thread_id: None,
+                expected_format: crate::llm::LlmExpectedFormat::JsonObject,
+                max_output_tokens: None,
+                temperature: None,
+                top_p: None,
+                reasoning_effort: None,
+            },
+        )
+        .await;
+        assert!(res.is_err(), "expected run to fail fast on LLM_ERROR text");
+        let err = res.err().unwrap();
+
+        assert!(
+            err.contains("LLM_ERROR:"),
+            "expected error to include LLM_ERROR text; got: {err}"
+        );
+        assert_eq!(
+            replies.lock().unwrap().len(),
+            1,
+            "agent should not have retried after LLM_ERROR text"
+        );
     }
 
     struct CapturingDbtFilesPatchTool {

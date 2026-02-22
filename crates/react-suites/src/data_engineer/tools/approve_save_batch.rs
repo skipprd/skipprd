@@ -188,14 +188,17 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 }));
             }
 
+            let old_text = existing.clone().unwrap_or_default();
+            let patch_text =
+                crate::data_engineer::project_fs::hunks_only_full_replace_patch(&old_text, &content);
             let outcome = crate::data_engineer::project_fs::apply_patch(
                 ctx,
                 self.datasets.as_ref(),
                 &rel_path,
-                &content,
+                &patch_text,
                 None,
                 None,
-                crate::data_engineer::project_fs::PatchApplyKind::FullOverwrite,
+                crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
             )
             .await?;
             ctx.storage

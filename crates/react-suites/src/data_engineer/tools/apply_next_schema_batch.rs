@@ -782,7 +782,7 @@ mod tests {
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
             replies: Mutex::new(vec![serde_json::json!({
                 "path": "models/staging/stg_test_raw_raw_customers.yml",
-                "patch_text": "@@ -0,0 +1,6 @@\n+version: 2\n+\n+models:\n+  - name: stg_test_raw_raw_customers\n+    columns:\n+      - name: customer_id_raw\n+      - name: email_raw\n"
+                "patch_text": "@@ ... @@\n+version: 2\n+\n+models:\n+  - name: stg_test_raw_raw_customers\n+    columns:\n+      - name: customer_id_raw\n+      - name: email_raw\n"
             }).to_string()]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
@@ -890,7 +890,7 @@ mod tests {
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
             replies: Mutex::new(vec![serde_json::json!({
                 "path": "models/staging/stg_test_raw_raw_customers.yml",
-                "patch_text": "@@ -0,0 +1,6 @@\n+version: 2\n+\n+models:\n+  - name: stg_test_raw_raw_customers\n+    columns:\n+      - name: customer_id_raw\n+      - name: email_raw\n"
+                "patch_text": "@@ ... @@\n+version: 2\n+\n+models:\n+  - name: stg_test_raw_raw_customers\n+    columns:\n+      - name: customer_id_raw\n+      - name: email_raw\n"
             })
             .to_string()]),
         });
@@ -1014,7 +1014,7 @@ mod tests {
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
             replies: Mutex::new(vec![serde_json::json!({
                 "path": "models/schema.yml",
-                "patch_text": "@@ -0,0 +1,5 @@\n+version: 2\n+\n+models:\n+  - name: dim_customers\n+    columns: []\n"
+                "patch_text": "@@ ... @@\n+version: 2\n+\n+models:\n+  - name: dim_customers\n+    columns: []\n"
             }).to_string()]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
@@ -1121,7 +1121,7 @@ mod tests {
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
             replies: Mutex::new(vec![serde_json::json!({
                 "path": "models/schema.yml",
-                "patch_text": "@@ -0,0 +1,5 @@\n+version: 2\n+\n+models:\n+  - name: dim_customers\n+    columns: []\n"
+                "patch_text": "@@ ... @@\n+version: 2\n+\n+models:\n+  - name: dim_customers\n+    columns: []\n"
             })
             .to_string()]),
         });
@@ -1249,7 +1249,7 @@ mod tests {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let reply = serde_json::json!({
             "path": "models/schema.yml",
-            "patch_text": "@@ -0,0 +1,5 @@\n+version: 2\n+\n+models:\n+  - name: dim_customers\n+    columns: []\n"
+            "patch_text": "@@ ... @@\n+version: 2\n+\n+models:\n+  - name: dim_customers\n+    columns: []\n"
         })
         .to_string();
         let llm = Arc::new(InspectingLlm {
@@ -1370,7 +1370,7 @@ mod tests {
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
             replies: Mutex::new(vec![serde_json::json!({
                 "path": "models/schema.yml",
-                "patch_text": "@@ -0,0 +1,7 @@\n+version: 2\n+\n+models:\n+  - name: stg_test_raw_raw_customers\n+    columns: []\n+  - name: dim_customers\n+    columns: []\n"
+                "patch_text": "@@ ... @@\n+version: 2\n+\n+models:\n+  - name: stg_test_raw_raw_customers\n+    columns: []\n+  - name: dim_customers\n+    columns: []\n"
             }).to_string()]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
