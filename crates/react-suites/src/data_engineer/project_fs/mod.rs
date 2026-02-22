@@ -595,13 +595,22 @@ pub async fn apply_patch(
 
             // Cursor/Aider hunks-only patches: no file headers; apply using flexible search/replace.
             if has_hunks && !has_file_headers {
-                let normalized = normalize_hunks_only_patch_text(patch_text).map_err(|e| {
+                let normalized = normalize_hunks_only_patch_text(patch_text, &rel).map_err(|e| {
                     format!("invalid patch: {}", e)
                 })?;
                 if normalized.line_number_headers_rewritten > 0 {
                     apply_repairs.push(format!(
                         "normalized_line_number_hunk_headers={}",
                         normalized.line_number_headers_rewritten
+                    ));
+                }
+                if normalized.git_headers_stripped {
+                    apply_repairs.push("stripped_git_file_headers".to_string());
+                }
+                if normalized.git_metadata_lines_dropped > 0 {
+                    apply_repairs.push(format!(
+                        "dropped_git_metadata_lines={}",
+                        normalized.git_metadata_lines_dropped
                     ));
                 }
                 if let Some(repl) = try_apply_unified_hunks_flexible(normalized.patch_text.as_str(), &old) {

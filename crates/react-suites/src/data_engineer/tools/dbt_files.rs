@@ -1016,7 +1016,7 @@ impl Tool for DbtFilesTool {
                     }
                 }
 
-                let normalized = normalize_hunks_only_patch_text(parsed.patch_text.as_str()).map_err(|e| {
+                let normalized = normalize_hunks_only_patch_text(parsed.patch_text.as_str(), &want_rel).map_err(|e| {
                     format!("dbt_files op=patch contract violation: {}", e)
                 })?;
                 let patch_in = normalized.patch_text;
@@ -1065,7 +1065,9 @@ impl Tool for DbtFilesTool {
                     "applied_patch_text": outcome.git_patch.trim_end().to_string(),
                     "written_keys": [outcome.key.clone()],
                     "patch_normalization": {
-                        "line_number_headers_rewritten": normalized.line_number_headers_rewritten
+                        "line_number_headers_rewritten": normalized.line_number_headers_rewritten,
+                        "git_headers_stripped": normalized.git_headers_stripped,
+                        "git_metadata_lines_dropped": normalized.git_metadata_lines_dropped
                     },
                     "path_rewrites": rewrites_json,
                     "results": [{
@@ -1364,6 +1366,46 @@ mod tests {
         let rewrites = obs
             .get("patch_normalization")
             .and_then(|v| v.get("line_number_headers_rewritten"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert_eq!(rewrites, 1);
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_strips_git_headers_and_records_telemetry() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let obs = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/core/z.sql",
+                    "patch_text": "diff --git a/models/core/z.sql b/models/core/z.sql\nindex 123..456 100644\n--- a/models/core/z.sql\n+++ b/models/core/z.sql\n@@ -1,0 +1,1 @@\n+select 1\n"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("patch ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        let norm = obs
+            .get("patch_normalization")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        assert_eq!(
+            norm.get("git_headers_stripped").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            norm.get("git_metadata_lines_dropped")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            2
+        );
+        let rewrites = norm
+            .get("line_number_headers_rewritten")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         assert_eq!(rewrites, 1);

@@ -265,7 +265,7 @@ fn parse_llm_patch_response(
             rel, expected_rel_path
         ));
     }
-    let normalized = normalize_hunks_only_patch_text(parsed.patch_text.as_str())?;
+    let normalized = normalize_hunks_only_patch_text(parsed.patch_text.as_str(), expected_rel_path)?;
     parsed.patch_text = normalized.patch_text;
     Ok(parsed)
 }
@@ -732,6 +732,29 @@ mod tests {
         }"#;
         let parsed = parse_llm_patch_response(txt, "models/schema.yml").expect("parse ok");
         assert!(parsed.patch_text.starts_with("@@ ... @@"));
+    }
+
+    #[test]
+    fn parse_llm_patch_response_strips_git_headers_for_expected_path() {
+        let txt = r#"{
+          "path": "models/schema.yml",
+          "patch_text": "diff --git a/models/schema.yml b/models/schema.yml\n--- a/models/schema.yml\n+++ b/models/schema.yml\n@@ -1,1 +1,1 @@\n- a\n+ b\n"
+        }"#;
+        let parsed = parse_llm_patch_response(txt, "models/schema.yml").expect("parse ok");
+        assert!(parsed.patch_text.starts_with("@@ ... @@"));
+        assert!(!parsed.patch_text.contains("diff --git"));
+        assert!(!parsed.patch_text.contains("--- "));
+        assert!(!parsed.patch_text.contains("+++ "));
+    }
+
+    #[test]
+    fn parse_llm_patch_response_rejects_git_headers_for_wrong_path() {
+        let txt = r#"{
+          "path": "models/schema.yml",
+          "patch_text": "diff --git a/models/other.yml b/models/other.yml\n--- a/models/other.yml\n+++ b/models/other.yml\n@@ -1,1 +1,1 @@\n- a\n+ b\n"
+        }"#;
+        let err = parse_llm_patch_response(txt, "models/schema.yml").unwrap_err();
+        assert!(err.contains("must target expected path"));
     }
 
     fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {
