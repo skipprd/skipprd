@@ -132,6 +132,13 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+fn should_log_dbt_info_line(line: &str) -> bool {
+    // Keep INFO logs high-signal only. We still buffer full stdout/stderr for error handling.
+    let clean = strip_ansi(line);
+    let t = clean.trim();
+    t.contains("Done. PASS=")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DbtProgressMode {
     Build,
@@ -713,7 +720,6 @@ fn run_cmd_labeled(
     };
     for (is_err, line) in rx {
         if is_err {
-            tracing::info!(target: "dbt", phase = %label, runner = "host", stream = "stderr", "{}", line);
             err_buf.push_str(&line);
             err_buf.push('\n');
         } else {
@@ -727,7 +733,9 @@ fn run_cmd_labeled(
                     }
                 }
             }
-            tracing::info!(target: "dbt", phase = %label, runner = "host", stream = "stdout", "{}", line);
+            if should_log_dbt_info_line(&line) {
+                tracing::info!(target: "dbt", phase = %label, runner = "host", stream = "stdout", "{}", line);
+            }
             out_buf.push_str(&line);
             out_buf.push('\n');
         }
@@ -950,11 +958,12 @@ fn run_cmd_docker_labeled(
     let mut err_buf = String::new();
     for (is_err, line) in rx {
         if is_err {
-            tracing::info!(target: "dbt", phase = %label, runner = "docker", stream = "stderr", "{}", line);
             err_buf.push_str(&line);
             err_buf.push('\n');
         } else {
-            tracing::info!(target: "dbt", phase = %label, runner = "docker", stream = "stdout", "{}", line);
+            if should_log_dbt_info_line(&line) {
+                tracing::info!(target: "dbt", phase = %label, runner = "docker", stream = "stdout", "{}", line);
+            }
             out_buf.push_str(&line);
             out_buf.push('\n');
         }
