@@ -866,18 +866,18 @@ Apply these fixes in the output.",
         Self::parse_json_typed_lenient::<react_core::schema_registry::CleansePlanSkeletonV1>(&raw)
     }
 
-    async fn generate_model_skeleton(
+    async fn generate_model_candidates(
         ctx: &AgentCtx,
         planning_context: &str,
         memo: &str,
         critique: &react_core::schema_registry::PlanDesignCritiqueV1,
-    ) -> Result<react_core::schema_registry::ModelPlanSkeletonV1, String> {
+    ) -> Result<react_core::schema_registry::ModelPlanCandidatesV1, String> {
         use react_core::llm::ChatMessage;
         let opts = LlmCallOptions {
-            prompt_id: "data_engineer.model_plan_skeleton",
+            prompt_id: "data_engineer.model_plan_candidates",
             thread_id: ctx.thread_id.clone(),
             expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(
-                react_core::schema_registry::SchemaId::ModelPlanSkeletonV1,
+                react_core::schema_registry::SchemaId::ModelPlanCandidatesV1,
             ),
             temperature: Some(0.1),
             top_p: Some(1.0),
@@ -890,9 +890,9 @@ Apply these fixes in the output.",
             ),
             reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
         };
-        let sys = crate::prompts::plan::model_plan_skeleton_system_prompt();
+        let sys = crate::prompts::plan::model_plan_candidates_system_prompt();
         let user = format!(
-            "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nReturn skeleton JSON.",
+            "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nReturn candidate-selection JSON.",
             Self::excerpt(planning_context, 60_000),
             Self::excerpt(memo, 30_000),
             Self::critique_guidance(critique)
@@ -910,7 +910,7 @@ Apply these fixes in the output.",
             ],
             &opts,
         )?;
-        Self::parse_json_typed_lenient::<react_core::schema_registry::ModelPlanSkeletonV1>(&raw)
+        Self::parse_json_typed_lenient::<react_core::schema_registry::ModelPlanCandidatesV1>(&raw)
     }
 
     fn compile_cleanse_skeleton_payload(
@@ -932,13 +932,47 @@ Apply these fixes in the output.",
         })
     }
 
-    fn compile_model_skeleton_payload(
-        skeleton: &react_core::schema_registry::ModelPlanSkeletonV1,
+    fn model_plan_min_score() -> i32 {
+        std::env::var("LLM_MODEL_PLAN_MIN_SCORE")
+            .ok()
+            .and_then(|s| s.parse::<i32>().ok())
+            .map(|p| p.clamp(0, 100))
+            .unwrap_or(70)
+    }
+
+    fn select_high_value_model_candidates(
+        candidates: &[react_core::schema_registry::ModelPlanCandidateV1],
+    ) -> Vec<react_core::schema_registry::ModelPlanCandidateV1> {
+        if candidates.is_empty() {
+            return vec![];
+        }
+        let min_score = Self::model_plan_min_score();
+        let mut ranked = candidates.to_vec();
+        ranked.sort_by(|a, b| {
+            b.value_score
+                .cmp(&a.value_score)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        ranked
+            .into_iter()
+            .filter(|c| c.value_score >= min_score)
+            .collect()
+    }
+
+    fn compile_model_candidates_payload(
+        candidates: &react_core::schema_registry::ModelPlanCandidatesV1,
     ) -> serde_json::Value {
+        let selected = Self::select_high_value_model_candidates(&candidates.candidates);
+        let task_names: Vec<String> = selected.into_iter().map(|c| c.name).collect();
+        let batches: Vec<Vec<String>> = task_names.chunks(5).map(|c| c.to_vec()).collect();
+        let tasks: Vec<serde_json::Value> = task_names
+            .into_iter()
+            .map(|name| serde_json::json!({ "name": name }))
+            .collect();
         serde_json::json!({
             "status": "draft",
-            "tasks": skeleton.tasks,
-            "batches": skeleton.batches,
+            "tasks": tasks,
+            "batches": batches,
             "work_groups": [],
             "mutations": [],
             "progress": {
@@ -4213,15 +4247,15 @@ Apply these fixes in the output.",
                                 );
                                 return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
                             } else {
-                                let skeleton =
-                                    Self::generate_model_skeleton(
+                                let candidates =
+                                    Self::generate_model_candidates(
                                         &actx,
                                         &q,
                                         &design_memo,
                                         &design_critique,
                                     )
                                     .await?;
-                                let mut payload = Self::compile_model_skeleton_payload(&skeleton);
+                                let mut payload = Self::compile_model_candidates_payload(&candidates);
                                 Self::normalize_plan_json_payload("model_plan", &mut payload);
                                 let mut plan = match serde_json::from_value::<
                                     crate::data_engineer::plan::ModelPlan,
@@ -4268,6 +4302,23 @@ Apply these fixes in the output.",
                                     for it in t.checklist.iter_mut() {
                                         it.evidence.clear();
                                     }
+                                }
+                                let selected_candidates = Self::select_high_value_model_candidates(
+                                    &candidates.candidates,
+                                );
+                                if plan.project_snapshot.is_null() {
+                                    plan.project_snapshot = serde_json::json!({});
+                                }
+                                if let Some(obj) = plan.project_snapshot.as_object_mut() {
+                                    obj.insert(
+                                        "model_candidate_selection".to_string(),
+                                        serde_json::json!({
+                                            "min_score": Self::model_plan_min_score(),
+                                            "candidate_count": candidates.candidates.len(),
+                                            "selected_count": selected_candidates.len(),
+                                            "selected": selected_candidates,
+                                        }),
+                                    );
                                 }
                                 plan.status = crate::data_engineer::plan::PlanStatus::Draft;
                                 plan.plan_key =
@@ -7917,6 +7968,47 @@ mod tests {
             field.get("description").and_then(|v| v.as_str()),
             Some("derived from source trust")
         );
+    }
+
+    #[test]
+    fn select_high_value_model_candidates_uses_score_threshold_not_fixed_count() {
+        let candidates: Vec<react_core::schema_registry::ModelPlanCandidateV1> = (0..10)
+            .map(|i| react_core::schema_registry::ModelPlanCandidateV1 {
+                name: format!("m_{i}"),
+                insight: "x".to_string(),
+                observation: "y".to_string(),
+                value_score: 95 - (i as i32 * 5),
+            })
+            .collect();
+        let selected = DataEngineerSuite::select_high_value_model_candidates(&candidates);
+        assert_eq!(selected.len(), 6, "default min score 70 should keep 6");
+        assert_eq!(selected[0].name, "m_0");
+        assert_eq!(selected[5].name, "m_5");
+    }
+
+    #[test]
+    fn compile_model_candidates_payload_builds_batches_from_selected_threshold() {
+        let cands = react_core::schema_registry::ModelPlanCandidatesV1 {
+            candidates: (0..13)
+                .map(|i| react_core::schema_registry::ModelPlanCandidateV1 {
+                    name: format!("m_{i}"),
+                    insight: "high value".to_string(),
+                    observation: "grounded".to_string(),
+                    value_score: 100 - (i as i32 * 5),
+                })
+                .collect(),
+        };
+        let payload = DataEngineerSuite::compile_model_candidates_payload(&cands);
+        let tasks = payload.get("tasks").and_then(|v| v.as_array()).cloned().unwrap();
+        let batches = payload
+            .get("batches")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap();
+        assert_eq!(tasks.len(), 7, "default min score 70 should keep 7");
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].as_array().map(|a| a.len()), Some(5));
+        assert_eq!(batches[1].as_array().map(|a| a.len()), Some(2));
     }
 
     #[tokio::test]

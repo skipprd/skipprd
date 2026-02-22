@@ -78,10 +78,15 @@ No implementation_spec, no checklist, no work_groups, no prose."
         .to_string()
 }
 
-pub fn model_plan_skeleton_system_prompt() -> String {
-    "Return MODEL plan skeleton JSON only.\n\
-Use strict schema fields only: tasks[].name and batches.\n\
-No implementation_spec, no checklist, no work_groups, no prose."
+pub fn model_plan_candidates_system_prompt() -> String {
+    "Return MODEL candidate-selection JSON only.\n\
+Use strict schema fields only: candidates[].{name,insight,observation,value_score}.\n\
+Rules:\n\
+- Enumerate high-value candidate GOLD models based on grounded evidence.\n\
+- value_score must be an integer from 0 to 100 (higher = more value now).\n\
+- Keep insight/observation concise and concrete.\n\
+- Include only model names that can be authored from available staging/core inputs.\n\
+- Do not return batches, implementation_spec, checklist, work_groups, or prose."
         .to_string()
 }
 
