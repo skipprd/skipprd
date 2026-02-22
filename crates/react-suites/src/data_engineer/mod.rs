@@ -702,12 +702,7 @@ impl DataEngineerSuite {
     ) -> Result<String, String> {
         use react_core::llm::ChatMessage;
         let kind = if is_cleanse { "cleanse_plan" } else { "model_plan" };
-        let sys = format!(
-            "You are a principal analytics engineer writing a planning design memo.\n\
-Return plain text only (no JSON, no markdown tables).\n\
-Focus on: goals, entities, dependencies, risks, sequencing, and validation strategy.\n\
-Keep it concise but complete for downstream structured compilation."
-        );
+        let sys = crate::prompts::plan::plan_design_memo_system_prompt(kind);
         let user = format!(
             "Planning kind: {kind}\n\nContext:\n{}\n\nWrite the design memo.",
             Self::excerpt(planning_context, 120_000)
@@ -741,10 +736,94 @@ Keep it concise but complete for downstream structured compilation."
         ], &opts).map_err(|e| e.to_string())
     }
 
+    async fn critique_design_memo(
+        ctx: &AgentCtx,
+        is_cleanse: bool,
+        planning_context: &str,
+        memo: &str,
+    ) -> Result<react_core::schema_registry::PlanDesignCritiqueV1, String> {
+        use react_core::llm::ChatMessage;
+        let kind = if is_cleanse { "cleanse_plan" } else { "model_plan" };
+        let opts = LlmCallOptions {
+            prompt_id: "data_engineer.plan_design_critique",
+            thread_id: ctx.thread_id.clone(),
+            expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(
+                react_core::schema_registry::SchemaId::PlanDesignCritiqueV1,
+            ),
+            temperature: Some(0.1),
+            top_p: Some(1.0),
+            max_output_tokens: Some(
+                std::env::var("LLM_PLAN_CRITIQUE_MAX_TOKENS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(16_000)
+                    .max(2_000),
+            ),
+            reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
+        };
+        let sys = crate::prompts::plan::plan_design_critique_system_prompt(kind);
+        let user = format!(
+            "Planning kind: {kind}\n\nContext:\n{}\n\nDesign memo:\n{}\n\nReturn critique JSON.",
+            Self::excerpt(planning_context, 80_000),
+            Self::excerpt(memo, 40_000)
+        );
+        let raw = ctx.llm.chat(
+            &[
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: sys,
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: user,
+                },
+            ],
+            &opts,
+        )?;
+        Self::parse_json_typed_lenient::<react_core::schema_registry::PlanDesignCritiqueV1>(&raw)
+    }
+
+    fn critique_guidance(critique: &react_core::schema_registry::PlanDesignCritiqueV1) -> String {
+        if critique.blockers.is_empty() && critique.fixes.is_empty() {
+            return "Design critique: no blockers identified.".to_string();
+        }
+        let blockers = if critique.blockers.is_empty() {
+            "- (none)".to_string()
+        } else {
+            critique
+                .blockers
+                .iter()
+                .take(6)
+                .map(|b| format!("- {}", b.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let fixes = if critique.fixes.is_empty() {
+            "- (none)".to_string()
+        } else {
+            critique
+                .fixes
+                .iter()
+                .take(6)
+                .map(|f| format!("- {}", f.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        format!(
+            "Design critique (bounded one-pass):\n\
+ok={}\n\
+blockers:\n{}\n\
+fixes:\n{}\n\
+Apply these fixes in the output.",
+            critique.ok, blockers, fixes
+        )
+    }
+
     async fn generate_cleanse_skeleton(
         ctx: &AgentCtx,
         planning_context: &str,
         memo: &str,
+        critique: &react_core::schema_registry::PlanDesignCritiqueV1,
     ) -> Result<react_core::schema_registry::CleansePlanSkeletonV1, String> {
         use react_core::llm::ChatMessage;
         let opts = LlmCallOptions {
@@ -764,11 +843,12 @@ Keep it concise but complete for downstream structured compilation."
             ),
             reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
         };
-        let sys = "Return a CLEANSE plan skeleton JSON only. Include only tasks(dataset_id) and batches. No implementation details.";
+        let sys = crate::prompts::plan::cleanse_plan_skeleton_system_prompt();
         let user = format!(
-            "Context:\n{}\n\nDesign memo:\n{}\n\nReturn skeleton JSON.",
+            "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nReturn skeleton JSON.",
             Self::excerpt(planning_context, 60_000),
-            Self::excerpt(memo, 30_000)
+            Self::excerpt(memo, 30_000),
+            Self::critique_guidance(critique)
         );
         let raw = ctx.llm.chat(
             &[
@@ -790,6 +870,7 @@ Keep it concise but complete for downstream structured compilation."
         ctx: &AgentCtx,
         planning_context: &str,
         memo: &str,
+        critique: &react_core::schema_registry::PlanDesignCritiqueV1,
     ) -> Result<react_core::schema_registry::ModelPlanSkeletonV1, String> {
         use react_core::llm::ChatMessage;
         let opts = LlmCallOptions {
@@ -809,11 +890,12 @@ Keep it concise but complete for downstream structured compilation."
             ),
             reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
         };
-        let sys = "Return a MODEL plan skeleton JSON only. Include only tasks(name) and batches. No implementation details.";
+        let sys = crate::prompts::plan::model_plan_skeleton_system_prompt();
         let user = format!(
-            "Context:\n{}\n\nDesign memo:\n{}\n\nReturn skeleton JSON.",
+            "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nReturn skeleton JSON.",
             Self::excerpt(planning_context, 60_000),
-            Self::excerpt(memo, 30_000)
+            Self::excerpt(memo, 30_000),
+            Self::critique_guidance(critique)
         );
         let raw = ctx.llm.chat(
             &[
@@ -873,6 +955,7 @@ Keep it concise but complete for downstream structured compilation."
         ctx: &AgentCtx,
         planning_context: &str,
         memo: &str,
+        critique: &react_core::schema_registry::PlanDesignCritiqueV1,
         plan: &mut crate::data_engineer::plan::CleansePlan,
         task_ids: &[String],
     ) -> Result<(), String> {
@@ -880,11 +963,12 @@ Keep it concise but complete for downstream structured compilation."
         for chunk in task_ids.chunks(Self::plan_enrich_chunk_size()) {
             let chunk_vec = chunk.to_vec();
             let summary = crate::data_engineer::plan::summarize_cleanse_plan(plan, 50);
-            let sys = "Return CLEANSE enrichment JSON only for the requested task_ids. Each item must include task_id and implementation_spec_json.";
+            let sys = crate::prompts::plan::cleanse_plan_enrichment_system_prompt();
             let user = format!(
-                "Context:\n{}\n\nDesign memo:\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nReturn schema-valid enrichment JSON.",
+                "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nReturn schema-valid enrichment JSON.",
                 Self::excerpt(planning_context, 30_000),
                 Self::excerpt(memo, 20_000),
+                Self::critique_guidance(critique),
                 summary,
                 serde_json::to_string_pretty(&chunk_vec).unwrap_or_else(|_| "[]".to_string())
             );
@@ -932,6 +1016,7 @@ Keep it concise but complete for downstream structured compilation."
         ctx: &AgentCtx,
         planning_context: &str,
         memo: &str,
+        critique: &react_core::schema_registry::PlanDesignCritiqueV1,
         plan: &mut crate::data_engineer::plan::ModelPlan,
         task_ids: &[String],
     ) -> Result<(), String> {
@@ -939,11 +1024,12 @@ Keep it concise but complete for downstream structured compilation."
         for chunk in task_ids.chunks(Self::plan_enrich_chunk_size()) {
             let chunk_vec = chunk.to_vec();
             let summary = crate::data_engineer::plan::summarize_model_plan(plan, 50);
-            let sys = "Return MODEL enrichment JSON only for the requested task_ids. Each item must include task_id and implementation_spec_json.";
+            let sys = crate::prompts::plan::model_plan_enrichment_system_prompt();
             let user = format!(
-                "Context:\n{}\n\nDesign memo:\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nReturn schema-valid enrichment JSON.",
+                "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nReturn schema-valid enrichment JSON.",
                 Self::excerpt(planning_context, 30_000),
                 Self::excerpt(memo, 20_000),
+                Self::critique_guidance(critique),
                 summary,
                 serde_json::to_string_pretty(&chunk_vec).unwrap_or_else(|_| "[]".to_string())
             );
@@ -3803,9 +3889,17 @@ Keep it concise but complete for downstream structured compilation."
                             }
 
                             let design_memo = Self::generate_design_memo(&actx, is_cleanse, &q).await?;
+                            let design_critique =
+                                Self::critique_design_memo(&actx, is_cleanse, &q, &design_memo).await?;
                             if is_cleanse {
                                 let skeleton =
-                                    Self::generate_cleanse_skeleton(&actx, &q, &design_memo).await?;
+                                    Self::generate_cleanse_skeleton(
+                                        &actx,
+                                        &q,
+                                        &design_memo,
+                                        &design_critique,
+                                    )
+                                    .await?;
                                 let mut payload = Self::compile_cleanse_skeleton_payload(&skeleton);
                                 Self::normalize_plan_json_payload("cleanse_plan", &mut payload);
                                 let mut plan = match serde_json::from_value::<
@@ -3869,6 +3963,11 @@ Keep it concise but complete for downstream structured compilation."
                                     "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
                                     "dbt_project_yml_etag": actx.storage.head_etag(&actx.keyspace.dbt_project_key(&actx.scope)).await.ok().flatten(),
                                     "plan_design_memo": Self::excerpt(&design_memo, 12_000),
+                                    "plan_design_critique": {
+                                        "ok": design_critique.ok,
+                                        "blockers": design_critique.blockers.clone(),
+                                        "fixes": design_critique.fixes.clone()
+                                    },
                                 });
                                 if entered_from_actionable_review {
                                     if let Some(obj) = plan.project_snapshot.as_object_mut() {
@@ -3973,7 +4072,14 @@ Keep it concise but complete for downstream structured compilation."
                                     .map(|t| t.dataset_id.trim().to_string())
                                     .filter(|s| !s.is_empty())
                                     .collect();
-                                Self::enrich_cleanse_tasks(&actx, &q, &design_memo, &mut plan, &enrich_ids)
+                                Self::enrich_cleanse_tasks(
+                                    &actx,
+                                    &q,
+                                    &design_memo,
+                                    &design_critique,
+                                    &mut plan,
+                                    &enrich_ids,
+                                )
                                     .await?;
                                 // Crash-safety: persist the grounded/pruned draft so resume/inspection reflects
                                 // what we actually validated/critiqued (not just the initial parsed JSON).
@@ -3998,6 +4104,7 @@ Keep it concise but complete for downstream structured compilation."
                                             &actx,
                                             &q,
                                             &design_memo,
+                                            &design_critique,
                                             &mut plan,
                                             &targeted,
                                         )
@@ -4107,7 +4214,13 @@ Keep it concise but complete for downstream structured compilation."
                                 return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
                             } else {
                                 let skeleton =
-                                    Self::generate_model_skeleton(&actx, &q, &design_memo).await?;
+                                    Self::generate_model_skeleton(
+                                        &actx,
+                                        &q,
+                                        &design_memo,
+                                        &design_critique,
+                                    )
+                                    .await?;
                                 let mut payload = Self::compile_model_skeleton_payload(&skeleton);
                                 Self::normalize_plan_json_payload("model_plan", &mut payload);
                                 let mut plan = match serde_json::from_value::<
@@ -4170,6 +4283,11 @@ Keep it concise but complete for downstream structured compilation."
                                     "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
                                     "dbt_project_yml_etag": actx.storage.head_etag(&actx.keyspace.dbt_project_key(&actx.scope)).await.ok().flatten(),
                                     "plan_design_memo": Self::excerpt(&design_memo, 12_000),
+                                    "plan_design_critique": {
+                                        "ok": design_critique.ok,
+                                        "blockers": design_critique.blockers.clone(),
+                                        "fixes": design_critique.fixes.clone()
+                                    },
                                 });
                                 if entered_from_actionable_review {
                                     if let Some(obj) = plan.project_snapshot.as_object_mut() {
@@ -4256,7 +4374,14 @@ Keep it concise but complete for downstream structured compilation."
                                     .map(|t| t.name.trim().to_string())
                                     .filter(|s| !s.is_empty())
                                     .collect();
-                                Self::enrich_model_tasks(&actx, &q, &design_memo, &mut plan, &enrich_ids)
+                                Self::enrich_model_tasks(
+                                    &actx,
+                                    &q,
+                                    &design_memo,
+                                    &design_critique,
+                                    &mut plan,
+                                    &enrich_ids,
+                                )
                                     .await?;
                                 // Crash-safety: persist the grounded/pruned draft so resume/inspection reflects
                                 // what we actually validated/critiqued (not just the initial parsed JSON).
@@ -4282,6 +4407,7 @@ Keep it concise but complete for downstream structured compilation."
                                             &actx,
                                             &q,
                                             &design_memo,
+                                            &design_critique,
                                             &mut plan,
                                             &targeted,
                                         )

@@ -17,6 +17,7 @@ pub enum SchemaId {
     ModelPlanSkeletonV1,
     CleansePlanEnrichmentV1,
     ModelPlanEnrichmentV1,
+    PlanDesignCritiqueV1,
 }
 
 impl SchemaId {
@@ -28,6 +29,7 @@ impl SchemaId {
             SchemaId::ModelPlanSkeletonV1 => "data_engineer.model_plan_skeleton.v1",
             SchemaId::CleansePlanEnrichmentV1 => "data_engineer.cleanse_plan_enrichment.v1",
             SchemaId::ModelPlanEnrichmentV1 => "data_engineer.model_plan_enrichment.v1",
+            SchemaId::PlanDesignCritiqueV1 => "data_engineer.plan_design_critique.v1",
         }
     }
 }
@@ -180,6 +182,14 @@ pub struct ModelPlanEnrichmentV1 {
     pub items: Vec<ModelPlanEnrichmentItemV1>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDesignCritiqueV1 {
+    pub ok: bool,
+    pub blockers: Vec<String>,
+    pub fixes: Vec<String>,
+}
+
 fn schema_for_id(id: SchemaId) -> Value {
     let schema = match id {
         SchemaId::AgentStepV1 => schemars::schema_for!(AgentStepV1),
@@ -188,6 +198,7 @@ fn schema_for_id(id: SchemaId) -> Value {
         SchemaId::ModelPlanSkeletonV1 => schemars::schema_for!(ModelPlanSkeletonV1),
         SchemaId::CleansePlanEnrichmentV1 => schemars::schema_for!(CleansePlanEnrichmentV1),
         SchemaId::ModelPlanEnrichmentV1 => schemars::schema_for!(ModelPlanEnrichmentV1),
+        SchemaId::PlanDesignCritiqueV1 => schemars::schema_for!(PlanDesignCritiqueV1),
     };
     let root_v = serde_json::to_value(&schema).expect("schema serialization must succeed");
     root_schema_json_to_json_schema_value(root_v)
@@ -324,6 +335,10 @@ pub fn json_schema(id: SchemaId) -> Value {
         m.insert(
             SchemaId::ModelPlanEnrichmentV1,
             schema_for_id(SchemaId::ModelPlanEnrichmentV1),
+        );
+        m.insert(
+            SchemaId::PlanDesignCritiqueV1,
+            schema_for_id(SchemaId::PlanDesignCritiqueV1),
         );
         m
     });
