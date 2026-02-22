@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::json;
 
 use crate::data_engineer_shared::policy_sql_validated::SqlValidatedPolicy;
@@ -273,87 +272,35 @@ enum UserDecision {
     Reject,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct PlanCritique {
-    #[serde(default)]
-    ok: bool,
-    #[serde(default)]
-    blockers: Vec<String>,
-    #[serde(default)]
-    fixes: Vec<String>,
-}
-
 impl DataEngineerSuite {
-    /// Bound the design-first planning loop to guarantee termination.
-    const MAX_PLAN_DESIGN_ROUNDS: usize = 3;
-
-    fn plan_json_repair_system_prompt(kind: &str) -> String {
-        match kind {
-            "cleanse_plan" => crate::prompts::plan::cleanse_plan_system_prompt()
-                + "\n\nSTRICT REPAIR MODE:\n\
-- Tools are NOT available.\n\
-- You MUST finish with a single final result (no tool calls).\n\
-- Do not output any prose outside the contracted output.\n\
-- When you finish: final.kind MUST be \"cleanse_plan\".\n",
-            "model_plan" => crate::prompts::plan::model_plan_system_prompt()
-                + "\n\nSTRICT REPAIR MODE:\n\
-- Tools are NOT available.\n\
-- You MUST finish with a single final result (no tool calls).\n\
-- Do not output any prose outside the contracted output.\n\
-- When you finish: final.kind MUST be \"model_plan\".\n",
-            _ => {
-                "You are repairing a JSON plan.\n\
-Hard rules:\n\
-- Tools are NOT available.\n\
-- Output format is enforced by the system-provided output contract.\n"
-                    .to_string()
-            }
-        }
-    }
-
-    fn plan_design_critic_system_prompt(kind: &str) -> String {
-        let base = r#"You are a plan design critic for a dbt project.
-
-You will be given a DRAFT plan JSON (already parsed by the server).
-Your job is to determine whether the plan is explicit enough that authoring can implement it without inventing logic.
-
-Return a JSON object with this schema:
-{
-  "ok": true|false,
-  "blockers": [string, ...],
-  "fixes": [string, ...]
-}
-
-Rules:
-- Be pragmatic: report only blocker/high-risk issues (max 6 blockers).
-- Each blocker must mention the specific plan location (dataset_id/model name and field/metric) and the smallest fix.
-- If ok=true, blockers MUST be [].
-- fixes should be short, imperative, and directly actionable (max 6).
-"#;
-
-        if kind == "cleanse_plan" {
-            return format!(
-                "{base}\n\nFocus: SILVER cleanse (models/staging/).\n\
-- CRITICAL: row-preserving. No filtering, no dedup, no grain enforcement.\n\
-- `tasks[].implementation_spec` is REQUIRED and must be explicit.\n\
-- `implementation_spec.output_fields` must include:\n\
-  - raw fields (or explicitly justify omissions)\n\
-  - canonical clean fields\n\
-  - derived typed fields only when grounded\n\
-  - quality flags derived from the canonical field (avoid duplicated logic)\n\
-- Watch for contradictions like: validity flag not derived from canonical field; duplicate cast logic.\n"
-            );
-        }
-        format!(
-            "{base}\n\nFocus: GOLD (models/core/ + models/marts/).\n\
-- `tasks[].implementation_spec` is REQUIRED and must be explicit.\n\
-- Must include grain + at least one metric or an explicit output schema with business meaning.\n\
-- Join contracts must be explicit (join_type, keys) and align with inputs.\n\
-- Metrics must have clear definitions + caveats.\n"
-        )
-    }
-
     fn normalize_plan_json_payload(expected_kind: &str, payload: &mut serde_json::Value) {
+        fn normalized_string_vec(v: Option<&serde_json::Value>) -> Vec<String> {
+            let mut out = Vec::new();
+            if let Some(arr) = v.and_then(|x| x.as_array()) {
+                for it in arr {
+                    let s = if let Some(s) = it.as_str() {
+                        s.trim().to_string()
+                    } else if let Some(obj) = it.as_object() {
+                        obj.get("task_id")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| obj.get("name").and_then(|v| v.as_str()))
+                            .or_else(|| obj.get("dataset_id").and_then(|v| v.as_str()))
+                            .unwrap_or("")
+                            .trim()
+                            .to_string()
+                    } else {
+                        String::new()
+                    };
+                    if !s.is_empty() {
+                        out.push(s);
+                    }
+                }
+            }
+            out.sort();
+            out.dedup();
+            out
+        }
+
         // Deterministic normalizer for common plan-shape drift from LLMs.
         // Goal: avoid expensive/truncation-prone "plan_json_repair" loops.
         // 0) Unwrap common wrapper shapes:
@@ -397,12 +344,53 @@ Rules:
             return;
         };
 
-        // Normalize work_groups[].items[].checklist_item_id
+        // Normalize root task aliases first (skeleton-compile pass).
+        if obj.get("tasks").and_then(|v| v.as_array()).is_none() {
+            let mut task_ids = normalized_string_vec(obj.get("task_names"));
+            if task_ids.is_empty() {
+                task_ids = normalized_string_vec(obj.get("items"));
+            }
+            if !task_ids.is_empty() {
+                let mut tasks: Vec<serde_json::Value> = Vec::new();
+                for id in task_ids {
+                    if expected_kind == "cleanse_plan" {
+                        tasks.push(serde_json::json!({"dataset_id": id}));
+                    } else {
+                        tasks.push(serde_json::json!({"name": id}));
+                    }
+                }
+                obj.insert("tasks".to_string(), serde_json::Value::Array(tasks));
+            }
+        }
+        obj.remove("task_names");
+
+        // Normalize work_groups with deterministic alias handling and key-pruning.
         if let Some(wgs) = obj.get_mut("work_groups").and_then(|v| v.as_array_mut()) {
             for wg in wgs.iter_mut() {
                 let Some(wg_obj) = wg.as_object_mut() else {
                     continue;
                 };
+                // Common drift: task_names/tasks under work_group instead of items.
+                let mut item_ids = normalized_string_vec(wg_obj.get("task_names"));
+                if item_ids.is_empty() {
+                    item_ids = normalized_string_vec(wg_obj.get("tasks"));
+                }
+                if wg_obj.get("items").and_then(|v| v.as_array()).is_none() && !item_ids.is_empty() {
+                    wg_obj.insert(
+                        "items".to_string(),
+                        serde_json::Value::Array(
+                            item_ids
+                                .iter()
+                                .map(|task_id| {
+                                    serde_json::json!({
+                                        "task_id": task_id,
+                                        "checklist_item_id": crate::data_engineer::plan::CHECKLIST_SQL_MODEL
+                                    })
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
                 let Some(items) = wg_obj.get_mut("items").and_then(|v| v.as_array_mut()) else {
                     continue;
                 };
@@ -410,6 +398,23 @@ Rules:
                     let Some(it_obj) = it.as_object_mut() else {
                         continue;
                     };
+                    // Alias normalization for item task id.
+                    if it_obj.get("task_id").and_then(|v| v.as_str()).is_none() {
+                        let alias = it_obj
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| it_obj.get("dataset_id").and_then(|v| v.as_str()))
+                            .or_else(|| it_obj.get("model").and_then(|v| v.as_str()))
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if !alias.is_empty() {
+                            it_obj.insert(
+                                "task_id".to_string(),
+                                serde_json::Value::String(alias),
+                            );
+                        }
+                    }
                     if it_obj.get("checklist_item_id").and_then(|v| v.as_str()).is_none() {
                         // Legacy: checklist_item_ids: ["sql_model", ...]
                         if let Some(arr) = it_obj.get("checklist_item_ids").and_then(|v| v.as_array())
@@ -437,6 +442,24 @@ Rules:
                         );
                     }
                     it_obj.remove("checklist_item_ids");
+                    // Strict parse safety: remove common unknown aliases in item objects.
+                    it_obj.remove("task_names");
+                    it_obj.remove("tasks");
+                    it_obj.remove("status");
+                }
+                // Strict parse safety: keep only canonical work-group keys.
+                let allowed = [
+                    "group_id",
+                    "label",
+                    "kind",
+                    "items",
+                    "depends_on_group_ids",
+                ];
+                let keys: Vec<String> = wg_obj.keys().cloned().collect();
+                for k in keys {
+                    if !allowed.contains(&k.as_str()) {
+                        wg_obj.remove(&k);
+                    }
                 }
             }
         }
@@ -444,7 +467,12 @@ Rules:
         // If the LLM accidentally put plan-like objects inside `work_groups`, drop them so we
         // can still parse the rest of the plan deterministically.
         if let Some(wgs) = obj.get_mut("work_groups").and_then(|v| v.as_array_mut()) {
-            wgs.retain(|wg| wg.get("group_id").is_some() || wg.get("items").is_some());
+            wgs.retain(|wg| {
+                wg.get("group_id").and_then(|v| v.as_str()).is_some()
+                    && wg.get("label").and_then(|v| v.as_str()).is_some()
+                    && wg.get("kind").and_then(|v| v.as_str()).is_some()
+                    && wg.get("items").and_then(|v| v.as_array()).is_some()
+            });
         } else if obj.get("work_groups").is_some() {
             // Wrong type: prefer an empty default over a hard parse failure.
             obj.insert("work_groups".to_string(), serde_json::Value::Array(vec![]));
@@ -478,7 +506,7 @@ Rules:
             );
         }
 
-        // Normalize tasks[].checklist[].evidence to [] (planning/repair must not include evidence).
+        // Normalize tasks[] to canonical skeletons.
         let tasks_key = match expected_kind {
             "cleanse_plan" => "tasks",
             "model_plan" => "tasks",
@@ -489,6 +517,93 @@ Rules:
                 let Some(t_obj) = t.as_object_mut() else {
                     continue;
                 };
+                if expected_kind == "cleanse_plan" {
+                    if t_obj.get("dataset_id").and_then(|v| v.as_str()).is_none() {
+                        let alias = t_obj
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| t_obj.get("task_id").and_then(|v| v.as_str()))
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if !alias.is_empty() {
+                            t_obj.insert(
+                                "dataset_id".to_string(),
+                                serde_json::Value::String(alias),
+                            );
+                        }
+                    }
+                    if t_obj.get("implementation_spec").is_none() {
+                        t_obj.insert(
+                            "implementation_spec".to_string(),
+                            serde_json::json!({
+                                "spec_version": 1,
+                                "row_preserving": true,
+                                "output_fields": [],
+                                "prohibited_ops": []
+                            }),
+                        );
+                    }
+                } else {
+                    if t_obj.get("name").and_then(|v| v.as_str()).is_none() {
+                        let alias = t_obj
+                            .get("task_id")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| t_obj.get("dataset_id").and_then(|v| v.as_str()))
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if !alias.is_empty() {
+                            t_obj.insert(
+                                "name".to_string(),
+                                serde_json::Value::String(alias),
+                            );
+                        }
+                    }
+                    if t_obj.get("implementation_spec").is_none() {
+                        t_obj.insert(
+                            "implementation_spec".to_string(),
+                            serde_json::json!({
+                                "spec_version": 1,
+                                "grain": "TBD",
+                                "inputs": [],
+                                "joins": [],
+                                "metrics": [],
+                                "output_fields": [],
+                                "assumptions": []
+                            }),
+                        );
+                    }
+                }
+                // Normalize common drift inside implementation_spec.output_fields.
+                if let Some(out_fields) = t_obj
+                    .get_mut("implementation_spec")
+                    .and_then(|v| v.as_object_mut())
+                    .and_then(|spec| spec.get_mut("output_fields"))
+                    .and_then(|v| v.as_array_mut())
+                {
+                    for f in out_fields.iter_mut() {
+                        let Some(f_obj) = f.as_object_mut() else {
+                            continue;
+                        };
+                        if f_obj.get("description").and_then(|v| v.as_str()).is_none() {
+                            if let Some(note) = f_obj
+                                .get("assumption_note")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim())
+                                .filter(|s| !s.is_empty())
+                            {
+                                f_obj.insert(
+                                    "description".to_string(),
+                                    serde_json::Value::String(note.to_string()),
+                                );
+                            }
+                        }
+                        f_obj.remove("assumption_note");
+                        f_obj.remove("quality_flags");
+                    }
+                }
+                // Normalize tasks[].checklist[].evidence to [] (planning/repair must not include evidence).
                 if let Some(ck) = t_obj.get_mut("checklist").and_then(|v| v.as_array_mut()) {
                     for it in ck.iter_mut() {
                         if let Some(it_obj) = it.as_object_mut() {
@@ -532,34 +647,89 @@ Rules:
         }
     }
 
-    async fn critique_plan_design(
-        sctx: &SuiteCtx,
-        _thread_id: &str,
-        phase: control_flow::Phase,
-        kind: &str,
-        plan_json: &serde_json::Value,
-    ) -> Result<PlanCritique, String> {
-        use react_core::llm::ChatMessage;
+    fn parse_reasoning_effort_env(var: &str) -> Option<react_core::llm::ReasoningEffort> {
+        match std::env::var(var)
+            .ok()
+            .map(|s| s.trim().to_lowercase())
+            .as_deref()
+        {
+            Some("none") => Some(react_core::llm::ReasoningEffort::None),
+            Some("low") => Some(react_core::llm::ReasoningEffort::Low),
+            Some("medium") => Some(react_core::llm::ReasoningEffort::Medium),
+            Some("high") => Some(react_core::llm::ReasoningEffort::High),
+            _ => None,
+        }
+    }
 
-        let sys = crate::util::time_context::with_time_context(Self::plan_design_critic_system_prompt(kind));
-        let plan_txt = serde_json::to_string_pretty(plan_json).unwrap_or_else(|_| plan_json.to_string());
-        // Keep bounded to reduce truncation risk.
-        let plan_txt = if plan_txt.len() > 45_000 {
-            format!(
-                "{}\n... (truncated; total_chars={})",
-                plan_txt.chars().take(45_000).collect::<String>(),
-                plan_txt.len()
-            )
-        } else {
-            plan_txt
-        };
-        let user = format!(
-            "Phase: {phase}\nkind: {kind}\n\nDRAFT plan JSON:\n{plan}\n",
-            phase = phase.as_str(),
-            kind = kind,
-            plan = plan_txt
+    fn excerpt(s: &str, max_chars: usize) -> String {
+        if s.chars().count() <= max_chars {
+            return s.to_string();
+        }
+        let mut out = s.chars().take(max_chars).collect::<String>();
+        out.push_str("\n... (truncated)");
+        out
+    }
+
+    fn parse_json_object_lenient(raw: &str) -> Result<serde_json::Value, String> {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+            return Ok(v);
+        }
+        let start = raw.find('{').ok_or_else(|| "no JSON object start found".to_string())?;
+        let end = raw.rfind('}').ok_or_else(|| "no JSON object end found".to_string())?;
+        if end <= start {
+            return Err("invalid JSON object bounds".to_string());
+        }
+        serde_json::from_str::<serde_json::Value>(&raw[start..=end]).map_err(|e| e.to_string())
+    }
+
+    fn parse_json_typed_lenient<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, String> {
+        let v = Self::parse_json_object_lenient(raw)?;
+        serde_json::from_value::<T>(v).map_err(|e| e.to_string())
+    }
+
+    fn plan_enrich_chunk_size() -> usize {
+        std::env::var("LLM_PLAN_ENRICH_CHUNK_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(3)
+            .clamp(1, 3)
+    }
+
+    async fn generate_design_memo(
+        ctx: &AgentCtx,
+        is_cleanse: bool,
+        planning_context: &str,
+    ) -> Result<String, String> {
+        use react_core::llm::ChatMessage;
+        let kind = if is_cleanse { "cleanse_plan" } else { "model_plan" };
+        let sys = format!(
+            "You are a principal analytics engineer writing a planning design memo.\n\
+Return plain text only (no JSON, no markdown tables).\n\
+Focus on: goals, entities, dependencies, risks, sequencing, and validation strategy.\n\
+Keep it concise but complete for downstream structured compilation."
         );
-        let messages = vec![
+        let user = format!(
+            "Planning kind: {kind}\n\nContext:\n{}\n\nWrite the design memo.",
+            Self::excerpt(planning_context, 120_000)
+        );
+        let max_tokens: u32 = std::env::var("LLM_PLAN_MEMO_MAX_TOKENS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(64_000)
+            .max(8_000);
+        let opts = LlmCallOptions {
+            prompt_id: "data_engineer.plan_design_memo",
+            thread_id: ctx.thread_id.clone(),
+            expected_format: react_core::llm::LlmExpectedFormat::Text,
+            temperature: Some(0.2),
+            top_p: Some(1.0),
+            max_output_tokens: Some(max_tokens),
+            reasoning_effort: Some(
+                Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT")
+                    .unwrap_or(react_core::llm::ReasoningEffort::Medium),
+            ),
+        };
+        ctx.llm.chat(&[
             ChatMessage {
                 role: "system".to_string(),
                 content: sys,
@@ -568,41 +738,268 @@ Rules:
                 role: "user".to_string(),
                 content: user,
             },
-        ];
-        // The critique is structured JSON and can legitimately exceed 1200 tokens for large plans.
-        // Keep it bounded but give enough headroom to avoid truncation (fail-fast).
-        let critique_max_tokens: u32 = std::env::var("LLM_PLAN_DESIGN_CRITIQUE_MAX_TOKENS")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(6_000)
-            .max(800)
-            .min(16_000);
-        // Important: on OpenAI Responses, "output_tokens" includes reasoning tokens. If reasoning_effort
-        // is too high, the model can spend most tokens reasoning and leave too few for the JSON payload.
-        // Default to LOW (env-overridable).
-        let critique_reasoning_effort = match std::env::var("LLM_PLAN_DESIGN_CRITIQUE_REASONING_EFFORT")
-            .ok()
-            .map(|s| s.trim().to_lowercase())
-            .as_deref()
-        {
-            Some("none") => react_core::llm::ReasoningEffort::None,
-            Some("low") | None | Some("") => react_core::llm::ReasoningEffort::Low,
-            Some("medium") => react_core::llm::ReasoningEffort::Medium,
-            Some("high") => react_core::llm::ReasoningEffort::High,
-            _ => react_core::llm::ReasoningEffort::Low,
-        };
+        ], &opts).map_err(|e| e.to_string())
+    }
+
+    async fn generate_cleanse_skeleton(
+        ctx: &AgentCtx,
+        planning_context: &str,
+        memo: &str,
+    ) -> Result<react_core::schema_registry::CleansePlanSkeletonV1, String> {
+        use react_core::llm::ChatMessage;
         let opts = LlmCallOptions {
-            prompt_id: "data_engineer.plan_design_critique",
-            thread_id: Some(_thread_id.to_string()),
-            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-            temperature: Some(0.15),
+            prompt_id: "data_engineer.cleanse_plan_skeleton",
+            thread_id: ctx.thread_id.clone(),
+            expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(
+                react_core::schema_registry::SchemaId::CleansePlanSkeletonV1,
+            ),
+            temperature: Some(0.1),
             top_p: Some(1.0),
-            max_output_tokens: Some(critique_max_tokens),
-            reasoning_effort: Some(critique_reasoning_effort),
+            max_output_tokens: Some(
+                std::env::var("LLM_PLAN_SKELETON_MAX_TOKENS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(24_000)
+                    .max(4_000),
+            ),
+            reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
         };
-        let raw = sctx.llm.chat(&messages, &opts).map_err(|e| e.to_string())?;
-        let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        serde_json::from_value::<PlanCritique>(v).map_err(|e| e.to_string())
+        let sys = "Return a CLEANSE plan skeleton JSON only. Include only tasks(dataset_id) and batches. No implementation details.";
+        let user = format!(
+            "Context:\n{}\n\nDesign memo:\n{}\n\nReturn skeleton JSON.",
+            Self::excerpt(planning_context, 60_000),
+            Self::excerpt(memo, 30_000)
+        );
+        let raw = ctx.llm.chat(
+            &[
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: sys.to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: user,
+                },
+            ],
+            &opts,
+        )?;
+        Self::parse_json_typed_lenient::<react_core::schema_registry::CleansePlanSkeletonV1>(&raw)
+    }
+
+    async fn generate_model_skeleton(
+        ctx: &AgentCtx,
+        planning_context: &str,
+        memo: &str,
+    ) -> Result<react_core::schema_registry::ModelPlanSkeletonV1, String> {
+        use react_core::llm::ChatMessage;
+        let opts = LlmCallOptions {
+            prompt_id: "data_engineer.model_plan_skeleton",
+            thread_id: ctx.thread_id.clone(),
+            expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(
+                react_core::schema_registry::SchemaId::ModelPlanSkeletonV1,
+            ),
+            temperature: Some(0.1),
+            top_p: Some(1.0),
+            max_output_tokens: Some(
+                std::env::var("LLM_PLAN_SKELETON_MAX_TOKENS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(24_000)
+                    .max(4_000),
+            ),
+            reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
+        };
+        let sys = "Return a MODEL plan skeleton JSON only. Include only tasks(name) and batches. No implementation details.";
+        let user = format!(
+            "Context:\n{}\n\nDesign memo:\n{}\n\nReturn skeleton JSON.",
+            Self::excerpt(planning_context, 60_000),
+            Self::excerpt(memo, 30_000)
+        );
+        let raw = ctx.llm.chat(
+            &[
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: sys.to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: user,
+                },
+            ],
+            &opts,
+        )?;
+        Self::parse_json_typed_lenient::<react_core::schema_registry::ModelPlanSkeletonV1>(&raw)
+    }
+
+    fn compile_cleanse_skeleton_payload(
+        skeleton: &react_core::schema_registry::CleansePlanSkeletonV1,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "status": "draft",
+            "tasks": skeleton.tasks,
+            "batches": skeleton.batches,
+            "work_groups": [],
+            "mutations": [],
+            "progress": {
+                "last_applied_step_idx": 0,
+                "consecutive_batch_failures": 0,
+                "total_batch_failures": 0
+            },
+            "project_snapshot": {},
+            "plan_key": ""
+        })
+    }
+
+    fn compile_model_skeleton_payload(
+        skeleton: &react_core::schema_registry::ModelPlanSkeletonV1,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "status": "draft",
+            "tasks": skeleton.tasks,
+            "batches": skeleton.batches,
+            "work_groups": [],
+            "mutations": [],
+            "progress": {
+                "last_applied_step_idx": 0,
+                "consecutive_batch_failures": 0,
+                "total_batch_failures": 0
+            },
+            "project_snapshot": {},
+            "plan_key": ""
+        })
+    }
+
+    async fn enrich_cleanse_tasks(
+        ctx: &AgentCtx,
+        planning_context: &str,
+        memo: &str,
+        plan: &mut crate::data_engineer::plan::CleansePlan,
+        task_ids: &[String],
+    ) -> Result<(), String> {
+        use react_core::llm::ChatMessage;
+        for chunk in task_ids.chunks(Self::plan_enrich_chunk_size()) {
+            let chunk_vec = chunk.to_vec();
+            let summary = crate::data_engineer::plan::summarize_cleanse_plan(plan, 50);
+            let sys = "Return CLEANSE enrichment JSON only for the requested task_ids. Each item must include task_id and implementation_spec_json.";
+            let user = format!(
+                "Context:\n{}\n\nDesign memo:\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nReturn schema-valid enrichment JSON.",
+                Self::excerpt(planning_context, 30_000),
+                Self::excerpt(memo, 20_000),
+                summary,
+                serde_json::to_string_pretty(&chunk_vec).unwrap_or_else(|_| "[]".to_string())
+            );
+            let opts = LlmCallOptions {
+                prompt_id: "data_engineer.cleanse_plan_enrich",
+                thread_id: ctx.thread_id.clone(),
+                expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(
+                    react_core::schema_registry::SchemaId::CleansePlanEnrichmentV1,
+                ),
+                temperature: Some(0.15),
+                top_p: Some(1.0),
+                max_output_tokens: Some(
+                    std::env::var("LLM_PLAN_ENRICH_MAX_TOKENS")
+                        .ok()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(32_000)
+                        .max(6_000),
+                ),
+                reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
+            };
+            let raw = ctx.llm.chat(
+                &[
+                    ChatMessage { role: "system".to_string(), content: sys.to_string() },
+                    ChatMessage { role: "user".to_string(), content: user },
+                ],
+                &opts,
+            )?;
+            let enrich = Self::parse_json_typed_lenient::<react_core::schema_registry::CleansePlanEnrichmentV1>(&raw)?;
+            for it in enrich.items {
+                if !chunk_vec.iter().any(|t| t == &it.task_id) {
+                    continue;
+                }
+                let spec = Self::parse_json_typed_lenient::<crate::data_engineer::plan::CleanseImplementationSpec>(
+                    &it.implementation_spec_json,
+                )?;
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == it.task_id) {
+                    t.implementation_spec = spec;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn enrich_model_tasks(
+        ctx: &AgentCtx,
+        planning_context: &str,
+        memo: &str,
+        plan: &mut crate::data_engineer::plan::ModelPlan,
+        task_ids: &[String],
+    ) -> Result<(), String> {
+        use react_core::llm::ChatMessage;
+        for chunk in task_ids.chunks(Self::plan_enrich_chunk_size()) {
+            let chunk_vec = chunk.to_vec();
+            let summary = crate::data_engineer::plan::summarize_model_plan(plan, 50);
+            let sys = "Return MODEL enrichment JSON only for the requested task_ids. Each item must include task_id and implementation_spec_json.";
+            let user = format!(
+                "Context:\n{}\n\nDesign memo:\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nReturn schema-valid enrichment JSON.",
+                Self::excerpt(planning_context, 30_000),
+                Self::excerpt(memo, 20_000),
+                summary,
+                serde_json::to_string_pretty(&chunk_vec).unwrap_or_else(|_| "[]".to_string())
+            );
+            let opts = LlmCallOptions {
+                prompt_id: "data_engineer.model_plan_enrich",
+                thread_id: ctx.thread_id.clone(),
+                expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(
+                    react_core::schema_registry::SchemaId::ModelPlanEnrichmentV1,
+                ),
+                temperature: Some(0.15),
+                top_p: Some(1.0),
+                max_output_tokens: Some(
+                    std::env::var("LLM_PLAN_ENRICH_MAX_TOKENS")
+                        .ok()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(32_000)
+                        .max(6_000),
+                ),
+                reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
+            };
+            let raw = ctx.llm.chat(
+                &[
+                    ChatMessage { role: "system".to_string(), content: sys.to_string() },
+                    ChatMessage { role: "user".to_string(), content: user },
+                ],
+                &opts,
+            )?;
+            let enrich = Self::parse_json_typed_lenient::<react_core::schema_registry::ModelPlanEnrichmentV1>(&raw)?;
+            for it in enrich.items {
+                if !chunk_vec.iter().any(|t| t == &it.task_id) {
+                    continue;
+                }
+                let spec = Self::parse_json_typed_lenient::<crate::data_engineer::plan::ModelImplementationSpec>(
+                    &it.implementation_spec_json,
+                )?;
+                if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == it.task_id) {
+                    t.implementation_spec = spec;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_targeted_semantic_tasks(errors: &[String], candidates: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        for e in errors {
+            if let Some((head, _)) = e.split_once(':') {
+                let key = head.trim();
+                if !key.is_empty() && candidates.iter().any(|c| c == key) {
+                    out.push(key.to_string());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Parse a user approval/rejection decision from free-form text.
@@ -845,170 +1242,6 @@ Rules:
         )
         .await?;
         Ok(true)
-    }
-
-    async fn repair_plan_json_payload_via_llm(
-        thread_store: &ThreadStore,
-        thread_id: &str,
-        actx: &AgentCtx,
-        phase: control_flow::Phase,
-        expected_kind: &str,
-        bad_payload: &serde_json::Value,
-        err: &str,
-        attempt: usize,
-    ) -> Result<react_core::session::ThreadResult, String> {
-        fn compact_json_for_prompt(v: &serde_json::Value, depth: usize) -> serde_json::Value {
-            // Keep this conservative: preserve structure, but truncate long strings/arrays to
-            // reduce prompt bloat (especially in repeated repair loops).
-            const MAX_DEPTH: usize = 10;
-            const MAX_STRING_CHARS: usize = 600;
-            const MAX_ARRAY_ITEMS: usize = 50;
-
-            if depth >= MAX_DEPTH {
-                return serde_json::Value::String("...(truncated: max_depth reached)".to_string());
-            }
-
-            match v {
-                serde_json::Value::Null => serde_json::Value::Null,
-                serde_json::Value::Bool(b) => serde_json::Value::Bool(*b),
-                serde_json::Value::Number(n) => serde_json::Value::Number(n.clone()),
-                serde_json::Value::String(s) => {
-                    let t = s.trim();
-                    if t.chars().count() <= MAX_STRING_CHARS {
-                        serde_json::Value::String(s.clone())
-                    } else {
-                        let prefix: String = t.chars().take(MAX_STRING_CHARS).collect();
-                        serde_json::Value::String(format!(
-                            "{} …(truncated; original_chars={})",
-                            prefix,
-                            t.chars().count()
-                        ))
-                    }
-                }
-                serde_json::Value::Array(arr) => {
-                    let mut out: Vec<serde_json::Value> = arr
-                        .iter()
-                        .take(MAX_ARRAY_ITEMS)
-                        .map(|x| compact_json_for_prompt(x, depth + 1))
-                        .collect();
-                    if arr.len() > MAX_ARRAY_ITEMS {
-                        out.push(serde_json::Value::String(format!(
-                            "...(truncated {} items)",
-                            arr.len().saturating_sub(MAX_ARRAY_ITEMS)
-                        )));
-                    }
-                    serde_json::Value::Array(out)
-                }
-                serde_json::Value::Object(map) => {
-                    let mut out = serde_json::Map::new();
-                    for (k, val) in map.iter() {
-                        out.insert(k.clone(), compact_json_for_prompt(val, depth + 1));
-                    }
-                    serde_json::Value::Object(out)
-                }
-            }
-        }
-
-        // Record an explicit guard step so the UI can surface "plan was invalid and is being repaired".
-        let ts = chrono::Utc::now().to_rfc3339();
-        let reason = format!(
-            "Plan JSON failed validation (attempt {attempt}). expected_kind={expected_kind}. error={err}"
-        );
-        let step = react_core::session::ThreadStep::GuardBlock {
-            phase: phase.as_str().to_string(),
-            kind: GuardBlockKind::PlanJsonInvalid,
-            reason: reason.clone(),
-            observation: react_core::session::Observation::fail(vec![reason.clone()]),
-            ts: ts.clone(),
-            agent: "agent".to_string(),
-        };
-        let _ = thread_store.append_step(thread_id, step.clone()).await;
-        control_flow::append_phase_with_reason(
-            thread_store,
-            thread_id,
-            Some("agent".to_string()),
-            Some(phase),
-            phase,
-            Some(PhaseReasonCode::PhaseBlocked),
-            Some(serde_json::json!({
-                "kind": "plan_json_invalid",
-                "attempt": attempt,
-                "expected_kind": expected_kind,
-                "error": err,
-            })),
-        )
-        .await?;
-
-        // Build a repair-only prompt: include the invalid payload and the parse error.
-        //
-        // If the payload is enormous, compact it so retries don't amplify prompt bloat.
-        const MAX_REPAIR_PAYLOAD_CHARS: usize = 30_000;
-        let full_payload_str =
-            serde_json::to_string_pretty(bad_payload).unwrap_or_else(|_| bad_payload.to_string());
-        let (payload_label, payload_str, payload_note) = if full_payload_str.len()
-            <= MAX_REPAIR_PAYLOAD_CHARS
-        {
-            ("FULL", full_payload_str, String::new())
-        } else {
-            let compact = compact_json_for_prompt(bad_payload, 0);
-            let compact_str =
-                serde_json::to_string_pretty(&compact).unwrap_or_else(|_| compact.to_string());
-            (
-                "COMPACTED",
-                compact_str,
-                format!(
-                    "\nNOTE: The invalid payload JSON was compacted to reduce prompt size. \
-Long strings were truncated and long arrays were truncated. Preserve the overall structure and required fields.\n"
-                ),
-            )
-        };
-        let q = format!(
-            "Your previous plan JSON payload was invalid and could not be parsed by the server.\n\
-You MUST fix it and re-emit the plan.\n\n\
-Validation error:\n{err}\n\n\
-Invalid payload JSON ({payload_label}):\n{payload_str}\n{payload_note}\n\
-Hard constraints:\n\
-- Your response format is enforced by the system-provided output contract.\n\
-- Every checklist item's `evidence` must be an empty array `[]` (no strings, no objects).\n\n\
-Now finish with a final result where final.kind=\"{expected_kind}\"."
-        );
-
-        let sys = crate::util::time_context::with_time_context(
-            Self::plan_json_repair_system_prompt(expected_kind),
-        );
-
-        // No tools for repair: any tool call should fail and force a retry.
-        let registry = ToolRegistry::new();
-        let tools_card = "";
-        let llm_options = LlmCallOptions {
-            prompt_id: "data_engineer.plan_json_repair",
-            thread_id: actx.thread_id.clone(),
-            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-            // Strict JSON repair emitter: keep variance minimal.
-            temperature: Some(0.0),
-            top_p: Some(1.0),
-            max_output_tokens: Some(3600),
-            reasoning_effort: None,
-        };
-        match Agent::run_until_block(&registry, actx, &sys, tools_card, &q, llm_options).await {
-            Ok(RunOutcome::Final {
-                thread_id: _tid,
-                result,
-            }) => Ok(result),
-            Ok(RunOutcome::AwaitUser {
-                thread_id: _tid,
-                prompt,
-            }) => Err(format!(
-                "plan json repair failed: model requested user input (not allowed). prompt={prompt}"
-            )),
-            Ok(RunOutcome::AwaitApproval {
-                thread_id: _tid,
-                prompt,
-            }) => Err(format!(
-                "plan json repair failed: model requested approval (not allowed). prompt={prompt}"
-            )),
-            Err(e) => Err(format!("plan json repair failed: {e}")),
-        }
     }
 
     async fn authoring_complete_reason_detail(
@@ -3419,48 +3652,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 }
                             }
 
-                            // Design-first planning loop: if we re-entered this phase due to a plan design critique,
-                            // load the critique artifact (atomic storage ref) and inject it verbatim.
-                            //
-                            // This is intentionally based on the *phase entry reason_detail* (like review_ref),
-                            // not on scanning GuardBlock steps since `phase_start_idx` points at the latest
-                            // phase entry and would otherwise miss the immediately preceding critique block.
-                            if matches!(reason_code, Some(PhaseReasonCode::PhaseBlocked)) {
-                                let blocked_kind = reason_detail
-                                    .and_then(|v| v.get("kind"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                if blocked_kind == "plan_design_critique" {
-                                    let round = reason_detail
-                                        .and_then(|v| v.get("round"))
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0) as usize;
-                                    if round >= Self::MAX_PLAN_DESIGN_ROUNDS {
-                                        return Ok(vec![FlowFrame::AwaitUser {
-                                            prompt: format!(
-                                                "Planning was unable to converge on an explicit, critique-passing design plan after {} critique round(s). Please restart planning with a narrower scope or add more constraints (e.g., required fields/metrics, canonical time axis), then retry.",
-                                                round
-                                            ),
-                                        }]);
-                                    }
-                                    if let Some(key) = reason_detail
-                                        .and_then(|v| v.get("critique_ref"))
-                                        .and_then(|v| v.get("key"))
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.trim().to_string())
-                                        .filter(|s| !s.is_empty())
-                                    {
-                                        if let Ok(bytes) = actx.storage.get_bytes(&key).await {
-                                            let txt = String::from_utf8_lossy(&bytes).to_string();
-                                            if !txt.trim().is_empty() {
-                                                q.push_str("\n\nPRIOR PLAN DESIGN CRITIQUE (must address in the next draft):\n");
-                                                q.push_str(txt.trim());
-                                                q.push('\n');
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            // Hard cutover: no legacy design-critique loopbacks in planning prompts.
                         }
                     }
                     if let Some(ref brief) = last_validate_brief {
@@ -3493,31 +3685,14 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                         }
                     }
 
-                    // Note: plan design critique injection is handled above via phase entry reason_detail
-                    // (`critique_ref`) so it remains stable across re-entry loops.
-
-                    fn parse_reasoning_effort_env(var: &str) -> Option<react_core::llm::ReasoningEffort> {
-                        match std::env::var(var)
-                            .ok()
-                            .map(|s| s.trim().to_lowercase())
-                            .as_deref()
-                        {
-                            Some("none") => Some(react_core::llm::ReasoningEffort::None),
-                            Some("low") => Some(react_core::llm::ReasoningEffort::Low),
-                            Some("medium") => Some(react_core::llm::ReasoningEffort::Medium),
-                            Some("high") => Some(react_core::llm::ReasoningEffort::High),
-                            _ => None,
-                        }
-                    }
-
                     let llm_options = if is_cleanse {
                         let plan_max_tokens_cleanse: u32 = std::env::var("LLM_PLAN_MAX_TOKENS_CLEANSE")
                             .ok()
                             .and_then(|s| s.parse::<u32>().ok())
                             .unwrap_or(96_000)
                             .max(4_000);
-                        let reasoning_effort = parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT_CLEANSE")
-                            .or_else(|| parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT"))
+                        let reasoning_effort = Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT_CLEANSE")
+                            .or_else(|| Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT"))
                             .unwrap_or(react_core::llm::ReasoningEffort::Medium);
                         LlmCallOptions {
                             prompt_id: "data_engineer.cleanse_plan",
@@ -3536,8 +3711,8 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                             .and_then(|s| s.parse::<u32>().ok())
                             .unwrap_or(128_000)
                             .max(8_000);
-                        let reasoning_effort = parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT_MODEL")
-                            .or_else(|| parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT"))
+                        let reasoning_effort = Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT_MODEL")
+                            .or_else(|| Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT"))
                             .unwrap_or(react_core::llm::ReasoningEffort::Medium);
                         LlmCallOptions {
                             prompt_id: "data_engineer.model_plan",
@@ -3553,7 +3728,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                     match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q, llm_options).await {
                         Ok(RunOutcome::Final {
                             thread_id: _tid,
-                            result,
+                            result: _result,
                         }) => {
                             // Deterministic enforcement: planning must be grounded in actual project state.
                             // Require at least:
@@ -3627,16 +3802,11 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 }
                             }
 
+                            let design_memo = Self::generate_design_memo(&actx, is_cleanse, &q).await?;
                             if is_cleanse {
-                                if result.kind != "cleanse_plan" {
-                                    return Ok(vec![FlowFrame::AwaitUser {
-                                        prompt: format!(
-                                            "Plan phase failed: final.kind must be 'cleanse_plan' (got '{}'). Please retry.",
-                                            result.kind
-                                        ),
-                                    }]);
-                                }
-                                let mut payload = result.payload.clone();
+                                let skeleton =
+                                    Self::generate_cleanse_skeleton(&actx, &q, &design_memo).await?;
+                                let mut payload = Self::compile_cleanse_skeleton_payload(&skeleton);
                                 Self::normalize_plan_json_payload("cleanse_plan", &mut payload);
                                 let mut plan = match serde_json::from_value::<
                                     crate::data_engineer::plan::CleansePlan,
@@ -3698,6 +3868,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 plan.project_snapshot = serde_json::json!({
                                     "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
                                     "dbt_project_yml_etag": actx.storage.head_etag(&actx.keyspace.dbt_project_key(&actx.scope)).await.ok().flatten(),
+                                    "plan_design_memo": Self::excerpt(&design_memo, 12_000),
                                 });
                                 if entered_from_actionable_review {
                                     if let Some(obj) = plan.project_snapshot.as_object_mut() {
@@ -3796,6 +3967,14 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             .to_string(),
                                     }]);
                                 }
+                                let enrich_ids: Vec<String> = plan
+                                    .tasks
+                                    .iter()
+                                    .map(|t| t.dataset_id.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                                Self::enrich_cleanse_tasks(&actx, &q, &design_memo, &mut plan, &enrich_ids)
+                                    .await?;
                                 // Crash-safety: persist the grounded/pruned draft so resume/inspection reflects
                                 // what we actually validated/critiqued (not just the initial parsed JSON).
                                 let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
@@ -3807,6 +3986,31 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     &mut plan,
                                 )
                                 .await?;
+                                let sem = if sem.ok {
+                                    sem
+                                } else {
+                                    let candidates: Vec<String> =
+                                        plan.tasks.iter().map(|t| t.dataset_id.clone()).collect();
+                                    let targeted =
+                                        Self::collect_targeted_semantic_tasks(&sem.errors, &candidates);
+                                    if !targeted.is_empty() {
+                                        Self::enrich_cleanse_tasks(
+                                            &actx,
+                                            &q,
+                                            &design_memo,
+                                            &mut plan,
+                                            &targeted,
+                                        )
+                                        .await?;
+                                        crate::data_engineer::plan::ensure_cleanse_plan_semantically_valid_or_repaired(
+                                            &actx,
+                                            &mut plan,
+                                        )
+                                        .await?
+                                    } else {
+                                        sem
+                                    }
+                                };
                                 // Crash-safety: persist the normalized draft so resume/inspection reflects
                                 // what we actually validated (not just the initial parsed JSON).
                                 let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
@@ -3902,15 +4106,9 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 );
                                 return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
                             } else {
-                                if result.kind != "model_plan" {
-                                    return Ok(vec![FlowFrame::AwaitUser {
-                                        prompt: format!(
-                                            "Plan phase failed: final.kind must be 'model_plan' (got '{}'). Please retry.",
-                                            result.kind
-                                        ),
-                                    }]);
-                                }
-                                let mut payload = result.payload.clone();
+                                let skeleton =
+                                    Self::generate_model_skeleton(&actx, &q, &design_memo).await?;
+                                let mut payload = Self::compile_model_skeleton_payload(&skeleton);
                                 Self::normalize_plan_json_payload("model_plan", &mut payload);
                                 let mut plan = match serde_json::from_value::<
                                     crate::data_engineer::plan::ModelPlan,
@@ -3971,6 +4169,7 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                 plan.project_snapshot = serde_json::json!({
                                     "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
                                     "dbt_project_yml_etag": actx.storage.head_etag(&actx.keyspace.dbt_project_key(&actx.scope)).await.ok().flatten(),
+                                    "plan_design_memo": Self::excerpt(&design_memo, 12_000),
                                 });
                                 if entered_from_actionable_review {
                                     if let Some(obj) = plan.project_snapshot.as_object_mut() {
@@ -4051,6 +4250,14 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                             .to_string(),
                                     }]);
                                 }
+                                let enrich_ids: Vec<String> = plan
+                                    .tasks
+                                    .iter()
+                                    .map(|t| t.name.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                                Self::enrich_model_tasks(&actx, &q, &design_memo, &mut plan, &enrich_ids)
+                                    .await?;
                                 // Crash-safety: persist the grounded/pruned draft so resume/inspection reflects
                                 // what we actually validated/critiqued (not just the initial parsed JSON).
                                 let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
@@ -4063,6 +4270,32 @@ Now finish with a final result where final.kind=\"{expected_kind}\"."
                                     &stg.allowed_models,
                                 )
                                 .await?;
+                                let sem = if sem.ok {
+                                    sem
+                                } else {
+                                    let candidates: Vec<String> =
+                                        plan.tasks.iter().map(|t| t.name.clone()).collect();
+                                    let targeted =
+                                        Self::collect_targeted_semantic_tasks(&sem.errors, &candidates);
+                                    if !targeted.is_empty() {
+                                        Self::enrich_model_tasks(
+                                            &actx,
+                                            &q,
+                                            &design_memo,
+                                            &mut plan,
+                                            &targeted,
+                                        )
+                                        .await?;
+                                        crate::data_engineer::plan::ensure_model_plan_semantically_valid_or_repaired(
+                                            &actx,
+                                            &mut plan,
+                                            &stg.allowed_models,
+                                        )
+                                        .await?
+                                    } else {
+                                        sem
+                                    }
+                                };
                                 // Crash-safety: persist the normalized draft so resume/inspection reflects
                                 // what we actually validated (not just the initial parsed JSON).
                                 let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
@@ -7481,6 +7714,85 @@ mod tests {
         assert_eq!(wgs[0].get("group_id").and_then(|v| v.as_str()), Some("wg1"));
     }
 
+    #[test]
+    fn normalize_plan_json_payload_repairs_model_work_group_task_aliases() {
+        let mut payload = serde_json::json!({
+            "status": "draft",
+            "tasks": [{"name":"dim_customers"}],
+            "work_groups": [{
+                "group_id": "wg1",
+                "label": "author",
+                "kind": "author_sql",
+                "task_names": ["dim_customers"],
+                "status": "draft"
+            }]
+        });
+        DataEngineerSuite::normalize_plan_json_payload("model_plan", &mut payload);
+        let wg = payload
+            .get("work_groups")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_object())
+            .cloned()
+            .expect("work group");
+        assert!(wg.get("task_names").is_none(), "legacy task_names should be removed");
+        assert!(wg.get("status").is_none(), "unknown status key should be removed");
+        let items = wg
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .expect("items derived from task_names");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].get("task_id").and_then(|v| v.as_str()),
+            Some("dim_customers")
+        );
+    }
+
+    #[test]
+    fn normalize_plan_json_payload_repairs_output_field_aliases() {
+        let mut payload = serde_json::json!({
+            "status": "draft",
+            "tasks": [{
+                "name":"dim_customers",
+                "implementation_spec": {
+                    "spec_version": 1,
+                    "grain": "1 row per customer_id",
+                    "inputs": [],
+                    "joins": [],
+                    "metrics": [],
+                    "assumptions": [],
+                    "output_fields": [{
+                        "name":"is_active",
+                        "kind":"quality_flag",
+                        "source_columns": [],
+                        "expression":"is_active",
+                        "nullable": false,
+                        "assumption_note": "derived from source trust"
+                    }]
+                }
+            }],
+            "batches": [["dim_customers"]]
+        });
+        DataEngineerSuite::normalize_plan_json_payload("model_plan", &mut payload);
+        let field = payload
+            .get("tasks")
+            .and_then(|v| v.as_array())
+            .and_then(|t| t.first())
+            .and_then(|t| t.get("implementation_spec"))
+            .and_then(|s| s.get("output_fields"))
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_object())
+            .cloned()
+            .expect("output field exists");
+        assert!(field.get("assumption_note").is_none());
+        assert_eq!(
+            field.get("description").and_then(|v| v.as_str()),
+            Some("derived from source trust")
+        );
+    }
+
     #[tokio::test]
     async fn review_registry_is_read_only() {
         let mut sctx = SuiteCtx::default();
@@ -8227,120 +8539,4 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn plan_json_repair_prompt_compacts_huge_payload_and_requests_json_mode() {
-        use crate::data_engineer::control_flow::Phase;
-        use react_core::agent::DefaultPolicy;
-        use react_core::keyspace::DefaultKeyspace;
-        use react_core::llm::{ChatMessage, LargeLanguageModel, LlmCallOptions, LlmExpectedFormat};
-        use react_core::scope::RequestScope;
-        use react_core::storage::InMemoryStorageAdapter;
-
-        #[derive(Clone)]
-        struct CapturingLlm {
-            reply: String,
-            captured: Arc<std::sync::Mutex<Vec<(String, LlmCallOptions)>>>,
-        }
-        impl LargeLanguageModel for CapturingLlm {
-            fn chat(
-                &self,
-                messages: &[ChatMessage],
-                options: &LlmCallOptions,
-            ) -> Result<String, String> {
-                let prompt = messages
-                    .iter()
-                    .find(|m| m.role.eq_ignore_ascii_case("user"))
-                    .map(|m| m.content.clone())
-                    .unwrap_or_default();
-                if let Ok(mut g) = self.captured.lock() {
-                    g.push((prompt, options.clone()));
-                }
-                Ok(self.reply.clone())
-            }
-            fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-                Ok(vec![])
-            }
-        }
-
-        let storage = Arc::new(InMemoryStorageAdapter::default());
-        let scope = RequestScope {
-            tenant: "t".into(),
-            workspace: "w".into(),
-            project_id: "p".into(),
-        };
-        let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
-        let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
-
-        let captured: Arc<std::sync::Mutex<Vec<(String, LlmCallOptions)>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
-        let llm: Arc<dyn LargeLanguageModel> = Arc::new(CapturingLlm {
-            // AgentStepV1 is a strict schema: all top-level keys must be present,
-            // and final payload is a JSON-encoded string.
-            reply: r#"{"type":"final","name":null,"args":null,"final":{"kind":"model_plan","payload":"{}","display":null}}"#
-                .to_string(),
-            captured: captured.clone(),
-        });
-
-        let actx = AgentCtx {
-            top_k: 1,
-            per_step_timeout_secs: 10,
-            max_steps: 1,
-            thread_id: Some("tid".to_string()),
-            progress_tx: None,
-            pre_step_tx: None,
-            trace_tx: None,
-            agent_name: Some("agent".to_string()),
-            policy: Arc::new(DefaultPolicy),
-            llm,
-            storage: storage.clone(),
-            scope: scope.clone(),
-            keyspace: keyspace.clone(),
-            query: None,
-            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
-            dbt: None,
-            vector: None,
-            thread_store: Some(store.clone()),
-            exec_ctx: None,
-            runtime: None,
-        };
-
-        let huge = "x".repeat(120_000);
-        let bad_payload = serde_json::json!({
-            "status": "draft",
-            "project_snapshot": {"notes": huge},
-            "tasks": [],
-            "batches": [],
-            "work_groups": [],
-            "progress": {"last_applied_step_idx": 0}
-        });
-
-        let _ = DataEngineerSuite::repair_plan_json_payload_via_llm(
-            &store,
-            "tid",
-            &actx,
-            Phase::ModelPlan,
-            "model_plan",
-            &bad_payload,
-            "bad json",
-            1,
-        )
-        .await
-        .expect("repair should return final");
-
-        let got = captured.lock().unwrap();
-        assert!(!got.is_empty(), "expected at least one llm call");
-        let (prompt, opts) = &got[0];
-        assert_eq!(
-            opts.expected_format,
-            LlmExpectedFormat::JsonSchema(react_core::schema_registry::SchemaId::AgentStepV1)
-        );
-        assert!(
-            prompt.contains("Invalid payload JSON (COMPACTED)"),
-            "expected compaction label in prompt"
-        );
-        assert!(
-            prompt.contains("NOTE: The invalid payload JSON was compacted"),
-            "expected compaction note in prompt"
-        );
-    }
 }
