@@ -160,11 +160,11 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install dbt-core dbt-athena-community
 
-      - name: Build react crate
-        run: cargo build -p react
-
       - name: Test react crate
-        run: cargo test -p react
+        run: cargo test -p react --lib --tests
+
+      - name: Build react binary (debug)
+        run: cargo build -p react --bin react
 
       - name: Run React examples (1..4) in parallel
         env:
