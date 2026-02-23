@@ -702,6 +702,48 @@ pub fn replan_backtrack_count_for_phase(log: Option<&ThreadLog>, phase: Phase) -
     count
 }
 
+/// Count consecutive review->author loopbacks caused by `review_patch_impl`.
+///
+/// This is intentionally review-phase scoped and is used as a secondary guard when
+/// validate keeps passing but review repeatedly requests more implementation patching.
+pub fn review_patch_impl_streak(log: Option<&ThreadLog>, review_phase: Phase) -> usize {
+    let Some(log) = log else { return 0 };
+    let expected_back_to = match review_phase {
+        Phase::CleanseReview => Phase::CleanseAuthor,
+        Phase::ModelReview | Phase::PostPublishReview => Phase::ModelAuthor,
+        _ => return 0,
+    };
+
+    let mut streak = 0usize;
+    for step in log.steps.iter().rev() {
+        let ThreadStep::Phase {
+            phase: to_phase,
+            from_phase: Some(from_phase),
+            reason_code,
+            ..
+        } = step
+        else {
+            continue;
+        };
+        let Some(from) = Phase::from_str(from_phase) else {
+            continue;
+        };
+        let Some(to) = Phase::from_str(to_phase) else {
+            continue;
+        };
+        if from != review_phase {
+            continue;
+        }
+        if matches!(reason_code, Some(PhaseReasonCode::ReviewPatchImpl)) && to == expected_back_to {
+            streak = streak.saturating_add(1);
+            continue;
+        }
+        // Any other decision emitted by this review phase ends the streak window.
+        break;
+    }
+    streak
+}
+
 #[derive(Clone, Debug)]
 pub enum AuthoringGate {
     Allow,

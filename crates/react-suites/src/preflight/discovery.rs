@@ -63,3 +63,59 @@ pub async fn run_discovery(
     let datasets = pairs.into_iter().take(k).collect();
     DiscoveryBundle { datasets }
 }
+
+pub async fn run_discovery_cached(
+    thread_id: &str,
+    question: &str,
+    limits: &DiscoveryLimits,
+    sctx: &crate::suite::SuiteCtx,
+) -> DiscoveryBundle {
+    let k = if limits.top_k_datasets == 0 {
+        12
+    } else {
+        limits.top_k_datasets
+    };
+    let qhash = react_core::llm_observability::sha256_hex_str(question);
+    let root = sctx
+        .keyspace
+        .threads_prefix(&sctx.scope)
+        .trim_end_matches("/threads")
+        .trim_end_matches('/')
+        .to_string();
+    let key = format!("{}/state/{}/discovery_{}_k{}.json", root, thread_id, qhash, k);
+
+    if let Ok(v) = sctx.storage.get_json(&key).await {
+        if let Some(arr) = v.get("datasets").and_then(|x| x.as_array()) {
+            let mut out: Vec<(String, f32)> = Vec::new();
+            for it in arr {
+                let ds = it
+                    .get("dataset_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let score = it.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+                if !ds.is_empty() {
+                    out.push((ds, score));
+                }
+            }
+            if !out.is_empty() {
+                return DiscoveryBundle { datasets: out };
+            }
+        }
+    }
+
+    let bundle = run_discovery(question, limits, sctx).await;
+    let payload = serde_json::json!({
+        "thread_id": thread_id,
+        "question_sha256": qhash,
+        "k": k,
+        "datasets": bundle.datasets.iter().map(|(ds, score)| serde_json::json!({
+            "dataset_id": ds,
+            "score": score
+        })).collect::<Vec<_>>(),
+        "ts": chrono::Utc::now().to_rfc3339(),
+    });
+    let _ = sctx.storage.put_json(&key, &payload).await;
+    bundle
+}

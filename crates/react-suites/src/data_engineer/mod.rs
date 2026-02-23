@@ -272,7 +272,135 @@ enum UserDecision {
     Reject,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CatalogBootstrapOutcome {
+    metadata_complete: bool,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubjectiveRetryState {
+    #[serde(default)]
+    phase: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    retries: usize,
+    #[serde(default)]
+    last_ts: String,
+}
+
 impl DataEngineerSuite {
+    fn subjective_retry_limit() -> usize {
+        std::env::var("AGENT_MAX_SUBJECTIVE_RETRIES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2)
+            .max(1)
+            .min(6)
+    }
+
+    async fn bump_subjective_retry(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+        phase: control_flow::Phase,
+        kind: &str,
+    ) -> usize {
+        let mut st = thread_store
+            .get_thread_artifact_json(thread_id, "subjective_retry_state")
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value::<SubjectiveRetryState>(v).ok())
+            .unwrap_or_default();
+        if st.phase == phase.as_str() && st.kind == kind {
+            st.retries = st.retries.saturating_add(1);
+        } else {
+            st.phase = phase.as_str().to_string();
+            st.kind = kind.to_string();
+            st.retries = 1;
+        }
+        st.last_ts = chrono::Utc::now().to_rfc3339();
+        let _ = thread_store
+            .put_thread_artifact_json(
+                thread_id,
+                "subjective_retry_state",
+                &serde_json::to_value(&st).unwrap_or(serde_json::json!({})),
+            )
+            .await;
+        st.retries
+    }
+
+    async fn reset_subjective_retry(thread_store: &ThreadStore, thread_id: &str) {
+        let _ = thread_store
+            .put_thread_artifact_json(
+                thread_id,
+                "subjective_retry_state",
+                &serde_json::json!({
+                    "phase": "",
+                    "kind": "",
+                    "retries": 0,
+                    "last_ts": chrono::Utc::now().to_rfc3339()
+                }),
+            )
+            .await;
+    }
+
+    fn review_retry_kind(decision: ReviewDecision) -> Option<&'static str> {
+        match decision {
+            ReviewDecision::PatchPlan => Some("review_patch_plan"),
+            ReviewDecision::PatchImpl => Some("review_patch_impl"),
+            ReviewDecision::Proceed => None,
+        }
+    }
+
+    fn catalog_bootstrap_semaphore_key(sctx: &SuiteCtx, thread_id: &str) -> String {
+        let root = sctx
+            .keyspace
+            .threads_prefix(&sctx.scope)
+            .trim_end_matches("/threads")
+            .trim_end_matches('/')
+            .to_string();
+        format!("{}/state/{}/catalog_bootstrap.json", root, thread_id)
+    }
+
+    async fn ensure_catalog_bootstrap_semaphored(
+        thread_id: &str,
+        sctx: &SuiteCtx,
+    ) -> Result<(), String> {
+        let key = Self::catalog_bootstrap_semaphore_key(sctx, thread_id);
+        if let Ok(v) = sctx.storage.get_json(&key).await {
+            let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
+            if status == "ready" || status == "best_effort" {
+                tracing::info!(
+                    "data_engineer: catalog bootstrap semaphore hit status={} thread_id={}",
+                    status,
+                    thread_id
+                );
+                return Ok(());
+            }
+        }
+        let out = Self::ensure_catalog_bootstrap(sctx).await?;
+        let status = if out.metadata_complete {
+            "ready"
+        } else {
+            "best_effort"
+        };
+        let sem_v = serde_json::json!({
+            "status": status,
+            "metadata_complete": out.metadata_complete,
+            "thread_id": thread_id,
+            "ts": chrono::Utc::now().to_rfc3339(),
+        });
+        if let Err(e) = sctx.storage.put_json(&key, &sem_v).await {
+            tracing::warn!(
+                "data_engineer: failed to persist catalog bootstrap semaphore state key={} err={}",
+                key,
+                e
+            );
+        }
+        Ok(())
+    }
+
     fn normalize_plan_json_payload(expected_kind: &str, payload: &mut serde_json::Value) {
         fn normalized_string_vec(v: Option<&serde_json::Value>) -> Vec<String> {
             let mut out = Vec::new();
@@ -2864,9 +2992,11 @@ Apply these fixes in the output.",
     ///
     /// This builds/refreshes warehouse-backed catalog artifacts and then enforces that required
     /// metadata exists so planning can treat catalog as canonical.
-    async fn ensure_catalog_bootstrap(sctx: &SuiteCtx) -> Result<(), String> {
+    async fn ensure_catalog_bootstrap(sctx: &SuiteCtx) -> Result<CatalogBootstrapOutcome, String> {
         let (Some(cat), Some(datasets)) = (sctx.catalog.as_ref(), sctx.datasets.as_ref()) else {
-            return Ok(());
+            return Ok(CatalogBootstrapOutcome {
+                metadata_complete: true,
+            });
         };
         let dss = datasets
             .list_datasets()
@@ -3080,7 +3210,9 @@ Apply these fixes in the output.",
                 );
             }
         }
-        Ok(())
+        Ok(CatalogBootstrapOutcome {
+            metadata_complete: meta_errors.is_empty(),
+        })
     }
 
     async fn manifest_targeting_lines(
@@ -3277,7 +3409,7 @@ Apply these fixes in the output.",
         question: &str,
         sctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
-        Self::ensure_catalog_bootstrap(sctx).await?;
+        Self::ensure_catalog_bootstrap_semaphored(thread_id, sctx).await?;
         let sys = crate::util::time_context::with_time_context(prompts::review_system_prompt());
         let tools_card = prompts::review_tool_card();
 
@@ -3431,7 +3563,7 @@ Apply these fixes in the output.",
         sctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
         use control_flow::{DerivedGuardState, Phase};
-        if let Err(e) = Self::ensure_catalog_bootstrap(sctx).await {
+        if let Err(e) = Self::ensure_catalog_bootstrap_semaphored(thread_id, sctx).await {
             let thread_store = ThreadStore::new(
                 sctx.storage.clone(),
                 sctx.scope.clone(),
@@ -3472,6 +3604,13 @@ Apply these fixes in the output.",
             .unwrap_or(3)
             .max(2)
             .min(20);
+        let max_review_patch_impl_streak: usize =
+            std::env::var("AGENT_MAX_REVIEW_PATCH_IMPL_STREAK")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(3)
+                .max(1)
+                .min(12);
 
         let phase_index = |p: Phase| -> usize {
             match p {
@@ -3959,7 +4098,7 @@ Apply these fixes in the output.",
                     }
 
                     // Generate a new draft plan via LLM and then ask the user to approve it.
-                    Self::ensure_catalog_bootstrap(sctx).await?;
+                    Self::ensure_catalog_bootstrap_semaphored(thread_id, sctx).await?;
                     // Deterministic bootstrap: ensure the plan phase ALWAYS has grounded context recorded
                     // in the thread history. This prevents LLM loops that repeatedly call dbt_files list
                     // and never reach sql_schema/evidence, which would trip the plan_grounding guard.
@@ -4347,6 +4486,24 @@ Apply these fixes in the output.",
                                         })),
                                     )
                                     .await?;
+                                    let tries = Self::bump_subjective_retry(
+                                        &thread_store,
+                                        thread_id,
+                                        phase,
+                                        "plan_grounding_missing_discovery",
+                                    )
+                                    .await;
+                                    if tries > Self::subjective_retry_limit() {
+                                        return Ok(vec![FlowFrame::AwaitUser {
+                                            prompt: format!(
+                                                "Plan grounding did not converge after {} retries. Missing required discovery steps: dbt_files={}, sql_schema={}, evidence={}. Please provide targeted guidance and retry.",
+                                                tries,
+                                                saw_dbt_files,
+                                                saw_sql_schema,
+                                                saw_evidence
+                                            ),
+                                        }]);
+                                    }
                                     continue;
                                 }
                             }
@@ -4398,11 +4555,22 @@ Apply these fixes in the output.",
                                             })),
                                         )
                                         .await?;
-                                        return Ok(vec![FlowFrame::AwaitUser {
-                                            prompt: format!(
-                                                "Plan JSON is invalid and could not be parsed.\n\nError:\n{e}\n\nPlease retry plan generation."
-                                            ),
-                                        }]);
+                                        let tries = Self::bump_subjective_retry(
+                                            &thread_store,
+                                            thread_id,
+                                            phase,
+                                            "plan_json_invalid",
+                                        )
+                                        .await;
+                                        if tries > Self::subjective_retry_limit() {
+                                            return Ok(vec![FlowFrame::AwaitUser {
+                                                prompt: format!(
+                                                    "Plan JSON stayed invalid after {} retries.\n\nLast error:\n{e}\n\nPlease provide targeted guidance and retry.",
+                                                    tries
+                                                ),
+                                            }]);
+                                        }
+                                        continue;
                                     }
                                 };
                                 // Planning/repair must not emit evidence; the deterministic runner adds it later.
@@ -4524,10 +4692,34 @@ Apply these fixes in the output.",
                                     &grounded.allowed,
                                 );
                                 if plan.tasks.is_empty() || plan.batches.is_empty() {
-                                    return Ok(vec![FlowFrame::AwaitUser {
-                                        prompt: "Cleanse plan contained no grounded raw datasets after applying schema() facts. This indicates the raw datasets are not queryable via the current warehouse connection (or the plan referenced non-raw tables). Fix the underlying data/catalog visibility and retry plan generation."
-                                            .to_string(),
-                                    }]);
+                                    let reason = "Cleanse plan contained no grounded raw datasets after applying schema() facts.".to_string();
+                                    let _ = control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        phase,
+                                        Some(PhaseReasonCode::PhaseBlocked),
+                                        Some(serde_json::json!({
+                                            "kind": "plan_grounding_empty_after_prune",
+                                            "reason": reason,
+                                        })),
+                                    )
+                                    .await;
+                                    let tries = Self::bump_subjective_retry(
+                                        &thread_store,
+                                        thread_id,
+                                        phase,
+                                        "plan_grounding_empty_after_prune",
+                                    )
+                                    .await;
+                                    if tries > Self::subjective_retry_limit() {
+                                        return Ok(vec![FlowFrame::AwaitUser {
+                                            prompt: "Cleanse plan contained no grounded raw datasets after repeated retries. This indicates raw datasets are not queryable via the current warehouse connection or the plan keeps targeting non-raw tables. Fix data/catalog visibility and retry plan generation."
+                                                .to_string(),
+                                        }]);
+                                    }
+                                    continue;
                                 }
                                 let enrich_ids: Vec<String> = plan
                                     .tasks
@@ -4612,6 +4804,22 @@ Apply these fixes in the output.",
                                         })),
                                     )
                                     .await?;
+                                    let tries = Self::bump_subjective_retry(
+                                        &thread_store,
+                                        thread_id,
+                                        phase,
+                                        "plan_semantic_invalid",
+                                    )
+                                    .await;
+                                    if tries > Self::subjective_retry_limit() {
+                                        return Ok(vec![FlowFrame::AwaitUser {
+                                            prompt: format!(
+                                                "Plan semantic validation did not converge after {} retries.\n\nLatest errors:\n- {}\n\nPlease provide targeted guidance and retry.",
+                                                tries,
+                                                sem.errors.join("\n- ")
+                                            ),
+                                        }]);
+                                    }
                                     continue;
                                 }
 
@@ -4634,6 +4842,7 @@ Apply these fixes in the output.",
                                 }
 
                                 crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await?;
+                                Self::reset_subjective_retry(&thread_store, thread_id).await;
                                 if entered_from_actionable_review {
                                     let mut detail = serde_json::json!({
                                         "plan_key": plan.plan_key,
@@ -4719,11 +4928,22 @@ Apply these fixes in the output.",
                                             })),
                                         )
                                         .await?;
-                                        return Ok(vec![FlowFrame::AwaitUser {
-                                            prompt: format!(
-                                                "Plan JSON is invalid and could not be parsed.\n\nError:\n{e}\n\nPlease retry plan generation."
-                                            ),
-                                        }]);
+                                        let tries = Self::bump_subjective_retry(
+                                            &thread_store,
+                                            thread_id,
+                                            phase,
+                                            "plan_json_invalid",
+                                        )
+                                        .await;
+                                        if tries > Self::subjective_retry_limit() {
+                                            return Ok(vec![FlowFrame::AwaitUser {
+                                                prompt: format!(
+                                                    "Plan JSON stayed invalid after {} retries.\n\nLast error:\n{e}\n\nPlease provide targeted guidance and retry.",
+                                                    tries
+                                                ),
+                                            }]);
+                                        }
+                                        continue;
                                     }
                                 };
                                 // Planning/repair must not emit evidence; the deterministic runner adds it later.
@@ -4843,10 +5063,34 @@ Apply these fixes in the output.",
                                     &stg.allowed_models,
                                 );
                                 if plan.tasks.is_empty() || plan.batches.is_empty() {
-                                    return Ok(vec![FlowFrame::AwaitUser {
-                                        prompt: "Model plan contained no grounded tasks after enforcing gold-tier constraints (must reference existing silver models under models/staging/ only). Ensure silver models exist under models/staging/ and retry."
-                                            .to_string(),
-                                    }]);
+                                    let reason = "Model plan contained no grounded tasks after enforcing gold-tier constraints.".to_string();
+                                    let _ = control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        phase,
+                                        Some(PhaseReasonCode::PhaseBlocked),
+                                        Some(serde_json::json!({
+                                            "kind": "plan_grounding_empty_after_prune",
+                                            "reason": reason,
+                                        })),
+                                    )
+                                    .await;
+                                    let tries = Self::bump_subjective_retry(
+                                        &thread_store,
+                                        thread_id,
+                                        phase,
+                                        "plan_grounding_empty_after_prune",
+                                    )
+                                    .await;
+                                    if tries > Self::subjective_retry_limit() {
+                                        return Ok(vec![FlowFrame::AwaitUser {
+                                            prompt: "Model plan contained no grounded tasks after repeated retries (gold must reference existing silver models under models/staging/). Ensure silver models exist and retry."
+                                                .to_string(),
+                                        }]);
+                                    }
+                                    continue;
                                 }
                                 let enrich_ids: Vec<String> = plan
                                     .tasks
@@ -4933,6 +5177,22 @@ Apply these fixes in the output.",
                                         })),
                                     )
                                     .await?;
+                                    let tries = Self::bump_subjective_retry(
+                                        &thread_store,
+                                        thread_id,
+                                        phase,
+                                        "plan_semantic_invalid",
+                                    )
+                                    .await;
+                                    if tries > Self::subjective_retry_limit() {
+                                        return Ok(vec![FlowFrame::AwaitUser {
+                                            prompt: format!(
+                                                "Plan semantic validation did not converge after {} retries.\n\nLatest errors:\n- {}\n\nPlease provide targeted guidance and retry.",
+                                                tries,
+                                                sem.errors.join("\n- ")
+                                            ),
+                                        }]);
+                                    }
                                     continue;
                                 }
 
@@ -4955,6 +5215,7 @@ Apply these fixes in the output.",
                                 }
 
                                 crate::data_engineer::plan::save_model_plan(&actx, &plan).await?;
+                                Self::reset_subjective_retry(&thread_store, thread_id).await;
                                 if entered_from_actionable_review {
                                     let mut detail = serde_json::json!({
                                         "plan_key": plan.plan_key,
@@ -7474,7 +7735,7 @@ Apply these fixes in the output.",
                         payload: serde_json::json!({ "text": "" }),
                         display: None,
                     });
-                    let (answer, decision_meta_v) = match first {
+                    let (mut answer, decision_meta_v) = match first {
                         FlowFrame::Final {
                             payload, display, ..
                         } => {
@@ -7535,6 +7796,47 @@ Apply these fixes in the output.",
                     if meta.review_ref.is_none() {
                         meta.review_ref = review_ref_from_trigger;
                     }
+                    let patch_impl_streak =
+                        control_flow::review_patch_impl_streak(log.as_ref(), phase);
+                    let mut review_retry_count = 0usize;
+                    if let Some(kind) = Self::review_retry_kind(meta.decision) {
+                        review_retry_count =
+                            Self::bump_subjective_retry(&thread_store, thread_id, phase, kind).await;
+                    } else {
+                        Self::reset_subjective_retry(&thread_store, thread_id).await;
+                    }
+                    let forced_by_patch_impl_streak = matches!(meta.decision, ReviewDecision::PatchImpl)
+                        && !guard.last_validate_failed
+                        && patch_impl_streak >= max_review_patch_impl_streak;
+                    let forced_by_subjective_retry =
+                        Self::review_retry_kind(meta.decision).is_some()
+                            && review_retry_count > Self::subjective_retry_limit();
+                    let forced_progress = forced_by_patch_impl_streak || forced_by_subjective_retry;
+                    if forced_progress {
+                        let reason = if forced_by_subjective_retry {
+                            format!(
+                                "subjective review retry limit reached ({})",
+                                review_retry_count
+                            )
+                        } else {
+                            format!(
+                                "patch_impl streak reached {} (threshold {})",
+                                patch_impl_streak, max_review_patch_impl_streak
+                            )
+                        };
+                        tracing::warn!(
+                            "data_engineer: forcing review proceed phase={} reason={}",
+                            phase.as_str(),
+                            reason
+                        );
+                        meta.decision = ReviewDecision::Proceed;
+                        answer.push_str(&format!(
+                            "\n\nProgress guard: review remained subjective without convergence (retry_count={}, patch_impl_streak={}). Proceeding to next phase to avoid non-convergent review loops.",
+                            review_retry_count,
+                            patch_impl_streak
+                        ));
+                        Self::reset_subjective_retry(&thread_store, thread_id).await;
+                    }
                     out_frames.push(FlowFrame::Review {
                         text: answer.clone(),
                         meta: serde_json::to_value(&meta).ok(),
@@ -7544,6 +7846,11 @@ Apply these fixes in the output.",
                         "review_phase": phase.as_str(),
                         "meta": meta,
                         "answer": answer,
+                        "forced_progress_guard": forced_progress,
+                        "forced_progress_by_subjective_retry": forced_by_subjective_retry,
+                        "forced_progress_by_patch_impl_streak": forced_by_patch_impl_streak,
+                        "review_subjective_retry_count": review_retry_count,
+                        "review_patch_impl_streak": patch_impl_streak,
                         "trigger_step_idx": trigger_step_idx,
                         "trigger_step": trigger_step,
                     });
@@ -7805,7 +8112,7 @@ Apply these fixes in the output.",
         question: &str,
         sctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
-        Self::ensure_catalog_bootstrap(sctx).await?;
+        Self::ensure_catalog_bootstrap_semaphored(thread_id, sctx).await?;
 
         let (agent_name, sys, tools_card, run_preflight_on_bundle) = match kind {
             AuthoringKind::Cleanse => (
