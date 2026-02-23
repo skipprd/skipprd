@@ -108,18 +108,22 @@ async fn global_semantic_context_is_written_under_semantic_global_key() {
     let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
     let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("bucket".to_string()));
     let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
-        replies: std::sync::Mutex::new(vec![serde_json::json!({
-            "version": 1,
-            "audiences": [
-              {"audience":"finance","confidence":0.9,"evidence":["AwsDataCatalog.db.orders has amount/status fields"]},
-              {"audience":"low_conf_should_drop","confidence":0.5,"evidence":["x"]}
-            ],
-            "context_bullets": [
-              {"text":"This looks like transactional order/customer data.","confidence":0.92,"evidence":["orders, customers tables"]}
-            ],
-            "dataset_groups": [],
-            "assumptions_and_gaps": []
-        }).to_string()]),
+        replies: std::sync::Mutex::new(vec![
+            "Likely audience: finance analysts; evidence comes from orders amount/status fields."
+                .to_string(),
+            serde_json::json!({
+                "version": 1,
+                "audiences": [
+                  {"audience":"finance","confidence":0.9,"evidence":["AwsDataCatalog.db.orders has amount/status fields"]},
+                  {"audience":"low_conf_should_drop","confidence":0.5,"evidence":["x"]}
+                ],
+                "context_bullets": [
+                  {"text":"This looks like transactional order/customer data.","confidence":0.92,"evidence":["orders, customers tables"]}
+                ],
+                "dataset_groups": [],
+                "assumptions_and_gaps": []
+            }).to_string(),
+        ]),
     });
 
     let scope = RequestScope {
