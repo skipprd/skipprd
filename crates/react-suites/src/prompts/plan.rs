@@ -93,6 +93,7 @@ Rules:\n\
 pub fn cleanse_plan_enrichment_system_prompt() -> String {
     "Return CLEANSE enrichment JSON only for requested task_ids.\n\
 Each item MUST include {task_id, implementation_spec_json}.\n\
+Do not re-design the plan; this pass only compiles requested specs from provided context.\n\
 implementation_spec_json must decode to a valid CleanseImplementationSpec object.\n\
 The JSON string MUST contain only these top-level keys:\n\
 - spec_version\n\
@@ -106,6 +107,7 @@ Do not emit batch_id, dependencies, data_quality, wrappers, commentary, or any n
 pub fn model_plan_enrichment_system_prompt() -> String {
     "Return MODEL enrichment JSON only for requested task_ids.\n\
 Each item MUST include {task_id, implementation_spec_json}.\n\
+Do not re-design the plan; this pass only compiles requested specs from provided context.\n\
 implementation_spec_json must decode to a valid ModelImplementationSpec object.\n\
 The JSON string MUST contain only these top-level keys:\n\
 - spec_version\n\

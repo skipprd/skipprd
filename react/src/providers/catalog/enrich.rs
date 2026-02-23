@@ -1,11 +1,190 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use serde::Deserialize;
 use tracing::debug;
 
 use super::types::{CatalogField, DataCatalog};
 use crate::llm::ChatMessage;
 
 const GLOBAL_CONTEXT_MIN_CONFIDENCE: f32 = 0.80;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DatasetDescriptionCompile {
+    description: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FieldDescriptionsCompile {
+    #[serde(rename = "descriptionByField")]
+    description_by_field: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FieldSynonymsCompile {
+    #[serde(rename = "synonymsByField")]
+    synonyms_by_field: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FieldPiiUnitsCompile {
+    #[serde(rename = "piiUnitsByField")]
+    pii_units_by_field: HashMap<String, FieldPiiUnit>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FieldPiiUnit {
+    pii: Option<String>,
+    units: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GlobalSemanticContextCompile {
+    version: Option<u32>,
+    built_at_epoch_secs: Option<u64>,
+    audiences: Vec<GlobalAudienceCompile>,
+    context_bullets: Vec<GlobalContextBulletCompile>,
+    dataset_groups: Vec<GlobalDatasetGroupCompile>,
+    assumptions_and_gaps: Vec<GlobalAssumptionGapCompile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GlobalAudienceCompile {
+    audience: String,
+    confidence: f32,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GlobalContextBulletCompile {
+    text: String,
+    confidence: f32,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GlobalDatasetGroupCompile {
+    group_name: String,
+    dataset_ids: Vec<String>,
+    confidence: f32,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GlobalAssumptionGapCompile {
+    text: String,
+    confidence: f32,
+    evidence: Vec<String>,
+    suggested_probe: Option<String>,
+}
+
+async fn llm_reason_pass(
+    llm: Arc<dyn crate::llm::LargeLanguageModel>,
+    prompt: String,
+    prompt_id: &'static str,
+    llm_timeout_secs: u64,
+) -> Option<String> {
+    let opts = react_core::llm::LlmCallOptions {
+        prompt_id,
+        thread_id: None,
+        expected_format: react_core::llm::LlmExpectedFormat::Text,
+        max_output_tokens: None,
+        temperature: None,
+        top_p: None,
+        reasoning_effort: None,
+    };
+    if llm_timeout_secs == 0 {
+        tokio::task::spawn_blocking(move || {
+            llm.chat(
+                &[ChatMessage {
+                    role: "user".into(),
+                    content: prompt,
+                }],
+                &opts,
+            )
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(llm_timeout_secs),
+            tokio::task::spawn_blocking(move || {
+                llm.chat(
+                    &[ChatMessage {
+                        role: "user".into(),
+                        content: prompt,
+                    }],
+                    &opts,
+                )
+            }),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .and_then(|r| r.ok())
+    }
+}
+
+async fn llm_compile_pass_json(
+    llm: Arc<dyn crate::llm::LargeLanguageModel>,
+    prompt: String,
+    prompt_id: &'static str,
+    llm_timeout_secs: u64,
+) -> Option<serde_json::Value> {
+    let opts = react_core::llm::LlmCallOptions {
+        prompt_id,
+        thread_id: None,
+        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+        max_output_tokens: None,
+        temperature: None,
+        top_p: None,
+        reasoning_effort: None,
+    };
+    let text = if llm_timeout_secs == 0 {
+        tokio::task::spawn_blocking(move || {
+            llm.chat(
+                &[ChatMessage {
+                    role: "user".into(),
+                    content: prompt,
+                }],
+                &opts,
+            )
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(llm_timeout_secs),
+            tokio::task::spawn_blocking(move || {
+                llm.chat(
+                    &[ChatMessage {
+                        role: "user".into(),
+                        content: prompt,
+                    }],
+                    &opts,
+                )
+            }),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .and_then(|r| r.ok())
+    }?;
+    serde_json::from_str::<serde_json::Value>(&text)
+        .or_else(|_| super_extract_json_value(&text))
+        .ok()
+}
 
 fn global_semantic_key(
     keyspace: &Arc<dyn crate::providers::Keyspace>,
@@ -29,12 +208,12 @@ async fn write_global_semantic_context(
     keyspace: &Arc<dyn crate::providers::Keyspace>,
     scope: &crate::providers::RequestScope,
     ctx: &react_core::providers::catalog::types::GlobalSemanticContext,
-) {
+) -> Result<(), String> {
     let key = global_semantic_key(keyspace, scope);
     let yaml = serde_yaml::to_string(ctx).unwrap_or_else(|_| "".to_string());
     let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
     let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-    let _ = storage.put_json(&key, &json_equiv).await;
+    storage.put_json(&key, &json_equiv).await
 }
 
 fn clamp_and_filter_global_context(
@@ -135,6 +314,95 @@ fn compact_catalog_for_global_context(
     })
 }
 
+fn deterministic_dataset_description(dataset_id: &str, fields: &[String]) -> String {
+    let short = fields.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    if short.is_empty() {
+        format!(
+            "Dataset {} contains operational records used for downstream analytics modeling.",
+            dataset_id
+        )
+    } else {
+        format!(
+            "Dataset {} contains records with key fields {} for downstream analytics modeling.",
+            dataset_id, short
+        )
+    }
+}
+
+fn deterministic_global_context_from_compact(
+    compact_batch: &[serde_json::Value],
+) -> react_core::providers::catalog::types::GlobalSemanticContext {
+    let dataset_ids: Vec<String> = compact_batch
+        .iter()
+        .filter_map(|v| {
+            v.get("dataset_id")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+    let mut bullets = vec![react_core::providers::catalog::types::GlobalContextBullet {
+        text: "Project models warehouse datasets for analytics use-cases.".to_string(),
+        confidence: 0.90,
+        evidence: dataset_ids
+            .iter()
+            .take(5)
+            .map(|d| format!("dataset_id={}", d))
+            .collect(),
+    }];
+    if !dataset_ids.is_empty() {
+        bullets.push(react_core::providers::catalog::types::GlobalContextBullet {
+            text: "Catalog refresh confirms schema-driven planning context is available.".to_string(),
+            confidence: 0.85,
+            evidence: dataset_ids
+                .iter()
+                .take(5)
+                .map(|d| format!("dataset_id={}", d))
+                .collect(),
+        });
+    }
+    react_core::providers::catalog::types::GlobalSemanticContext {
+        version: 1,
+        built_at_epoch_secs: Some((chrono::Utc::now().timestamp()).max(0) as u64),
+        audiences: vec![react_core::providers::catalog::types::GlobalAudience {
+            audience: "Analytics engineering and data consumers".to_string(),
+            confidence: 0.90,
+            evidence: dataset_ids
+                .iter()
+                .take(5)
+                .map(|d| format!("dataset_id={}", d))
+                .collect(),
+        }],
+        context_bullets: bullets,
+        dataset_groups: if dataset_ids.is_empty() {
+            vec![]
+        } else {
+            vec![react_core::providers::catalog::types::GlobalDatasetGroup {
+                group_name: "Discovered project datasets".to_string(),
+                dataset_ids: dataset_ids.clone(),
+                confidence: 0.85,
+                evidence: dataset_ids
+                    .iter()
+                    .take(5)
+                    .map(|d| format!("dataset_id={}", d))
+                    .collect(),
+            }]
+        },
+        assumptions_and_gaps: vec![react_core::providers::catalog::types::GlobalAssumptionGap {
+            text: "Business semantics inferred from available schema and stats; validate domain-specific definitions during planning.".to_string(),
+            confidence: 0.85,
+            evidence: dataset_ids
+                .iter()
+                .take(5)
+                .map(|d| format!("dataset_id={}", d))
+                .collect(),
+            suggested_probe: Some(
+                "Validate metric definitions, grain, and audience-specific reporting needs."
+                    .to_string(),
+            ),
+        }],
+    }
+}
+
 /// Run dataset-level and field-level LLM enrichment for a dataset_id.
 pub async fn enrich_dataset_with_llm(
     storage: Arc<dyn crate::adapters::storage::StorageAdapter>,
@@ -144,7 +412,7 @@ pub async fn enrich_dataset_with_llm(
     dataset_id: &str,
     llm_timeout_secs: u64,
     llm_batch_size: usize,
-) {
+) -> Result<bool, String> {
     // Load semantic from S3
     let semantic = super::infer::infer_semantic_model_async(
         storage.clone(),
@@ -154,106 +422,73 @@ pub async fn enrich_dataset_with_llm(
     )
     .await;
 
-    // Dataset-level short description (JSON object)
+    // Dataset-level two-pass enrichment: reason (text) -> compile (strict JSON)
     if !semantic.fields.is_empty() {
+        let field_names: Vec<String> = semantic.fields.iter().map(|f| f.name.clone()).collect();
         let mut lines: Vec<String> = Vec::new();
         lines.push(format!("Dataset: {}", dataset_id));
         lines.push(format!(
             "Fields: {}",
-            semantic
-                .fields
-                .iter()
-                .map(|f| f.name.clone())
-                .take(10)
-                .collect::<Vec<_>>()
-                .join(", ")
+            field_names.iter().take(10).cloned().collect::<Vec<_>>().join(", ")
         ));
-        let prompt = format!(
-            "Return a JSON object: {{\"description\": \"<≤40 words>\"}}.\\nRules: one or two short sentences; start with '{{' and end with '}}'. No labels or prose.\\n\\nContext: \\n+{}\\n\\nOutput JSON:",
+        let reason_prompt = format!(
+            "You are preparing semantic notes for a dataset catalog entry.\n\
+Return plain text only (no JSON).\n\
+Focus only on dataset purpose and business meaning using the provided dataset id and fields.\n\
+Do not include templates like <...> and do not restate instructions.\n\n{}",
             lines.join("\n")
         );
-        let prompt_clone = prompt.clone();
-        let text_opt = if llm_timeout_secs == 0 {
-            let llm0 = llm.clone();
-            match tokio::task::spawn_blocking(move || {
-                llm0.chat(
-                    &[ChatMessage {
-                        role: "user".into(),
-                        content: prompt_clone,
-                    }],
-                    &react_core::llm::LlmCallOptions {
-                        prompt_id: "react.catalog.enrich.dataset_description",
-                        thread_id: None,
-                        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                        max_output_tokens: None,
-                        temperature: None,
-                        top_p: None,
-                        reasoning_effort: None,
-                    },
-                )
-            })
-            .await
-            {
-                Ok(Ok(t)) => Some(t),
-                _ => None,
+        let reason_memo = llm_reason_pass(
+            llm.clone(),
+            reason_prompt,
+            "react.catalog.enrich.dataset.reason",
+            llm_timeout_secs,
+        )
+        .await
+        .unwrap_or_default();
+        let compile_prompt = format!(
+            "Compile the memo into strict JSON only.\n\
+Return exactly: {{\"description\":\"...\"}} and no other keys.\n\
+Rules:\n\
+- One or two short sentences, <= 40 words.\n\
+- ASCII printable text only.\n\
+- No placeholders like <...>, no markdown, no commentary.\n\n\
+Dataset: {dataset_id}\n\
+Fields: {fields}\n\
+Reasoning memo:\n{memo}\n\nOutput JSON only:",
+            dataset_id = dataset_id,
+            fields = field_names.join(", "),
+            memo = reason_memo
+        );
+        let mut summary_raw = None;
+        if let Some(v) = llm_compile_pass_json(
+            llm.clone(),
+            compile_prompt,
+            "react.catalog.enrich.dataset.compile",
+            llm_timeout_secs,
+        )
+        .await
+        {
+            if let Ok(parsed) = serde_json::from_value::<DatasetDescriptionCompile>(v) {
+                summary_raw = Some(parsed.description);
             }
-        } else {
-            let llm0 = llm.clone();
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(llm_timeout_secs),
-                tokio::task::spawn_blocking(move || {
-                    llm0.chat(
-                        &[ChatMessage {
-                            role: "user".into(),
-                            content: prompt,
-                        }],
-                        &react_core::llm::LlmCallOptions {
-                            prompt_id: "react.catalog.enrich.dataset_description",
-                            thread_id: None,
-                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                            max_output_tokens: None,
-                            temperature: None,
-                            top_p: None,
-                            reasoning_effort: None,
-                        },
-                    )
-                }),
-            )
-            .await
-            {
-                Ok(Ok(Ok(t))) => Some(t),
-                _ => None,
-            }
-        };
-        if let Some(text) = text_opt {
+        }
+        if summary_raw.is_none() {
+            summary_raw = Some(deterministic_dataset_description(dataset_id, &field_names));
+        }
+        if let Some(text) = summary_raw {
             debug!(
-                "{} LLM Enrich: dataset description raw for dataset_id='{}': {}",
+                "{} LLM Enrich: dataset description compiled for dataset_id='{}': {}",
                 chrono::Utc::now().to_rfc3339(),
                 dataset_id,
                 text
             );
-            let summary_raw = super_extract_json_value(&text)
-                .ok()
-                .and_then(|v| {
-                    v.get("description")
-                        .and_then(|x| x.as_str())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_else(|| {
-                    text.lines()
-                        .take(2)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .trim_start_matches("Answer:")
-                        .trim()
-                        .to_string()
-                });
             // Guard against placeholder/echoed prompt content (e.g., when LLM backend echoes the prompt)
-            let is_placeholder = summary_raw.contains('<')
-                || summary_raw.contains('>')
-                || summary_raw.to_lowercase().contains("strict json");
+            let is_placeholder = text.contains('<')
+                || text.contains('>')
+                || text.to_lowercase().contains("strict json");
             // Heuristic: ensure short, printable, and not obviously garbage
-            let s_trim = summary_raw.trim();
+            let s_trim = text.trim();
             let ascii_ok = s_trim.chars().all(|c| c.is_ascii() && !c.is_control());
             let len_ok = s_trim.len() <= 220 && s_trim.len() >= 8;
             if !is_placeholder && ascii_ok && len_ok {
@@ -275,10 +510,10 @@ pub async fn enrich_dataset_with_llm(
                         v.as_object_mut().map(|obj| {
                             obj.insert(
                                 "description".to_string(),
-                                serde_json::Value::String(summary_raw.clone()),
+                                serde_json::Value::String(text.clone()),
                             )
                         });
-                        let _ = storage.put_json(&key, &v).await;
+                        storage.put_json(&key, &v).await?;
                     }
                 }
             }
@@ -508,271 +743,151 @@ pub async fn enrich_dataset_with_llm(
                 })
                 .collect::<Vec<String>>()
                 .join(", ");
-            let prompt_desc = format!(
-                        "Return a JSON object: {{\"descriptionByField\": {{ \"<field_name>\": \"<≤20 words>\" }} }}.\nRules: one sentence (≤20 words) per field; start with '{{' and end with '}}'. Keys MUST be exactly the provided FieldNames.\n\nDataset: {ns}\nFieldNames: {fnames}\nField details: [{items}]\n\nOutput JSON:",
-                        ns = dataset_id,
-                        fnames = field_names_json,
-                        items = items
-                    );
-            let desc_text = tokio::task::spawn_blocking({
-                let llm0 = llm.clone();
-                let p = prompt_desc.clone();
-                move || {
-                    llm0.chat(
-                        &[ChatMessage {
-                            role: "user".into(),
-                            content: p,
-                        }],
-                        &react_core::llm::LlmCallOptions {
-                            prompt_id: "react.catalog.enrich.field_descriptions_batch",
-                            thread_id: None,
-                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                            max_output_tokens: None,
-                            temperature: None,
-                            top_p: None,
-                            reasoning_effort: None,
-                        },
-                    )
-                }
-            })
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .unwrap_or_default();
-            debug!(
-                "{} LLM Enrich: description batch raw dataset_id='{}' fields=[{}]: {}",
-                chrono::Utc::now().to_rfc3339(),
-                dataset_id,
-                fields.join(","),
-                desc_text
+            let reason_prompt_desc = format!(
+                "Write semantic field-description notes in plain text only (no JSON).\n\
+Focus only on concise per-field meaning for this dataset.\n\
+Dataset: {ns}\nFieldNames: {fnames}\nField details: [{items}]",
+                ns = dataset_id,
+                fnames = field_names_json,
+                items = items
             );
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&desc_text)
-                .or_else(|_| super_extract_json_value(&desc_text))
+            let desc_reason = llm_reason_pass(
+                llm.clone(),
+                reason_prompt_desc,
+                "react.catalog.enrich.fields.reason",
+                llm_timeout_secs,
+            )
+            .await
+            .unwrap_or_default();
+            let compile_desc = format!(
+                "Compile the notes into strict JSON only.\n\
+Return exactly {{\"descriptionByField\": {{\"<field>\": \"...\"}}}}.\n\
+Rules: keys MUST match FieldNames exactly; one sentence <= 20 words per field; ASCII only; no placeholders <...>; no extra keys.\n\
+Dataset: {ns}\nFieldNames: {fnames}\nReasoning notes:\n{memo}\n\nOutput JSON only:",
+                ns = dataset_id,
+                fnames = field_names_json,
+                memo = desc_reason
+            );
+            if let Some(v) = llm_compile_pass_json(
+                llm.clone(),
+                compile_desc,
+                "react.catalog.enrich.fields.compile_descriptions",
+                llm_timeout_secs,
+            )
+            .await
             {
-                if let Some(map) = v.get("descriptionByField").and_then(|m| m.as_object()) {
-                    for (k, val) in map {
-                        if !allowed_fields.contains(k) {
+                if let Ok(parsed) = serde_json::from_value::<FieldDescriptionsCompile>(v) {
+                    for (k, val) in parsed.description_by_field {
+                        if !allowed_fields.contains(&k) {
                             continue;
                         }
-                        if let Some(s) = val.as_str() {
-                            let s2 = s.trim();
-                            let is_placeholder = s2.contains('<')
-                                || s2.contains('>')
-                                || s2.to_lowercase().contains("strict json");
-                            if !s2.is_empty() && !is_placeholder {
-                                desc_map_all.insert(k.clone(), s2.to_string());
-                            }
+                        let s2 = val.trim();
+                        let is_placeholder = s2.contains('<')
+                            || s2.contains('>')
+                            || s2.to_lowercase().contains("strict json");
+                        if !s2.is_empty() && !is_placeholder {
+                            desc_map_all.insert(k, s2.to_string());
                         }
                     }
                 }
             }
-            // Per-field fallback for any missing keys
-            let mut missing: Vec<String> = fields
-                .iter()
-                .filter(|n| !desc_map_all.contains_key(*n))
-                .cloned()
-                .collect();
-            if !missing.is_empty() {
-                for fname in missing.drain(..) {
-                    let item = format!(
-                        "{{name: {}, role: {}, stats: {}}}",
-                        fname,
-                        role_by_field
-                            .get(&fname)
-                            .cloned()
-                            .unwrap_or_else(|| "\"Unknown\"".to_string()),
-                        serde_json::to_string(
-                            stats_snip_by_field.get(&fname).unwrap_or(&"".to_string())
-                        )
-                        .unwrap_or_else(|_| "\"\"".to_string())
+            // Deterministic fallback for any missing field descriptions.
+            for fname in fields.iter() {
+                if !desc_map_all.contains_key(fname) {
+                    desc_map_all.insert(
+                        fname.clone(),
+                        format!("Field {} from dataset {}.", fname, dataset_id),
                     );
-                    let single_prompt = format!(
-                                "Return a JSON object: {{\"descriptionByField\": {{ \"{fname}\": \"<≤20 words>\" }} }}.\nRules: one sentence (≤20 words) per field; start with '{{' and end with '}}'.\nDataset: {ns}\nField details: [{item}]\n\nOutput JSON:",
-                                fname = fname,
-                                ns = dataset_id,
-                                item = item
-                            );
-                    let single_text = tokio::task::spawn_blocking({
-                        let llm0 = llm.clone();
-                        let p = single_prompt.clone();
-                        move || {
-                            llm0.chat(
-                                &[ChatMessage {
-                                    role: "user".into(),
-                                    content: p,
-                                }],
-                                &react_core::llm::LlmCallOptions {
-                                    prompt_id: "react.catalog.enrich.field_description_single",
-                                    thread_id: None,
-                                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                                    max_output_tokens: None,
-                                    temperature: None,
-                                    top_p: None,
-                                    reasoning_effort: None,
-                                },
-                            )
-                        }
-                    })
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .unwrap_or_default();
-                    if let Ok(vs) = serde_json::from_str::<serde_json::Value>(&single_text)
-                        .or_else(|_| super_extract_json_value(&single_text))
-                    {
-                        if let Some(m) = vs.get("descriptionByField").and_then(|m| m.as_object()) {
-                            if let Some(val) = m.get(&fname).and_then(|x| x.as_str()) {
-                                let t = val.trim();
-                                if !t.is_empty() {
-                                    desc_map_all.insert(fname.clone(), t.to_string());
-                                }
-                            }
-                        }
-                    }
                 }
             }
 
             // Synonyms batch
-            let items2 = fields
+            let _items2 = fields
                 .iter()
                 .map(|n| format!("{{name: {}}}", n))
                 .collect::<Vec<String>>()
                 .join(", ");
-            let prompt_syn = format!(
-                        "Return a JSON object: {{\"synonymsByField\": {{ \"<field_name>\": [\"a\",\"b\"] }} }}.\nRules: 3–6 single-word synonyms, lowercase; start with '{{' and end with '}}'. Keys MUST match FieldNames.\n\nDataset: {ns}\nFieldNames: {fnames}\nFields: [{items}]\n\nOutput JSON:",
-                        ns = dataset_id,
-                        fnames = field_names_json,
-                        items = items2
-                    );
-            let syn_text = tokio::task::spawn_blocking({
-                let llm0 = llm.clone();
-                let p = prompt_syn.clone();
-                move || {
-                    llm0.chat(
-                        &[ChatMessage {
-                            role: "user".into(),
-                            content: p,
-                        }],
-                        &react_core::llm::LlmCallOptions {
-                            prompt_id: "react.catalog.enrich.field_synonyms_batch",
-                            thread_id: None,
-                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                            max_output_tokens: None,
-                            temperature: None,
-                            top_p: None,
-                            reasoning_effort: None,
-                        },
-                    )
-                }
-            })
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .unwrap_or_default();
-            debug!(
-                "{} LLM Enrich: synonyms batch raw dataset_id='{}' fields=[{}]: {}",
-                chrono::Utc::now().to_rfc3339(),
-                dataset_id,
-                fields.join(","),
-                syn_text
+            let compile_syn = format!(
+                "Compile field synonym output from notes into strict JSON only.\n\
+Return exactly {{\"synonymsByField\": {{\"<field>\": [\"a\",\"b\"]}}}}.\n\
+Rules: keys MUST match FieldNames exactly; 3-6 lowercase single-word synonyms per field; no placeholders; no extra keys.\n\
+Dataset: {ns}\nFieldNames: {fnames}\nReasoning notes:\n{memo}\n\nOutput JSON only:",
+                ns = dataset_id,
+                fnames = field_names_json,
+                memo = desc_reason
             );
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&syn_text)
-                .or_else(|_| super_extract_json_value(&syn_text))
+            if let Some(v) = llm_compile_pass_json(
+                llm.clone(),
+                compile_syn,
+                "react.catalog.enrich.fields.compile_synonyms",
+                llm_timeout_secs,
+            )
+            .await
             {
-                if let Some(map) = v.get("synonymsByField").and_then(|m| m.as_object()) {
-                    for (k, val) in map {
-                        if !allowed_fields.contains(k) {
+                if let Ok(parsed) = serde_json::from_value::<FieldSynonymsCompile>(v) {
+                    for (k, arr) in parsed.synonyms_by_field {
+                        if !allowed_fields.contains(&k) {
                             continue;
                         }
-                        if let Some(arr) = val.as_array() {
-                            let mut out = Vec::new();
-                            for x in arr {
-                                if let Some(s) = x.as_str() {
-                                    let t = s.trim().to_lowercase();
-                                    let is_placeholder = t.contains('<')
-                                        || t.contains('>')
-                                        || t.contains("strict json");
-                                    if !t.is_empty() && !is_placeholder {
-                                        out.push(t);
-                                    }
-                                }
-                            }
-                            out.dedup();
-                            if !out.is_empty() {
-                                syn_map_all.insert(k.clone(), out);
-                            }
+                        let mut out: Vec<String> = arr
+                            .into_iter()
+                            .map(|s| s.trim().to_lowercase())
+                            .filter(|t| {
+                                !t.is_empty()
+                                    && !t.contains('<')
+                                    && !t.contains('>')
+                                    && !t.contains("strict json")
+                            })
+                            .collect();
+                        out.dedup();
+                        if !out.is_empty() {
+                            syn_map_all.insert(k, out);
                         }
                     }
                 }
             }
 
             // PII/Units batch
-            let items3 = fields
+            let _items3 = fields
                 .iter()
                 .map(|n| format!("{{name: {}}}", n))
                 .collect::<Vec<String>>()
                 .join(", ");
-            let prompt_pu = format!(
-                        "Return a JSON object: {{\"piiUnitsByField\": {{ \"<field_name>\": {{\"pii\": \"none|low|medium|high\", \"units\": \"<units or format>\"}} }} }}.\nRules: units may be null if not applicable; start with '{{' and end with '}}'. Keys MUST match FieldNames.\n\nDataset: {ns}\nFieldNames: {fnames}\nFields: [{items}]\n\nOutput JSON:",
-                        ns = dataset_id,
-                        fnames = field_names_json,
-                        items = items3
-                    );
-            let pu_text = tokio::task::spawn_blocking({
-                let llm0 = llm.clone();
-                let p = prompt_pu.clone();
-                move || {
-                    llm0.chat(
-                        &[ChatMessage {
-                            role: "user".into(),
-                            content: p,
-                        }],
-                        &react_core::llm::LlmCallOptions {
-                            prompt_id: "react.catalog.enrich.field_pii_units_batch",
-                            thread_id: None,
-                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                            max_output_tokens: None,
-                            temperature: None,
-                            top_p: None,
-                            reasoning_effort: None,
-                        },
-                    )
-                }
-            })
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .unwrap_or_default();
-            debug!(
-                "{} LLM Enrich: pii/units batch raw dataset_id='{}' fields=[{}]: {}",
-                chrono::Utc::now().to_rfc3339(),
-                dataset_id,
-                fields.join(","),
-                pu_text
+            let compile_pu = format!(
+                "Compile field pii/units output from notes into strict JSON only.\n\
+Return exactly {{\"piiUnitsByField\": {{\"<field>\": {{\"pii\": \"none|low|medium|high\", \"units\": \"...|null\"}}}}}}.\n\
+Rules: keys MUST match FieldNames exactly; no placeholders; no extra keys.\n\
+Dataset: {ns}\nFieldNames: {fnames}\nReasoning notes:\n{memo}\n\nOutput JSON only:",
+                ns = dataset_id,
+                fnames = field_names_json,
+                memo = desc_reason
             );
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&pu_text)
-                .or_else(|_| super_extract_json_value(&pu_text))
+            if let Some(v) = llm_compile_pass_json(
+                llm.clone(),
+                compile_pu,
+                "react.catalog.enrich.fields.compile_pii_units",
+                llm_timeout_secs,
+            )
+            .await
             {
-                if let Some(map) = v.get("piiUnitsByField").and_then(|m| m.as_object()) {
-                    for (k, val) in map {
-                        if !allowed_fields.contains(k) {
+                if let Ok(parsed) = serde_json::from_value::<FieldPiiUnitsCompile>(v) {
+                    for (k, obj) in parsed.pii_units_by_field {
+                        if !allowed_fields.contains(&k) {
                             continue;
                         }
-                        if let Some(obj) = val.as_object() {
-                            if let Some(p) = obj.get("pii").and_then(|x| x.as_str()) {
-                                let p_l = p.to_lowercase();
-                                if matches!(p_l.as_str(), "none" | "low" | "medium" | "high") {
-                                    pii_map_all.insert(k.clone(), p_l);
-                                }
+                        if let Some(p) = obj.pii.as_deref() {
+                            let p_l = p.to_lowercase();
+                            if matches!(p_l.as_str(), "none" | "low" | "medium" | "high") {
+                                pii_map_all.insert(k.clone(), p_l);
                             }
-                            if let Some(u) = obj.get("units").and_then(|x| x.as_str()) {
-                                let t = u.trim();
-                                let is_placeholder = t.contains('<')
-                                    || t.contains('>')
-                                    || t.to_lowercase().contains("strict json");
-                                if !t.is_empty() && !is_placeholder {
-                                    units_map_all.insert(k.clone(), t.to_string());
-                                }
+                        }
+                        if let Some(u) = obj.units.as_deref() {
+                            let t = u.trim();
+                            let is_placeholder = t.contains('<')
+                                || t.contains('>')
+                                || t.to_lowercase().contains("strict json");
+                            if !t.is_empty() && !is_placeholder {
+                                units_map_all.insert(k, t.to_string());
                             }
                         }
                     }
@@ -816,13 +931,14 @@ pub async fn enrich_dataset_with_llm(
             }
         }
 
-        // Persist enriched catalog (legacy format: YAML->json equiv)
+        // Persist enriched catalog (YAML->json equiv)
         let yaml = serde_yaml::to_string(&catalog).unwrap_or_else(|_| "".to_string());
         let value =
             serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
         let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-        let _ = storage.put_json(&key, &json_equiv).await;
+        storage.put_json(&key, &json_equiv).await?;
     }
+    Ok(true)
 }
 
 /// Enrich all datasets with LLM at the end of discovery.
@@ -834,10 +950,14 @@ pub async fn run_llm_enrichment_all(
     dataset_ids: &HashMap<String, crate::discover::Metadata>,
     llm_timeout_secs: u64,
     llm_batch_size: usize,
-) {
+) -> Result<react_core::providers::catalog::CatalogEnrichmentReport, String> {
+    let mut report = react_core::providers::catalog::CatalogEnrichmentReport {
+        dataset_total: dataset_ids.len(),
+        ..Default::default()
+    };
     // Engine-agnostic: iterate provided dataset ids (no sqlrt/registry coupling).
     for ds in dataset_ids.keys() {
-        enrich_dataset_with_llm(
+        match enrich_dataset_with_llm(
             storage.clone(),
             keyspace.clone(),
             llm.clone(),
@@ -846,8 +966,138 @@ pub async fn run_llm_enrichment_all(
             llm_timeout_secs,
             llm_batch_size,
         )
-        .await;
+        .await
+        {
+            Ok(_) => report.dataset_enriched_ok += 1,
+            Err(e) => {
+                report.dataset_enriched_failed += 1;
+                debug!(
+                    "{} catalog enrichment failed for dataset_id='{}': {}",
+                    chrono::Utc::now().to_rfc3339(),
+                    ds,
+                    e
+                );
+            }
+        }
     }
+    Ok(report)
+}
+
+async fn process_global_context_batch(
+    llm: Arc<dyn crate::llm::LargeLanguageModel>,
+    llm_timeout_secs: u64,
+    scope: &crate::providers::RequestScope,
+    keyspace: &Arc<dyn crate::providers::Keyspace>,
+    storage: &Arc<dyn crate::adapters::storage::StorageAdapter>,
+    global: &mut react_core::providers::catalog::types::GlobalSemanticContext,
+    compact_batch: &[serde_json::Value],
+) -> Result<bool, String> {
+    if compact_batch.is_empty() {
+        return Ok(false);
+    }
+    let existing = serde_json::to_string_pretty(global).unwrap_or_else(|_| "{}".to_string());
+    let input = serde_json::to_string_pretty(compact_batch).unwrap_or_else(|_| "[]".to_string());
+    let reason_prompt = format!(
+        "You are inferring project-level business context from datasets.\n\
+Return plain text reasoning only (no JSON).\n\
+Focus on likely audiences, context bullets, dataset groupings, and assumptions/gaps grounded in evidence.\n\
+Avoid invented company/domain specifics.\n\n\
+Existing global context JSON:\n{existing}\n\n\
+Dataset batch context (catalog summaries):\n{input}\n\n\
+Output plain text only:"
+    );
+    let reason_memo = llm_reason_pass(
+        llm.clone(),
+        reason_prompt,
+        "react.catalog.enrich.global.reason",
+        llm_timeout_secs,
+    )
+    .await
+    .unwrap_or_default();
+    let compile_prompt = format!(
+        "Compile the reasoning memo into strict JSON only for this schema:\n\
+{{\n\
+  \"version\": 1,\n\
+  \"built_at_epoch_secs\": <optional int>,\n\
+  \"audiences\": [{{\"audience\": string, \"confidence\": number, \"evidence\": [string...]}}...],\n\
+  \"context_bullets\": [{{\"text\": string, \"confidence\": number, \"evidence\": [string...]}}...],\n\
+  \"dataset_groups\": [{{\"group_name\": string, \"dataset_ids\": [string...], \"confidence\": number, \"evidence\": [string...]}}...],\n\
+  \"assumptions_and_gaps\": [{{\"text\": string, \"confidence\": number, \"evidence\": [string...], \"suggested_probe\": string|null}}...]\n\
+}}\n\
+Rules:\n\
+- Output JSON only.\n\
+- No extra top-level keys, wrappers, commentary, or markdown.\n\
+- Evidence must cite dataset_id and concrete schema/stats clues.\n\
+- Confidence threshold target is >= {min_conf} for entries.\n\n\
+Existing global context JSON:\n{existing}\n\n\
+Dataset batch context:\n{input}\n\n\
+Reasoning memo:\n{memo}\n\nOutput JSON only:",
+        min_conf = GLOBAL_CONTEXT_MIN_CONFIDENCE,
+        existing = existing,
+        input = input,
+        memo = reason_memo
+    );
+    let mut next = None;
+    if let Some(v) = llm_compile_pass_json(
+        llm,
+        compile_prompt,
+        "react.catalog.enrich.global.compile",
+        llm_timeout_secs,
+    )
+    .await
+    {
+        if let Ok(parsed) = serde_json::from_value::<GlobalSemanticContextCompile>(v) {
+            let typed = react_core::providers::catalog::types::GlobalSemanticContext {
+                version: parsed.version.unwrap_or(1),
+                built_at_epoch_secs: parsed.built_at_epoch_secs,
+                audiences: parsed
+                    .audiences
+                    .into_iter()
+                    .map(|a| react_core::providers::catalog::types::GlobalAudience {
+                        audience: a.audience,
+                        confidence: a.confidence,
+                        evidence: a.evidence,
+                    })
+                    .collect(),
+                context_bullets: parsed
+                    .context_bullets
+                    .into_iter()
+                    .map(|b| react_core::providers::catalog::types::GlobalContextBullet {
+                        text: b.text,
+                        confidence: b.confidence,
+                        evidence: b.evidence,
+                    })
+                    .collect(),
+                dataset_groups: parsed
+                    .dataset_groups
+                    .into_iter()
+                    .map(|g| react_core::providers::catalog::types::GlobalDatasetGroup {
+                        group_name: g.group_name,
+                        dataset_ids: g.dataset_ids,
+                        confidence: g.confidence,
+                        evidence: g.evidence,
+                    })
+                    .collect(),
+                assumptions_and_gaps: parsed
+                    .assumptions_and_gaps
+                    .into_iter()
+                    .map(|a| react_core::providers::catalog::types::GlobalAssumptionGap {
+                        text: a.text,
+                        confidence: a.confidence,
+                        evidence: a.evidence,
+                        suggested_probe: a.suggested_probe,
+                    })
+                    .collect(),
+            };
+            next = Some(clamp_and_filter_global_context(typed));
+        }
+    }
+    let mut next = next.unwrap_or_else(|| deterministic_global_context_from_compact(compact_batch));
+    next.version = next.version.max(1);
+    next.built_at_epoch_secs = Some((chrono::Utc::now().timestamp()).max(0) as u64);
+    write_global_semantic_context(storage, keyspace, scope, &next).await?;
+    *global = next;
+    Ok(true)
 }
 
 /// Enrich GLOBAL project-level context (business meaning + audiences) from all dataset catalogs.
@@ -861,7 +1111,7 @@ pub async fn run_llm_global_context_enrichment_all(
     scope: &crate::providers::RequestScope,
     dataset_ids: &HashMap<String, crate::discover::Metadata>,
     llm_timeout_secs: u64,
-) {
+) -> Result<bool, String> {
     // Deterministic order.
     let mut dss: Vec<String> = dataset_ids.keys().cloned().collect();
     dss.sort();
@@ -876,45 +1126,15 @@ pub async fn run_llm_global_context_enrichment_all(
     let mut batch_chars: usize = 0;
     let max_batch_chars: usize = 85_000; // conservative prompt budget; LLM backend dependent
 
-    let mut flush_batch = |batch: &mut Vec<serde_json::Value>,
-                           global: &mut react_core::providers::catalog::types::GlobalSemanticContext|
-     -> Option<String> {
+    let flush_batch = |batch: &mut Vec<serde_json::Value>| -> Option<Vec<serde_json::Value>> {
         if batch.is_empty() {
             return None;
         }
-        let existing = serde_json::to_string_pretty(global).unwrap_or_else(|_| "{}".to_string());
-        let input = serde_json::to_string_pretty(&batch).unwrap_or_else(|_| "[]".to_string());
+        let out = batch.clone();
         batch.clear();
-        Some(format!(
-            "You are inferring project-level business context from datasets.\n\
-Return a JSON object for this schema:\n\
-{{\n\
-  \"version\": 1,\n\
-  \"built_at_epoch_secs\": <optional int>,\n\
-  \"audiences\": [{{\"audience\": string, \"confidence\": number, \"evidence\": [string...]}}...],\n\
-  \"context_bullets\": [{{\"text\": string, \"confidence\": number, \"evidence\": [string...]}}...],\n\
-  \"dataset_groups\": [{{\"group_name\": string, \"dataset_ids\": [string...], \"confidence\": number, \"evidence\": [string...]}}...],\n\
-  \"assumptions_and_gaps\": [{{\"text\": string, \"confidence\": number, \"evidence\": [string...], \"suggested_probe\": string|null}}...]\n\
-}}\n\
-\n\
-Rules:\n\
-- Only include entries when confidence is genuinely high (>= {min_conf}).\n\
-- Evidence must cite dataset_id and concrete schema/stats clues (field names/types/stats).\n\
-- Do NOT invent company/domain specifics; prefer general-but-useful analytics context.\n\
-- Merge with existing context: keep good prior entries; add/adjust only when the new batch provides strong evidence.\n\
-\n\
-Existing global context JSON:\n\
-{existing}\n\
-\n\
-Dataset batch context (catalog summaries):\n\
-{input}\n\
-\n\
-Output JSON only:",
-            min_conf = GLOBAL_CONTEXT_MIN_CONFIDENCE,
-            existing = existing,
-            input = input
-        ))
+        Some(out)
     };
+    let mut wrote = false;
 
     for ds in dss.iter() {
         let key = keyspace.catalog_key(scope, ds);
@@ -924,70 +1144,17 @@ Output JSON only:",
         let compact = compact_catalog_for_global_context(ds, &cat_json);
         let add_chars = serde_json::to_string(&compact).map(|s| s.len()).unwrap_or(0);
         if !batch.is_empty() && (batch_chars + add_chars) > max_batch_chars {
-            if let Some(prompt) = flush_batch(&mut batch, &mut global) {
-                let text_opt = if llm_timeout_secs == 0 {
-                    let llm0 = llm.clone();
-                    tokio::task::spawn_blocking(move || {
-                        llm0.chat(
-                            &[ChatMessage {
-                                role: "user".into(),
-                                content: prompt,
-                            }],
-                            &react_core::llm::LlmCallOptions {
-                                prompt_id: "react.catalog.enrich.global_semantic_context",
-                                thread_id: None,
-                                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                                max_output_tokens: None,
-                                temperature: None,
-                                top_p: None,
-                                reasoning_effort: None,
-                            },
-                        )
-                    })
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-                } else {
-                    let llm0 = llm.clone();
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(llm_timeout_secs),
-                        tokio::task::spawn_blocking(move || {
-                            llm0.chat(
-                                &[ChatMessage {
-                                    role: "user".into(),
-                                    content: prompt,
-                                }],
-                                &react_core::llm::LlmCallOptions {
-                                    prompt_id: "react.catalog.enrich.global_semantic_context",
-                                    thread_id: None,
-                                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                                    max_output_tokens: None,
-                                    temperature: None,
-                                    top_p: None,
-                                    reasoning_effort: None,
-                                },
-                            )
-                        }),
-                    )
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .and_then(|r| r.ok())
-                };
-                if let Some(text) = text_opt {
-                    if let Ok(v) = super_extract_json_value(&text) {
-                        if let Ok(parsed) = serde_json::from_value::<
-                            react_core::providers::catalog::types::GlobalSemanticContext,
-                        >(v)
-                        {
-                            global = clamp_and_filter_global_context(parsed);
-                            global.version = global.version.max(1);
-                            global.built_at_epoch_secs =
-                                Some((chrono::Utc::now().timestamp()).max(0) as u64);
-                            write_global_semantic_context(&storage, &keyspace, scope, &global).await;
-                        }
-                    }
-                }
+            if let Some(compact_batch) = flush_batch(&mut batch) {
+                wrote |= process_global_context_batch(
+                    llm.clone(),
+                    llm_timeout_secs,
+                    scope,
+                    &keyspace,
+                    &storage,
+                    &mut global,
+                    &compact_batch,
+                )
+                .await?;
             }
             batch_chars = 0;
         }
@@ -996,71 +1163,24 @@ Output JSON only:",
     }
 
     // Final flush.
-    if let Some(prompt) = flush_batch(&mut batch, &mut global) {
-        let text_opt = if llm_timeout_secs == 0 {
-            let llm0 = llm.clone();
-            tokio::task::spawn_blocking(move || {
-                llm0.chat(
-                    &[ChatMessage {
-                        role: "user".into(),
-                        content: prompt,
-                    }],
-                    &react_core::llm::LlmCallOptions {
-                        prompt_id: "react.catalog.enrich.global_semantic_context",
-                        thread_id: None,
-                        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                        max_output_tokens: None,
-                        temperature: None,
-                        top_p: None,
-                        reasoning_effort: None,
-                    },
-                )
-            })
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-        } else {
-            let llm0 = llm.clone();
-            tokio::time::timeout(
-                std::time::Duration::from_secs(llm_timeout_secs),
-                tokio::task::spawn_blocking(move || {
-                    llm0.chat(
-                        &[ChatMessage {
-                            role: "user".into(),
-                            content: prompt,
-                        }],
-                        &react_core::llm::LlmCallOptions {
-                            prompt_id: "react.catalog.enrich.global_semantic_context",
-                            thread_id: None,
-                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                            max_output_tokens: None,
-                            temperature: None,
-                            top_p: None,
-                            reasoning_effort: None,
-                        },
-                    )
-                }),
-            )
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .and_then(|r| r.ok())
-        };
-        if let Some(text) = text_opt {
-            if let Ok(v) = super_extract_json_value(&text) {
-                if let Ok(parsed) = serde_json::from_value::<
-                    react_core::providers::catalog::types::GlobalSemanticContext,
-                >(v)
-                {
-                    global = clamp_and_filter_global_context(parsed);
-                    global.version = global.version.max(1);
-                    global.built_at_epoch_secs =
-                        Some((chrono::Utc::now().timestamp()).max(0) as u64);
-                    write_global_semantic_context(&storage, &keyspace, scope, &global).await;
-                }
-            }
-        }
+    if let Some(compact_batch) = flush_batch(&mut batch) {
+        wrote |= process_global_context_batch(
+            llm.clone(),
+            llm_timeout_secs,
+            scope,
+            &keyspace,
+            &storage,
+            &mut global,
+            &compact_batch,
+        )
+        .await?;
     }
+    if !wrote {
+        let fallback = deterministic_global_context_from_compact(&[]);
+        write_global_semantic_context(&storage, &keyspace, scope, &fallback).await?;
+        return Ok(true);
+    }
+    Ok(true)
 }
 
 // NOTE: legacy wrapper removed. Call `run_llm_enrichment_all(storage, keyspace, llm, scope, dataset_ids)` instead.

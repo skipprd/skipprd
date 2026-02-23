@@ -2895,9 +2895,17 @@ Apply these fixes in the output.",
         for ds in dss.iter() {
             all.insert(ds.fqn(), react_core::discover::Metadata::default());
         }
-        cat.run_llm_enrichment_all(&sctx.scope, &all)
+        let enrich_report = cat
+            .run_llm_enrichment_all(&sctx.scope, &all)
             .await
             .map_err(|e| format!("catalog bootstrap failed while enriching metadata: {e}"))?;
+        tracing::info!(
+            "data_engineer: catalog enrichment summary datasets={} ok={} failed={} global_written={}",
+            enrich_report.dataset_total,
+            enrich_report.dataset_enriched_ok,
+            enrich_report.dataset_enriched_failed,
+            enrich_report.global_context_written
+        );
 
         // Hard gate: dataset-level and field-level descriptions must be present.
         let mut meta_errors: Vec<String> = Vec::new();
@@ -3302,7 +3310,31 @@ Apply these fixes in the output.",
         sctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
         use control_flow::{DerivedGuardState, Phase};
-        Self::ensure_catalog_bootstrap(sctx).await?;
+        if let Err(e) = Self::ensure_catalog_bootstrap(sctx).await {
+            let thread_store = ThreadStore::new(
+                sctx.storage.clone(),
+                sctx.scope.clone(),
+                sctx.keyspace.clone(),
+            );
+            let reason = format!(
+                "catalog bootstrap metadata gate failed before planning:\n{}",
+                e.trim()
+            );
+            let _ = thread_store
+                .append_step(
+                    thread_id,
+                    react_core::session::ThreadStep::GuardBlock {
+                        phase: Phase::Preflight.as_str().to_string(),
+                        kind: GuardBlockKind::PrecheckFailed,
+                        reason: reason.clone(),
+                        observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        agent: "agent".to_string(),
+                    },
+                )
+                .await;
+            return Ok(vec![FlowFrame::AwaitUser { prompt: reason }]);
+        }
 
         // Phase-step budget is reset when we make clear forward progress (phase advances).
         // This prevents aborting a healthy thread that is steadily moving through phases,

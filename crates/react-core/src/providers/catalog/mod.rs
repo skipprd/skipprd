@@ -10,6 +10,15 @@ pub mod types;
 
 pub use types::{DataCatalog, SemanticModel};
 
+#[derive(Clone, Debug, Default)]
+pub struct CatalogEnrichmentReport {
+    pub dataset_total: usize,
+    pub dataset_enriched_ok: usize,
+    pub dataset_enriched_failed: usize,
+    pub global_context_written: bool,
+    pub global_context_error: Option<String>,
+}
+
 #[async_trait]
 pub trait CatalogProvider: Send + Sync {
     async fn read_catalog(
@@ -50,5 +59,5 @@ pub trait CatalogProvider: Send + Sync {
         &self,
         scope: &RequestScope,
         dataset_ids: &HashMap<String, Metadata>,
-    ) -> Result<(), String>;
+    ) -> Result<CatalogEnrichmentReport, String>;
 }

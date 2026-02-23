@@ -140,8 +140,8 @@ impl CatalogProvider for DefaultCatalogProvider {
         &self,
         scope: &crate::providers::RequestScope,
         dataset_ids: &HashMap<String, crate::discover::Metadata>,
-    ) -> Result<(), String> {
-        enrich::run_llm_enrichment_all(
+    ) -> Result<react_core::providers::catalog::CatalogEnrichmentReport, String> {
+        let mut report = enrich::run_llm_enrichment_all(
             self.storage.clone(),
             self.keyspace.clone(),
             self.llm.clone(),
@@ -150,9 +150,9 @@ impl CatalogProvider for DefaultCatalogProvider {
             self.llm_timeout_secs,
             self.llm_batch_size,
         )
-        .await;
+        .await?;
         // Global context pass: infer cross-dataset meaning + likely audiences.
-        enrich::run_llm_global_context_enrichment_all(
+        match enrich::run_llm_global_context_enrichment_all(
             self.storage.clone(),
             self.keyspace.clone(),
             self.llm.clone(),
@@ -160,7 +160,18 @@ impl CatalogProvider for DefaultCatalogProvider {
             dataset_ids,
             self.llm_timeout_secs,
         )
-        .await;
-        Ok(())
+        .await
+        {
+            Ok(global_written) => {
+                report.global_context_written = global_written;
+                Ok(report)
+            }
+            Err(e) => {
+                report.global_context_error = Some(e.clone());
+                Err(format!(
+                    "global semantic context enrichment failed after dataset enrichment: {e}"
+                ))
+            }
+        }
     }
 }

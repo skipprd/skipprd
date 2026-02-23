@@ -169,7 +169,8 @@ async fn global_semantic_context_is_written_under_semantic_global_key() {
         &ids,
         0,
     )
-    .await;
+    .await
+    .expect("global context enrichment");
 
     let gkey = keyspace.semantic_key(&scope, react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID);
     let raw = storage.get_json(&gkey).await.expect("global semantic stored");
