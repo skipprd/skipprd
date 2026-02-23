@@ -119,7 +119,6 @@ impl Tool for PublishDbtToProviderTool {
             .map_err(|e| format!("failed to fetch manifest.json: {}", e))?;
         // NOTE: `manifest.json` bytes are not guaranteed stable across dbt runs (invocation ids, timestamps, ordering).
         // For approvals we use a deterministic "publish plan" hash derived from the manifest's model relations.
-        let raw_manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
 
         let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|e| format!("failed to parse manifest.json: {}", e))?;
@@ -150,7 +149,7 @@ impl Tool for PublishDbtToProviderTool {
                             .unwrap_or("");
                         let d = observation
                             .extra
-                            .get("manifest_sha256")
+                            .get("plan_sha256")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
                         if stage == "published" && last_published_digest.is_none() {
@@ -169,9 +168,7 @@ impl Tool for PublishDbtToProviderTool {
             return Ok(serde_json::json!({
                 "ok": true,
                 "stage": "no_change",
-                // Back-compat key: historically was raw manifest sha; now it's a deterministic publish-plan sha.
-                "manifest_sha256": plan_sha256,
-                "raw_manifest_sha256": raw_manifest_sha256,
+                "plan_sha256": plan_sha256,
                 "relations": relations,
                 "dialect": crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg),
                 "repair_report": compile_repair
@@ -205,9 +202,7 @@ impl Tool for PublishDbtToProviderTool {
                 "stage": "await_approval",
                 "await_approval": true,
                 "prompt": prompt,
-                // Back-compat key: deterministic publish-plan sha.
-                "manifest_sha256": plan_sha256,
-                "raw_manifest_sha256": raw_manifest_sha256,
+                "plan_sha256": plan_sha256,
                 "relations": relations,
                 "exists": exists,
                 "dialect": crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg),
@@ -282,9 +277,7 @@ impl Tool for PublishDbtToProviderTool {
         Ok(serde_json::json!({
             "ok": true,
             "stage": "published",
-            // Back-compat key: deterministic publish-plan sha.
-            "manifest_sha256": plan_sha256,
-            "raw_manifest_sha256": raw_manifest_sha256,
+            "plan_sha256": plan_sha256,
             "relations": relations,
             "dbt": build_res,
             "dialect": crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg),

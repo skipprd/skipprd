@@ -82,12 +82,9 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            // Refactor: replace legacy {pipeline,namespace} with {dataset_id} for grouping,
-            // and allow saving to models/<dataset_id>/<name>.sql and metrics/<dataset_id>/<name>.yaml.
-            // Back-compat: accept legacy `namespace` as an alias for `dataset_id`.
+            // Hard cutover: require dataset_id for model/metric grouping.
             let dataset_id = it
                 .get("dataset_id")
-                .or_else(|| it.get("namespace"))
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .trim()

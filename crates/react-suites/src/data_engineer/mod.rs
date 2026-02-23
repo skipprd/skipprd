@@ -5026,7 +5026,7 @@ Apply these fixes in the output.",
                                 Some((crate::data_engineer::plan::WorkGroupKind::AuthorSql, ds)) => {
                                     ds
                                 }
-                                _ => crate::data_engineer::plan::cleanse_next_batch(&plan),
+                                _ => Vec::new(),
                             };
                             let mut expected_paths: Vec<String> = Vec::new();
                             for ds in next.iter() {
@@ -5075,15 +5075,14 @@ Apply these fixes in the output.",
                             .await?;
                                 continue;
                             }
-                            // Work-group driven selection (preferred). Fall back to batch scanning if work_groups
-                            // are absent (older plans).
+                            // Work-group driven selection only (hard cutover).
                             let next_action =
                                 crate::data_engineer::plan::cleanse_next_action(&plan);
                             let next = match next_action.as_ref() {
                                 Some((crate::data_engineer::plan::WorkGroupKind::AuthorSql, ds)) => {
                                     ds.clone()
                                 }
-                                _ => crate::data_engineer::plan::cleanse_next_batch(&plan),
+                                _ => Vec::new(),
                             };
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
                             // the authoring tool registry will be patch-only (hard_mutation_only).
@@ -5303,8 +5302,7 @@ Apply these fixes in the output.",
                                             None, // allow freeform dbt_files patching for targeted repair
                                         )
                                     } else {
-                                        // If schema checklist work remains (legacy plans without work_groups),
-                                        // stay in authoring and request YAML patching.
+                                        // If schema checklist work remains, stay in authoring and request YAML patching.
                                         let pending_schema =
                                             crate::data_engineer::plan::cleanse_pending_for_checklist(
                                                 &plan,
@@ -5442,7 +5440,7 @@ Apply these fixes in the output.",
                                 Some((crate::data_engineer::plan::WorkGroupKind::AuthorSql, names)) => {
                                     names
                                 }
-                                _ => crate::data_engineer::plan::model_next_batch(&plan),
+                                _ => Vec::new(),
                             };
                             let mut expected_paths: Vec<String> = Vec::new();
                             for n in next.iter() {
@@ -5491,14 +5489,13 @@ Apply these fixes in the output.",
                         .await?;
                                 continue;
                             }
-                            // Work-group driven selection (preferred). Fall back to batch scanning if work_groups
-                            // are absent (older plans).
+                            // Work-group driven selection only (hard cutover).
                             let next_action = crate::data_engineer::plan::model_next_action(&plan);
                             let next_names = match next_action.as_ref() {
                                 Some((crate::data_engineer::plan::WorkGroupKind::AuthorSql, names)) => {
                                     names.clone()
                                 }
-                                _ => crate::data_engineer::plan::model_next_batch(&plan),
+                                _ => Vec::new(),
                             };
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
                             // the authoring tool registry will be patch-only (hard_mutation_only).

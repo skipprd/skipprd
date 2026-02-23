@@ -10,29 +10,14 @@ use react_core::tools::Tool;
 pub struct CatalogNoteTool;
 
 fn resolve_single_dataset_id(args: &Value) -> Result<String, String> {
-    // Preferred: dataset_id
+    // Hard cutover: accept dataset_id only.
     if let Some(s) = args.get("dataset_id").and_then(|x| x.as_str()) {
         let t = s.trim();
         if !t.is_empty() {
             return Ok(t.to_string());
         }
     }
-    // Back/alt compat: dataset_ids with exactly one entry
-    if let Some(arr) = args.get("dataset_ids").and_then(|x| x.as_array()) {
-        let mut vals: Vec<String> = arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
-            .filter(|s| !s.is_empty())
-            .collect();
-        vals.dedup();
-        if vals.len() == 1 {
-            return Ok(vals.remove(0));
-        }
-        if vals.len() > 1 {
-            return Err("catalog_note accepts a single dataset target; provide args.dataset_id OR args.dataset_ids with exactly one item.".to_string());
-        }
-    }
-    Err("dataset_id required (or dataset_ids with exactly one item)".to_string())
+    Err("dataset_id required".to_string())
 }
 
 #[async_trait]
@@ -386,17 +371,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_single_dataset_id_accepts_dataset_ids_len1() {
-        let args = serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_customers"]});
-        let got = resolve_single_dataset_id(&args).expect("ok");
-        assert_eq!(got, "AwsDataCatalog.test_raw.raw_customers");
-    }
-
-    #[test]
-    fn resolve_single_dataset_id_rejects_dataset_ids_len_gt1() {
-        let args = serde_json::json!({"dataset_ids":["a.b.c","d.e.f"]});
+    fn resolve_single_dataset_id_rejects_legacy_dataset_ids_shape() {
+        let args = serde_json::json!({"dataset_ids":["a.b.c"]});
         let err = resolve_single_dataset_id(&args).unwrap_err();
-        assert!(err.contains("exactly one"));
+        assert_eq!(err, "dataset_id required");
     }
 }
 

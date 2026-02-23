@@ -154,12 +154,11 @@ impl Tool for ApplyNextCleanseBatchTool {
             }));
         }
 
-        // Keep batch selection consistent with the suite driver:
-        // prefer work-group driven selection when available, otherwise fall back to batch scanning.
+        // Keep batch selection consistent with the suite driver: work-group driven only.
         let next_action = plan::cleanse_next_action(&plan);
         let batch = match next_action.as_ref() {
             Some((plan::WorkGroupKind::AuthorSql, ds)) => ds.clone(),
-            _ => plan::cleanse_next_batch(&plan),
+            _ => Vec::new(),
         };
         if batch.is_empty() {
             let pending_schema = plan::cleanse_pending_schema_contracts(&plan);
@@ -427,12 +426,11 @@ impl Tool for ApplyNextModelBatchTool {
             }));
         }
 
-        // Keep batch selection consistent with the suite driver:
-        // prefer work-group driven selection when available, otherwise fall back to batch scanning.
+        // Keep batch selection consistent with the suite driver: work-group driven only.
         let next_action = plan::model_next_action(&plan);
         let batch_names = match next_action.as_ref() {
             Some((plan::WorkGroupKind::AuthorSql, names)) => names.clone(),
-            _ => plan::model_next_batch(&plan),
+            _ => Vec::new(),
         };
         if batch_names.is_empty() {
             let pending_schema = plan::model_pending_schema_contracts(&plan);
