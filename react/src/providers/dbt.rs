@@ -76,16 +76,34 @@ struct CmdOut {
 
 fn redact_docker_args_for_log(args: &[String]) -> String {
     // IMPORTANT: docker args can include `-e KEY=VALUE` where VALUE may be a secret.
-    // We redact values after '=' for any token passed to `-e`, and fully redact known AWS secrets.
+    // Redact only known secret env keys so non-sensitive operational values stay observable.
     let mut out: Vec<String> = Vec::with_capacity(args.len());
     let mut next_is_env = false;
+    let is_secret_key = |k: &str| {
+        let k_uc = k.to_ascii_uppercase();
+        k_uc.contains("AWS_SECRET_ACCESS_KEY")
+            || k_uc.contains("AWS_SESSION_TOKEN")
+            || k_uc.contains("AWS_ACCESS_KEY_ID")
+            || k_uc.contains("LLM_API_KEY")
+            || k_uc.contains("OPENAI_API_KEY")
+            || k_uc.contains("ANTHROPIC_API_KEY")
+            || k_uc.contains("GOOGLE_API_KEY")
+            || k_uc.contains("AZURE_OPENAI_API_KEY")
+            || k_uc.contains("API_KEY")
+            || k_uc.contains("TOKEN")
+            || k_uc.contains("SECRET")
+    };
     for a in args.iter() {
         if next_is_env {
             next_is_env = false;
             if let Some((k, _v)) = a.split_once('=') {
-                out.push(format!("{}=***", k));
+                if is_secret_key(k) {
+                    out.push(format!("{}=***", k));
+                } else {
+                    out.push(a.clone());
+                }
             } else {
-                out.push("***".to_string());
+                out.push(a.clone());
             }
             continue;
         }
@@ -96,11 +114,7 @@ fn redact_docker_args_for_log(args: &[String]) -> String {
         }
         // Also redact inline KEY=VALUE tokens for common AWS secrets if present.
         if let Some((k, _v)) = a.split_once('=') {
-            let k_uc = k.to_ascii_uppercase();
-            if k_uc.contains("AWS_SECRET_ACCESS_KEY")
-                || k_uc.contains("AWS_SESSION_TOKEN")
-                || k_uc.contains("AWS_ACCESS_KEY_ID")
-            {
+            if is_secret_key(k) {
                 out.push(format!("{}=***", k));
                 continue;
             }
@@ -1486,5 +1500,21 @@ mod tests {
         assert!(joined.contains(":/project"));
         assert!(joined.contains("-w /project"));
         assert!(joined.contains("ghcr.io/dbt-labs/dbt-athena:1.8.3"));
+    }
+
+    #[test]
+    fn redact_docker_args_only_redacts_secret_env_keys() {
+        let args = vec![
+            "docker".to_string(),
+            "run".to_string(),
+            "-e".to_string(),
+            "ATHENA_WORKGROUP=picnic".to_string(),
+            "-e".to_string(),
+            "AWS_SECRET_ACCESS_KEY=supersecret".to_string(),
+        ];
+        let redacted = redact_docker_args_for_log(&args);
+        assert!(redacted.contains("ATHENA_WORKGROUP=picnic"));
+        assert!(redacted.contains("AWS_SECRET_ACCESS_KEY=***"));
+        assert!(!redacted.contains("supersecret"));
     }
 }

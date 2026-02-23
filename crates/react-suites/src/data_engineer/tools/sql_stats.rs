@@ -29,13 +29,63 @@ impl Tool for SqlStatsTool {
             .unwrap_or("")
             .trim()
             .to_string();
-        if table.is_empty() || field.is_empty() {
-            let hint = if !table.is_empty() && field.is_empty() {
-                Some("sql_stats requires args.field. Call sql_schema(args:{table}) first to list fields, then retry with a specific field.".to_string())
-            } else {
-                None
-            };
-            return Ok(serde_json::json!({"ok": false, "error": "missing table/field", "hint": hint}));
+        if table.is_empty() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error": "probe_policy_invalid_target",
+                "code": "missing_table",
+                "hint": "Provide args.table as fully-qualified <catalog>.<database>.<table>."
+            }));
+        }
+        if field.is_empty() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error": "probe_policy_invalid_target",
+                "code": "missing_field",
+                "table": table,
+                "hint": "sql_stats requires args.field. Call sql_schema(args:{table}) first and pick a concrete field."
+            }));
+        }
+
+        // Probe policy: table/field must resolve from canonical catalog or provider schema.
+        let mut known_fields: Option<Vec<String>> = None;
+        if let Some(cat) = self.catalog.as_ref() {
+            if let Ok(Some(c)) = cat.read_catalog(&ctx.scope, &table).await {
+                let cols: Vec<String> = c.fields.iter().map(|f| f.name.clone()).collect();
+                if !cols.is_empty() {
+                    known_fields = Some(cols);
+                }
+            }
+        }
+        if known_fields.is_none() {
+            if let Some(dsprov) = self.datasets.as_ref() {
+                if let Ok(ds) = parse_dataset_id_strict(&table) {
+                    if let Ok(cols) = dsprov.get_dataset_schema(&ds).await {
+                        let names: Vec<String> = cols.into_iter().map(|(n, _)| n).collect();
+                        if !names.is_empty() {
+                            known_fields = Some(names);
+                        }
+                    }
+                }
+            }
+        }
+        let Some(known_fields) = known_fields else {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error": "probe_policy_invalid_target",
+                "code": "unknown_table",
+                "table": table
+            }));
+        };
+        if !known_fields.iter().any(|f| f == &field) {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error": "probe_policy_invalid_target",
+                "code": "unknown_field",
+                "table": table,
+                "field": field,
+                "known_fields": known_fields.into_iter().take(80).collect::<Vec<_>>()
+            }));
         }
 
         // Try catalog first (acts as cache)

@@ -93,13 +93,28 @@ Rules:\n\
 pub fn cleanse_plan_enrichment_system_prompt() -> String {
     "Return CLEANSE enrichment JSON only for requested task_ids.\n\
 Each item MUST include {task_id, implementation_spec_json}.\n\
-implementation_spec_json must decode to a valid CleanseImplementationSpec object."
+implementation_spec_json must decode to a valid CleanseImplementationSpec object.\n\
+The JSON string MUST contain only these top-level keys:\n\
+- spec_version\n\
+- row_preserving\n\
+- output_fields\n\
+- prohibited_ops\n\
+Do not emit batch_id, dependencies, data_quality, wrappers, commentary, or any non-schema keys."
         .to_string()
 }
 
 pub fn model_plan_enrichment_system_prompt() -> String {
     "Return MODEL enrichment JSON only for requested task_ids.\n\
 Each item MUST include {task_id, implementation_spec_json}.\n\
-implementation_spec_json must decode to a valid ModelImplementationSpec object."
+implementation_spec_json must decode to a valid ModelImplementationSpec object.\n\
+The JSON string MUST contain only these top-level keys:\n\
+- spec_version\n\
+- grain\n\
+- inputs\n\
+- joins\n\
+- metrics\n\
+- output_fields\n\
+- assumptions\n\
+Do not emit batch_id, dependencies, data_quality, wrappers, commentary, or any non-schema keys."
         .to_string()
 }

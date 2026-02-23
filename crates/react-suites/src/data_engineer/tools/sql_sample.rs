@@ -19,13 +19,45 @@ impl Tool for SqlSampleTool {
         let table = args.get("table").and_then(|x| x.as_str()).unwrap_or("");
         let field = args.get("field").and_then(|x| x.as_str()).unwrap_or("");
         let k = args.get("k").and_then(|x| x.as_u64()).unwrap_or(10);
-        if table.is_empty() || field.is_empty() {
-            let hint = if !table.is_empty() && field.is_empty() {
-                Some("sql_sample requires args.field. Call sql_schema(args:{table}) first to list fields, then retry with a specific field. To sample rows, use run_sql with LIMIT.".to_string())
-            } else {
-                None
-            };
-            return Ok(serde_json::json!({"ok": false, "error": "missing table/field", "hint": hint}));
+        if table.trim().is_empty() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error": "probe_policy_invalid_target",
+                "code": "missing_table",
+                "hint": "Provide args.table as fully-qualified <catalog>.<database>.<table>."
+            }));
+        }
+        if field.trim().is_empty() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error": "probe_policy_invalid_target",
+                "code": "missing_field",
+                "table": table,
+                "hint": "sql_sample requires args.field. Call sql_schema(args:{table}) first and pick a field. For row samples use run_sql LIMIT."
+            }));
+        }
+        match self.query.schema(table).await {
+            Ok(cols) => {
+                let names: Vec<String> = cols.into_iter().map(|(n, _)| n).collect();
+                if !names.iter().any(|n| n == field) {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error": "probe_policy_invalid_target",
+                        "code": "unknown_field",
+                        "table": table,
+                        "field": field,
+                        "known_fields": names.into_iter().take(80).collect::<Vec<_>>()
+                    }));
+                }
+            }
+            Err(_) => {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error": "probe_policy_invalid_target",
+                    "code": "unknown_table",
+                    "table": table
+                }));
+            }
         }
         let sql = format!(
             "SELECT {f} AS value, COUNT(1) AS cnt FROM {t} GROUP BY {f} ORDER BY cnt DESC LIMIT {k}",

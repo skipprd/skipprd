@@ -575,6 +575,13 @@ impl DataEngineerSuite {
                         );
                     }
                 }
+                // Strip unknown top-level keys in implementation_spec before typed validation.
+                if let Some(spec) = t_obj.get_mut("implementation_spec") {
+                    let is_cleanse = expected_kind == "cleanse_plan";
+                    let (new_spec, _stripped) =
+                        Self::sanitize_impl_spec_value(spec.clone(), is_cleanse);
+                    *spec = new_spec;
+                }
                 // Normalize common drift inside implementation_spec.output_fields.
                 if let Some(out_fields) = t_obj
                     .get_mut("implementation_spec")
@@ -685,6 +692,73 @@ impl DataEngineerSuite {
     fn parse_json_typed_lenient<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, String> {
         let v = Self::parse_json_object_lenient(raw)?;
         serde_json::from_value::<T>(v).map_err(|e| e.to_string())
+    }
+
+    fn sanitize_impl_spec_value(
+        mut v: serde_json::Value,
+        is_cleanse: bool,
+    ) -> (serde_json::Value, Vec<String>) {
+        let mut stripped: Vec<String> = Vec::new();
+        let Some(obj) = v.as_object_mut() else {
+            return (v, stripped);
+        };
+        let allowed: HashSet<&'static str> = if is_cleanse {
+            ["spec_version", "row_preserving", "output_fields", "prohibited_ops"]
+                .into_iter()
+                .collect()
+        } else {
+            [
+                "spec_version",
+                "grain",
+                "inputs",
+                "joins",
+                "metrics",
+                "output_fields",
+                "assumptions",
+            ]
+            .into_iter()
+            .collect()
+        };
+        let keys: Vec<String> = obj.keys().cloned().collect();
+        for k in keys {
+            if !allowed.contains(k.as_str()) {
+                obj.remove(&k);
+                stripped.push(k);
+            }
+        }
+        (v, stripped)
+    }
+
+    fn parse_impl_spec_with_sanitize<T: serde::de::DeserializeOwned>(
+        raw: &str,
+        is_cleanse: bool,
+    ) -> Result<(T, Vec<String>), String> {
+        let v = Self::parse_json_object_lenient(raw)?;
+        let (sv, stripped) = Self::sanitize_impl_spec_value(v, is_cleanse);
+        let spec = serde_json::from_value::<T>(sv).map_err(|e| e.to_string())?;
+        Ok((spec, stripped))
+    }
+
+    fn push_snapshot_array_event(
+        snapshot: &mut serde_json::Value,
+        key: &str,
+        event: serde_json::Value,
+        max_len: usize,
+    ) {
+        if snapshot.is_null() {
+            *snapshot = serde_json::json!({});
+        }
+        if let Some(obj) = snapshot.as_object_mut() {
+            let arr = obj
+                .entry(key.to_string())
+                .or_insert_with(|| serde_json::Value::Array(vec![]));
+            if let Some(items) = arr.as_array_mut() {
+                items.push(event);
+                while items.len() > max_len {
+                    items.remove(0);
+                }
+            }
+        }
     }
 
     fn plan_enrich_chunk_size() -> usize {
@@ -985,6 +1059,88 @@ Apply these fixes in the output.",
         })
     }
 
+    fn apply_cleanse_enrichment_items(
+        plan: &mut crate::data_engineer::plan::CleansePlan,
+        allowed_task_ids: &[String],
+        items: Vec<react_core::schema_registry::CleansePlanEnrichmentItemV1>,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut failed: Vec<String> = Vec::new();
+        let mut failure_errors: Vec<String> = Vec::new();
+        for it in items {
+            if !allowed_task_ids.iter().any(|t| t == &it.task_id) {
+                continue;
+            }
+            match Self::parse_impl_spec_with_sanitize::<
+                crate::data_engineer::plan::CleanseImplementationSpec,
+            >(&it.implementation_spec_json, true)
+            {
+                Ok((spec, stripped)) => {
+                    if !stripped.is_empty() {
+                        Self::push_snapshot_array_event(
+                            &mut plan.project_snapshot,
+                            "spec_sanitizer_events",
+                            serde_json::json!({
+                                "phase": "cleanse_enrich",
+                                "task_id": it.task_id,
+                                "stripped_keys": stripped
+                            }),
+                            200,
+                        );
+                    }
+                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == it.task_id) {
+                        t.implementation_spec = spec;
+                    }
+                }
+                Err(e) => {
+                    failed.push(it.task_id);
+                    failure_errors.push(e);
+                }
+            }
+        }
+        (failed, failure_errors)
+    }
+
+    fn apply_model_enrichment_items(
+        plan: &mut crate::data_engineer::plan::ModelPlan,
+        allowed_task_ids: &[String],
+        items: Vec<react_core::schema_registry::ModelPlanEnrichmentItemV1>,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut failed: Vec<String> = Vec::new();
+        let mut failure_errors: Vec<String> = Vec::new();
+        for it in items {
+            if !allowed_task_ids.iter().any(|t| t == &it.task_id) {
+                continue;
+            }
+            match Self::parse_impl_spec_with_sanitize::<
+                crate::data_engineer::plan::ModelImplementationSpec,
+            >(&it.implementation_spec_json, false)
+            {
+                Ok((spec, stripped)) => {
+                    if !stripped.is_empty() {
+                        Self::push_snapshot_array_event(
+                            &mut plan.project_snapshot,
+                            "spec_sanitizer_events",
+                            serde_json::json!({
+                                "phase": "model_enrich",
+                                "task_id": it.task_id,
+                                "stripped_keys": stripped
+                            }),
+                            200,
+                        );
+                    }
+                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == it.task_id) {
+                        t.implementation_spec = spec;
+                    }
+                }
+                Err(e) => {
+                    failed.push(it.task_id);
+                    failure_errors.push(e);
+                }
+            }
+        }
+        (failed, failure_errors)
+    }
+
     async fn enrich_cleanse_tasks(
         ctx: &AgentCtx,
         planning_context: &str,
@@ -997,11 +1153,10 @@ Apply these fixes in the output.",
         for chunk in task_ids.chunks(Self::plan_enrich_chunk_size()) {
             let chunk_vec = chunk.to_vec();
             let summary = crate::data_engineer::plan::summarize_cleanse_plan(plan, 50);
-            let sys = crate::prompts::plan::cleanse_plan_enrichment_system_prompt();
-            let user = format!(
+            let base_user = format!(
                 "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nReturn schema-valid enrichment JSON.",
-                Self::excerpt(planning_context, 30_000),
-                Self::excerpt(memo, 20_000),
+                Self::excerpt(planning_context, 20_000),
+                Self::excerpt(memo, 12_000),
                 Self::critique_guidance(critique),
                 summary,
                 serde_json::to_string_pretty(&chunk_vec).unwrap_or_else(|_| "[]".to_string())
@@ -1025,21 +1180,61 @@ Apply these fixes in the output.",
             };
             let raw = ctx.llm.chat(
                 &[
-                    ChatMessage { role: "system".to_string(), content: sys.to_string() },
-                    ChatMessage { role: "user".to_string(), content: user },
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: crate::prompts::plan::cleanse_plan_enrichment_system_prompt(),
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: base_user,
+                    },
                 ],
                 &opts,
             )?;
-            let enrich = Self::parse_json_typed_lenient::<react_core::schema_registry::CleansePlanEnrichmentV1>(&raw)?;
-            for it in enrich.items {
-                if !chunk_vec.iter().any(|t| t == &it.task_id) {
-                    continue;
-                }
-                let spec = Self::parse_json_typed_lenient::<crate::data_engineer::plan::CleanseImplementationSpec>(
-                    &it.implementation_spec_json,
+            let enrich = Self::parse_json_typed_lenient::<
+                react_core::schema_registry::CleansePlanEnrichmentV1,
+            >(&raw)?;
+            let (failed, failure_errors) =
+                Self::apply_cleanse_enrichment_items(plan, &chunk_vec, enrich.items);
+            if !failed.is_empty() {
+                let retry_hint = format!(
+                    "You previously returned invalid implementation_spec_json.\nErrors:\n{}\nOnly emit keys: spec_version,row_preserving,output_fields,prohibited_ops.\nNo wrappers, no extra fields.",
+                    failure_errors.join("\n")
+                );
+                let retry_user = format!(
+                    "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nSTRICT RETRY REQUIREMENTS:\n{}\n\nReturn schema-valid enrichment JSON.",
+                    Self::excerpt(planning_context, 20_000),
+                    Self::excerpt(memo, 12_000),
+                    Self::critique_guidance(critique),
+                    crate::data_engineer::plan::summarize_cleanse_plan(plan, 50),
+                    serde_json::to_string_pretty(&failed).unwrap_or_else(|_| "[]".to_string()),
+                    retry_hint
+                );
+                let retry_opts = LlmCallOptions { prompt_id: "data_engineer.cleanse_plan_enrich_retry", ..opts };
+                let retry_raw = ctx.llm.chat(
+                    &[
+                        ChatMessage {
+                            role: "system".to_string(),
+                            content: crate::prompts::plan::cleanse_plan_enrichment_system_prompt(),
+                        },
+                        ChatMessage {
+                            role: "user".to_string(),
+                            content: retry_user,
+                        },
+                    ],
+                    &retry_opts,
                 )?;
-                if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == it.task_id) {
-                    t.implementation_spec = spec;
+                let retry_enrich = Self::parse_json_typed_lenient::<
+                    react_core::schema_registry::CleansePlanEnrichmentV1,
+                >(&retry_raw)?;
+                let (retry_failed, retry_errors) =
+                    Self::apply_cleanse_enrichment_items(plan, &failed, retry_enrich.items);
+                if !retry_failed.is_empty() {
+                    return Err(format!(
+                        "cleanse enrichment invalid after bounded retry for task_ids={}: {}",
+                        retry_failed.join(","),
+                        retry_errors.join(" | ")
+                    ));
                 }
             }
         }
@@ -1058,11 +1253,10 @@ Apply these fixes in the output.",
         for chunk in task_ids.chunks(Self::plan_enrich_chunk_size()) {
             let chunk_vec = chunk.to_vec();
             let summary = crate::data_engineer::plan::summarize_model_plan(plan, 50);
-            let sys = crate::prompts::plan::model_plan_enrichment_system_prompt();
-            let user = format!(
+            let base_user = format!(
                 "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nReturn schema-valid enrichment JSON.",
-                Self::excerpt(planning_context, 30_000),
-                Self::excerpt(memo, 20_000),
+                Self::excerpt(planning_context, 20_000),
+                Self::excerpt(memo, 12_000),
                 Self::critique_guidance(critique),
                 summary,
                 serde_json::to_string_pretty(&chunk_vec).unwrap_or_else(|_| "[]".to_string())
@@ -1086,21 +1280,62 @@ Apply these fixes in the output.",
             };
             let raw = ctx.llm.chat(
                 &[
-                    ChatMessage { role: "system".to_string(), content: sys.to_string() },
-                    ChatMessage { role: "user".to_string(), content: user },
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: crate::prompts::plan::model_plan_enrichment_system_prompt(),
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: base_user,
+                    },
                 ],
                 &opts,
             )?;
-            let enrich = Self::parse_json_typed_lenient::<react_core::schema_registry::ModelPlanEnrichmentV1>(&raw)?;
-            for it in enrich.items {
-                if !chunk_vec.iter().any(|t| t == &it.task_id) {
-                    continue;
-                }
-                let spec = Self::parse_json_typed_lenient::<crate::data_engineer::plan::ModelImplementationSpec>(
-                    &it.implementation_spec_json,
+            let enrich =
+                Self::parse_json_typed_lenient::<react_core::schema_registry::ModelPlanEnrichmentV1>(
+                    &raw,
                 )?;
-                if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == it.task_id) {
-                    t.implementation_spec = spec;
+            let (failed, failure_errors) =
+                Self::apply_model_enrichment_items(plan, &chunk_vec, enrich.items);
+            if !failed.is_empty() {
+                let retry_hint = format!(
+                    "You previously returned invalid implementation_spec_json.\nErrors:\n{}\nOnly emit keys: spec_version,grain,inputs,joins,metrics,output_fields,assumptions.\nNo wrappers, no extra fields.",
+                    failure_errors.join("\n")
+                );
+                let retry_user = format!(
+                    "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nSTRICT RETRY REQUIREMENTS:\n{}\n\nReturn schema-valid enrichment JSON.",
+                    Self::excerpt(planning_context, 20_000),
+                    Self::excerpt(memo, 12_000),
+                    Self::critique_guidance(critique),
+                    crate::data_engineer::plan::summarize_model_plan(plan, 50),
+                    serde_json::to_string_pretty(&failed).unwrap_or_else(|_| "[]".to_string()),
+                    retry_hint
+                );
+                let retry_opts = LlmCallOptions { prompt_id: "data_engineer.model_plan_enrich_retry", ..opts };
+                let retry_raw = ctx.llm.chat(
+                    &[
+                        ChatMessage {
+                            role: "system".to_string(),
+                            content: crate::prompts::plan::model_plan_enrichment_system_prompt(),
+                        },
+                        ChatMessage {
+                            role: "user".to_string(),
+                            content: retry_user,
+                        },
+                    ],
+                    &retry_opts,
+                )?;
+                let retry_enrich = Self::parse_json_typed_lenient::<
+                    react_core::schema_registry::ModelPlanEnrichmentV1,
+                >(&retry_raw)?;
+                let (retry_failed, retry_errors) =
+                    Self::apply_model_enrichment_items(plan, &failed, retry_enrich.items);
+                if !retry_failed.is_empty() {
+                    return Err(format!(
+                        "model enrichment invalid after bounded retry for task_ids={}: {}",
+                        retry_failed.join(","),
+                        retry_errors.join(" | ")
+                    ));
                 }
             }
         }
@@ -2625,15 +2860,14 @@ Apply these fixes in the output.",
         Ok((reg, tools_card_lines.join("\n")))
     }
 
-    /// If no catalogs/stats exist yet for this scope, build them for all tables first.
+    /// Hard cutover: refresh canonical catalog state on every run.
     ///
-    /// This avoids table-name assumptions and gives the agent a reliable base for shortlist selection.
+    /// This builds/refreshes warehouse-backed catalog artifacts and then enforces that required
+    /// metadata exists so planning can treat catalog as canonical.
     async fn ensure_catalog_bootstrap(sctx: &SuiteCtx) -> Result<(), String> {
         let (Some(cat), Some(datasets)) = (sctx.catalog.as_ref(), sctx.datasets.as_ref()) else {
             return Ok(());
         };
-        // Detect whether any catalog entry already exists (sample a few datasets).
-        let mut has_any = false;
         let dss = datasets
             .list_datasets()
             .await
@@ -2647,33 +2881,75 @@ Apply these fixes in the output.",
             &sctx.scope,
             react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
         );
-        let has_global = sctx.storage.get_json(&global_key).await.is_ok();
+        tracing::info!(
+            "data_engineer: refreshing canonical catalogs/stats for {} dataset(s)",
+            dss.len()
+        );
+        let empty: HashMap<String, react_core::discover::Metadata> = HashMap::new();
+        cat.build_all_with_progress(&sctx.scope, datasets.as_ref(), &empty, None)
+            .await
+            .map_err(|e| format!("catalog bootstrap failed while building catalogs: {e}"))?;
 
-        for ds in dss.iter().take(5) {
+        // Mandatory metadata completion pass.
+        let mut all: HashMap<String, react_core::discover::Metadata> = HashMap::new();
+        for ds in dss.iter() {
+            all.insert(ds.fqn(), react_core::discover::Metadata::default());
+        }
+        cat.run_llm_enrichment_all(&sctx.scope, &all)
+            .await
+            .map_err(|e| format!("catalog bootstrap failed while enriching metadata: {e}"))?;
+
+        // Hard gate: dataset-level and field-level descriptions must be present.
+        let mut meta_errors: Vec<String> = Vec::new();
+        for ds in dss.iter() {
             let id = ds.fqn();
-            if let Ok(Some(_)) = cat.read_catalog(&sctx.scope, &id).await {
-                has_any = true;
-                break;
+            let Some(c) = cat
+                .read_catalog(&sctx.scope, &id)
+                .await
+                .map_err(|e| format!("catalog bootstrap failed while reading catalog for {id}: {e}"))?
+            else {
+                meta_errors.push(format!("{id}: catalog missing after refresh"));
+                continue;
+            };
+            if c.description.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+                meta_errors.push(format!("{id}: missing dataset description"));
+            }
+            let missing_fields = c
+                .fields
+                .iter()
+                .filter(|f| f.description.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true))
+                .count();
+            if missing_fields > 0 {
+                meta_errors.push(format!(
+                    "{id}: {} field(s) missing field descriptions",
+                    missing_fields
+                ));
             }
         }
-        if !has_any || !has_global {
-            tracing::info!("data_engineer: no existing catalog found; building catalogs/stats for all datasets");
-            let empty: HashMap<String, react_core::discover::Metadata> = HashMap::new();
-            if !has_any {
-                cat.build_all_with_progress(&sctx.scope, datasets.as_ref(), &empty, None)
-                    .await
-                    .map_err(|e| format!("catalog bootstrap failed while building catalogs: {e}"))?;
-            }
 
-            // Best-effort LLM enrichment (dataset descriptions + global context).
-            // Use a stable dataset_id map so the provider can chunk deterministically.
-            let mut all: HashMap<String, react_core::discover::Metadata> = HashMap::new();
-            for ds in dss.iter() {
-                all.insert(ds.fqn(), react_core::discover::Metadata::default());
+        let gctx = sctx.storage.get_json(&global_key).await.ok().and_then(|v| {
+            serde_json::from_value::<react_core::providers::catalog::types::GlobalSemanticContext>(
+                v,
+            )
+            .ok()
+        });
+        match gctx {
+            Some(g) => {
+                if g.audiences.is_empty() {
+                    meta_errors.push("global_semantic_context: audiences is empty".to_string());
+                }
+                if g.context_bullets.is_empty() {
+                    meta_errors
+                        .push("global_semantic_context: context_bullets is empty".to_string());
+                }
             }
-            if let Err(e) = cat.run_llm_enrichment_all(&sctx.scope, &all).await {
-                tracing::warn!("data_engineer: catalog enrichment failed: {}", e);
-            }
+            None => meta_errors.push("global_semantic_context: missing".to_string()),
+        }
+        if !meta_errors.is_empty() {
+            return Err(format!(
+                "catalog bootstrap metadata gate failed:\n- {}",
+                meta_errors.join("\n- ")
+            ));
         }
         Ok(())
     }
@@ -8009,6 +8285,49 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].as_array().map(|a| a.len()), Some(5));
         assert_eq!(batches[1].as_array().map(|a| a.len()), Some(2));
+    }
+
+    #[test]
+    fn parse_impl_spec_with_sanitize_strips_unknown_cleanse_keys() {
+        let raw = serde_json::json!({
+            "spec_version": 1,
+            "row_preserving": true,
+            "output_fields": [],
+            "prohibited_ops": [],
+            "batch_id": "x",
+            "data_quality": {"checks":[]}
+        })
+        .to_string();
+        let (spec, stripped) = DataEngineerSuite::parse_impl_spec_with_sanitize::<
+            crate::data_engineer::plan::CleanseImplementationSpec,
+        >(&raw, true)
+        .expect("cleanse spec should parse after sanitize");
+        assert_eq!(spec.spec_version, 1);
+        assert!(stripped.iter().any(|k| k == "batch_id"));
+        assert!(stripped.iter().any(|k| k == "data_quality"));
+    }
+
+    #[test]
+    fn parse_impl_spec_with_sanitize_strips_unknown_model_keys() {
+        let raw = serde_json::json!({
+            "spec_version": 1,
+            "grain": "1 row per id",
+            "inputs": [],
+            "joins": [],
+            "metrics": [],
+            "output_fields": [],
+            "assumptions": [],
+            "dependencies": ["x"],
+            "batch_id": "b1"
+        })
+        .to_string();
+        let (spec, stripped) = DataEngineerSuite::parse_impl_spec_with_sanitize::<
+            crate::data_engineer::plan::ModelImplementationSpec,
+        >(&raw, false)
+        .expect("model spec should parse after sanitize");
+        assert_eq!(spec.spec_version, 1);
+        assert!(stripped.iter().any(|k| k == "dependencies"));
+        assert!(stripped.iter().any(|k| k == "batch_id"));
     }
 
     #[tokio::test]
