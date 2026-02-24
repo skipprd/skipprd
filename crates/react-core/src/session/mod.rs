@@ -262,7 +262,7 @@ impl ToolObservation {
 
         // If this is a failure and we still have no errors, force one.
         if !ok && errors.is_empty() {
-            errors.push("unknown error".to_string());
+            errors.push("no error details were captured".to_string());
         }
 
         Self {
