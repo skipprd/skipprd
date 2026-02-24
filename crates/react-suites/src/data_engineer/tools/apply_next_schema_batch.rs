@@ -860,6 +860,14 @@ mod tests {
 
         // Seed a cleanse plan with sql_model done and schema_contract pending.
         let plan_key = plan::new_cleanse_plan_key(&ctx);
+        let mut checklist = plan::canonical_task_checklist(true);
+        if let Some(item) = checklist
+            .iter_mut()
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SQL_MODEL)
+        {
+            item.status = plan::ChecklistItemStatus::Done;
+        }
+        let batches = vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]];
         let p = plan::CleansePlan {
             plan_key: plan_key.clone(),
             status: plan::PlanStatus::Approved,
@@ -885,29 +893,10 @@ mod tests {
                     prohibited_ops: vec![],
                 },
                 status: plan::TaskStatus::InProgress,
-                checklist: vec![
-                    plan::PlanChecklistItem {
-                        checklist_item_id: "sql_model".to_string(),
-                        label: "Author staging SQL model".to_string(),
-                        details: None,
-                        status: plan::ChecklistItemStatus::Done,
-                        origin: plan::ChecklistOrigin::Initial,
-                        origin_step_idx: None,
-                        evidence: vec![],
-                    },
-                    plan::PlanChecklistItem {
-                        checklist_item_id: "schema_contract".to_string(),
-                        label: "Define staging schema contract".to_string(),
-                        details: None,
-                        status: plan::ChecklistItemStatus::Pending,
-                        origin: plan::ChecklistOrigin::Initial,
-                        origin_step_idx: None,
-                        evidence: vec![],
-                    },
-                ],
+                checklist,
             }],
-            batches: vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]],
-            work_groups: vec![],
+            batches: batches.clone(),
+            work_groups: plan::canonical_work_groups_from_batches(&batches, "cleanse"),
             mutations: vec![],
             progress: plan::PlanProgress::default(),
         };
@@ -982,9 +971,17 @@ mod tests {
             plan_key: Some(plan_key.clone()),
             workgroup_id: Some("wg".to_string()),
             task_id: Some("AwsDataCatalog.test_raw.raw_customers".to_string()),
-            checklist_item_id: Some("collision_id_contract".to_string()),
+            checklist_item_id: Some(plan::CHECKLIST_SCHEMA_CONTRACT.to_string()),
         });
 
+        let mut checklist = plan::canonical_task_checklist(true);
+        if let Some(item) = checklist
+            .iter_mut()
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SQL_MODEL)
+        {
+            item.status = plan::ChecklistItemStatus::Done;
+        }
+        let batches = vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]];
         let p = plan::CleansePlan {
             plan_key: plan_key.clone(),
             status: plan::PlanStatus::Approved,
@@ -1010,29 +1007,10 @@ mod tests {
                     prohibited_ops: vec![],
                 },
                 status: plan::TaskStatus::InProgress,
-                checklist: vec![
-                    plan::PlanChecklistItem {
-                        checklist_item_id: plan::CHECKLIST_SQL_MODEL.to_string(),
-                        label: "Author staging SQL model".to_string(),
-                        details: None,
-                        status: plan::ChecklistItemStatus::Done,
-                        origin: plan::ChecklistOrigin::Initial,
-                        origin_step_idx: None,
-                        evidence: vec![],
-                    },
-                    plan::PlanChecklistItem {
-                        checklist_item_id: "collision_id_contract".to_string(),
-                        label: "Collision id contract".to_string(),
-                        details: None,
-                        status: plan::ChecklistItemStatus::Pending,
-                        origin: plan::ChecklistOrigin::Initial,
-                        origin_step_idx: None,
-                        evidence: vec![],
-                    },
-                ],
+                checklist,
             }],
-            batches: vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]],
-            work_groups: vec![],
+            batches: batches.clone(),
+            work_groups: plan::canonical_work_groups_from_batches(&batches, "cleanse"),
             mutations: vec![],
             progress: plan::PlanProgress::default(),
         };
@@ -1066,7 +1044,7 @@ mod tests {
         let st = t
             .checklist
             .iter()
-            .find(|it| it.checklist_item_id == "collision_id_contract")
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SCHEMA_CONTRACT)
             .map(|it| it.status)
             .unwrap();
         assert_eq!(st, plan::ChecklistItemStatus::Done);
@@ -1112,6 +1090,14 @@ mod tests {
 
         // Seed a model plan with sql_model done and schema_contract pending.
         let plan_key = plan::new_model_plan_key(&ctx);
+        let mut checklist = plan::canonical_task_checklist(false);
+        if let Some(item) = checklist
+            .iter_mut()
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SQL_MODEL)
+        {
+            item.status = plan::ChecklistItemStatus::Done;
+        }
+        let batches = vec![vec!["dim_customers".to_string()]];
         let p = plan::ModelPlan {
             plan_key: plan_key.clone(),
             status: plan::PlanStatus::Approved,
@@ -1141,29 +1127,10 @@ mod tests {
                     assumptions: vec![],
                 },
                 status: plan::TaskStatus::InProgress,
-                checklist: vec![
-                    plan::PlanChecklistItem {
-                        checklist_item_id: "sql_model".to_string(),
-                        label: "Author gold SQL model".to_string(),
-                        details: None,
-                        status: plan::ChecklistItemStatus::Done,
-                        origin: plan::ChecklistOrigin::Initial,
-                        origin_step_idx: None,
-                        evidence: vec![],
-                    },
-                    plan::PlanChecklistItem {
-                        checklist_item_id: "schema_contract".to_string(),
-                        label: "Define schema contract".to_string(),
-                        details: None,
-                        status: plan::ChecklistItemStatus::Pending,
-                        origin: plan::ChecklistOrigin::Initial,
-                        origin_step_idx: None,
-                        evidence: vec![],
-                    },
-                ],
+                checklist,
             }],
-            batches: vec![vec!["dim_customers".to_string()]],
-            work_groups: vec![],
+            batches: batches.clone(),
+            work_groups: plan::canonical_work_groups_from_batches(&batches, "model"),
             mutations: vec![],
             progress: plan::PlanProgress::default(),
         };
@@ -1228,7 +1195,7 @@ mod tests {
             plan_key: Some(plan_key.clone()),
             workgroup_id: Some("wg".to_string()),
             task_id: Some("dim_customers".to_string()),
-            checklist_item_id: Some("collision_id_contract".to_string()),
+            checklist_item_id: Some(plan::CHECKLIST_SCHEMA_CONTRACT.to_string()),
         });
 
         // Seed model SQL so allowed_columns can be derived (best-effort).
@@ -1240,6 +1207,14 @@ mod tests {
             .await
             .unwrap();
 
+        let mut checklist = plan::canonical_task_checklist(false);
+        if let Some(item) = checklist
+            .iter_mut()
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SQL_MODEL)
+        {
+            item.status = plan::ChecklistItemStatus::Done;
+        }
+        let batches = vec![vec!["dim_customers".to_string()]];
         let p = plan::ModelPlan {
             plan_key: plan_key.clone(),
             status: plan::PlanStatus::Approved,
@@ -1269,29 +1244,10 @@ mod tests {
                     assumptions: vec![],
                 },
                 status: plan::TaskStatus::InProgress,
-                checklist: vec![
-                    plan::PlanChecklistItem {
-                        checklist_item_id: plan::CHECKLIST_SQL_MODEL.to_string(),
-                        label: "Author gold SQL model".to_string(),
-                        details: None,
-                        status: plan::ChecklistItemStatus::Done,
-                        origin: plan::ChecklistOrigin::Initial,
-                        origin_step_idx: None,
-                        evidence: vec![],
-                    },
-                    plan::PlanChecklistItem {
-                        checklist_item_id: "collision_id_contract".to_string(),
-                        label: "Collision id contract".to_string(),
-                        details: None,
-                        status: plan::ChecklistItemStatus::Pending,
-                        origin: plan::ChecklistOrigin::Initial,
-                        origin_step_idx: None,
-                        evidence: vec![],
-                    },
-                ],
+                checklist,
             }],
-            batches: vec![vec!["dim_customers".to_string()]],
-            work_groups: vec![],
+            batches: batches.clone(),
+            work_groups: plan::canonical_work_groups_from_batches(&batches, "model"),
             mutations: vec![],
             progress: plan::PlanProgress::default(),
         };
@@ -1314,7 +1270,7 @@ mod tests {
         let st = t
             .checklist
             .iter()
-            .find(|it| it.checklist_item_id == "collision_id_contract")
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SCHEMA_CONTRACT)
             .map(|it| it.status)
             .unwrap();
         assert_eq!(st, plan::ChecklistItemStatus::Done);
@@ -1371,6 +1327,14 @@ mod tests {
             .unwrap();
 
         let plan_key = plan::new_model_plan_key(&ctx);
+        let mut checklist = plan::canonical_task_checklist(false);
+        if let Some(item) = checklist
+            .iter_mut()
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SQL_MODEL)
+        {
+            item.status = plan::ChecklistItemStatus::Done;
+        }
+        let batches = vec![vec!["dim_customers".to_string()]];
         let p = plan::ModelPlan {
             plan_key: plan_key.clone(),
             status: plan::PlanStatus::Approved,
@@ -1400,29 +1364,10 @@ mod tests {
                     assumptions: vec![],
                 },
                 status: plan::TaskStatus::InProgress,
-                checklist: vec![
-                    plan::PlanChecklistItem {
-                        checklist_item_id: "sql_model".to_string(),
-                        label: "Author gold SQL model".to_string(),
-                        details: None,
-                        status: plan::ChecklistItemStatus::Done,
-                        origin: plan::ChecklistOrigin::Initial,
-                        origin_step_idx: None,
-                        evidence: vec![],
-                    },
-                    plan::PlanChecklistItem {
-                        checklist_item_id: "schema_contract".to_string(),
-                        label: "Define schema contract".to_string(),
-                        details: None,
-                        status: plan::ChecklistItemStatus::Pending,
-                        origin: plan::ChecklistOrigin::Initial,
-                        origin_step_idx: None,
-                        evidence: vec![],
-                    },
-                ],
+                checklist,
             }],
-            batches: vec![vec!["dim_customers".to_string()]],
-            work_groups: vec![],
+            batches: batches.clone(),
+            work_groups: plan::canonical_work_groups_from_batches(&batches, "model"),
             mutations: vec![],
             progress: plan::PlanProgress::default(),
         };
@@ -1484,6 +1429,14 @@ mod tests {
 
         // Seed model plan.
         let plan_key = plan::new_model_plan_key(&ctx);
+        let mut checklist = plan::canonical_task_checklist(false);
+        if let Some(item) = checklist
+            .iter_mut()
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SQL_MODEL)
+        {
+            item.status = plan::ChecklistItemStatus::Done;
+        }
+        let batches = vec![vec!["dim_customers".to_string()]];
         let p = plan::ModelPlan {
             plan_key: plan_key.clone(),
             status: plan::PlanStatus::Approved,
@@ -1513,29 +1466,10 @@ mod tests {
                     assumptions: vec![],
                 },
                 status: plan::TaskStatus::InProgress,
-                checklist: vec![
-                    plan::PlanChecklistItem {
-                        checklist_item_id: "sql_model".to_string(),
-                        label: "Author gold SQL model".to_string(),
-                        details: None,
-                        status: plan::ChecklistItemStatus::Done,
-                        origin: plan::ChecklistOrigin::Initial,
-                        origin_step_idx: None,
-                        evidence: vec![],
-                    },
-                    plan::PlanChecklistItem {
-                        checklist_item_id: "schema_contract".to_string(),
-                        label: "Define schema contract".to_string(),
-                        details: None,
-                        status: plan::ChecklistItemStatus::Pending,
-                        origin: plan::ChecklistOrigin::Initial,
-                        origin_step_idx: None,
-                        evidence: vec![],
-                    },
-                ],
+                checklist,
             }],
-            batches: vec![vec!["dim_customers".to_string()]],
-            work_groups: vec![],
+            batches: batches.clone(),
+            work_groups: plan::canonical_work_groups_from_batches(&batches, "model"),
             mutations: vec![],
             progress: plan::PlanProgress::default(),
         };
