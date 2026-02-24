@@ -668,9 +668,16 @@ impl ThreadStore {
             },
         );
 
-        // Best-effort: keep thread_state strongly consistent with the persisted step sequence.
-        // This is a separate object today (S3 best-effort); later a transactional store can make this atomic.
-        let _ = self.materialize_thread_state(thread_id, step_count).await;
+        // Keep thread_state strongly consistent with the persisted step sequence. We do not fail
+        // append_step after the log write succeeds, but we must surface materialization failures.
+        if let Err(e) = self.materialize_thread_state(thread_id, step_count).await {
+            tracing::warn!(
+                "thread_state_materialize_failed thread_id={} step_count={} error={}",
+                thread_id,
+                step_count,
+                e
+            );
+        }
         Ok(())
     }
 

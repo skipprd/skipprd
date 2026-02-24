@@ -5509,24 +5509,7 @@ Apply these fixes in the output.",
                                         agent: "agent".to_string(),
                                     };
                                     let _ = thread_store.append_step(thread_id, step.clone()).await;
-                                    control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        phase,
-                                        Some(PhaseReasonCode::PhaseBlocked),
-                                        Some(serde_json::json!({
-                                            "kind": "plan_grounding",
-                                            "reason": miss,
-                                            "plan_manifest_lookup_unavailable_fallback": manifest_retry_signal.fallback_mode,
-                                            "manifest_retry_suppressed": manifest_retry_signal.retry_suppressed,
-                                            "manifest_lookup_failure_signature": manifest_retry_signal.failure_signature,
-                                            "metadata_probe_failures": metadata_probe_failures,
-                                            "trigger_step": step,
-                                        })),
-                                    )
-                                    .await?;
+                                    // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     let tries = Self::bump_subjective_retry(
                                         &thread_store,
                                         thread_id,
@@ -5590,20 +5573,7 @@ Apply these fixes in the output.",
                                         };
                                         let _ =
                                             thread_store.append_step(thread_id, step.clone()).await;
-                                        control_flow::append_phase_with_reason(
-                                            &thread_store,
-                                            thread_id,
-                                            Some("agent".to_string()),
-                                            Some(phase),
-                                            phase,
-                                            Some(PhaseReasonCode::PhaseBlocked),
-                                            Some(serde_json::json!({
-                                                "kind": "plan_json_invalid",
-                                                "expected_kind": "cleanse_plan",
-                                                "error": err,
-                                            })),
-                                        )
-                                        .await?;
+                                        // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                         let tries = Self::bump_subjective_retry(
                                             &thread_store,
                                             thread_id,
@@ -5852,19 +5822,7 @@ Apply these fixes in the output.",
                                         agent: "agent".to_string(),
                                     };
                                     let _ = thread_store.append_step(thread_id, step.clone()).await;
-                                    control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        phase,
-                                        Some(PhaseReasonCode::PhaseBlocked),
-                                        Some(serde_json::json!({
-                                            "kind": "plan_semantic_invalid",
-                                            "errors": sem.errors,
-                                        })),
-                                    )
-                                    .await?;
+                                    // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     let tries = Self::bump_subjective_retry(
                                         &thread_store,
                                         thread_id,
@@ -5980,20 +5938,7 @@ Apply these fixes in the output.",
                                         };
                                         let _ =
                                             thread_store.append_step(thread_id, step.clone()).await;
-                                        control_flow::append_phase_with_reason(
-                                            &thread_store,
-                                            thread_id,
-                                            Some("agent".to_string()),
-                                            Some(phase),
-                                            phase,
-                                            Some(PhaseReasonCode::PhaseBlocked),
-                                            Some(serde_json::json!({
-                                                "kind": "plan_json_invalid",
-                                                "expected_kind": "model_plan",
-                                                "error": err,
-                                            })),
-                                        )
-                                        .await?;
+                                        // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                         let tries = Self::bump_subjective_retry(
                                             &thread_store,
                                             thread_id,
@@ -6130,20 +6075,7 @@ Apply these fixes in the output.",
                                     &stg.allowed_models,
                                 );
                                 if plan.tasks.is_empty() || plan.batches.is_empty() {
-                                    let reason = "Model plan contained no grounded tasks after enforcing gold-tier constraints.".to_string();
-                                    let _ = control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        phase,
-                                        Some(PhaseReasonCode::PhaseBlocked),
-                                        Some(serde_json::json!({
-                                            "kind": "plan_grounding_empty_after_prune",
-                                            "reason": reason,
-                                        })),
-                                    )
-                                    .await;
+                                    // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     let tries = Self::bump_subjective_retry(
                                         &thread_store,
                                         thread_id,
@@ -6237,19 +6169,7 @@ Apply these fixes in the output.",
                                         agent: "agent".to_string(),
                                     };
                                     let _ = thread_store.append_step(thread_id, step.clone()).await;
-                                    control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        phase,
-                                        Some(PhaseReasonCode::PhaseBlocked),
-                                        Some(serde_json::json!({
-                                            "kind": "plan_semantic_invalid",
-                                            "errors": sem.errors,
-                                        })),
-                                    )
-                                    .await?;
+                                    // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     let tries = Self::bump_subjective_retry(
                                         &thread_store,
                                         thread_id,
@@ -7750,27 +7670,7 @@ Apply these fixes in the output.",
                                         agent: "agent".to_string(),
                                     };
                                     let _ = thread_store.append_step(thread_id, step.clone()).await;
-                                    let trigger_step_idx = thread_store
-                                        .get(thread_id)
-                                        .await
-                                        .ok()
-                                        .map(|l| l.steps.len().saturating_sub(1))
-                                        .unwrap_or(0);
-                                    control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        phase,
-                                        Some(PhaseReasonCode::PhaseBlocked),
-                                        Some(serde_json::json!({
-                                            "kind": "authoring_completion",
-                                            "reason": reason,
-                                            "trigger_step_idx": trigger_step_idx,
-                                            "trigger_step": step,
-                                        })),
-                                    )
-                                    .await?;
+                                    // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     continue;
                                 }
                             }
@@ -7795,27 +7695,7 @@ Apply these fixes in the output.",
                                         agent: "agent".to_string(),
                                     };
                                     let _ = thread_store.append_step(thread_id, step.clone()).await;
-                                    let trigger_step_idx = thread_store
-                                        .get(thread_id)
-                                        .await
-                                        .ok()
-                                        .map(|l| l.steps.len().saturating_sub(1))
-                                        .unwrap_or(0);
-                                    control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        phase,
-                                        Some(PhaseReasonCode::PhaseBlocked),
-                                        Some(serde_json::json!({
-                                            "kind": "authoring_to_validate",
-                                            "reason": reason,
-                                            "trigger_step_idx": trigger_step_idx,
-                                            "trigger_step": step,
-                                        })),
-                                    )
-                                    .await?;
+                                    // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     continue;
                                 }
                             }
@@ -7838,28 +7718,7 @@ Apply these fixes in the output.",
                                         agent: "agent".to_string(),
                                     };
                                     let _ = thread_store.append_step(thread_id, step.clone()).await;
-                                    let trigger_step_idx = thread_store
-                                        .get(thread_id)
-                                        .await
-                                        .ok()
-                                        .map(|l| l.steps.len().saturating_sub(1))
-                                        .unwrap_or(0);
-                                    control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        phase,
-                                        Some(PhaseReasonCode::PhaseBlocked),
-                                        Some(serde_json::json!({
-                                            "kind": "missing_gold_models",
-                                            "reason": reason,
-                                            "expected_prefixes": ["models/core/", "models/marts/"],
-                                            "trigger_step_idx": trigger_step_idx,
-                                            "trigger_step": step,
-                                        })),
-                                    )
-                                    .await?;
+                                    // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     continue;
                                 }
                             }

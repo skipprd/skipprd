@@ -4,11 +4,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
-use react_core::control_flow::PhaseReasonCode;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
-use crate::data_engineer::control_flow;
 use crate::data_engineer::dataset_truth;
 use crate::data_engineer::plan;
 use crate::data_engineer::plan::{CleansePlan, ModelPlan};
@@ -90,36 +88,6 @@ fn sql_model_checklist_status(items: &[plan::PlanChecklistItem]) -> plan::Checkl
         .find(|it| it.checklist_item_id == "sql_model")
         .map(|it| it.status)
         .unwrap_or(plan::ChecklistItemStatus::Pending)
-}
-
-async fn maybe_advance_phase_on_done(
-    ctx: &AgentCtx,
-    from_phase: control_flow::Phase,
-    to_phase: control_flow::Phase,
-    reason_code: PhaseReasonCode,
-    detail: Value,
-) {
-    let (Some(store), Some(tid)) = (ctx.thread_store.as_ref(), ctx.thread_id.as_deref()) else {
-        return;
-    };
-    let log = store.get(tid).await.ok();
-    let cur = control_flow::phase_from_log(log.as_ref());
-    if cur != from_phase {
-        return;
-    }
-    control_flow::append_phase_with_reason(
-        store,
-        tid,
-        Some("agent".to_string()),
-        Some(cur),
-        to_phase,
-        Some(reason_code),
-        Some(detail),
-    )
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!("failed to append phase transition: {}", e);
-    });
 }
 
 #[derive(Clone)]
@@ -208,16 +176,7 @@ impl Tool for ApplyNextCleanseBatchTool {
                 }));
             }
             let done = plan::cleanse_all_done(&plan);
-            if done {
-                maybe_advance_phase_on_done(
-                    ctx,
-                    control_flow::Phase::CleanseAuthor,
-                    control_flow::Phase::CleanseValidate,
-                    PhaseReasonCode::NoWorkAllDone,
-                    serde_json::json!({ "plan_key": plan.plan_key }),
-                )
-                .await;
-            }
+            if done {}
             if !done {
                 let mut blocked: Vec<String> = Vec::new();
                 for t in plan.tasks.iter() {
@@ -270,7 +229,9 @@ impl Tool for ApplyNextCleanseBatchTool {
                     "dataset schema lookup failed; dataset not usable",
                 );
                 update_failure_counters(&mut plan.progress, false);
-                let _ = plan::save_cleanse_plan(ctx, &plan).await;
+                plan::save_cleanse_plan(ctx, &plan)
+                    .await
+                    .map_err(|e| format!("failed to save cleanse plan after schema gating failure: {e}"))?;
                 return Ok(serde_json::json!({
                     "ok": false,
                     "attempted_dataset_ids": batch.clone(),
@@ -301,7 +262,9 @@ impl Tool for ApplyNextCleanseBatchTool {
         } else {
             mark_in_progress_cleanse_checklist(&mut plan, &batch, &checklist_item_id);
         }
-        let _ = plan::save_cleanse_plan(ctx, &plan).await;
+        plan::save_cleanse_plan(ctx, &plan)
+            .await
+            .map_err(|e| format!("failed to save cleanse plan after marking in-progress: {e}"))?;
 
         let mut inner_args = serde_json::json!({ "dataset_ids": batch.clone() });
         if let Some(i) = instructions {
@@ -322,7 +285,9 @@ impl Tool for ApplyNextCleanseBatchTool {
                     &format!("apply_next_cleanse_batch failed: {}", e.trim()),
                 );
                 update_failure_counters(&mut plan.progress, false);
-                let _ = plan::save_cleanse_plan(ctx, &plan).await;
+                plan::save_cleanse_plan(ctx, &plan)
+                    .await
+                    .map_err(|e| format!("failed to save cleanse plan after batch tool failure: {e}"))?;
                 return Ok(serde_json::json!({
                     "ok": false,
                     "attempted_dataset_ids": batch,
@@ -390,7 +355,9 @@ impl Tool for ApplyNextCleanseBatchTool {
             }
         }
         update_failure_counters(&mut plan.progress, ok && failed.is_empty());
-        let _ = plan::save_cleanse_plan(ctx, &plan).await;
+        plan::save_cleanse_plan(ctx, &plan)
+            .await
+            .map_err(|e| format!("failed to save cleanse plan after batch reconciliation: {e}"))?;
 
         if plan.progress.consecutive_batch_failures >= MAX_CONSECUTIVE_BATCH_FAILURES {
             return Ok(serde_json::json!({
@@ -507,16 +474,7 @@ impl Tool for ApplyNextModelBatchTool {
                 }));
             }
             let done = plan::model_all_done(&plan);
-            if done {
-                maybe_advance_phase_on_done(
-                    ctx,
-                    control_flow::Phase::ModelAuthor,
-                    control_flow::Phase::ModelValidate,
-                    PhaseReasonCode::NoWorkAllDone,
-                    serde_json::json!({ "plan_key": plan.plan_key }),
-                )
-                .await;
-            }
+            if done {}
             if !done {
                 let mut blocked: Vec<String> = Vec::new();
                 for t in plan.tasks.iter() {
@@ -581,7 +539,9 @@ impl Tool for ApplyNextModelBatchTool {
                 "gold inputs are not grounded in existing silver models under models/staging/",
             );
             update_failure_counters(&mut plan.progress, false);
-            let _ = plan::save_model_plan(ctx, &plan).await;
+            plan::save_model_plan(ctx, &plan)
+                .await
+                .map_err(|e| format!("failed to save model plan after input gating failure: {e}"))?;
             return Ok(serde_json::json!({
                 "ok": false,
                 "attempted_item_names": batch_names,
@@ -609,7 +569,9 @@ impl Tool for ApplyNextModelBatchTool {
         } else {
             mark_in_progress_model_checklist(&mut plan, &batch_names, &checklist_item_id);
         }
-        let _ = plan::save_model_plan(ctx, &plan).await;
+        plan::save_model_plan(ctx, &plan)
+            .await
+            .map_err(|e| format!("failed to save model plan after marking in-progress: {e}"))?;
 
         // Build gold_model items deterministically from the plan.
         let mut items: Vec<Value> = Vec::new();
@@ -641,7 +603,9 @@ impl Tool for ApplyNextModelBatchTool {
                     &format!("apply_next_model_batch failed: {}", e.trim()),
                 );
                 update_failure_counters(&mut plan.progress, false);
-                let _ = plan::save_model_plan(ctx, &plan).await;
+                plan::save_model_plan(ctx, &plan)
+                    .await
+                    .map_err(|e| format!("failed to save model plan after batch tool failure: {e}"))?;
                 return Ok(serde_json::json!({
                     "ok": false,
                     "attempted_item_names": batch_names,
@@ -704,7 +668,9 @@ impl Tool for ApplyNextModelBatchTool {
         }
 
         update_failure_counters(&mut plan.progress, ok && failed.is_empty());
-        let _ = plan::save_model_plan(ctx, &plan).await;
+        plan::save_model_plan(ctx, &plan)
+            .await
+            .map_err(|e| format!("failed to save model plan after batch reconciliation: {e}"))?;
 
         if plan.progress.consecutive_batch_failures >= MAX_CONSECUTIVE_BATCH_FAILURES {
             return Ok(serde_json::json!({
