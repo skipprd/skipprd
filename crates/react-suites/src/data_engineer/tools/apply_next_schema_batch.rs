@@ -924,7 +924,11 @@ mod tests {
 
         let tool = ApplyNextCleanseSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
-        assert!(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        assert!(
+            res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "unexpected tool response: {}",
+            res
+        );
 
         let yml_rel = "models/staging/stg_test_raw_raw_customers.yml";
         let yml_key = project_fs::join_storage_key(&ctx, yml_rel);
@@ -1045,7 +1049,11 @@ mod tests {
 
         let tool = ApplyNextCleanseSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
-        assert!(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        assert!(
+            res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "unexpected tool response: {}",
+            res
+        );
 
         let got_plan = plan::load_cleanse_plan_by_key(&ctx, &plan_key)
             .await
@@ -1163,7 +1171,11 @@ mod tests {
 
         let tool = ApplyNextModelSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
-        assert!(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        assert!(
+            res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "unexpected tool response: {}",
+            res
+        );
 
         let key = project_fs::join_storage_key(&ctx, project_files::MODELS_SCHEMA_YML);
         let got = ctx.storage.get_bytes(&key).await.unwrap();
@@ -1287,7 +1299,11 @@ mod tests {
 
         let tool = ApplyNextModelSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
-        assert!(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        assert!(
+            res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "unexpected tool response: {}",
+            res
+        );
 
         let got_plan = plan::load_model_plan_by_key(&ctx, &plan_key).await.unwrap();
         let t = got_plan
@@ -1414,7 +1430,11 @@ mod tests {
 
         let tool = ApplyNextModelSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
-        assert!(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        assert!(
+            res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "unexpected tool response: {}",
+            res
+        );
 
         let saw = *llm
             .saw_allowed_columns
@@ -1523,7 +1543,11 @@ mod tests {
 
         let tool = ApplyNextModelSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
-        assert!(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        assert!(
+            res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "unexpected tool response: {}",
+            res
+        );
 
         let key = project_fs::join_storage_key(&ctx, project_files::MODELS_SCHEMA_YML);
         let got = ctx.storage.get_bytes(&key).await.unwrap();
