@@ -4569,7 +4569,10 @@ Apply these fixes in the output.",
                     ts: chrono::Utc::now().to_rfc3339(),
                     agent: "agent".to_string(),
                 };
-                let _ = thread_store.append_step(thread_id, step).await;
+                thread_store
+                    .append_step(thread_id, step)
+                    .await
+                    .map_err(|e| format!("failed to append guard step: {e}"))?;
                 return Err(stop_msg);
             }
 
@@ -5508,7 +5511,10 @@ Apply these fixes in the output.",
                                         ts,
                                         agent: "agent".to_string(),
                                     };
-                                    let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                    thread_store
+                                        .append_step(thread_id, step.clone())
+                                        .await
+                                        .map_err(|e| format!("failed to append guard step: {e}"))?;
                                     // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     let tries = Self::bump_subjective_retry(
                                         &thread_store,
@@ -5821,7 +5827,10 @@ Apply these fixes in the output.",
                                         ts,
                                         agent: "agent".to_string(),
                                     };
-                                    let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                    thread_store
+                                        .append_step(thread_id, step.clone())
+                                        .await
+                                        .map_err(|e| format!("failed to append guard step: {e}"))?;
                                     // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     let tries = Self::bump_subjective_retry(
                                         &thread_store,
@@ -6168,7 +6177,10 @@ Apply these fixes in the output.",
                                         ts,
                                         agent: "agent".to_string(),
                                     };
-                                    let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                    thread_store
+                                        .append_step(thread_id, step.clone())
+                                        .await
+                                        .map_err(|e| format!("failed to append guard step: {e}"))?;
                                     // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     let tries = Self::bump_subjective_retry(
                                         &thread_store,
@@ -6394,7 +6406,10 @@ Apply these fixes in the output.",
                                     ts: chrono::Utc::now().to_rfc3339(),
                                     agent: "agent".to_string(),
                                 };
-                                let _ = thread_store.append_step(thread_id, step).await;
+                                thread_store
+                                    .append_step(thread_id, step)
+                                    .await
+                                    .map_err(|e| format!("failed to append guard step: {e}"))?;
                                 control_flow::append_phase_with_reason(
                                     &thread_store,
                                     thread_id,
@@ -6472,7 +6487,10 @@ Apply these fixes in the output.",
                                 ts,
                                 agent: "agent".to_string(),
                             };
-                            let _ = thread_store.append_step(thread_id, step).await;
+                            thread_store
+                                .append_step(thread_id, step)
+                                .await
+                                .map_err(|e| format!("failed to append guard step: {e}"))?;
                             return Ok(vec![FlowFrame::AwaitUser { prompt: reason }]);
                         }
                             if plan.status != crate::data_engineer::plan::PlanStatus::Approved
@@ -6705,7 +6723,10 @@ Apply these fixes in the output.",
                                             ts: chrono::Utc::now().to_rfc3339(),
                                             agent: "agent".to_string(),
                                         };
-                                        let _ = thread_store.append_step(thread_id, step).await;
+                                        thread_store
+                                            .append_step(thread_id, step)
+                                            .await
+                                            .map_err(|e| format!("failed to append guard step: {e}"))?;
                                         control_flow::append_phase_with_reason(
                                             &thread_store,
                                             thread_id,
@@ -6772,7 +6793,10 @@ Apply these fixes in the output.",
                                     ts: chrono::Utc::now().to_rfc3339(),
                                     agent: "agent".to_string(),
                                 };
-                                let _ = thread_store.append_step(thread_id, step).await;
+                                thread_store
+                                    .append_step(thread_id, step)
+                                    .await
+                                    .map_err(|e| format!("failed to append guard step: {e}"))?;
                                 control_flow::append_phase_with_reason(
                                     &thread_store,
                                     thread_id,
@@ -6848,7 +6872,10 @@ Apply these fixes in the output.",
                                 ts,
                                 agent: "agent".to_string(),
                             };
-                            let _ = thread_store.append_step(thread_id, step).await;
+                            thread_store
+                                .append_step(thread_id, step)
+                                .await
+                                .map_err(|e| format!("failed to append guard step: {e}"))?;
                             return Ok(vec![FlowFrame::AwaitUser { prompt: reason }]);
                         }
                             if plan.status != crate::data_engineer::plan::PlanStatus::Approved
@@ -7148,7 +7175,10 @@ Apply these fixes in the output.",
                                             ts: chrono::Utc::now().to_rfc3339(),
                                             agent: "agent".to_string(),
                                         };
-                                        let _ = thread_store.append_step(thread_id, step).await;
+                                        thread_store
+                                            .append_step(thread_id, step)
+                                            .await
+                                            .map_err(|e| format!("failed to append guard step: {e}"))?;
                                         control_flow::append_phase_with_reason(
                                         &thread_store,
                                         thread_id,
@@ -7669,7 +7699,10 @@ Apply these fixes in the output.",
                                         ts,
                                         agent: "agent".to_string(),
                                     };
-                                    let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                    thread_store
+                                        .append_step(thread_id, step.clone())
+                                        .await
+                                        .map_err(|e| format!("failed to append guard step: {e}"))?;
                                     // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     continue;
                                 }
@@ -7694,7 +7727,10 @@ Apply these fixes in the output.",
                                         ts,
                                         agent: "agent".to_string(),
                                     };
-                                    let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                    thread_store
+                                        .append_step(thread_id, step.clone())
+                                        .await
+                                        .map_err(|e| format!("failed to append guard step: {e}"))?;
                                     // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     continue;
                                 }
@@ -7717,7 +7753,10 @@ Apply these fixes in the output.",
                                         ts,
                                         agent: "agent".to_string(),
                                     };
-                                    let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                    thread_store
+                                        .append_step(thread_id, step.clone())
+                                        .await
+                                        .map_err(|e| format!("failed to append guard step: {e}"))?;
                                     // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     continue;
                                 }
@@ -7804,7 +7843,10 @@ Apply these fixes in the output.",
                             ts,
                             agent: "agent".to_string(),
                         };
-                        let _ = thread_store.append_step(thread_id, step).await;
+                        thread_store
+                            .append_step(thread_id, step)
+                            .await
+                            .map_err(|e| format!("failed to append guard step: {e}"))?;
                         let to_phase = if phase == Phase::CleanseValidate {
                             Phase::CleanseAuthor
                         } else {
@@ -7841,7 +7883,10 @@ Apply these fixes in the output.",
                             ts,
                             agent: "agent".to_string(),
                         };
-                        let _ = thread_store.append_step(thread_id, step).await;
+                        thread_store
+                            .append_step(thread_id, step)
+                            .await
+                            .map_err(|e| format!("failed to append guard step: {e}"))?;
                         let to_phase = if phase == Phase::CleanseValidate {
                             Phase::CleanseAuthor
                         } else {
@@ -8191,7 +8236,10 @@ Apply these fixes in the output.",
                                 ts: chrono::Utc::now().to_rfc3339(),
                                 agent: "agent".to_string(),
                             };
-                            let _ = thread_store.append_step(thread_id, step).await;
+                            thread_store
+                                .append_step(thread_id, step)
+                                .await
+                                .map_err(|e| format!("failed to append guard step: {e}"))?;
                             let to_phase = if phase == Phase::CleanseValidate {
                                 Phase::CleanseAuthor
                             } else {
