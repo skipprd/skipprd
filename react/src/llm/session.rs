@@ -32,7 +32,10 @@ mod tests {
     #[test]
     fn openai_schema_name_sanitizes_dots_and_weird_chars() {
         assert_eq!(openai_schema_name("agent.step.v1"), "agent_step_v1");
-        assert_eq!(openai_schema_name("patch_protocol/single-file@v1"), "patch_protocol_single-file_v1");
+        assert_eq!(
+            openai_schema_name("patch_protocol/single-file@v1"),
+            "patch_protocol_single-file_v1"
+        );
     }
 }
 
@@ -55,9 +58,9 @@ impl LlmSession {
     pub fn chat_strict(&self, prompt: &str) -> Result<String, String> {
         self.llm.chat(
             &[ChatMessage {
-            role: "user".into(),
-            content: prompt.into(),
-        }],
+                role: "user".into(),
+                content: prompt.into(),
+            }],
             &LlmCallOptions {
                 prompt_id: "react.session.chat_strict",
                 thread_id: None,
@@ -87,14 +90,12 @@ impl RouterModel {
 fn apply_hard_cap_max_output_tokens(requested: Option<u32>) -> Option<u32> {
     // Keep per-call budgets flexible, but enforce one global hard ceiling so a
     // bad prompt cannot explode token usage.
-    let cap = crate::helpers::configuration::Config::getenv(
-        "LLM_MAX_OUTPUT_TOKENS_HARD_CAP",
-        "256000",
-    )
-    .parse::<u32>()
-    .ok()
-    .filter(|v| *v > 0)
-    .unwrap_or(256000);
+    let cap =
+        crate::helpers::configuration::Config::getenv("LLM_MAX_OUTPUT_TOKENS_HARD_CAP", "256000")
+            .parse::<u32>()
+            .ok()
+            .filter(|v| *v > 0)
+            .unwrap_or(256000);
     requested.map(|v| v.min(cap))
 }
 
@@ -103,21 +104,21 @@ impl LargeLanguageModel for RouterModel {
         let model = crate::helpers::configuration::Config::llm_chat_model()
             .unwrap_or_else(|| "gpt-4o-mini".to_string());
 
-        let default_max_output_tokens = crate::helpers::configuration::Config::getenv(
-            "LLM_MAX_TOKENS",
-            "1024",
-        )
-        .parse()
-        .ok();
-        let default_temperature = crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2")
-            .parse()
-            .ok();
+        let default_max_output_tokens =
+            crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "1024")
+                .parse()
+                .ok();
+        let default_temperature =
+            crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2")
+                .parse()
+                .ok();
         let default_top_p = crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0")
             .parse()
             .ok();
 
-        let max_output_tokens =
-            apply_hard_cap_max_output_tokens(options.max_output_tokens.or(default_max_output_tokens));
+        let max_output_tokens = apply_hard_cap_max_output_tokens(
+            options.max_output_tokens.or(default_max_output_tokens),
+        );
         let temperature = options.temperature.or(default_temperature);
         let top_p = options.top_p.or(default_top_p);
         let reasoning_effort = match options.reasoning_effort.unwrap_or(ReasoningEffort::Low) {

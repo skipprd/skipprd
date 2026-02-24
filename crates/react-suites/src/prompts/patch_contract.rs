@@ -53,4 +53,3 @@ Example args:
         crate::data_engineer::patch_contract::single_file_patch_good_example_json()
     )
 }
-

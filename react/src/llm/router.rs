@@ -12,8 +12,8 @@ use tracing::debug;
 use super::adapter::Adapter;
 use super::registry::{pick_adapter_from_config, pick_openai_adapter_for_model};
 use super::types::{
-    ChatRequest, ChatResponse, ChatResponseFormat, EmbedRequest, EmbedResponse, ProviderHttpRequest,
-    ProviderHttpResponse,
+    ChatRequest, ChatResponse, ChatResponseFormat, EmbedRequest, EmbedResponse,
+    ProviderHttpRequest, ProviderHttpResponse,
 };
 use crate::llm::LargeLanguageModel;
 use react_core::llm::ChatMessage as CoreChatMessage;
@@ -277,12 +277,8 @@ impl LlmRouter {
                 (None, None, None)
             };
 
-        let (status, body_text) = self.request_json_with_retry(
-            &http_req.method,
-            &full_url,
-            &http_req.headers,
-            payload,
-        )?;
+        let (status, body_text) =
+            self.request_json_with_retry(&http_req.method, &full_url, &http_req.headers, payload)?;
         let (status, body_text) = if self.should_poll_background_response(&http_req) {
             self.complete_background_response(&full_url, status, body_text)?
         } else {
@@ -338,10 +334,7 @@ impl LlmRouter {
                     .and_then(|u| u.get("input_tokens"))
                     .and_then(|x| x.as_u64())
                     .unwrap_or(0);
-                let effort = req
-                    .reasoning_effort
-                    .as_deref()
-                    .unwrap_or("(unset)");
+                let effort = req.reasoning_effort.as_deref().unwrap_or("(unset)");
                 let tid = obs_thread_id.as_deref().unwrap_or("-");
                 let call_id = call_id_opt
                     .map(|n| n.to_string())
@@ -453,12 +446,8 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
         let full_url = format!("{}{}", self.base_prefix(), http_req.url);
         let payload = serde_json::to_value(&http_req.body).map_err(|e| e.to_string())?;
         let _permit = llm_inflight_limiter().acquire();
-        let (status, body_text) = self.request_json_with_retry(
-            &http_req.method,
-            &full_url,
-            &http_req.headers,
-            payload,
-        )?;
+        let (status, body_text) =
+            self.request_json_with_retry(&http_req.method, &full_url, &http_req.headers, payload)?;
         let ph = ProviderHttpResponse {
             status: status as u16,
             body_text,
@@ -512,7 +501,10 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
 
             match r.send_json(payload.clone()) {
                 Ok(resp_ok) => {
-                    return Ok((resp_ok.status() as u16, resp_ok.into_string().unwrap_or_default()))
+                    return Ok((
+                        resp_ok.status() as u16,
+                        resp_ok.into_string().unwrap_or_default(),
+                    ))
                 }
                 Err(ureq::Error::Status(s, rr)) => {
                     if s == 429 && attempt < self.retry_policy.max_retries {
@@ -570,7 +562,10 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
 
             match r.call() {
                 Ok(resp_ok) => {
-                    return Ok((resp_ok.status() as u16, resp_ok.into_string().unwrap_or_default()))
+                    return Ok((
+                        resp_ok.status() as u16,
+                        resp_ok.into_string().unwrap_or_default(),
+                    ))
                 }
                 Err(ureq::Error::Status(s, rr)) => {
                     if s == 429 && attempt < self.retry_policy.max_retries {

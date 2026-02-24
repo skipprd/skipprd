@@ -17,10 +17,10 @@ use react::providers::{
     DbtProjectProvider, DefaultKeyspace, EnvSecretsProvider, LanceVectorStore, LocalKeyspace,
 };
 use react_suites::SuiteCtx;
-use tracing_subscriber::prelude::*;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinSet;
+use tracing_subscriber::prelude::*;
 
 #[derive(Parser, Debug)]
 #[command(name = "react")]
@@ -304,7 +304,11 @@ fn resolve_athena_settings(cfg: &react::config::ReactResolvedConfig) -> AthenaSe
         .unwrap_or(15);
 
     let discovery_cache_ttl_secs = env_u64("ATHENA_DISCOVERY_CACHE_TTL_SECS")
-        .or_else(|| extras.get("discovery_cache_ttl_secs").and_then(|v| v.as_u64()))
+        .or_else(|| {
+            extras
+                .get("discovery_cache_ttl_secs")
+                .and_then(|v| v.as_u64())
+        })
         .unwrap_or(120);
 
     AthenaSettings {
@@ -337,8 +341,12 @@ async fn run_parallel_configs(
     let exe = std::env::current_exe()
         .map_err(|e| format!("failed to resolve current executable path: {e}"))?;
     let logs_dir = PathBuf::from("./.react/multi-run-logs");
-    std::fs::create_dir_all(&logs_dir)
-        .map_err(|e| format!("failed to create multi-run log dir '{}': {e}", logs_dir.display()))?;
+    std::fs::create_dir_all(&logs_dir).map_err(|e| {
+        format!(
+            "failed to create multi-run log dir '{}': {e}",
+            logs_dir.display()
+        )
+    })?;
 
     println!("Starting parallel run for {} config(s)", configs.len());
 
@@ -453,7 +461,10 @@ async fn run_parallel_configs(
             }
             Ok(s) => {
                 failures += 1;
-                let code = s.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string());
+                let code = s
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string());
                 println!(
                     "[{}] failed ({:.1}s, exit={}) {} log={}",
                     label,
@@ -485,7 +496,10 @@ async fn run_parallel_configs(
         );
         Ok(1)
     } else {
-        println!("Parallel run finished: all {} config(s) succeeded", configs.len());
+        println!(
+            "Parallel run finished: all {} config(s) succeeded",
+            configs.len()
+        );
         Ok(0)
     }
 }
@@ -649,7 +663,11 @@ async fn main() {
                     }
                 };
                 let keyspace = Arc::new(LocalKeyspace::new(root));
-                (storage, keyspace as Arc<dyn react::providers::Keyspace>, "local".to_string())
+                (
+                    storage,
+                    keyspace as Arc<dyn react::providers::Keyspace>,
+                    "local".to_string(),
+                )
             } else {
                 let b = cfg
                     .storage
@@ -745,8 +763,7 @@ async fn main() {
             if wh_kind == "athena" {
                 apply_aws_region_fallback_from_warehouse(&cfg.providers.warehouse.extras);
                 let athena = Arc::new(
-                    AthenaQueryProvider::from_settings(resolve_athena_settings(&cfg))
-                    .await,
+                    AthenaQueryProvider::from_settings(resolve_athena_settings(&cfg)).await,
                 );
                 suite_ctx.warehouse = athena.clone();
                 // Keep these set for now (some older call sites still use them), but suites should prefer `warehouse`.
@@ -971,8 +988,11 @@ async fn main() {
             let run_logs = if terminal_enabled {
                 if cfg.storage.mode == "local" {
                     if let Some(root) = cfg.storage.path.as_ref() {
-                        react::thread_logs::RunThreadLogs::new_local(root.clone(), cfg.scope.clone())
-                            .ok()
+                        react::thread_logs::RunThreadLogs::new_local(
+                            root.clone(),
+                            cfg.scope.clone(),
+                        )
+                        .ok()
                     } else {
                         None
                     }
@@ -1018,7 +1038,11 @@ async fn main() {
                     }
                 };
                 let keyspace = Arc::new(LocalKeyspace::new(root));
-                (storage, keyspace as Arc<dyn react::providers::Keyspace>, "local".to_string())
+                (
+                    storage,
+                    keyspace as Arc<dyn react::providers::Keyspace>,
+                    "local".to_string(),
+                )
             } else {
                 let b = cfg
                     .storage
@@ -1112,8 +1136,7 @@ async fn main() {
             if wh_kind == "athena" {
                 apply_aws_region_fallback_from_warehouse(&cfg.providers.warehouse.extras);
                 let athena = Arc::new(
-                    AthenaQueryProvider::from_settings(resolve_athena_settings(&cfg))
-                    .await,
+                    AthenaQueryProvider::from_settings(resolve_athena_settings(&cfg)).await,
                 );
                 suite_ctx.warehouse = athena.clone();
                 suite_ctx.query = Some(athena.clone());
@@ -1227,13 +1250,12 @@ async fn main() {
 
             // Bind the run log to the real thread_id as soon as it is observed so the
             // file appears as `logs/{thread_id}.log` during the run (local mode rename).
-            let (thread_id_tx, tid_rx) =
-                if run_logs.is_some() && requested_thread_id.is_none() {
-                    let (tx, rx) = mpsc::unbounded_channel::<String>();
-                    (Some(tx), Some(rx))
-                } else {
-                    (None, None)
-                };
+            let (thread_id_tx, tid_rx) = if run_logs.is_some() && requested_thread_id.is_none() {
+                let (tx, rx) = mpsc::unbounded_channel::<String>();
+                (Some(tx), Some(rx))
+            } else {
+                (None, None)
+            };
 
             if let (Some(mut rx), Some(logs)) = (tid_rx, run_logs.clone()) {
                 let ks = keyspace.clone();
@@ -1288,11 +1310,7 @@ async fn main() {
                     let _ = logs.bind_thread_id(keyspace.as_ref(), &tid);
                     // Non-local: upload temp file to storage key.
                     let _ = logs
-                        .upload_if_needed(
-                            storage_for_logs.clone(),
-                            keyspace_for_logs.clone(),
-                            &tid,
-                        )
+                        .upload_if_needed(storage_for_logs.clone(), keyspace_for_logs.clone(), &tid)
                         .await;
                 }
             }

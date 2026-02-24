@@ -8,10 +8,10 @@ use react_core::llm_observability::{self, PartInput};
 use react_core::providers::DatasetCatalogProvider;
 use react_core::session::{Observation, ThreadStep};
 
-use crate::data_engineer::project_fs;
 use crate::data_engineer::patch_contract::{
-    LlmSingleFilePatchResponse, normalize_hunks_only_patch_text,
+    normalize_hunks_only_patch_text, LlmSingleFilePatchResponse,
 };
+use crate::data_engineer::project_fs;
 
 fn sha256_hex(s: &str) -> String {
     use sha2::Digest;
@@ -256,8 +256,8 @@ fn parse_llm_patch_response(
     expected_rel_path: &str,
 ) -> Result<LlmSingleFilePatchResponse, String> {
     let v = parse_patch_json_from_llm(text)?;
-    let mut parsed: LlmSingleFilePatchResponse =
-        serde_json::from_value(v).map_err(|e| format!("failed to parse patch response JSON: {}", e))?;
+    let mut parsed: LlmSingleFilePatchResponse = serde_json::from_value(v)
+        .map_err(|e| format!("failed to parse patch response JSON: {}", e))?;
     let rel = project_fs::normalize_rel_path(parsed.path.as_str())?;
     if rel != expected_rel_path {
         return Err(format!(
@@ -265,7 +265,8 @@ fn parse_llm_patch_response(
             rel, expected_rel_path
         ));
     }
-    let normalized = normalize_hunks_only_patch_text(parsed.patch_text.as_str(), expected_rel_path)?;
+    let normalized =
+        normalize_hunks_only_patch_text(parsed.patch_text.as_str(), expected_rel_path)?;
     parsed.patch_text = normalized.patch_text;
     Ok(parsed)
 }
@@ -303,8 +304,12 @@ pub async fn llm_patch_loop_single_file(
     let base_sha256 = sha256_hex(&existing);
     // Prompt facts used to help the LLM produce stable hunks.
     // We cap numbered content to avoid doubling prompt size for large files.
-    let (existing_content_with_line_numbers, existing_content_with_line_numbers_truncated, existing_line_count, existing_had_trailing_newline) =
-        format_with_line_numbers(&existing, 200_000);
+    let (
+        existing_content_with_line_numbers,
+        existing_content_with_line_numbers_truncated,
+        existing_line_count,
+        existing_had_trailing_newline,
+    ) = format_with_line_numbers(&existing, 200_000);
 
     // Always include the raw file content in the prompt payload.
     let user_payload_value = parse_json_from_llm(&user_payload_json)?;
@@ -811,7 +816,10 @@ mod tests {
             _messages: &[react_core::llm::ChatMessage],
             _options: &react_core::llm::LlmCallOptions,
         ) -> Result<String, String> {
-            let mut g = self.replies.lock().map_err(|_| "mutex poisoned".to_string())?;
+            let mut g = self
+                .replies
+                .lock()
+                .map_err(|_| "mutex poisoned".to_string())?;
             if g.is_empty() {
                 return Err("no more replies".to_string());
             }
@@ -891,6 +899,8 @@ mod tests {
         .await
         .expect("ok");
         assert!(outcome.content.contains("version: 2"));
-        assert!(notes.iter().any(|n| n.to_ascii_lowercase().starts_with("business question")));
+        assert!(notes
+            .iter()
+            .any(|n| n.to_ascii_lowercase().starts_with("business question")));
     }
 }

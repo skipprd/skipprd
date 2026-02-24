@@ -3,8 +3,8 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
-use react_core::llm::{ChatMessage, LlmCallOptions, LlmExpectedFormat, ReasoningEffort};
 use react_core::control_flow::{PhaseReasonCode, ReviewDecision, ReviewTier};
+use react_core::llm::{ChatMessage, LlmCallOptions, LlmExpectedFormat, ReasoningEffort};
 use react_core::session::{Observation, ThreadStep, ThreadStore};
 use react_core::tools::Tool;
 
@@ -466,7 +466,9 @@ async fn llm_json(
         .unwrap_or(ReasoningEffort::Medium);
 
     fn parse_u32_env(key: &str) -> Option<u32> {
-        std::env::var(key).ok().and_then(|s| s.trim().parse::<u32>().ok())
+        std::env::var(key)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
     }
 
     // Provide ample headroom by default. Review prompts are structured JSON and truncation is costly.
@@ -491,7 +493,11 @@ async fn llm_json(
             } else {
                 "LLM_REVIEW_MAX_TOKENS_CLEANSE"
             };
-            parse_u32_env(k).unwrap_or(if is_unify { default_unify } else { default_non_unify })
+            parse_u32_env(k).unwrap_or(if is_unify {
+                default_unify
+            } else {
+                default_non_unify
+            })
         }
         Phase::ModelReview => {
             let k = if is_unify {
@@ -499,7 +505,11 @@ async fn llm_json(
             } else {
                 "LLM_REVIEW_MAX_TOKENS_MODEL"
             };
-            parse_u32_env(k).unwrap_or(if is_unify { default_unify } else { default_non_unify })
+            parse_u32_env(k).unwrap_or(if is_unify {
+                default_unify
+            } else {
+                default_non_unify
+            })
         }
         Phase::PostPublishReview => {
             let k = if is_unify {
@@ -507,7 +517,11 @@ async fn llm_json(
             } else {
                 "LLM_REVIEW_MAX_TOKENS_POSTPUBLISH"
             };
-            parse_u32_env(k).unwrap_or(if is_unify { default_unify } else { default_non_unify })
+            parse_u32_env(k).unwrap_or(if is_unify {
+                default_unify
+            } else {
+                default_non_unify
+            })
         }
         _ => {
             if is_unify {
@@ -700,7 +714,7 @@ async fn llm_json(
                         "review {}: expected JSON, got parse error: {} (first_error: {})",
                         name, e2, e1
                     )
-                })
+                });
             }
         }
     }
@@ -745,15 +759,16 @@ async fn llm_json(
     }
 }
 
-async fn load_global_semantic_context_json(
-    actx: &AgentCtx,
-    sctx: &SuiteCtx,
-) -> serde_json::Value {
+async fn load_global_semantic_context_json(actx: &AgentCtx, sctx: &SuiteCtx) -> serde_json::Value {
     let key = sctx.keyspace.semantic_key(
         &sctx.scope,
         react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
     );
-    actx.storage.get_json(&key).await.ok().unwrap_or(Value::Null)
+    actx.storage
+        .get_json(&key)
+        .await
+        .ok()
+        .unwrap_or(Value::Null)
 }
 
 fn include_global_semantic_context(phase: Phase) -> bool {
@@ -1729,9 +1744,8 @@ pub async fn run_batched_review(
         batches = serde_json::to_string_pretty(&unify_batches).unwrap_or_else(|_| "[]".to_string()),
     );
     let unify_v = llm_json(sctx, &actx, thread_id, phase, "unify", unify_user).await?;
-    let unify: ReviewUnifyOutput = serde_json::from_value(unify_v).map_err(|e| {
-        format!("batched review unify output did not match schema: {e}")
-    })?;
+    let unify: ReviewUnifyOutput = serde_json::from_value(unify_v)
+        .map_err(|e| format!("batched review unify output did not match schema: {e}"))?;
     let final_review_text = unify.final_review_text;
     if final_review_text.trim().is_empty() {
         return Err("batched review unify produced empty final_review_text".to_string());
@@ -2021,7 +2035,8 @@ mod tests {
         assert!(matches!(out[0], FlowFrame::Final { .. }));
 
         // Thread log step should store review by reference (not the full text).
-        let thread_store = ThreadStore::new(storage.clone(), sctx.scope.clone(), sctx.keyspace.clone());
+        let thread_store =
+            ThreadStore::new(storage.clone(), sctx.scope.clone(), sctx.keyspace.clone());
         let log = thread_store.get("tid").await.expect("thread log");
         let last = log.steps.last().cloned().expect("step");
         match last {
@@ -2078,7 +2093,9 @@ mod tests {
         storage
             .put_bytes(
                 &gkey,
-                serde_json::json!({"domain":"should_not_leak_to_cleanse"}).to_string().as_bytes(),
+                serde_json::json!({"domain":"should_not_leak_to_cleanse"})
+                    .to_string()
+                    .as_bytes(),
                 "application/json",
             )
             .await
@@ -2090,7 +2107,11 @@ mod tests {
             .trim_end_matches('/')
             .to_string();
         storage
-            .put_bytes(&format!("{}/dbt_project.yml", base), "name: x\n".as_bytes(), "text/plain")
+            .put_bytes(
+                &format!("{}/dbt_project.yml", base),
+                "name: x\n".as_bytes(),
+                "text/plain",
+            )
             .await
             .unwrap();
         storage
@@ -2152,6 +2173,8 @@ mod tests {
         assert!(prompts
             .iter()
             .any(|p| p.contains("IMMUTABLE CONTEXT (global_semantic_context)")));
-        assert!(prompts.iter().any(|p| p.contains("should_not_leak_to_cleanse")));
+        assert!(prompts
+            .iter()
+            .any(|p| p.contains("should_not_leak_to_cleanse")));
     }
 }

@@ -487,10 +487,7 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
         if name != "file" || !observation.ok {
             continue;
         }
-        let op = args
-            .get("op")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
         // Consider patch and mv as sources of new/updated model paths.
         // (rm removes paths; targeting removed paths is usually unhelpful.)
         if op != "patch" && op != "mv" {
@@ -645,13 +642,14 @@ pub fn replan_backtrack_count_for_phase(log: Option<&ThreadLog>, phase: Phase) -
                 cur_phase = Phase::from_str(phase);
             }
             ThreadStep::ToolEnd {
-                name,
-                observation,
-                ..
+                name, observation, ..
             } => {
                 if name == "dbt_validate"
                     && observation.ok
-                    && matches!(cur_phase, Some(Phase::CleanseValidate | Phase::ModelValidate))
+                    && matches!(
+                        cur_phase,
+                        Some(Phase::CleanseValidate | Phase::ModelValidate)
+                    )
                 {
                     last_successful_validate_idx = Some(i);
                 }
@@ -916,8 +914,9 @@ pub fn gate_author_phase_execution_model(
     if issues.is_empty() {
         return AuthoringGate::Allow;
     }
-    let mut msg =
-        String::from("Approved model plan is not executable. Re-enter planning before authoring:\n");
+    let mut msg = String::from(
+        "Approved model plan is not executable. Re-enter planning before authoring:\n",
+    );
     for issue in issues.iter().take(8) {
         msg.push_str("- ");
         msg.push_str(issue);
@@ -1004,7 +1003,10 @@ impl DeterministicDbtValidateOnce {
                     2000,
                 ) {
                     obj.insert("error_summary".to_string(), serde_json::json!(sum.summary));
-                    obj.insert("failing_nodes".to_string(), serde_json::json!(sum.failing_nodes));
+                    obj.insert(
+                        "failing_nodes".to_string(),
+                        serde_json::json!(sum.failing_nodes),
+                    );
                     obj.insert(
                         "suggested_next_files".to_string(),
                         serde_json::json!(sum.suggested_next_files),
@@ -1099,7 +1101,10 @@ impl DeterministicDbtValidateTargetedOnce {
                     2000,
                 ) {
                     obj.insert("error_summary".to_string(), serde_json::json!(sum.summary));
-                    obj.insert("failing_nodes".to_string(), serde_json::json!(sum.failing_nodes));
+                    obj.insert(
+                        "failing_nodes".to_string(),
+                        serde_json::json!(sum.failing_nodes),
+                    );
                     obj.insert(
                         "suggested_next_files".to_string(),
                         serde_json::json!(sum.suggested_next_files),
@@ -1463,7 +1468,10 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert_eq!(replan_backtrack_count_for_phase(Some(&log), Phase::CleanseAuthor), 2);
+        assert_eq!(
+            replan_backtrack_count_for_phase(Some(&log), Phase::CleanseAuthor),
+            2
+        );
     }
 
     #[test]
@@ -1498,7 +1506,10 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert_eq!(replan_backtrack_count_for_phase(Some(&log), Phase::ModelAuthor), 2);
+        assert_eq!(
+            replan_backtrack_count_for_phase(Some(&log), Phase::ModelAuthor),
+            2
+        );
         assert_eq!(
             replan_backtrack_count_for_phase(Some(&log), Phase::CleanseAuthor),
             0
@@ -1531,7 +1542,11 @@ mod tests {
                     serde_json::json!({"ok":true}),
                 ),
                 // Successful validate should reset the hard-stop counter.
-                step("dbt_validate", serde_json::json!({}), serde_json::json!({"ok":true})),
+                step(
+                    "dbt_validate",
+                    serde_json::json!({}),
+                    serde_json::json!({"ok":true}),
+                ),
                 step(
                     "phase",
                     serde_json::json!({"phase":"publish_await_approval","from_phase":"model_validate"}),
@@ -1571,7 +1586,10 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert_eq!(review_patch_plan_streak(Some(&log), Phase::CleanseReview), 2);
+        assert_eq!(
+            review_patch_plan_streak(Some(&log), Phase::CleanseReview),
+            2
+        );
     }
 
     #[test]
@@ -1599,7 +1617,10 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert_eq!(review_patch_plan_streak(Some(&log), Phase::CleanseReview), 0);
+        assert_eq!(
+            review_patch_plan_streak(Some(&log), Phase::CleanseReview),
+            0
+        );
     }
 
     #[test]

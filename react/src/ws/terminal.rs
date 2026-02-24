@@ -402,7 +402,8 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
             tv.current_phase = snap.current_phase.clone();
             // Merge phases/items so previously seen entries never disappear.
             if !snap.phases.is_empty() {
-                let mut merged: Vec<String> = Vec::with_capacity(snap.phases.len() + tv.phases.len());
+                let mut merged: Vec<String> =
+                    Vec::with_capacity(snap.phases.len() + tv.phases.len());
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for p in snap.phases.iter() {
                     if seen.insert(p.clone()) {
@@ -450,11 +451,14 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
             cleanse,
             model,
         } => {
-            let tv = m.threads.entry(thread_id.clone()).or_insert_with(|| ThreadView {
-                thread_id: thread_id.clone(),
-                last_update: Instant::now(),
-                ..Default::default()
-            });
+            let tv = m
+                .threads
+                .entry(thread_id.clone())
+                .or_insert_with(|| ThreadView {
+                    thread_id: thread_id.clone(),
+                    last_update: Instant::now(),
+                    ..Default::default()
+                });
             if cleanse.is_some() {
                 tv.cleanse_plan = cleanse;
                 if tv.cleanse_plan_anchor_phase.is_none() {
@@ -572,7 +576,8 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                 }
             }
             let key = format!("phase:{}", ev.phase);
-            let mut item = api::ThreadStateItem::new(key.clone(), "phase".to_string(), "running".to_string());
+            let mut item =
+                api::ThreadStateItem::new(key.clone(), "phase".to_string(), "running".to_string());
             item.started_at = Some(ev.ts.clone());
             item.runtime_ms = if ev.runs.is_empty() {
                 None
@@ -604,9 +609,10 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
             // - A new "build"/"full" validate should replace only that specific kind.
             if ev.name == "dbt_validate" {
                 let label = ev.clean_name.clone().unwrap_or_else(|| ev.name.clone());
-                if let (Some(ref ph), Some(kind)) =
-                    (effective_phase.as_ref(), dbt_validate_kind_from_label(&label))
-                {
+                if let (Some(ref ph), Some(kind)) = (
+                    effective_phase.as_ref(),
+                    dbt_validate_kind_from_label(&label),
+                ) {
                     tv.tool_spans.retain(|_, s| {
                         if s.phase.as_deref() != Some(ph.as_str()) {
                             return true;
@@ -971,7 +977,9 @@ fn first_nonempty_line(s: &str) -> Option<&str> {
 fn validate_dbt_sort_rank(label: &str) -> Option<u8> {
     // Force stable ordering among Validate DBT items, even if tool_end arrives late/missing tool_start.
     // Keep this conservative: only rank labels that clearly start with the DBT validate prefix.
-    let s = normalize_validate_dbt_label(label).trim().to_ascii_lowercase();
+    let s = normalize_validate_dbt_label(label)
+        .trim()
+        .to_ascii_lowercase();
     if !s.starts_with("validate dbt") {
         return None;
     }
@@ -1040,10 +1048,7 @@ fn push_span_line(lines: &mut Vec<String>, indent: &str, s: &SpanAgg, spinner_id
             s.count
         ));
     } else {
-        lines.push(format!(
-            "{indent}{sg} {}  {dur}",
-            s.label.as_str().white(),
-        ));
+        lines.push(format!("{indent}{sg} {}  {dur}", s.label.as_str().white(),));
     }
 
     // Optional multi-line description (indented continuation lines).
@@ -1079,7 +1084,10 @@ fn push_span_list(lines: &mut Vec<String>, indent: &str, spans: &[SpanAgg], spin
     // Keep the most recent items (tail), and show a single compact elision line.
     let show = MAX_SPAN_LINES.saturating_sub(1);
     let omitted = spans.len().saturating_sub(show);
-    lines.push(format!("{indent}{}", format!("... and {omitted} more").dark_grey()));
+    lines.push(format!(
+        "{indent}{}",
+        format!("... and {omitted} more").dark_grey()
+    ));
     for s in spans.iter().skip(spans.len().saturating_sub(show)) {
         push_span_line(lines, indent, s, spinner_idx);
     }
@@ -1287,10 +1295,7 @@ fn render_plan_compact(
             let ci = lookup_checklist_item(p, &r.task_id, &r.checklist_item_id);
             let (ig, label) = match ci {
                 None => ("[ ]".dark_grey().to_string(), r.checklist_item_id.clone()),
-                Some(x) => (
-                    checklist_item_glyph_colored(&x.status),
-                    x.label.clone(),
-                ),
+                Some(x) => (checklist_item_glyph_colored(&x.status), x.label.clone()),
             };
 
             // Dataset/task line: show status of its (current) checklist item.
@@ -1384,7 +1389,11 @@ fn phase_detail_summary(t: &ThreadView, ph: &str) -> Option<String> {
     match ph {
         "cleanse_plan" => t.cleanse_plan.as_ref().map(|p| {
             let st = format!("{:?}", p.status).to_lowercase();
-            format!("cleanse plan {}  {}", short_plan_key(p.plan_key.as_str()), st)
+            format!(
+                "cleanse plan {}  {}",
+                short_plan_key(p.plan_key.as_str()),
+                st
+            )
         }),
         "model_plan" => t.model_plan.as_ref().map(|p| {
             let st = format!("{:?}", p.status).to_lowercase();
@@ -1421,7 +1430,11 @@ fn phase_detail_summary(t: &ThreadView, ph: &str) -> Option<String> {
 }
 
 fn phase_reason_summary(t: &ThreadView, ph: &str) -> Option<String> {
-    let rc = t.phase_reason_code.get(ph).map(|s| s.as_str()).unwrap_or("");
+    let rc = t
+        .phase_reason_code
+        .get(ph)
+        .map(|s| s.as_str())
+        .unwrap_or("");
     let rd = t.phase_reason_detail.get(ph);
     let trunc = |s: &str, max_chars: usize| -> String {
         let s = s.trim();
@@ -1511,7 +1524,9 @@ fn phase_reason_summary(t: &ThreadView, ph: &str) -> Option<String> {
                         (Some(r), Some(m)) => format!(", round {}/{}", r, m),
                         _ => "".to_string(),
                     };
-                    let ex = example.map(|s| format!(" — e.g. {}", s)).unwrap_or_default();
+                    let ex = example
+                        .map(|s| format!(" — e.g. {}", s))
+                        .unwrap_or_default();
                     Some(format!(
                         "blocked: design critique ({} blocker{}, {} fix{}){}{}",
                         blockers_n,
@@ -1534,7 +1549,9 @@ fn phase_reason_summary(t: &ThreadView, ph: &str) -> Option<String> {
                         .and_then(|a| a.first())
                         .and_then(|v| v.as_str())
                         .map(|s| trunc(s, 72));
-                    let ex = example.map(|s| format!(" — e.g. {}", s)).unwrap_or_default();
+                    let ex = example
+                        .map(|s| format!(" — e.g. {}", s))
+                        .unwrap_or_default();
                     Some(format!(
                         "blocked: plan semantics ({} error{}){}",
                         errors_n,
@@ -1691,10 +1708,7 @@ fn render_plan_workgroups_compact(
             let ci = lookup_checklist_item(p, &r.task_id, &r.checklist_item_id);
             let (ig, label) = match ci {
                 None => ("[ ]".dark_grey().to_string(), r.checklist_item_id.clone()),
-                Some(x) => (
-                    checklist_item_glyph_colored(&x.status),
-                    x.label.clone(),
-                ),
+                Some(x) => (checklist_item_glyph_colored(&x.status), x.label.clone()),
             };
             lines.push(format!("    {ig} {}", r.task_id.as_str().white()));
 
@@ -1730,8 +1744,7 @@ fn render_plan_workgroups_compact(
 fn render_model(m: &Model) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let up = fmt_ms(m.started.elapsed().as_millis() as i64);
-    let spinner_idx =
-        ((m.started.elapsed().as_millis() / 120) as usize) % SPINNER_FRAMES.len();
+    let spinner_idx = ((m.started.elapsed().as_millis() / 120) as usize) % SPINNER_FRAMES.len();
     let sel = m
         .selected
         .as_ref()
@@ -1772,8 +1785,7 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
         .current_phase
         .clone()
         .unwrap_or_else(|| "preflight".to_string());
-    let done: std::collections::HashSet<String> =
-        t.completed_phases.iter().cloned().collect();
+    let done: std::collections::HashSet<String> = t.completed_phases.iter().cloned().collect();
     // Phases can be re-entered (e.g. actionable review -> cleanse_plan -> cleanse_author).
     // Additionally, phases "after" the current one should not render as completed, even if
     // they were completed in a prior loop. This avoids confusing UX where future phases
@@ -1791,8 +1803,7 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
         .or_else(|| t.model_plan.as_ref().map(|_| "model_plan".to_string()));
 
     // Precompute span buckets (active + recent) in stable occurrence order.
-    let mut span_buckets: HashMap<WorkItemKey, Vec<SpanAgg>> =
-        HashMap::new();
+    let mut span_buckets: HashMap<WorkItemKey, Vec<SpanAgg>> = HashMap::new();
     let mut phase_buckets: HashMap<String, Vec<SpanAgg>> = HashMap::new();
     let now = Instant::now();
     let keep_recent = Duration::from_secs(300);
@@ -1822,7 +1833,10 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
                 continue;
             }
         }
-        span_buckets.entry(key_from_ctx(&s.ctx)).or_default().push(agg);
+        span_buckets
+            .entry(key_from_ctx(&s.ctx))
+            .or_default()
+            .push(agg);
     }
 
     for v in phase_buckets.values_mut() {
@@ -1843,9 +1857,14 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
                 .or_insert(s);
         }
         v.extend(by_key.into_values());
-        v.sort_by(|a, b| match (validate_dbt_sort_rank(&a.label), validate_dbt_sort_rank(&b.label)) {
-            (Some(ra), Some(rb)) => ra.cmp(&rb).then_with(|| a.order_idx.cmp(&b.order_idx)),
-            _ => a.order_idx.cmp(&b.order_idx),
+        v.sort_by(|a, b| {
+            match (
+                validate_dbt_sort_rank(&a.label),
+                validate_dbt_sort_rank(&b.label),
+            ) {
+                (Some(ra), Some(rb)) => ra.cmp(&rb).then_with(|| a.order_idx.cmp(&b.order_idx)),
+                _ => a.order_idx.cmp(&b.order_idx),
+            }
         });
     }
     for v in span_buckets.values_mut() {
@@ -1868,9 +1887,14 @@ fn render_thread_detail(t: &ThreadView, spinner_idx: usize) -> Vec<String> {
         }
         v.extend(by_key.into_values());
         // Keep the original occurrence ordering (stable, non-jumpy).
-        v.sort_by(|a, b| match (validate_dbt_sort_rank(&a.label), validate_dbt_sort_rank(&b.label)) {
-            (Some(ra), Some(rb)) => ra.cmp(&rb).then_with(|| a.order_idx.cmp(&b.order_idx)),
-            _ => a.order_idx.cmp(&b.order_idx),
+        v.sort_by(|a, b| {
+            match (
+                validate_dbt_sort_rank(&a.label),
+                validate_dbt_sort_rank(&b.label),
+            ) {
+                (Some(ra), Some(rb)) => ra.cmp(&rb).then_with(|| a.order_idx.cmp(&b.order_idx)),
+                _ => a.order_idx.cmp(&b.order_idx),
+            }
         });
     }
 
@@ -2192,10 +2216,7 @@ mod tests {
             api::plan_snapshot::PlanKind::Cleanse,
             "plan_k".to_string(),
             api::PlanStatus::Approved,
-            vec![
-                api::PlanTask::Cleanse(task1),
-                api::PlanTask::Cleanse(task2),
-            ],
+            vec![api::PlanTask::Cleanse(task1), api::PlanTask::Cleanse(task2)],
             vec![wg],
         );
 
@@ -2267,10 +2288,7 @@ mod tests {
             api::plan_snapshot::PlanKind::Cleanse,
             "plan_k".to_string(),
             api::PlanStatus::Approved,
-            vec![
-                api::PlanTask::Cleanse(task1),
-                api::PlanTask::Cleanse(task2),
-            ],
+            vec![api::PlanTask::Cleanse(task1), api::PlanTask::Cleanse(task2)],
             vec![wg],
         );
 
@@ -2319,4 +2337,3 @@ mod tests {
         assert!(joined.contains("Apply Next Cleanse Batch"));
     }
 }
-

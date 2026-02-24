@@ -213,7 +213,8 @@ fn render_plan_driven_instructions(
             .as_ref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
-        let include = it.status != crate::data_engineer::plan::ChecklistItemStatus::Done || has_details;
+        let include =
+            it.status != crate::data_engineer::plan::ChecklistItemStatus::Done || has_details;
         if !include {
             continue;
         }
@@ -234,7 +235,12 @@ fn render_plan_driven_instructions(
         out.push_str(", origin=");
         out.push_str(origin);
         out.push(')');
-        if let Some(d) = it.details.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some(d) = it
+            .details
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             out.push_str(": ");
             out.push_str(d);
         }
@@ -712,7 +718,12 @@ impl Tool for StagingModelTool {
                 .map(|b| String::from_utf8_lossy(&b).to_string())
                 .unwrap_or_default();
 
-            let (plan_invariants, plan_checklist, plan_expected_model_path, plan_implementation_spec) = plan_opt
+            let (
+                plan_invariants,
+                plan_checklist,
+                plan_expected_model_path,
+                plan_implementation_spec,
+            ) = plan_opt
                 .as_ref()
                 .and_then(|p| p.tasks.iter().find(|t| t.dataset_id == *ds))
                 .map(|t| {
@@ -802,12 +813,7 @@ impl Tool for StagingModelTool {
                 let user_json = v.to_string();
 
                 let mut d = match sql_first::llm_draft_sql_json(
-                    ctx,
-                    sys_msg,
-                    user_json,
-                    prompt_id,
-                    max_tokens,
-                    temp,
+                    ctx, sys_msg, user_json, prompt_id, max_tokens, temp,
                 )
                 .await
                 {
@@ -831,9 +837,11 @@ impl Tool for StagingModelTool {
                 }
 
                 // Deterministic SELECT * expansion (simple passthrough only).
-                if let Some(s) =
-                    sql_first::expand_select_star_from_placeholder(&d.sql, "__SOURCE__", &cols_for_sql)
-                {
+                if let Some(s) = sql_first::expand_select_star_from_placeholder(
+                    &d.sql,
+                    "__SOURCE__",
+                    &cols_for_sql,
+                ) {
                     d.sql = s;
                 }
 
@@ -862,9 +870,13 @@ impl Tool for StagingModelTool {
             let draft = draft.expect("ok implies draft");
 
             // Materialize: replace __SOURCE__ with dbt source().
-            let dbt_sql = draft
-                .sql
-                .replace("__SOURCE__", &format!("{{{{ source(\"{}\", \"{}\") }}}}", expected_db, expected_table));
+            let dbt_sql = draft.sql.replace(
+                "__SOURCE__",
+                &format!(
+                    "{{{{ source(\"{}\", \"{}\") }}}}",
+                    expected_db, expected_table
+                ),
+            );
             if !contains_expected_source_call(&dbt_sql, &expected_db, &expected_table) {
                 errors.push(format!(
                     "{ds}: materialized sql missing expected source(\"{expected_db}\",\"{expected_table}\")"

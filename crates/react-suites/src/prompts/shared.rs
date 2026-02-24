@@ -96,33 +96,6 @@ Usage guidance:
 "#
 }
 
-pub fn tool_card_common_suffix() -> &'static str {
-    r#"
-- If you reference any package macros, ensure packages.yml includes the required packages and run dbt deps.
-- After you have saved and validated, finalize with a concise summary.
-- After saving artifacts, call dbt_validate and fix any parse/compile errors; only then proceed.
-- After a clean validate, publish with publish_dbt_to_provider (it may return await_approval; on approval re-run with confirm=true).
-- When schema is empty/unavailable, proceed with a minimal staging model selecting from the dataset_id. Do not stall.
-- After any user clarification, call catalog_note to write a curated digest into the catalog (preview first if the change is material); then continue modeling.
-"#
-}
-
-pub fn build_common_tool_card(extra_tool_lines: &str, extra_guidance: &str) -> String {
-    let mut s = String::new();
-    s.push_str(tool_card_common_prefix());
-    if !extra_tool_lines.trim().is_empty() {
-        s.push_str(extra_tool_lines.trim_end());
-        s.push('\n');
-    }
-    s.push_str(&crate::prompts::patch_contract::file_patch_contract());
-    s.push_str(tool_card_common_suffix());
-    if !extra_guidance.trim().is_empty() {
-        s.push_str(extra_guidance.trim_end());
-        s.push('\n');
-    }
-    s
-}
-
 pub fn user_goal_line(prefix: &str, question: &str) -> String {
     let q = question.trim();
     if q.is_empty() {
@@ -150,4 +123,3 @@ mod tests {
         assert!(c.contains("downstream phases will compensate"));
     }
 }
-

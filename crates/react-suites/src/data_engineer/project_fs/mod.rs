@@ -278,7 +278,11 @@ pub async fn get_file(ctx: &AgentCtx, path: &str, max_chars: usize) -> Result<Va
                 hasher.update(text.as_bytes());
                 hex::encode(hasher.finalize())
             };
-            let existing_line_count = if text.is_empty() { 0 } else { text.lines().count() };
+            let existing_line_count = if text.is_empty() {
+                0
+            } else {
+                text.lines().count()
+            };
             let existing_had_trailing_newline = text.ends_with('\n');
             let content = if max_chars > 0 && text.len() > max_chars {
                 let mut s = text.chars().take(max_chars).collect::<String>();
@@ -321,7 +325,7 @@ pub async fn get_file(ctx: &AgentCtx, path: &str, max_chars: usize) -> Result<Va
                 "key": key,
                 "error": format!("not found or failed to fetch: {}", err_text),
             }))
-        },
+        }
     }
 }
 
@@ -402,9 +406,7 @@ pub async fn move_file(
         return Err(format!("destination already exists: {}", to_rel));
     }
 
-    ctx.storage
-        .put_bytes(&to_key, &bytes, "text/plain")
-        .await?;
+    ctx.storage.put_bytes(&to_key, &bytes, "text/plain").await?;
     ctx.storage.delete_object(&from_key).await?;
 
     Ok(serde_json::json!({
@@ -473,9 +475,8 @@ pub async fn apply_patch(
 
             // Cursor/Aider hunks-only patches: no file headers; apply using flexible search/replace.
             if has_hunks && !has_file_headers {
-                let normalized = normalize_hunks_only_patch_text(patch_text, &rel).map_err(|e| {
-                    format!("invalid patch: {}", e)
-                })?;
+                let normalized = normalize_hunks_only_patch_text(patch_text, &rel)
+                    .map_err(|e| format!("invalid patch: {}", e))?;
                 if normalized.line_number_headers_rewritten > 0 {
                     apply_repairs.push(format!(
                         "normalized_line_number_hunk_headers={}",
@@ -491,7 +492,9 @@ pub async fn apply_patch(
                         normalized.git_metadata_lines_dropped
                     ));
                 }
-                if let Some(repl) = try_apply_unified_hunks_flexible(normalized.patch_text.as_str(), &old) {
+                if let Some(repl) =
+                    try_apply_unified_hunks_flexible(normalized.patch_text.as_str(), &old)
+                {
                     apply_result_code = PatchApplyResultCode::AppliedHunksFlexible;
                     repl
                 } else {
@@ -515,88 +518,90 @@ pub async fn apply_patch(
                 // Accept git-style patches (with optional preamble) by stripping down to the unified diff section
                 // (`---`/`+++` + hunks) before feeding into diffy.
                 let unified = strip_git_preamble_to_unified(patch_text)?;
-            // diffy::Patch borrows from the patch text, so keep any repaired patch text alive
-            // for the duration of parsing + apply.
-            let mut patch_src: Cow<'_, str> = Cow::Borrowed(&unified);
-            let mut parse_error_fallback_content: Option<String> = None;
-            let patch = match Patch::from_str(patch_src.as_ref()) {
-                Ok(p) => p,
-                Err(e) => {
-                    let emsg = e.to_string();
-                    // Common LLM failure mode: incorrect hunk header counts or malformed hunk headers.
-                    //
-                    // diffy is strict and will reject mismatches with various error strings (including
-                    // "Hunks not in order or overlap"). Attempt a deterministic repair by recomputing hunk
-                    // counts and rewriting headers once, regardless of the specific parse error message.
-                    let fixed = repair_unified_hunk_headers(&unified);
-                    if fixed != unified {
-                        patch_src = Cow::Owned(fixed);
-                        apply_repairs.push("repaired_unified_hunk_headers".to_string());
-                        match Patch::from_str(patch_src.as_ref()) {
-                            Ok(p) => p,
-                            Err(e2) => {
-                                if let Some(repl) =
-                                    try_apply_unified_hunks_flexible(patch_src.as_ref(), &old)
-                                {
-                                    apply_result_code = PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
-                                    parse_error_fallback_content = Some(repl);
-                                    Patch::from_str(
-                                        "--- a/x\n+++ b/x\n@@ -1,0 +1,0 @@\n",
-                                    )
-                                    .map_err(|_| format!("invalid patch: {}", e2))?
-                                } else {
-                                    return Err(format!("invalid patch: {}", e2));
+                // diffy::Patch borrows from the patch text, so keep any repaired patch text alive
+                // for the duration of parsing + apply.
+                let mut patch_src: Cow<'_, str> = Cow::Borrowed(&unified);
+                let mut parse_error_fallback_content: Option<String> = None;
+                let patch = match Patch::from_str(patch_src.as_ref()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let emsg = e.to_string();
+                        // Common LLM failure mode: incorrect hunk header counts or malformed hunk headers.
+                        //
+                        // diffy is strict and will reject mismatches with various error strings (including
+                        // "Hunks not in order or overlap"). Attempt a deterministic repair by recomputing hunk
+                        // counts and rewriting headers once, regardless of the specific parse error message.
+                        let fixed = repair_unified_hunk_headers(&unified);
+                        if fixed != unified {
+                            patch_src = Cow::Owned(fixed);
+                            apply_repairs.push("repaired_unified_hunk_headers".to_string());
+                            match Patch::from_str(patch_src.as_ref()) {
+                                Ok(p) => p,
+                                Err(e2) => {
+                                    if let Some(repl) =
+                                        try_apply_unified_hunks_flexible(patch_src.as_ref(), &old)
+                                    {
+                                        apply_result_code =
+                                            PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
+                                        parse_error_fallback_content = Some(repl);
+                                        Patch::from_str("--- a/x\n+++ b/x\n@@ -1,0 +1,0 @@\n")
+                                            .map_err(|_| format!("invalid patch: {}", e2))?
+                                    } else {
+                                        return Err(format!("invalid patch: {}", e2));
+                                    }
                                 }
                             }
-                        }
-                    } else {
-                        if let Some(repl) = try_apply_unified_hunks_flexible(&unified, &old) {
-                            apply_result_code = PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
-                            parse_error_fallback_content = Some(repl);
-                            Patch::from_str("--- a/x\n+++ b/x\n@@ -1,0 +1,0 @@\n")
-                                .map_err(|_| format!("invalid patch: {}", emsg))?
                         } else {
-                            return Err(format!("invalid patch: {}", emsg));
+                            if let Some(repl) = try_apply_unified_hunks_flexible(&unified, &old) {
+                                apply_result_code =
+                                    PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
+                                parse_error_fallback_content = Some(repl);
+                                Patch::from_str("--- a/x\n+++ b/x\n@@ -1,0 +1,0 @@\n")
+                                    .map_err(|_| format!("invalid patch: {}", emsg))?
+                            } else {
+                                return Err(format!("invalid patch: {}", emsg));
+                            }
                         }
                     }
-                }
-            };
-            if let Some(repl) = parse_error_fallback_content {
-                repl
-            } else {
-                match diffy::apply(&old, &patch) {
-                    Ok(c) => {
-                        if apply_repairs
-                            .iter()
-                            .any(|x| x == "repaired_unified_hunk_headers")
-                        {
-                            apply_result_code = PatchApplyResultCode::AppliedUnifiedAfterHeaderRepair;
-                        } else {
-                            apply_result_code = PatchApplyResultCode::AppliedUnifiedDirect;
+                };
+                if let Some(repl) = parse_error_fallback_content {
+                    repl
+                } else {
+                    match diffy::apply(&old, &patch) {
+                        Ok(c) => {
+                            if apply_repairs
+                                .iter()
+                                .any(|x| x == "repaired_unified_hunk_headers")
+                            {
+                                apply_result_code =
+                                    PatchApplyResultCode::AppliedUnifiedAfterHeaderRepair;
+                            } else {
+                                apply_result_code = PatchApplyResultCode::AppliedUnifiedDirect;
+                            }
+                            c
                         }
-                        c
-                    }
-                    Err(e) => {
-                        // Fallbacks (in order):
-                        // 1) full-file rewrite reconstruction from hunk body
-                        // 2) flexible Cursor/Aider-style hunk search/replace
-                        if let Some(repl) =
-                            try_reconstruct_full_file_replacement(patch_src.as_ref(), &old)
-                        {
-                            apply_result_code =
+                        Err(e) => {
+                            // Fallbacks (in order):
+                            // 1) full-file rewrite reconstruction from hunk body
+                            // 2) flexible Cursor/Aider-style hunk search/replace
+                            if let Some(repl) =
+                                try_reconstruct_full_file_replacement(patch_src.as_ref(), &old)
+                            {
+                                apply_result_code =
                                 PatchApplyResultCode::AppliedUnifiedByFullReplacementReconstruction;
-                            repl
-                        } else if let Some(repl) =
-                            try_apply_unified_hunks_flexible(patch_src.as_ref(), &old)
-                        {
-                            apply_result_code = PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
-                            repl
-                        } else {
-                            return Err(format!("patch apply failed: {}", e));
+                                repl
+                            } else if let Some(repl) =
+                                try_apply_unified_hunks_flexible(patch_src.as_ref(), &old)
+                            {
+                                apply_result_code =
+                                    PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
+                                repl
+                            } else {
+                                return Err(format!("patch apply failed: {}", e));
+                            }
                         }
                     }
                 }
-            }
             }
         }
     };
@@ -632,6 +637,16 @@ fn parse_hunk_range(part: &str, sign: char) -> Option<(usize, usize)> {
         None => 1usize,
     };
     Some((start, count))
+}
+
+fn parse_hunk_marker_line(line: &str) -> Option<(char, &str)> {
+    let mut chars = line.chars();
+    let marker = chars.next()?;
+    if matches!(marker, '+' | '-' | ' ') {
+        Some((marker, chars.as_str()))
+    } else {
+        None
+    }
 }
 
 /// If a unified diff patch is effectively "replace the whole file", extract the intended
@@ -686,12 +701,15 @@ fn try_reconstruct_full_file_replacement(unified: &str, old: &str) -> Option<Str
             j += 1;
             continue;
         }
-        match l.chars().next().unwrap_or(' ') {
-            '+' | ' ' => {
-                // Strip the leading marker
-                out_lines.push(l[1..].to_string());
+        match parse_hunk_marker_line(l) {
+            Some(('+', body)) | Some((' ', body)) => out_lines.push(body.to_string()),
+            Some(('-', _)) => {}
+            None => {
+                // Be permissive for malformed/empty lines in best-effort reconstruction.
+                if l.is_empty() {
+                    out_lines.push(String::new());
+                }
             }
-            '-' => {}
             _ => {}
         }
         j += 1;
@@ -803,9 +821,7 @@ fn apply_hunk_search_replace_flexible(
     // Aider-like permissive fallback: trim unchanged context and retry.
     let mut prefix = 0usize;
     let mut suffix = 0usize;
-    while prefix < old_side.len()
-        && prefix < new_side.len()
-        && old_side[prefix] == new_side[prefix]
+    while prefix < old_side.len() && prefix < new_side.len() && old_side[prefix] == new_side[prefix]
     {
         prefix += 1;
     }
@@ -863,20 +879,21 @@ fn try_apply_unified_hunks_flexible(unified: &str, old: &str) -> Option<String> 
                 i += 1;
                 continue;
             }
-            match l.chars().next().unwrap_or(' ') {
-                '-' => {
-                    old_block.push(l[1..].to_string());
+            match parse_hunk_marker_line(l) {
+                Some(('-', body)) => {
+                    old_block.push(body.to_string());
                     changed = true;
                 }
-                '+' => {
-                    new_block.push(l[1..].to_string());
+                Some(('+', body)) => {
+                    new_block.push(body.to_string());
                     changed = true;
                 }
-                ' ' => {
-                    old_block.push(l[1..].to_string());
-                    new_block.push(l[1..].to_string());
+                Some((' ', body)) => {
+                    old_block.push(body.to_string());
+                    new_block.push(body.to_string());
                 }
                 _ => {
+                    // Keep malformed/marker-less lines as shared context on both sides.
                     old_block.push(l.to_string());
                     new_block.push(l.to_string());
                 }
@@ -1135,15 +1152,21 @@ fn disable_contract_enforcement_in_schema_yml_text(yml_text: &str) -> Result<Str
     };
 
     for m in models.iter_mut() {
-        let Some(mm) = m.as_mapping_mut() else { continue };
+        let Some(mm) = m.as_mapping_mut() else {
+            continue;
+        };
         let cfg = mm
             .entry(serde_yaml::Value::String("config".to_string()))
             .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-        let Some(cfgm) = cfg.as_mapping_mut() else { continue };
+        let Some(cfgm) = cfg.as_mapping_mut() else {
+            continue;
+        };
         let contract = cfgm
             .entry(serde_yaml::Value::String("contract".to_string()))
             .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-        let Some(cm) = contract.as_mapping_mut() else { continue };
+        let Some(cm) = contract.as_mapping_mut() else {
+            continue;
+        };
         // Force it off (if present), but keep the structure stable for users who expect it.
         cm.insert(
             serde_yaml::Value::String("enforced".to_string()),
@@ -2266,10 +2289,30 @@ packages:
         .await
         .expect("apply");
         assert!(out.content.to_ascii_lowercase().contains("select 2"));
-        assert_eq!(out.apply_result_code, PatchApplyResultCode::AppliedHunksFlexible);
+        assert_eq!(
+            out.apply_result_code,
+            PatchApplyResultCode::AppliedHunksFlexible
+        );
         assert!(out
             .apply_repairs
             .iter()
             .any(|r| r.starts_with("normalized_line_number_hunk_headers=")));
+    }
+
+    #[test]
+    fn flexible_hunk_apply_tolerates_empty_unmarked_body_lines() {
+        let old = "a\n\nb\n";
+        let unified = "@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n";
+        let out = try_apply_unified_hunks_flexible(unified, old).expect("apply should succeed");
+        assert_eq!(out, "a\n\nc\n");
+    }
+
+    #[test]
+    fn reconstruct_full_file_replacement_tolerates_empty_unmarked_body_lines() {
+        let old = "x\ny\n";
+        let unified = "@@ -1,2 +1,2 @@\n+hello\n\n+world\n";
+        let out = try_reconstruct_full_file_replacement(unified, old)
+            .expect("reconstruct should succeed");
+        assert_eq!(out, "hello\n\nworld");
     }
 }

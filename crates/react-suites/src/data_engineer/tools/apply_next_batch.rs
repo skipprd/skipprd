@@ -8,8 +8,8 @@ use react_core::control_flow::PhaseReasonCode;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
-use crate::data_engineer::dataset_truth;
 use crate::data_engineer::control_flow;
+use crate::data_engineer::dataset_truth;
 use crate::data_engineer::plan;
 use crate::data_engineer::plan::{CleansePlan, ModelPlan};
 use crate::data_engineer::tools;
@@ -29,9 +29,18 @@ fn mark_in_progress_cleanse(plan: &mut CleansePlan, dataset_ids: &[String]) {
     }
 }
 
-fn mark_in_progress_cleanse_checklist(plan: &mut CleansePlan, dataset_ids: &[String], checklist: &str) {
+fn mark_in_progress_cleanse_checklist(
+    plan: &mut CleansePlan,
+    dataset_ids: &[String],
+    checklist: &str,
+) {
     for ds in dataset_ids.iter() {
-        plan::cleanse_checklist_mark_status(plan, ds, checklist, plan::ChecklistItemStatus::InProgress);
+        plan::cleanse_checklist_mark_status(
+            plan,
+            ds,
+            checklist,
+            plan::ChecklistItemStatus::InProgress,
+        );
     }
 }
 
@@ -43,7 +52,12 @@ fn mark_in_progress_model(plan: &mut ModelPlan, names: &[String]) {
 
 fn mark_in_progress_model_checklist(plan: &mut ModelPlan, names: &[String], checklist: &str) {
     for n in names.iter() {
-        plan::model_checklist_mark_status(plan, n, checklist, plan::ChecklistItemStatus::InProgress);
+        plan::model_checklist_mark_status(
+            plan,
+            n,
+            checklist,
+            plan::ChecklistItemStatus::InProgress,
+        );
     }
 }
 
@@ -403,7 +417,12 @@ impl Tool for ApplyNextModelBatchTool {
 
         // Plan auto-heal (semantic): validate + single repair attempt before executing.
         let stg = dataset_truth::discover_staging_models_from_storage(ctx).await;
-        let v = plan::ensure_model_plan_semantically_valid_or_repaired(ctx, &mut plan, &stg.allowed_models).await?;
+        let v = plan::ensure_model_plan_semantically_valid_or_repaired(
+            ctx,
+            &mut plan,
+            &stg.allowed_models,
+        )
+        .await?;
         if !v.ok {
             return Ok(serde_json::json!({
                 "ok": false,

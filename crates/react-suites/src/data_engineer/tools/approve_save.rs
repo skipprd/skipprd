@@ -76,7 +76,9 @@ impl Tool for ApproveAndSaveArtifactTool {
             return Err("content required".to_string());
         }
         if args.get("preview_diff").is_some() {
-            return Err("preview_diff is no longer supported; remove it from the request".to_string());
+            return Err(
+                "preview_diff is no longer supported; remove it from the request".to_string(),
+            );
         }
         let mut warnings: Vec<String> = Vec::new();
 
@@ -238,8 +240,10 @@ impl Tool for ApproveAndSaveArtifactTool {
             .unwrap_or(&current_key)
             .to_string();
         let old_text = existing.clone().unwrap_or_default();
-        let patch_text =
-            crate::data_engineer::project_fs::hunks_only_full_replace_patch(&old_text, &content_final);
+        let patch_text = crate::data_engineer::project_fs::hunks_only_full_replace_patch(
+            &old_text,
+            &content_final,
+        );
         let outcome = crate::data_engineer::project_fs::apply_patch(
             ctx,
             None,

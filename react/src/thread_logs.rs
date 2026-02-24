@@ -86,11 +86,7 @@ impl RunThreadLogs {
         self.inner.scope.clone()
     }
 
-    pub fn bind_thread_id(
-        &self,
-        keyspace: &dyn Keyspace,
-        thread_id: &str,
-    ) -> Result<(), String> {
+    pub fn bind_thread_id(&self, keyspace: &dyn Keyspace, thread_id: &str) -> Result<(), String> {
         // Idempotent.
         {
             let g = self
@@ -147,9 +143,10 @@ impl RunThreadLogs {
         // Buffered mode: upload entire temp file at end.
         let key = keyspace.thread_log_key(&self.inner.scope, thread_id)?;
         let path = self.inner.tmp_path.clone();
-        let bytes = tokio::task::spawn_blocking(move || std::fs::read(&path).map_err(|e| e.to_string()))
-            .await
-            .map_err(|e| e.to_string())??;
+        let bytes =
+            tokio::task::spawn_blocking(move || std::fs::read(&path).map_err(|e| e.to_string()))
+                .await
+                .map_err(|e| e.to_string())??;
         storage.put_bytes(&key, &bytes, "text/plain").await?;
 
         Ok(())
@@ -192,7 +189,8 @@ mod tests {
 
     #[test]
     fn bind_thread_id_local_renames_into_logs_dir() {
-        let tmp = std::env::temp_dir().join(format!("react-thread-logs-test-{}", uuid::Uuid::new_v4()));
+        let tmp =
+            std::env::temp_dir().join(format!("react-thread-logs-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).expect("mkdir");
         let scope = RequestScope {
             tenant: "t".into(),
@@ -203,9 +201,12 @@ mod tests {
         let ks = DefaultKeyspace::new("b".to_string());
         logs.bind_thread_id(&ks, "123").expect("bind");
         let expected = tmp.join("t/w/p/logs/123.log");
-        assert!(expected.exists(), "expected log file to exist at {:?}", expected);
+        assert!(
+            expected.exists(),
+            "expected log file to exist at {:?}",
+            expected
+        );
         // Best-effort cleanup
         let _ = std::fs::remove_dir_all(tmp);
     }
 }
-

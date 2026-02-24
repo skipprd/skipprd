@@ -6,10 +6,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::control_flow::{GuardBlockKind, PhaseReasonCode};
 use crate::keyspace::Keyspace;
 use crate::scope::RequestScope;
 use crate::storage::StorageAdapter;
-use crate::control_flow::{GuardBlockKind, PhaseReasonCode};
 
 pub const THREAD_SCHEMA_VERSION: u32 = 4;
 pub const THREAD_STATE_SCHEMA_VERSION: u32 = 1;
@@ -1200,7 +1200,9 @@ fn apply_step_to_state(
                 },
             );
         }
-        ThreadStep::Final { ts, observation, .. } => {
+        ThreadStep::Final {
+            ts, observation, ..
+        } => {
             // A `final` marks the end of a run. Close out the currently-running phase so
             // UIs can mark the terminal phase (often `done`) as completed.
             let Some(ph) = st

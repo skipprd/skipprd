@@ -7,7 +7,9 @@ use crate::flow_frame::FlowFrame;
 use crate::preflight::PreflightProvider;
 use crate::suite::{Suite, SuiteCtx};
 use react_core::agent::{Agent, AgentCtx, AgentPolicy, Interrupt, RunOutcome};
-use react_core::control_flow::{GuardBlockKind, PhaseReasonCode, ReviewDecision, ReviewDecisionMeta, ReviewTier};
+use react_core::control_flow::{
+    GuardBlockKind, PhaseReasonCode, ReviewDecision, ReviewDecisionMeta, ReviewTier,
+};
 use react_core::llm::LlmCallOptions;
 use react_core::session::ThreadStore;
 use react_core::tools::{Tool, ToolRegistry};
@@ -26,14 +28,14 @@ pub mod naming;
 pub mod patch_contract;
 pub mod patch_protocol;
 pub mod plan;
-pub mod prompt_packets;
 pub mod project_files;
 pub mod project_fs;
-pub mod schema_policy;
-pub mod sql_first;
+pub mod prompt_packets;
 pub mod prompts;
 pub mod repair_state;
 mod review_batched;
+pub mod schema_policy;
+pub mod sql_first;
 pub mod tools;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,9 +129,7 @@ Plan:\n\
     }
     if !expected_paths.is_empty() {
         s.push_str("\nRecommended next step:\n");
-        s.push_str(
-            "- Apply a targeted `file op=patch` to fix the failing artifact(s):\n",
-        );
+        s.push_str("- Apply a targeted `file op=patch` to fix the failing artifact(s):\n");
         for p in expected_paths.iter().take(6) {
             s.push_str("  - ");
             s.push_str(p);
@@ -319,6 +319,36 @@ struct ManifestLookupRetrySignal {
 }
 
 impl DataEngineerSuite {
+    fn headless_mode_enabled() -> bool {
+        std::env::var("REACT_HEADLESS")
+            .ok()
+            .map(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                !(t.is_empty() || t == "0" || t == "false" || t == "no")
+            })
+            .unwrap_or(false)
+    }
+
+    fn build_tools_card(
+        header: &str,
+        tool_lines: Vec<String>,
+        notes: Vec<String>,
+        not_available: Option<String>,
+    ) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(header.to_string());
+        lines.extend(tool_lines);
+        if !notes.is_empty() {
+            lines.push(String::new());
+            lines.extend(notes);
+        }
+        if let Some(na) = not_available {
+            lines.push(String::new());
+            lines.push(na);
+        }
+        lines.join("\n")
+    }
+
     fn subjective_retry_limit() -> usize {
         std::env::var("AGENT_MAX_SUBJECTIVE_RETRIES")
             .ok()
@@ -431,8 +461,9 @@ impl DataEngineerSuite {
                     .and_then(|s| s.parse::<u32>().ok())
                     .unwrap_or(64_000)
                     .max(8_000);
-                let reasoning_effort = Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT")
-                    .unwrap_or(react_core::llm::ReasoningEffort::Medium);
+                let reasoning_effort =
+                    Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT")
+                        .unwrap_or(react_core::llm::ReasoningEffort::Medium);
                 LlmCallOptions {
                     prompt_id,
                     thread_id,
@@ -737,8 +768,10 @@ impl DataEngineerSuite {
         let batches = ids.chunks(5).map(|c| c.to_vec()).collect::<Vec<_>>();
         plan.tasks = tasks;
         plan.batches = batches;
-        plan.work_groups =
-            crate::data_engineer::plan::canonical_work_groups_from_batches(&plan.batches, "cleanse");
+        plan.work_groups = crate::data_engineer::plan::canonical_work_groups_from_batches(
+            &plan.batches,
+            "cleanse",
+        );
         true
     }
 
@@ -875,7 +908,11 @@ impl DataEngineerSuite {
                 sql_stats_timeout,
             )
             .await;
-            if stats_obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if stats_obs
+                .get("ok")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 return (true, Some(field.clone()));
             }
             let sample_obs = control_flow::call_and_record_tool(
@@ -888,7 +925,11 @@ impl DataEngineerSuite {
                 sql_sample_timeout,
             )
             .await;
-            if sample_obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if sample_obs
+                .get("ok")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 return (true, Some(field.clone()));
             }
         }
@@ -1074,7 +1115,8 @@ impl DataEngineerSuite {
                 if item_ids.is_empty() {
                     item_ids = normalized_string_vec(wg_obj.get("tasks"));
                 }
-                if wg_obj.get("items").and_then(|v| v.as_array()).is_none() && !item_ids.is_empty() {
+                if wg_obj.get("items").and_then(|v| v.as_array()).is_none() && !item_ids.is_empty()
+                {
                     wg_obj.insert(
                         "items".to_string(),
                         serde_json::Value::Array(
@@ -1108,15 +1150,17 @@ impl DataEngineerSuite {
                             .trim()
                             .to_string();
                         if !alias.is_empty() {
-                            it_obj.insert(
-                                "task_id".to_string(),
-                                serde_json::Value::String(alias),
-                            );
+                            it_obj.insert("task_id".to_string(), serde_json::Value::String(alias));
                         }
                     }
-                    if it_obj.get("checklist_item_id").and_then(|v| v.as_str()).is_none() {
+                    if it_obj
+                        .get("checklist_item_id")
+                        .and_then(|v| v.as_str())
+                        .is_none()
+                    {
                         // Legacy: checklist_item_ids: ["sql_model", ...]
-                        if let Some(arr) = it_obj.get("checklist_item_ids").and_then(|v| v.as_array())
+                        if let Some(arr) =
+                            it_obj.get("checklist_item_ids").and_then(|v| v.as_array())
                         {
                             if let Some(first) = arr.first().and_then(|v| v.as_str()) {
                                 it_obj.insert(
@@ -1147,13 +1191,7 @@ impl DataEngineerSuite {
                     it_obj.remove("status");
                 }
                 // Strict parse safety: keep only canonical work-group keys.
-                let allowed = [
-                    "group_id",
-                    "label",
-                    "kind",
-                    "items",
-                    "depends_on_group_ids",
-                ];
+                let allowed = ["group_id", "label", "kind", "items", "depends_on_group_ids"];
                 let keys: Vec<String> = wg_obj.keys().cloned().collect();
                 for k in keys {
                     if !allowed.contains(&k.as_str()) {
@@ -1186,10 +1224,16 @@ impl DataEngineerSuite {
             .unwrap_or_else(|| "draft".to_string());
         obj.insert("status".to_string(), serde_json::Value::String(status_norm));
         if obj.get("plan_key").and_then(|v| v.as_str()).is_none() {
-            obj.insert("plan_key".to_string(), serde_json::Value::String(String::new()));
+            obj.insert(
+                "plan_key".to_string(),
+                serde_json::Value::String(String::new()),
+            );
         }
         if obj.get("project_snapshot").is_none() {
-            obj.insert("project_snapshot".to_string(), serde_json::Value::Object(Default::default()));
+            obj.insert(
+                "project_snapshot".to_string(),
+                serde_json::Value::Object(Default::default()),
+            );
         }
         if obj.get("mutations").and_then(|v| v.as_array()).is_none() {
             obj.insert("mutations".to_string(), serde_json::Value::Array(vec![]));
@@ -1226,10 +1270,8 @@ impl DataEngineerSuite {
                             .trim()
                             .to_string();
                         if !alias.is_empty() {
-                            t_obj.insert(
-                                "dataset_id".to_string(),
-                                serde_json::Value::String(alias),
-                            );
+                            t_obj
+                                .insert("dataset_id".to_string(), serde_json::Value::String(alias));
                         }
                     }
                     if t_obj.get("implementation_spec").is_none() {
@@ -1253,10 +1295,7 @@ impl DataEngineerSuite {
                             .trim()
                             .to_string();
                         if !alias.is_empty() {
-                            t_obj.insert(
-                                "name".to_string(),
-                                serde_json::Value::String(alias),
-                            );
+                            t_obj.insert("name".to_string(), serde_json::Value::String(alias));
                         }
                     }
                     if t_obj.get("implementation_spec").is_none() {
@@ -1313,10 +1352,7 @@ impl DataEngineerSuite {
                 if let Some(ck) = t_obj.get_mut("checklist").and_then(|v| v.as_array_mut()) {
                     for it in ck.iter_mut() {
                         if let Some(it_obj) = it.as_object_mut() {
-                            it_obj.insert(
-                                "evidence".to_string(),
-                                serde_json::Value::Array(vec![]),
-                            );
+                            it_obj.insert("evidence".to_string(), serde_json::Value::Array(vec![]));
                         }
                     }
                 }
@@ -1380,8 +1416,12 @@ impl DataEngineerSuite {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
             return Ok(v);
         }
-        let start = raw.find('{').ok_or_else(|| "no JSON object start found".to_string())?;
-        let end = raw.rfind('}').ok_or_else(|| "no JSON object end found".to_string())?;
+        let start = raw
+            .find('{')
+            .ok_or_else(|| "no JSON object start found".to_string())?;
+        let end = raw
+            .rfind('}')
+            .ok_or_else(|| "no JSON object end found".to_string())?;
         if end <= start {
             return Err("invalid JSON object bounds".to_string());
         }
@@ -1402,9 +1442,14 @@ impl DataEngineerSuite {
             return (v, stripped);
         };
         let allowed: HashSet<&'static str> = if is_cleanse {
-            ["spec_version", "row_preserving", "output_fields", "prohibited_ops"]
-                .into_iter()
-                .collect()
+            [
+                "spec_version",
+                "row_preserving",
+                "output_fields",
+                "prohibited_ops",
+            ]
+            .into_iter()
+            .collect()
         } else {
             [
                 "spec_version",
@@ -1507,7 +1552,11 @@ impl DataEngineerSuite {
         planning_context: &str,
     ) -> Result<String, String> {
         use react_core::llm::ChatMessage;
-        let kind = if is_cleanse { "cleanse_plan" } else { "model_plan" };
+        let kind = if is_cleanse {
+            "cleanse_plan"
+        } else {
+            "model_plan"
+        };
         let sys = crate::prompts::plan::plan_design_memo_system_prompt(kind);
         let user = format!(
             "Planning kind: {kind}\n\nContext:\n{}\n\nWrite the design memo.",
@@ -1518,16 +1567,21 @@ impl DataEngineerSuite {
             "data_engineer.plan_design_memo",
             ctx.thread_id.clone(),
         );
-        ctx.llm.chat(&[
-            ChatMessage {
-                role: "system".to_string(),
-                content: sys,
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: user,
-            },
-        ], &opts).map_err(|e| e.to_string())
+        ctx.llm
+            .chat(
+                &[
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: sys,
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: user,
+                    },
+                ],
+                &opts,
+            )
+            .map_err(|e| e.to_string())
     }
 
     async fn critique_design_memo(
@@ -1537,7 +1591,11 @@ impl DataEngineerSuite {
         memo: &str,
     ) -> Result<react_core::schema_registry::PlanDesignCritiqueV1, String> {
         use react_core::llm::ChatMessage;
-        let kind = if is_cleanse { "cleanse_plan" } else { "model_plan" };
+        let kind = if is_cleanse {
+            "cleanse_plan"
+        } else {
+            "model_plan"
+        };
         let opts = Self::planning_llm_options(
             PlanningLlmProfile::DesignCritique,
             "data_engineer.plan_design_critique",
@@ -1799,7 +1857,8 @@ Apply these fixes in the output.",
             };
             match Self::parse_impl_spec_value_with_sanitize::<
                 crate::data_engineer::plan::CleanseImplementationSpec,
-            >(spec_value, true) {
+            >(spec_value, true)
+            {
                 Ok((spec, stripped)) => {
                     if !stripped.is_empty() {
                         Self::push_snapshot_array_event(
@@ -1847,7 +1906,8 @@ Apply these fixes in the output.",
             };
             match Self::parse_impl_spec_value_with_sanitize::<
                 crate::data_engineer::plan::ModelImplementationSpec,
-            >(spec_value, false) {
+            >(spec_value, false)
+            {
                 Ok((spec, stripped)) => {
                     if !stripped.is_empty() {
                         Self::push_snapshot_array_event(
@@ -1868,10 +1928,8 @@ Apply these fixes in the output.",
                             t.inputs = spec_inputs;
                         }
                         if t.goal.trim().is_empty() {
-                            t.goal = format!(
-                                "Build {} from grounded staging inputs.",
-                                t.name.trim()
-                            );
+                            t.goal =
+                                format!("Build {} from grounded staging inputs.", t.name.trim());
                         }
                     }
                 }
@@ -2071,10 +2129,9 @@ Apply these fixes in the output.",
                 ],
                 &opts,
             )?;
-            let enrich =
-                Self::parse_json_typed_lenient::<react_core::schema_registry::ModelPlanEnrichmentV1>(
-                    &raw,
-                )?;
+            let enrich = Self::parse_json_typed_lenient::<
+                react_core::schema_registry::ModelPlanEnrichmentV1,
+            >(&raw)?;
             let (failed, failure_errors) =
                 Self::apply_model_enrichment_items(plan, &chunk_vec, enrich.items);
             if !failed.is_empty() {
@@ -2528,7 +2585,9 @@ Apply these fixes in the output.",
                 parts.push("new task".to_string());
             }
             if let Some(pt) = prev_task {
-                if Self::normalize_string_vec(&pt.invariants) != Self::normalize_string_vec(&t.invariants) {
+                if Self::normalize_string_vec(&pt.invariants)
+                    != Self::normalize_string_vec(&t.invariants)
+                {
                     parts.push("invariants".to_string());
                 }
                 let mut prev_ci: std::collections::BTreeMap<
@@ -2665,7 +2724,9 @@ Apply these fixes in the output.",
                 if Self::normalize_string_vec(&pt.inputs) != Self::normalize_string_vec(&t.inputs) {
                     parts.push("inputs".to_string());
                 }
-                if Self::normalize_string_vec(&pt.invariants) != Self::normalize_string_vec(&t.invariants) {
+                if Self::normalize_string_vec(&pt.invariants)
+                    != Self::normalize_string_vec(&t.invariants)
+                {
                     parts.push("invariants".to_string());
                 }
                 let mut prev_ci: std::collections::BTreeMap<
@@ -3085,6 +3146,7 @@ Apply these fixes in the output.",
         });
         registry.register(VectQueryTool);
 
+        let allow_user_interrupt_tools = !Self::headless_mode_enabled();
         match agent_type {
             // review uses read-only tools only
             "review" => {
@@ -3124,7 +3186,9 @@ Apply these fixes in the output.",
                 registry.register(SqlRunTool {
                     query: query.clone(),
                 });
-                registry.register(tools::ask_user::AskUserTool);
+                if allow_user_interrupt_tools {
+                    registry.register(tools::ask_user::AskUserTool);
+                }
                 registry.register(tools::ask_approval::AskApprovalTool);
                 registry.register(tools::dbt_examples::SearchDbtExamplesTool);
                 registry.register(tools::staging_model::StagingModelTool {
@@ -3152,7 +3216,9 @@ Apply these fixes in the output.",
                 registry.register(SqlRunTool {
                     query: query.clone(),
                 });
-                registry.register(tools::ask_user::AskUserTool);
+                if allow_user_interrupt_tools {
+                    registry.register(tools::ask_user::AskUserTool);
+                }
                 registry.register(tools::ask_approval::AskApprovalTool);
                 registry.register(DbtFilesTool {
                     datasets: sctx.datasets.clone(),
@@ -3164,7 +3230,9 @@ Apply these fixes in the output.",
                 registry.register(SqlRunTool {
                     query: query.clone(),
                 });
-                registry.register(tools::ask_user::AskUserTool);
+                if allow_user_interrupt_tools {
+                    registry.register(tools::ask_user::AskUserTool);
+                }
                 registry.register(tools::ask_approval::AskApprovalTool);
                 registry.register(tools::dbt_examples::SearchDbtExamplesTool);
                 registry.register(tools::staging_model::StagingModelTool {
@@ -3191,6 +3259,68 @@ Apply these fixes in the output.",
         }
 
         Ok(registry)
+    }
+
+    fn build_tools_card_for_agent_type(agent_type: &str) -> String {
+        let allow_user_interrupt_tools = !Self::headless_mode_enabled();
+        match agent_type {
+            "review" => Self::build_tools_card(
+                "Allowed tools (review mode, read-only):",
+                vec![
+                    "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int})".to_string(),
+                    "- sql_schema / sql_stats / sql_sample / vect_query (read-only context)".to_string(),
+                    "- artifacts".to_string(),
+                ],
+                Vec::new(),
+                Some(
+                    "Not available: run_sql, staging_model, gold_model, file patch/rm/mv, dbt_validate, publish_dbt_to_provider."
+                        .to_string(),
+                ),
+            ),
+            "ask" => {
+                let mut lines = vec![
+                    "- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
+                    "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string(),
+                    "- run_sql(args:{sql:string})".to_string(),
+                    "- ask_approval(args:{prompt:string})".to_string(),
+                    "- artifacts".to_string(),
+                ];
+                if allow_user_interrupt_tools {
+                    lines.push("- ask_user(args:{prompt:string})".to_string());
+                }
+                Self::build_tools_card("Allowed tools (ask mode):", lines, Vec::new(), None)
+            }
+            "cleanse" => {
+                let mut lines = vec![
+                    "- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
+                    "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string(),
+                    "- run_sql(args:{sql:string})".to_string(),
+                    "- staging_model(args:{dataset_ids:[string], instructions?:string, sql?:string|staging_model?:string|expression?:string})".to_string(),
+                    "- dbt_validate / publish_dbt_to_provider".to_string(),
+                    "- ask_approval(args:{prompt:string})".to_string(),
+                    "- artifacts".to_string(),
+                ];
+                if allow_user_interrupt_tools {
+                    lines.push("- ask_user(args:{prompt:string})".to_string());
+                }
+                Self::build_tools_card("Allowed tools (cleanse mode):", lines, Vec::new(), None)
+            }
+            _ => {
+                let mut lines = vec![
+                    "- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
+                    "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string(),
+                    "- run_sql(args:{sql:string})".to_string(),
+                    "- staging_model / gold_model".to_string(),
+                    "- dbt_validate / publish_dbt_to_provider".to_string(),
+                    "- ask_approval(args:{prompt:string})".to_string(),
+                    "- artifacts".to_string(),
+                ];
+                if allow_user_interrupt_tools {
+                    lines.push("- ask_user(args:{prompt:string})".to_string());
+                }
+                Self::build_tools_card("Allowed tools (model mode):", lines, Vec::new(), None)
+            }
+        }
     }
 
     fn build_tools_for_phase(
@@ -3232,14 +3362,17 @@ Apply these fixes in the output.",
         reg.register(VectQueryTool);
         reg.register(ArtifactsTool);
 
-        let tools_card_lines: Vec<&'static str>;
+        let tools_card: String;
+        let allow_user_interrupt_tools = !Self::headless_mode_enabled();
 
         match phase {
             control_flow::Phase::CleansePlan | control_flow::Phase::ModelPlan => {
                 // Plan phases: read-only discovery + (optional) probes. No dbt file mutations.
                 let suppress_manifest_json =
                     suppress_manifest_json_in_plan && phase == control_flow::Phase::ModelPlan;
-                reg.register(tools::ask_user::AskUserTool);
+                if allow_user_interrupt_tools {
+                    reg.register(tools::ask_user::AskUserTool);
+                }
                 reg.register(SqlRunTool {
                     query: query.clone(),
                 });
@@ -3277,24 +3410,30 @@ Apply these fixes in the output.",
                     reg.register(JsonFileTool);
                 }
 
-                let mut plan_tools_card_lines = vec![
-                    "Allowed tools (plan phase, read-only):",
-                    "- file(args:{op:\"list\", prefix?:string, limit?:int} | {op:\"get\", path:string, max_chars?:int})",
-                    "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
-                    "- run_sql (targeted probes)",
-                    "- artifacts",
-                    "- ask_user",
-                    "",
+                let mut tool_lines: Vec<String> = vec![
+                    "- file(args:{op:\"list\", prefix?:string, limit?:int} | {op:\"get\", path:string, max_chars?:int})".to_string(),
+                    "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string(),
+                    "- run_sql (targeted probes)".to_string(),
+                    "- artifacts".to_string(),
                 ];
-                if suppress_manifest_json {
-                    plan_tools_card_lines.push("- json_file is temporarily disabled for this model_plan retry due to repeated manifest lookup failures; use deterministic fallback evidence (file + sql_schema + sql_stats/sql_sample).");
-                } else {
-                    plan_tools_card_lines.push("- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})");
-                    plan_tools_card_lines.push("  - IMPORTANT: use args.op (NOT args.type). For list use args.prefix (NOT path:\".\").");
-                    plan_tools_card_lines.push("  - For manifest queries use canonical path: target/manifest.json (NOT manifest.json).");
+                if allow_user_interrupt_tools {
+                    tool_lines.push("- ask_user".to_string());
                 }
-                plan_tools_card_lines.push("Not available: staging_model, gold_model, file patch/rm/mv, dbt_validate, publish_dbt_to_provider.");
-                tools_card_lines = plan_tools_card_lines;
+                if suppress_manifest_json {
+                    tool_lines.push("- json_file is temporarily disabled for this model_plan retry due to repeated manifest lookup failures; use deterministic fallback evidence (file + sql_schema + sql_stats/sql_sample).".to_string());
+                } else {
+                    tool_lines.push("- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})".to_string());
+                    tool_lines.push("  - IMPORTANT: use args.op (NOT args.type). For list use args.prefix (NOT path:\".\").".to_string());
+                    tool_lines.push("  - For manifest queries use canonical path: target/manifest.json (NOT manifest.json).".to_string());
+                }
+                tools_card = Self::build_tools_card(
+                    "Allowed tools (plan phase, read-only):",
+                    tool_lines,
+                    Vec::new(),
+                    Some(
+                        "Not available: staging_model, gold_model, file patch/rm/mv, dbt_validate, publish_dbt_to_provider.".to_string(),
+                    ),
+                );
             }
             control_flow::Phase::CleanseAuthor | control_flow::Phase::ModelAuthor => {
                 // Authoring phases: allow investigation + mutations; validation/publish are suite-driven.
@@ -3303,7 +3442,9 @@ Apply these fixes in the output.",
                 // the next step MUST be a mutation.
                 let hard_mutation_only = guard.last_validate_failed && !guard.mutated_since_fail;
 
-                reg.register(tools::ask_user::AskUserTool);
+                if allow_user_interrupt_tools {
+                    reg.register(tools::ask_user::AskUserTool);
+                }
 
                 if hard_mutation_only {
                     // Mutation-only file tool to avoid "read-only thrash" when we require a mutation next.
@@ -3325,7 +3466,9 @@ Apply these fixes in the output.",
                             if self.single_target_path.is_some() && op != "patch" {
                                 return Err("file is in deterministic single-target repair mode; only op='patch' is allowed.".to_string());
                             }
-                            if self.single_target_path.is_none() && !matches!(op, "patch" | "rm" | "mv") {
+                            if self.single_target_path.is_none()
+                                && !matches!(op, "patch" | "rm" | "mv")
+                            {
                                 return Err("file is mutation-only right now (a mutating fix is required before any further validation). Allowed ops: patch/rm/mv.".to_string());
                             }
                             if let Some(want) = self.single_target_path.as_ref() {
@@ -3365,11 +3508,12 @@ Apply these fixes in the output.",
                             ) {
                                 if op == "patch" {
                                     let rs = crate::data_engineer::repair_state::RepairState::load(
-                                        store,
-                                        thread_id,
+                                        store, thread_id,
                                     )
                                     .await
-                                    .unwrap_or_else(crate::data_engineer::repair_state::RepairState::new);
+                                    .unwrap_or_else(
+                                        crate::data_engineer::repair_state::RepairState::new,
+                                    );
 
                                     match rs.ladder_step {
                                         crate::data_engineer::repair_state::RepairLadderStep::Stop => {
@@ -3414,26 +3558,35 @@ Apply these fixes in the output.",
                                 self.single_target_path.as_ref(),
                             ) {
                                 if op == "patch" {
-                                    let mut rs = crate::data_engineer::repair_state::RepairState::load(
-                                        store,
-                                        thread_id,
-                                    )
-                                    .await
-                                    .unwrap_or_else(crate::data_engineer::repair_state::RepairState::new);
+                                    let mut rs =
+                                        crate::data_engineer::repair_state::RepairState::load(
+                                            store, thread_id,
+                                        )
+                                        .await
+                                        .unwrap_or_else(
+                                            crate::data_engineer::repair_state::RepairState::new,
+                                        );
                                     rs.target_path = Some(want.clone());
                                     rs.attempt_count = rs.attempt_count.saturating_add(1);
 
                                     match &res {
                                         Ok(v) => {
-                                            let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
-                                            let mutated = v.get("mutated").and_then(|x| x.as_bool()).unwrap_or(false);
+                                            let ok = v
+                                                .get("ok")
+                                                .and_then(|x| x.as_bool())
+                                                .unwrap_or(false);
+                                            let mutated = v
+                                                .get("mutated")
+                                                .and_then(|x| x.as_bool())
+                                                .unwrap_or(false);
                                             if ok && mutated {
                                                 // Progress made; reset ladder counters so we don't prematurely stop.
                                                 rs.attempt_count = 0;
                                                 rs.consecutive_noop_patches = 0;
                                                 rs.ladder_step = crate::data_engineer::repair_state::RepairLadderStep::PatchTarget;
                                             } else if ok && !mutated {
-                                                rs.consecutive_noop_patches = rs.consecutive_noop_patches.saturating_add(1);
+                                                rs.consecutive_noop_patches =
+                                                    rs.consecutive_noop_patches.saturating_add(1);
                                                 rs.ladder_step = if rs.attempt_count >= 2 {
                                                     crate::data_engineer::repair_state::RepairLadderStep::Stop
                                                 } else {
@@ -3479,35 +3632,51 @@ Apply these fixes in the output.",
                     // Even in hard_mutation_only, schema batch tools are safe to expose because they are
                     // inherently mutating and can resolve common "YAML contract" failures without manual
                     // file tool patching.
-                    let mut tool_lines: Vec<&'static str> = vec![
-                        "Allowed tools (authoring phase; HARD constraint: mutation required next):",
-                    ];
+                    let mut tool_lines: Vec<String> = Vec::new();
                     if phase == control_flow::Phase::CleanseAuthor {
-                        reg.register(tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
-                            datasets: sctx.datasets.clone(),
-                        });
-                        tool_lines.push("- apply_next_cleanse_schema_batch(args:{instructions?:string})");
+                        reg.register(
+                            tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
+                                datasets: sctx.datasets.clone(),
+                            },
+                        );
+                        tool_lines.push(
+                            "- apply_next_cleanse_schema_batch(args:{instructions?:string})"
+                                .to_string(),
+                        );
                     }
                     if phase == control_flow::Phase::ModelAuthor {
-                        reg.register(tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
-                            datasets: sctx.datasets.clone(),
-                        });
-                        tool_lines.push("- apply_next_model_schema_batch(args:{instructions?:string})");
+                        reg.register(
+                            tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
+                                datasets: sctx.datasets.clone(),
+                            },
+                        );
+                        tool_lines.push(
+                            "- apply_next_model_schema_batch(args:{instructions?:string})"
+                                .to_string(),
+                        );
                     }
                     tool_lines.extend_from_slice(&[
-                        "- file(args:{op:\"patch\"|\"rm\"|\"mv\", ...})",
-                        "  - op=patch args: {path:string, patch_text:string} (Cursor/Aider hunks-only; patch_text starts with '@@' and MUST NOT include ---/+++ or diff --git)",
-                        "  - op=rm args: {path:string, expected_sha256?:string}",
-                        "  - op=mv args: {from:string, to:string, expected_sha256?:string}",
-                        "- run_sql(args:{sql:string}) (targeted probes; required after runtime failures)",
-                        "- ask_user(args:{prompt:string})",
-                        "",
-                        "Not available: read/explore tools, dbt_validate, publish_dbt_to_provider.",
+                        "- file(args:{op:\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
+                        "  - op=patch args: {path:string, patch_text:string} (Cursor/Aider hunks-only; patch_text starts with '@@' and MUST NOT include ---/+++ or diff --git)".to_string(),
+                        "  - op=rm args: {path:string, expected_sha256?:string}".to_string(),
+                        "  - op=mv args: {from:string, to:string, expected_sha256?:string}".to_string(),
+                        "- run_sql(args:{sql:string}) (targeted probes; required after runtime failures)".to_string(),
                     ]);
-                    if single_target_repair_path.is_some() {
-                        tool_lines.push("Deterministic single-target repair mode is active: only file op=patch for the current failing model file is allowed.");
+                    if allow_user_interrupt_tools {
+                        tool_lines.push("- ask_user(args:{prompt:string})".to_string());
                     }
-                    tools_card_lines = tool_lines;
+                    if single_target_repair_path.is_some() {
+                        tool_lines.push("Deterministic single-target repair mode is active: only file op=patch for the current failing model file is allowed.".to_string());
+                    }
+                    tools_card = Self::build_tools_card(
+                        "Allowed tools (authoring phase; HARD constraint: mutation required next):",
+                        tool_lines,
+                        Vec::new(),
+                        Some(
+                            "Not available: read/explore tools, dbt_validate, publish_dbt_to_provider."
+                                .to_string(),
+                        ),
+                    );
                 } else {
                     // Normal authoring: allow read/explore + probes.
                     if phase == control_flow::Phase::CleanseAuthor {
@@ -3520,16 +3689,20 @@ Apply these fixes in the output.",
                             reg.register(tools::apply_next_batch::ApplyNextCleanseBatchTool {
                                 datasets: sctx.datasets.clone(),
                             });
-                            reg.register(tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
-                                datasets: sctx.datasets.clone(),
-                            });
+                            reg.register(
+                                tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
+                                    datasets: sctx.datasets.clone(),
+                                },
+                            );
                         } else {
                             reg.register(tools::staging_model::StagingModelTool {
                                 datasets: sctx.datasets.clone(),
                             });
-                            reg.register(tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
-                                datasets: sctx.datasets.clone(),
-                            });
+                            reg.register(
+                                tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
+                                    datasets: sctx.datasets.clone(),
+                                },
+                            );
                         }
                     }
                     if phase == control_flow::Phase::ModelAuthor {
@@ -3538,14 +3711,18 @@ Apply these fixes in the output.",
                             // The tool derives the exact next approved batch from the persisted plan.
                             let _ = allowed; // used only as an enablement signal
                             reg.register(tools::apply_next_batch::ApplyNextModelBatchTool);
-                            reg.register(tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
-                                datasets: sctx.datasets.clone(),
-                            });
+                            reg.register(
+                                tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
+                                    datasets: sctx.datasets.clone(),
+                                },
+                            );
                         } else {
                             reg.register(tools::gold_model::GoldModelTool);
-                            reg.register(tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
-                                datasets: sctx.datasets.clone(),
-                            });
+                            reg.register(
+                                tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
+                                    datasets: sctx.datasets.clone(),
+                                },
+                            );
                         }
                     }
                     reg.register(SqlRunTool {
@@ -3562,52 +3739,84 @@ Apply these fixes in the output.",
                     let plan_batched_model = phase == control_flow::Phase::ModelAuthor
                         && matches!(allowed_batch, Some(AllowedBatch::ModelItemNames(_)));
                     if plan_batched_cleanse {
-                        tools_card_lines = vec![
-							"Allowed tools (authoring phase; plan-batched, deterministic):",
-							"- apply_next_cleanse_batch(args:{instructions?:string})",
-							"- apply_next_cleanse_schema_batch(args:{instructions?:string})",
-							"- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})",
-							"- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})",
-							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
-							"- run_sql (targeted probes)",
-							"- ask_user",
-							"- artifacts",
-							"",
-							"Not available in this phase: staging_model (batch tool calls it deterministically), dbt_validate, publish_dbt_to_provider.",
-						];
+                        let mut lines = vec![
+                            "- apply_next_cleanse_batch(args:{instructions?:string})".to_string(),
+                            "- apply_next_cleanse_schema_batch(args:{instructions?:string})"
+                                .to_string(),
+                            "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})".to_string(),
+                            "- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})".to_string(),
+                            "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)"
+                                .to_string(),
+                            "- run_sql (targeted probes)".to_string(),
+                            "- artifacts".to_string(),
+                        ];
+                        if allow_user_interrupt_tools {
+                            lines.insert(6, "- ask_user".to_string());
+                        }
+                        tools_card = Self::build_tools_card(
+                            "Allowed tools (authoring phase; plan-batched, deterministic):",
+                            lines,
+                            Vec::new(),
+                            Some("Not available in this phase: staging_model (batch tool calls it deterministically), dbt_validate, publish_dbt_to_provider.".to_string()),
+                        );
                     } else if plan_batched_model {
-                        tools_card_lines = vec![
-							"Allowed tools (authoring phase; plan-batched, deterministic):",
-							"- apply_next_model_batch(args:{instructions?:string})",
-							"- apply_next_model_schema_batch(args:{instructions?:string})",
-							"- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})",
-							"- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})",
-							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
-							"- run_sql (targeted probes)",
-							"- ask_user",
-							"- artifacts",
-							"",
-							"Not available in this phase: gold_model (batch tool calls it deterministically), dbt_validate, publish_dbt_to_provider.",
-						];
+                        let mut lines = vec![
+                            "- apply_next_model_batch(args:{instructions?:string})".to_string(),
+                            "- apply_next_model_schema_batch(args:{instructions?:string})"
+                                .to_string(),
+                            "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})".to_string(),
+                            "- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})".to_string(),
+                            "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)"
+                                .to_string(),
+                            "- run_sql (targeted probes)".to_string(),
+                            "- artifacts".to_string(),
+                        ];
+                        if allow_user_interrupt_tools {
+                            lines.insert(6, "- ask_user".to_string());
+                        }
+                        tools_card = Self::build_tools_card(
+                            "Allowed tools (authoring phase; plan-batched, deterministic):",
+                            lines,
+                            Vec::new(),
+                            Some("Not available in this phase: gold_model (batch tool calls it deterministically), dbt_validate, publish_dbt_to_provider.".to_string()),
+                        );
                     } else {
-                        tools_card_lines = vec![
-							"Allowed tools (authoring phase):",
-							"- sql_schema(args:{table?:string})",
-							"- vect_query(args:{scope:\"dataset\"|\"field\"|\"doc\"|\"artifact\"|\"metric\"|\"model\", query_text:string, k:int})",
-							"  - IMPORTANT: arg key is query_text (NOT query). scope must be one of the listed strings (NOT \"table\").",
-							"- sql_stats(args:{table:string, field:string}) (requires field; no table-only mode)",
-							"- sql_sample(args:{table:string, field:string, k:int}) (top values for a FIELD; not a row sampler)",
-							"- run_sql(args:{sql:string}) (use this to sample rows: SELECT * FROM <table> LIMIT 20)",
-							"- staging_model(args:{dataset_ids:[string], instructions?:string, sql?:string|staging_model?:string|expression?:string})",
-							"  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
-							"- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})",
-							"  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().",
-							"- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})",
-							"- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})",
-							"- ask_user(args:{prompt:string})",
-							"",
-							"Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).",
-						];
+                        let mut lines = vec![
+                            "- sql_schema(args:{table?:string})".to_string(),
+                            "- vect_query(args:{scope:\"dataset\"|\"field\"|\"doc\"|\"artifact\"|\"metric\"|\"model\", query_text:string, k:int})".to_string(),
+                            "  - IMPORTANT: arg key is query_text (NOT query). scope must be one of the listed strings (NOT \"table\").".to_string(),
+                            "- sql_stats(args:{table:string, field:string}) (requires field; no table-only mode)".to_string(),
+                            "- sql_sample(args:{table:string, field:string, k:int}) (top values for a FIELD; not a row sampler)".to_string(),
+                            "- run_sql(args:{sql:string}) (use this to sample rows: SELECT * FROM <table> LIMIT 20)".to_string(),
+                        ];
+                        if phase == control_flow::Phase::CleanseAuthor {
+                            lines.push("- staging_model(args:{dataset_ids:[string], instructions?:string, sql?:string|staging_model?:string|expression?:string})".to_string());
+                            lines.push("  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.".to_string());
+                            lines.push(
+                                "- apply_next_cleanse_schema_batch(args:{instructions?:string})"
+                                    .to_string(),
+                            );
+                        } else {
+                            lines.push("- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})".to_string());
+                            lines.push("  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().".to_string());
+                            lines.push(
+                                "- apply_next_model_schema_batch(args:{instructions?:string})"
+                                    .to_string(),
+                            );
+                        }
+                        lines.extend_from_slice(&[
+                            "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})".to_string(),
+                            "- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})".to_string(),
+                        ]);
+                        if allow_user_interrupt_tools {
+                            lines.push("- ask_user(args:{prompt:string})".to_string());
+                        }
+                        tools_card = Self::build_tools_card(
+                            "Allowed tools (authoring phase):",
+                            lines,
+                            Vec::new(),
+                            Some("Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).".to_string()),
+                        );
                     }
                 }
             }
@@ -3642,24 +3851,27 @@ Apply these fixes in the output.",
                 });
                 reg.register(JsonFileTool);
 
-                tools_card_lines = vec![
+                tools_card = Self::build_tools_card(
                     "Allowed tools (review phase, read-only):",
-                    "- file (list/get)",
-                    "- json_file (get_item/query)",
-                    "- artifacts",
-                    "- sql_schema / sql_stats / sql_sample / vect_query (read-only context)",
-                    "",
-                    "Not available: run_sql, staging_model, approve_and_save_artifact(_batch), dbt_validate, publish_dbt_to_provider.",
-                ];
+                    vec![
+                        "- file (list/get)".to_string(),
+                        "- json_file (get_item/query)".to_string(),
+                        "- artifacts".to_string(),
+                        "- sql_schema / sql_stats / sql_sample / vect_query (read-only context)"
+                            .to_string(),
+                    ],
+                    Vec::new(),
+                    Some("Not available: run_sql, staging_model, approve_and_save_artifact(_batch), dbt_validate, publish_dbt_to_provider.".to_string()),
+                );
             }
             _ => {
                 // Other phases do not run an LLM action set (suite does deterministic steps).
-                tools_card_lines =
-                    vec!["Allowed tools: (suite deterministic step; no agent tools)"];
+                tools_card =
+                    "Allowed tools: (suite deterministic step; no agent tools)".to_string();
             }
         }
 
-        Ok((reg, tools_card_lines.join("\n")))
+        Ok((reg, tools_card))
     }
 
     /// Hard cutover: refresh canonical catalog state on every run.
@@ -3717,12 +3929,9 @@ Apply these fixes in the output.",
             let mut errs: Vec<String> = Vec::new();
             for ds in dss.iter() {
                 let id = ds.fqn();
-                let Some(c) = cat
-                    .read_catalog(&sctx.scope, &id)
-                    .await
-                    .map_err(|e| {
-                        format!("catalog bootstrap failed while reading catalog for {id}: {e}")
-                    })?
+                let Some(c) = cat.read_catalog(&sctx.scope, &id).await.map_err(|e| {
+                    format!("catalog bootstrap failed while reading catalog for {id}: {e}")
+                })?
                 else {
                     errs.push(format!("{id}: catalog missing after refresh"));
                     continue;
@@ -3988,7 +4197,7 @@ Apply these fixes in the output.",
         sctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
         let sys = crate::util::time_context::with_time_context(prompts::ask_system_prompt());
-        let tools_card = prompts::ask_tool_card();
+        let tools_card = Self::build_tools_card_for_agent_type("ask");
 
         let pf = crate::preflight::CatalogPreflightProvider {
             discovery_limits: crate::preflight::discovery::DiscoveryLimits::default(),
@@ -4085,7 +4294,7 @@ Apply these fixes in the output.",
     ) -> Result<Vec<FlowFrame>, String> {
         Self::ensure_catalog_bootstrap_semaphored(thread_id, sctx).await?;
         let sys = crate::util::time_context::with_time_context(prompts::review_system_prompt());
-        let tools_card = prompts::review_tool_card();
+        let tools_card = Self::build_tools_card_for_agent_type("review");
 
         let registry = Self::build_tools("review", sctx)?;
         let thread_store = ThreadStore::new(
@@ -4355,7 +4564,7 @@ Apply these fixes in the output.",
                     kind: GuardBlockKind::BatchLocked,
                     reason: stop_msg.clone(),
                     observation: react_core::session::Observation::fail(vec![
-                        "progress_stalled".to_string(),
+                        "progress_stalled".to_string()
                     ]),
                     ts: chrono::Utc::now().to_rfc3339(),
                     agent: "agent".to_string(),
@@ -4471,20 +4680,19 @@ Apply these fixes in the output.",
                     let actx = Self::plan_agent_ctx(thread_id, sctx);
                     let actionable_review_entry_step_idx =
                         Self::actionable_review_entry_step_idx(log.as_ref(), phase);
-                    let entered_from_actionable_review =
-                        actionable_review_entry_step_idx.is_some();
-                    let prior_cleanse_plan_for_update = if entered_from_actionable_review && is_cleanse
-                    {
-                        crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
-                    } else {
-                        None
-                    };
-                    let prior_model_plan_for_update = if entered_from_actionable_review && !is_cleanse
-                    {
-                        crate::data_engineer::plan::load_model_plan_any(&actx).await
-                    } else {
-                        None
-                    };
+                    let entered_from_actionable_review = actionable_review_entry_step_idx.is_some();
+                    let prior_cleanse_plan_for_update =
+                        if entered_from_actionable_review && is_cleanse {
+                            crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
+                        } else {
+                            None
+                        };
+                    let prior_model_plan_for_update =
+                        if entered_from_actionable_review && !is_cleanse {
+                            crate::data_engineer::plan::load_model_plan_any(&actx).await
+                        } else {
+                            None
+                        };
 
                     // If the user already approved an existing draft, mark it approved and proceed.
                     if let Some(ref l) = log {
@@ -4502,16 +4710,17 @@ Apply these fixes in the output.",
                                 };
                                 if decision == Some(UserDecision::Approve) {
                                     if is_cleanse {
-                                        let advanced = Self::approve_cleanse_plan_draft_and_advance(
-                                            &thread_store,
-                                            thread_id,
-                                            phase,
-                                            &actx,
-                                            l.steps.len(),
-                                            PhaseReasonCode::PlanApproved,
-                                            serde_json::json!({ "user_step": last_user }),
-                                        )
-                                        .await?;
+                                        let advanced =
+                                            Self::approve_cleanse_plan_draft_and_advance(
+                                                &thread_store,
+                                                thread_id,
+                                                phase,
+                                                &actx,
+                                                l.steps.len(),
+                                                PhaseReasonCode::PlanApproved,
+                                                serde_json::json!({ "user_step": last_user }),
+                                            )
+                                            .await?;
                                         if advanced {
                                             continue;
                                         }
@@ -4690,14 +4899,16 @@ Apply these fixes in the output.",
                             if p.status == crate::data_engineer::plan::PlanStatus::Draft {
                                 let removed_non_raw = Self::enforce_cleanse_plan_raw_only(&mut p);
                                 if removed_non_raw > 0 {
-                                    let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
-                                        .await;
+                                    let _ =
+                                        crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
+                                            .await;
                                 }
                                 if p.tasks.is_empty() || p.batches.is_empty() {
                                     let plan_key = p.plan_key.clone();
                                     p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-                                    let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
-                                        .await;
+                                    let _ =
+                                        crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
+                                            .await;
                                     let _ = control_flow::append_phase_with_reason(
                                         &thread_store,
                                         thread_id,
@@ -4839,7 +5050,9 @@ Apply these fixes in the output.",
                                     "sql_schema" => saw_sql_schema = true,
                                     "sql_stats" | "sql_sample" | "run_sql" => {
                                         if args_opt
-                                            .map(|a| Self::is_valid_grounding_evidence_tool(name, a))
+                                            .map(|a| {
+                                                Self::is_valid_grounding_evidence_tool(name, a)
+                                            })
                                             .unwrap_or(false)
                                         {
                                             saw_evidence = true;
@@ -5146,7 +5359,16 @@ Apply these fixes in the output.",
                             None,
                         )
                     };
-                    match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q, llm_options).await {
+                    match Agent::run_until_block(
+                        &registry,
+                        &actx,
+                        &sys,
+                        &tools_card,
+                        &q,
+                        llm_options,
+                    )
+                    .await
+                    {
                         Ok(RunOutcome::Final {
                             thread_id: _tid,
                             result: _result,
@@ -5172,7 +5394,9 @@ Apply these fixes in the output.",
                                             observation,
                                             args,
                                             ..
-                                        } => (Some(name.as_str()), Some(observation.ok), Some(args)),
+                                        } => {
+                                            (Some(name.as_str()), Some(observation.ok), Some(args))
+                                        }
                                         _ => (None, None, None),
                                     };
                                     if let (Some(name), Some(true)) = (name_opt, ok_opt) {
@@ -5200,21 +5424,26 @@ Apply these fixes in the output.",
                                         (sctx.query.as_ref(), sctx.datasets.as_ref())
                                     {
                                         if let Ok(items) = ds.list_datasets().await {
-                                            if let Some(first_table) =
-                                                items.first().map(|d| d.fqn()).filter(|s| !s.is_empty())
+                                            if let Some(first_table) = items
+                                                .first()
+                                                .map(|d| d.fqn())
+                                                .filter(|s| !s.is_empty())
                                             {
-                                                let sql_schema_tool = tools::sql_schema::SqlSchemaTool {
-                                                    query: query.clone(),
-                                                    datasets: sctx.datasets.clone(),
-                                                    catalog: sctx.catalog.clone(),
-                                                };
-                                                let sql_stats_tool = tools::sql_stats::SqlStatsTool {
-                                                    catalog: sctx.catalog.clone(),
-                                                    datasets: sctx.datasets.clone(),
-                                                };
-                                                let sql_sample_tool = tools::sql_sample::SqlSampleTool {
-                                                    query: query.clone(),
-                                                };
+                                                let sql_schema_tool =
+                                                    tools::sql_schema::SqlSchemaTool {
+                                                        query: query.clone(),
+                                                        datasets: sctx.datasets.clone(),
+                                                        catalog: sctx.catalog.clone(),
+                                                    };
+                                                let sql_stats_tool =
+                                                    tools::sql_stats::SqlStatsTool {
+                                                        catalog: sctx.catalog.clone(),
+                                                        datasets: sctx.datasets.clone(),
+                                                    };
+                                                let sql_sample_tool =
+                                                    tools::sql_sample::SqlSampleTool {
+                                                        query: query.clone(),
+                                                    };
                                                 let run_sql_tool = tools::sql_run::SqlRunTool {
                                                     query: query.clone(),
                                                 };
@@ -5320,27 +5549,31 @@ Apply these fixes in the output.",
                                 }
                             }
 
-                            let design_memo = Self::generate_design_memo(&actx, is_cleanse, &q).await?;
+                            let design_memo =
+                                Self::generate_design_memo(&actx, is_cleanse, &q).await?;
                             let design_critique =
-                                Self::critique_design_memo(&actx, is_cleanse, &q, &design_memo).await?;
-                            if is_cleanse {
-                                let skeleton =
-                                    Self::generate_cleanse_skeleton(
-                                        &actx,
-                                        &q,
-                                        &design_memo,
-                                        &design_critique,
-                                    )
+                                Self::critique_design_memo(&actx, is_cleanse, &q, &design_memo)
                                     .await?;
+                            if is_cleanse {
+                                let skeleton = Self::generate_cleanse_skeleton(
+                                    &actx,
+                                    &q,
+                                    &design_memo,
+                                    &design_critique,
+                                )
+                                .await?;
                                 let mut payload = Self::compile_cleanse_skeleton_payload(&skeleton);
                                 Self::normalize_plan_json_payload("cleanse_plan", &mut payload);
-                                let discovered_raw =
-                                    Self::discovered_raw_relations_from_phase_log(log.as_ref(), phase);
+                                let discovered_raw = Self::discovered_raw_relations_from_phase_log(
+                                    log.as_ref(),
+                                    phase,
+                                );
                                 Self::harden_cleanse_payload_to_raw(&mut payload, &discovered_raw);
                                 let mut plan = match serde_json::from_value::<
                                     crate::data_engineer::plan::CleansePlan,
-                                >(payload.clone())
-                                {
+                                >(
+                                    payload.clone()
+                                ) {
                                     Ok(p) => p,
                                     Err(e) => {
                                         let err = format!("invalid cleanse plan JSON: {e}");
@@ -5349,13 +5582,14 @@ Apply these fixes in the output.",
                                             phase: phase.as_str().to_string(),
                                             kind: GuardBlockKind::PlanJsonInvalid,
                                             reason: err.clone(),
-                                            observation: react_core::session::Observation::fail(vec![
-                                                err.clone(),
-                                            ]),
+                                            observation: react_core::session::Observation::fail(
+                                                vec![err.clone()],
+                                            ),
                                             ts,
                                             agent: "agent".to_string(),
                                         };
-                                        let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                        let _ =
+                                            thread_store.append_step(thread_id, step.clone()).await;
                                         control_flow::append_phase_with_reason(
                                             &thread_store,
                                             thread_id,
@@ -5412,7 +5646,8 @@ Apply these fixes in the output.",
                                     crate::data_engineer::plan::new_cleanse_plan_key(&actx);
                                 // Crash-safety: checkpoint the draft plan immediately so the thread
                                 // can be resumed even if we crash during grounding/critique.
-                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
+                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
+                                    .await;
                                 // Scope progress to the current plan instance so we don't replay the full
                                 // historical log and accidentally mark tasks done from prior cycles.
                                 plan.progress.last_applied_step_idx =
@@ -5555,10 +5790,11 @@ Apply these fixes in the output.",
                                     &mut plan,
                                     &enrich_ids,
                                 )
-                                    .await?;
+                                .await?;
                                 // Crash-safety: persist the grounded/pruned draft so resume/inspection reflects
                                 // what we actually validated/critiqued (not just the initial parsed JSON).
-                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
+                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
+                                    .await;
 
                                 // Quality gate 1: semantic validity (includes implementation_spec requirements).
                                 // Hard cutover: normalize conservative defaults before validating (no LLM repair).
@@ -5572,8 +5808,10 @@ Apply these fixes in the output.",
                                 } else {
                                     let candidates: Vec<String> =
                                         plan.tasks.iter().map(|t| t.dataset_id.clone()).collect();
-                                    let targeted =
-                                        Self::collect_targeted_semantic_tasks(&sem.errors, &candidates);
+                                    let targeted = Self::collect_targeted_semantic_tasks(
+                                        &sem.errors,
+                                        &candidates,
+                                    );
                                     if !targeted.is_empty() {
                                         Self::enrich_cleanse_tasks(
                                             &actx,
@@ -5595,7 +5833,8 @@ Apply these fixes in the output.",
                                 };
                                 // Crash-safety: persist the normalized draft so resume/inspection reflects
                                 // what we actually validated (not just the initial parsed JSON).
-                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
+                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
+                                    .await;
                                 if !sem.ok {
                                     let reason = format!(
                                         "Plan failed semantic validation (design-first). Errors:\n- {}",
@@ -5606,7 +5845,9 @@ Apply these fixes in the output.",
                                         phase: phase.as_str().to_string(),
                                         kind: GuardBlockKind::PlanSemanticInvalid,
                                         reason: reason.clone(),
-                                        observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                                        observation: react_core::session::Observation::fail(vec![
+                                            reason.clone(),
+                                        ]),
                                         ts,
                                         agent: "agent".to_string(),
                                     };
@@ -5708,20 +5949,21 @@ Apply these fixes in the output.",
                                 );
                                 return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
                             } else {
-                                let candidates =
-                                    Self::generate_model_candidates(
-                                        &actx,
-                                        &q,
-                                        &design_memo,
-                                        &design_critique,
-                                    )
-                                    .await?;
-                                let mut payload = Self::compile_model_candidates_payload(&candidates);
+                                let candidates = Self::generate_model_candidates(
+                                    &actx,
+                                    &q,
+                                    &design_memo,
+                                    &design_critique,
+                                )
+                                .await?;
+                                let mut payload =
+                                    Self::compile_model_candidates_payload(&candidates);
                                 Self::normalize_plan_json_payload("model_plan", &mut payload);
                                 let mut plan = match serde_json::from_value::<
                                     crate::data_engineer::plan::ModelPlan,
-                                >(payload.clone())
-                                {
+                                >(
+                                    payload.clone()
+                                ) {
                                     Ok(p) => p,
                                     Err(e) => {
                                         let err = format!("invalid model plan JSON: {e}");
@@ -5730,13 +5972,14 @@ Apply these fixes in the output.",
                                             phase: phase.as_str().to_string(),
                                             kind: GuardBlockKind::PlanJsonInvalid,
                                             reason: err.clone(),
-                                            observation: react_core::session::Observation::fail(vec![
-                                                err.clone(),
-                                            ]),
+                                            observation: react_core::session::Observation::fail(
+                                                vec![err.clone()],
+                                            ),
                                             ts,
                                             agent: "agent".to_string(),
                                         };
-                                        let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                        let _ =
+                                            thread_store.append_step(thread_id, step.clone()).await;
                                         control_flow::append_phase_with_reason(
                                             &thread_store,
                                             thread_id,
@@ -5797,7 +6040,8 @@ Apply these fixes in the output.",
                                     crate::data_engineer::plan::new_model_plan_key(&actx);
                                 // Crash-safety: checkpoint the draft plan immediately so the thread
                                 // can be resumed even if we crash during grounding/critique.
-                                let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
+                                let _ =
+                                    crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
                                 // Scope progress to the current plan instance so we don't replay the full
                                 // historical log and accidentally mark tasks done from prior cycles.
                                 plan.progress.last_applied_step_idx =
@@ -5929,10 +6173,11 @@ Apply these fixes in the output.",
                                     &mut plan,
                                     &enrich_ids,
                                 )
-                                    .await?;
+                                .await?;
                                 // Crash-safety: persist the grounded/pruned draft so resume/inspection reflects
                                 // what we actually validated/critiqued (not just the initial parsed JSON).
-                                let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
+                                let _ =
+                                    crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
 
                                 // Quality gate 1: semantic validity (includes implementation_spec requirements).
                                 // Hard cutover: normalize conservative defaults before validating (no LLM repair).
@@ -5947,8 +6192,10 @@ Apply these fixes in the output.",
                                 } else {
                                     let candidates: Vec<String> =
                                         plan.tasks.iter().map(|t| t.name.clone()).collect();
-                                    let targeted =
-                                        Self::collect_targeted_semantic_tasks(&sem.errors, &candidates);
+                                    let targeted = Self::collect_targeted_semantic_tasks(
+                                        &sem.errors,
+                                        &candidates,
+                                    );
                                     if !targeted.is_empty() {
                                         Self::enrich_model_tasks(
                                             &actx,
@@ -5971,7 +6218,8 @@ Apply these fixes in the output.",
                                 };
                                 // Crash-safety: persist the normalized draft so resume/inspection reflects
                                 // what we actually validated (not just the initial parsed JSON).
-                                let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
+                                let _ =
+                                    crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
                                 if !sem.ok {
                                     let reason = format!(
                                         "Plan failed semantic validation (design-first). Errors:\n- {}",
@@ -5982,7 +6230,9 @@ Apply these fixes in the output.",
                                         phase: phase.as_str().to_string(),
                                         kind: GuardBlockKind::PlanSemanticInvalid,
                                         reason: reason.clone(),
-                                        observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                                        observation: react_core::session::Observation::fail(vec![
+                                            reason.clone(),
+                                        ]),
                                         ts,
                                         agent: "agent".to_string(),
                                     };
@@ -6245,13 +6495,11 @@ Apply these fixes in the output.",
                                 // In deterministic repair mode, the plan is frozen (reference-only).
                                 if !hard_mutation_repair_mode {
                                     crate::data_engineer::plan::update_cleanse_progress_from_log(
-                                        &mut plan,
-                                        l,
+                                        &mut plan, l,
                                     );
-                                    let _ = crate::data_engineer::plan::save_cleanse_plan(
-                                        &actx, &plan,
-                                    )
-                                    .await;
+                                    let _ =
+                                        crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
+                                            .await;
                                 }
                             }
 
@@ -6330,9 +6578,10 @@ Apply these fixes in the output.",
                             let next_action =
                                 crate::data_engineer::plan::cleanse_next_action(&plan);
                             let next = match next_action.as_ref() {
-                                Some((crate::data_engineer::plan::WorkGroupKind::AuthorSql, ds)) => {
-                                    ds.clone()
-                                }
+                                Some((
+                                    crate::data_engineer::plan::WorkGroupKind::AuthorSql,
+                                    ds,
+                                )) => ds.clone(),
                                 _ => Vec::new(),
                             };
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
@@ -6379,12 +6628,16 @@ Apply these fixes in the output.",
                                         .exec_ctx
                                         .as_ref()
                                         .and_then(|c| c.checklist_item_id.as_deref())
-                                        .unwrap_or(crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT)
+                                        .unwrap_or(
+                                            crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
+                                        )
                                         .trim()
                                         .to_string();
                                     let mut expected_paths: Vec<String> = Vec::new();
                                     for ds in ids.iter() {
-                                        if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
+                                        if let Some(t) =
+                                            plan.tasks.iter().find(|t| t.dataset_id == *ds)
+                                        {
                                             if let Some(p) = t.expected_model_path.as_deref() {
                                                 if !p.trim().is_empty() {
                                                     expected_paths.push(p.trim().to_string());
@@ -6444,7 +6697,9 @@ Apply these fixes in the output.",
                                         .exec_ctx
                                         .as_ref()
                                         .and_then(|c| c.checklist_item_id.as_deref())
-                                        .unwrap_or(crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT)
+                                        .unwrap_or(
+                                            crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
+                                        )
                                         .trim()
                                         .to_string();
                                     let mut expected_paths: Vec<String> = Vec::new();
@@ -6539,7 +6794,9 @@ Apply these fixes in the output.",
                                             phase: phase.as_str().to_string(),
                                             kind: GuardBlockKind::PlanSemanticInvalid,
                                             reason: reason.clone(),
-                                            observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                                            observation: react_core::session::Observation::fail(
+                                                vec![reason.clone()],
+                                            ),
                                             ts: chrono::Utc::now().to_rfc3339(),
                                             agent: "agent".to_string(),
                                         };
@@ -6568,8 +6825,10 @@ Apply these fixes in the output.",
                             )
                             }
                         } else {
-                            let mut plan = match crate::data_engineer::plan::load_model_plan_any(&actx)
-                                .await
+                            let mut plan = match crate::data_engineer::plan::load_model_plan_any(
+                                &actx,
+                            )
+                            .await
                             {
                                 Some(p) => p,
                                 None => {
@@ -6629,13 +6888,11 @@ Apply these fixes in the output.",
                                 // In deterministic repair mode, the plan is frozen (reference-only).
                                 if !hard_mutation_repair_mode {
                                     crate::data_engineer::plan::update_model_progress_from_log(
-                                        &mut plan,
-                                        l,
+                                        &mut plan, l,
                                     );
-                                    let _ = crate::data_engineer::plan::save_model_plan(
-                                        &actx, &plan,
-                                    )
-                                    .await;
+                                    let _ =
+                                        crate::data_engineer::plan::save_model_plan(&actx, &plan)
+                                            .await;
                                 }
                             }
 
@@ -6710,9 +6967,10 @@ Apply these fixes in the output.",
                             // Work-group driven selection only (hard cutover).
                             let next_action = crate::data_engineer::plan::model_next_action(&plan);
                             let next_names = match next_action.as_ref() {
-                                Some((crate::data_engineer::plan::WorkGroupKind::AuthorSql, names)) => {
-                                    names.clone()
-                                }
+                                Some((
+                                    crate::data_engineer::plan::WorkGroupKind::AuthorSql,
+                                    names,
+                                )) => names.clone(),
                                 _ => Vec::new(),
                             };
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
@@ -6758,7 +7016,9 @@ Apply these fixes in the output.",
                                         .exec_ctx
                                         .as_ref()
                                         .and_then(|c| c.checklist_item_id.as_deref())
-                                        .unwrap_or(crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT)
+                                        .unwrap_or(
+                                            crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
+                                        )
                                         .trim()
                                         .to_string();
                                     let mut expected_paths: Vec<String> = Vec::new();
@@ -6830,11 +7090,11 @@ Apply these fixes in the output.",
                                             if let Ok(vy) =
                                                 serde_yaml::from_str::<serde_yaml::Value>(&content)
                                             {
-                                                let mut names_in_schema: std::collections::HashSet<String> =
-                                                    std::collections::HashSet::new();
-                                                if let Some(models) = vy
-                                                    .get("models")
-                                                    .and_then(|m| m.as_sequence())
+                                                let mut names_in_schema: std::collections::HashSet<
+                                                    String,
+                                                > = std::collections::HashSet::new();
+                                                if let Some(models) =
+                                                    vy.get("models").and_then(|m| m.as_sequence())
                                                 {
                                                     for m in models.iter() {
                                                         if let Some(nm) = m
@@ -6886,8 +7146,7 @@ Apply these fixes in the output.",
                                                 }
                                                 if changed {
                                                     crate::data_engineer::plan::save_model_plan(
-                                                        &actx,
-                                                        &plan,
+                                                        &actx, &plan,
                                                     )
                                                     .await?;
                                                     continue;
@@ -6912,7 +7171,9 @@ Apply these fixes in the output.",
                                         .exec_ctx
                                         .as_ref()
                                         .and_then(|c| c.checklist_item_id.as_deref())
-                                        .unwrap_or(crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT)
+                                        .unwrap_or(
+                                            crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
+                                        )
                                         .trim()
                                         .to_string();
                                     let mut ctx = format!(
@@ -6944,57 +7205,59 @@ Apply these fixes in the output.",
                                     }
 
                                     if guard.last_validate_failed {
-                                    // Same repair-mode behavior as cleanse: run authoring to patch failing files.
-                                    let mut ctx = format!(
+                                        // Same repair-mode behavior as cleanse: run authoring to patch failing files.
+                                        let mut ctx = format!(
                                     "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
                                     plan.plan_key,
                                     crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                 );
-                                    if !last_validate_failed_models.is_empty() {
-                                        for fm in last_validate_failed_models.iter().take(6) {
-                                            let name = fm
-                                                .get("name")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("unknown_model");
-                                            let file = fm
-                                                .get("file")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("(unknown file)");
-                                            ctx.push_str(&format!("- {} ({})\n", name, file));
+                                        if !last_validate_failed_models.is_empty() {
+                                            for fm in last_validate_failed_models.iter().take(6) {
+                                                let name = fm
+                                                    .get("name")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("unknown_model");
+                                                let file = fm
+                                                    .get("file")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("(unknown file)");
+                                                ctx.push_str(&format!("- {} ({})\n", name, file));
+                                            }
+                                        } else if let Some(ref brief) = last_validate_brief {
+                                            ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
+                                            ctx.push_str("\nLast dbt_validate summary:\n");
+                                            ctx.push_str(brief);
+                                            ctx.push('\n');
+                                        } else {
+                                            ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
                                         }
-                                    } else if let Some(ref brief) = last_validate_brief {
-                                        ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
-                                        ctx.push_str("\nLast dbt_validate summary:\n");
-                                        ctx.push_str(brief);
-                                        ctx.push('\n');
+                                        (ctx, None)
+                                    } else if crate::data_engineer::plan::model_all_done(&plan) {
+                                        control_flow::append_phase_with_reason(
+                                            &thread_store,
+                                            thread_id,
+                                            Some("agent".to_string()),
+                                            Some(phase),
+                                            Phase::ModelValidate,
+                                            Some(PhaseReasonCode::PlanTasksDone),
+                                            Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                                        )
+                                        .await?;
+                                        continue;
                                     } else {
-                                        ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
-                                    }
-                                    (ctx, None)
-                                } else if crate::data_engineer::plan::model_all_done(&plan) {
-                                    control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        Phase::ModelValidate,
-                                        Some(PhaseReasonCode::PlanTasksDone),
-                                        Some(serde_json::json!({ "plan_key": plan.plan_key })),
-                                    )
-                                    .await?;
-                                    continue;
-                                } else {
-                                    let reason = "approved model plan is not executable: no next work-group action while checklist work remains".to_string();
-                                    let step = react_core::session::ThreadStep::GuardBlock {
-                                        phase: phase.as_str().to_string(),
-                                        kind: GuardBlockKind::PlanSemanticInvalid,
-                                        reason: reason.clone(),
-                                        observation: react_core::session::Observation::fail(vec![reason.clone()]),
-                                        ts: chrono::Utc::now().to_rfc3339(),
-                                        agent: "agent".to_string(),
-                                    };
-                                    let _ = thread_store.append_step(thread_id, step).await;
-                                    control_flow::append_phase_with_reason(
+                                        let reason = "approved model plan is not executable: no next work-group action while checklist work remains".to_string();
+                                        let step = react_core::session::ThreadStep::GuardBlock {
+                                            phase: phase.as_str().to_string(),
+                                            kind: GuardBlockKind::PlanSemanticInvalid,
+                                            reason: reason.clone(),
+                                            observation: react_core::session::Observation::fail(
+                                                vec![reason.clone()],
+                                            ),
+                                            ts: chrono::Utc::now().to_rfc3339(),
+                                            agent: "agent".to_string(),
+                                        };
+                                        let _ = thread_store.append_step(thread_id, step).await;
+                                        control_flow::append_phase_with_reason(
                                         &thread_store,
                                         thread_id,
                                         Some("agent".to_string()),
@@ -7004,8 +7267,8 @@ Apply these fixes in the output.",
                                         Some(serde_json::json!({ "plan_key": plan.plan_key, "reason": reason })),
                                     )
                                     .await?;
-                                    continue;
-                                }
+                                        continue;
+                                    }
                                 }
                             } else {
                                 let allowed =
@@ -7033,13 +7296,12 @@ Apply these fixes in the output.",
                             }
                         };
 
-                    let single_target_repair_path = if hard_mutation_repair_mode
-                        && !prefer_schema_repairs
-                    {
-                        primary_failed_model_file(&last_validate_failed_models)
-                    } else {
-                        None
-                    };
+                    let single_target_repair_path =
+                        if hard_mutation_repair_mode && !prefer_schema_repairs {
+                            primary_failed_model_file(&last_validate_failed_models)
+                        } else {
+                            None
+                        };
 
                     let (registry, tools_card) = Self::build_tools_for_phase(
                         phase,
@@ -7234,8 +7496,7 @@ Apply these fixes in the output.",
 
                     // When the suite is in hard_mutation_only, file is patch-only (no op=get),
                     // so we MUST include the raw file content for at least the primary failing target.
-                    if hard_mutation_repair_mode && !last_validate_failed_models.is_empty()
-                    {
+                    if hard_mutation_repair_mode && !last_validate_failed_models.is_empty() {
                         if let Some(file) = last_validate_failed_models[0]
                             .get("file")
                             .and_then(|v| v.as_str())
@@ -7350,7 +7611,9 @@ Apply these fixes in the output.",
                         )
                         .await
                         .unwrap_or_else(crate::data_engineer::repair_state::RepairState::new);
-                        if rs.target_path.as_deref().unwrap_or("").trim().is_empty() && !target.is_empty() {
+                        if rs.target_path.as_deref().unwrap_or("").trim().is_empty()
+                            && !target.is_empty()
+                        {
                             rs.target_path = Some(target.clone());
                             let _ = rs.save(&thread_store, thread_id).await;
                         }
@@ -7443,7 +7706,16 @@ Apply these fixes in the output.",
                             reasoning_effort: None,
                         }
                     };
-                    match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q, llm_options).await {
+                    match Agent::run_until_block(
+                        &registry,
+                        &actx,
+                        &sys,
+                        &tools_card,
+                        &q,
+                        llm_options,
+                    )
+                    .await
+                    {
                         Ok(RunOutcome::Final { .. }) => {
                             // Update plan progress based on newly recorded tool steps.
                             if let Ok(latest) = thread_store.get(thread_id).await {
@@ -7722,14 +7994,19 @@ Apply these fixes in the output.",
 
                     // Cheap structural prechecks: fail fast on malformed/duplicated schema artifacts
                     // instead of burning a full dbt_validate cycle.
-                    if let Err(e) = crate::data_engineer::schema_policy::prevalidate_dbt_schema_artifacts(&actx).await {
+                    if let Err(e) =
+                        crate::data_engineer::schema_policy::prevalidate_dbt_schema_artifacts(&actx)
+                            .await
+                    {
                         let reason = format!("Pre-validation failed; fix DBT YAML artifacts before re-validating.\n\n{e}");
                         let ts = chrono::Utc::now().to_rfc3339();
                         let step = react_core::session::ThreadStep::GuardBlock {
                             phase: phase.as_str().to_string(),
                             kind: GuardBlockKind::PrecheckFailed,
                             reason: reason.clone(),
-                            observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                            observation: react_core::session::Observation::fail(vec![
+                                reason.clone()
+                            ]),
                             ts,
                             agent: "agent".to_string(),
                         };
@@ -8002,16 +8279,17 @@ Apply these fixes in the output.",
                             )
                             .await
                             .unwrap_or_else(crate::data_engineer::control_state::ControlState::new);
-                            cs.last_validate = Some(crate::data_engineer::control_state::LastValidateState {
-                                step_idx: None,
-                                ts: Some(chrono::Utc::now().to_rfc3339()),
-                                ok: Some(true),
-                                compile_ok: Some(true),
-                                run_ok: Some(true),
-                                brief: None,
-                                failed_models: Vec::new(),
-                                failure_class: None,
-                            });
+                            cs.last_validate =
+                                Some(crate::data_engineer::control_state::LastValidateState {
+                                    step_idx: None,
+                                    ts: Some(chrono::Utc::now().to_rfc3339()),
+                                    ok: Some(true),
+                                    compile_ok: Some(true),
+                                    run_ok: Some(true),
+                                    brief: None,
+                                    failed_models: Vec::new(),
+                                    failure_class: None,
+                                });
                             cs.hard_mutation_repair_mode = false;
                             cs.single_target_repair_path = None;
                             let _ = cs.save(&thread_store, thread_id).await;
@@ -8076,7 +8354,9 @@ Apply these fixes in the output.",
                                 phase: phase.as_str().to_string(),
                                 kind: GuardBlockKind::AuthoringCompletion,
                                 reason: reason.clone(),
-                                observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                                observation: react_core::session::Observation::fail(vec![
+                                    reason.clone()
+                                ]),
                                 ts: chrono::Utc::now().to_rfc3339(),
                                 agent: "agent".to_string(),
                             };
@@ -8180,16 +8460,17 @@ Apply these fixes in the output.",
                         )
                         .await
                         .unwrap_or_else(crate::data_engineer::control_state::ControlState::new);
-                        cs.last_validate = Some(crate::data_engineer::control_state::LastValidateState {
-                            step_idx: None,
-                            ts: Some(chrono::Utc::now().to_rfc3339()),
-                            ok: Some(false),
-                            compile_ok: Some(compile_ok),
-                            run_ok: Some(run_ok),
-                            brief: Some(brief.clone()),
-                            failed_models: failing_models.clone(),
-                            failure_class: Some(failure_class_str.clone()),
-                        });
+                        cs.last_validate =
+                            Some(crate::data_engineer::control_state::LastValidateState {
+                                step_idx: None,
+                                ts: Some(chrono::Utc::now().to_rfc3339()),
+                                ok: Some(false),
+                                compile_ok: Some(compile_ok),
+                                run_ok: Some(run_ok),
+                                brief: Some(brief.clone()),
+                                failed_models: failing_models.clone(),
+                                failure_class: Some(failure_class_str.clone()),
+                            });
                         cs.hard_mutation_repair_mode = true;
                         cs.single_target_repair_path = if primary_file.trim().is_empty() {
                             None
@@ -8208,7 +8489,8 @@ Apply these fixes in the output.",
                         rs.last_failed_models = failing_models.clone();
                         rs.last_error_class = Some(failure_class_str);
                         rs.last_error_brief = Some(brief.clone());
-                        rs.ladder_step = crate::data_engineer::repair_state::RepairLadderStep::PatchTarget;
+                        rs.ladder_step =
+                            crate::data_engineer::repair_state::RepairLadderStep::PatchTarget;
                         rs.attempt_count = 0;
                         rs.consecutive_noop_patches = 0;
                         let _ = rs.save(&thread_store, thread_id).await;
@@ -8269,7 +8551,8 @@ Apply these fixes in the output.",
                                         // Mark the task as needing attention again. Task status should be derived
                                         // from checklist items; we only adjust the coarse status here as a hint and
                                         // store detailed failure context into plan.project_snapshot.
-                                        t.status = crate::data_engineer::plan::TaskStatus::InProgress;
+                                        t.status =
+                                            crate::data_engineer::plan::TaskStatus::InProgress;
                                         reopened.push(t.dataset_id.clone());
                                     }
                                 }
@@ -8344,7 +8627,8 @@ Apply these fixes in the output.",
                                     if want_names.contains(&exp) {
                                         // Mark the task as needing attention again. Task status should be derived
                                         // from checklist items; we only adjust the coarse status here as a hint.
-                                        t.status = crate::data_engineer::plan::TaskStatus::InProgress;
+                                        t.status =
+                                            crate::data_engineer::plan::TaskStatus::InProgress;
                                         reopened.push(t.name.clone());
                                     }
                                 }
@@ -8516,10 +8800,12 @@ Apply these fixes in the output.",
                     // Fallback: extract review_ref (if present) from the trigger step so we can persist a stable pointer
                     // without embedding the full review text in subsequent phase transitions.
                     let review_ref_from_trigger = match &trigger_step {
-                        react_core::session::ThreadStep::Phase { reason_detail, .. } => reason_detail
-                            .as_ref()
-                            .and_then(|v| v.get("review_ref"))
-                            .cloned(),
+                        react_core::session::ThreadStep::Phase { reason_detail, .. } => {
+                            reason_detail
+                                .as_ref()
+                                .and_then(|v| v.get("review_ref"))
+                                .cloned()
+                        }
                         _ => None,
                     };
                     if meta.review_ref.is_none() {
@@ -8532,18 +8818,21 @@ Apply these fixes in the output.",
                     let mut review_retry_count = 0usize;
                     if let Some(kind) = Self::review_retry_kind(meta.decision) {
                         review_retry_count =
-                            Self::bump_subjective_retry(&thread_store, thread_id, phase, kind).await;
+                            Self::bump_subjective_retry(&thread_store, thread_id, phase, kind)
+                                .await;
                     } else {
                         Self::reset_subjective_retry(&thread_store, thread_id).await;
                     }
-                    let forced_by_patch_plan_streak = matches!(meta.decision, ReviewDecision::PatchPlan)
-                        && patch_plan_streak >= max_review_patch_plan_streak;
-                    let forced_by_patch_impl_streak = matches!(meta.decision, ReviewDecision::PatchImpl)
-                        && !guard.last_validate_failed
-                        && patch_impl_streak >= max_review_patch_impl_streak;
-                    let forced_by_subjective_retry =
-                        Self::review_retry_kind(meta.decision).is_some()
-                            && review_retry_count > Self::subjective_retry_limit();
+                    let forced_by_patch_plan_streak =
+                        matches!(meta.decision, ReviewDecision::PatchPlan)
+                            && patch_plan_streak >= max_review_patch_plan_streak;
+                    let forced_by_patch_impl_streak =
+                        matches!(meta.decision, ReviewDecision::PatchImpl)
+                            && !guard.last_validate_failed
+                            && patch_impl_streak >= max_review_patch_impl_streak;
+                    let forced_by_subjective_retry = Self::review_retry_kind(meta.decision)
+                        .is_some()
+                        && review_retry_count > Self::subjective_retry_limit();
                     let forced_progress = forced_by_patch_plan_streak
                         || forced_by_patch_impl_streak
                         || forced_by_subjective_retry;
@@ -8634,7 +8923,7 @@ Apply these fixes in the output.",
                                 Some(PhaseReasonCode::ReviewPatchPlan),
                                 Some(reason_detail),
                             )
-                                        .await?;
+                            .await?;
                             continue;
                         }
                         ReviewDecision::PatchImpl => {
@@ -8653,7 +8942,7 @@ Apply these fixes in the output.",
                                 Some(PhaseReasonCode::ReviewPatchImpl),
                                 Some(reason_detail),
                             )
-                                            .await?;
+                            .await?;
                             continue;
                         }
                     }
@@ -8726,7 +9015,7 @@ Apply these fixes in the output.",
                                 "publish_observation": obs,
                             })),
                         )
-                            .await?;
+                        .await?;
                         continue;
                     }
                     if ok && stage == "await_approval" {
@@ -8749,7 +9038,7 @@ Apply these fixes in the output.",
                             "publish_observation": obs,
                         })),
                     )
-                                        .await?;
+                    .await?;
                     continue;
                 }
 
@@ -8804,7 +9093,7 @@ Apply these fixes in the output.",
                                 "publish_observation": obs,
                             })),
                         )
-                                        .await?;
+                        .await?;
                         continue;
                     }
                     // Failed publish -> back to model authoring.
@@ -8861,13 +9150,13 @@ Apply these fixes in the output.",
             AuthoringKind::Cleanse => (
                 "cleanse",
                 crate::util::time_context::with_time_context(prompts::cleanse_system_prompt()),
-                prompts::cleanse_tool_card(),
+                Self::build_tools_card_for_agent_type("cleanse"),
                 false,
             ),
             AuthoringKind::Model => (
                 "model",
                 crate::util::time_context::with_time_context(prompts::model_system_prompt()),
-                prompts::model_tool_card(),
+                Self::build_tools_card_for_agent_type("model"),
                 true,
             ),
         };
@@ -9341,8 +9630,14 @@ mod tests {
             }]
         });
         DataEngineerSuite::normalize_plan_json_payload("cleanse_plan", &mut payload);
-        assert!(payload.get("tasks").is_some(), "expected tasks at plan root");
-        assert_eq!(payload.get("status").and_then(|v| v.as_str()), Some("draft"));
+        assert!(
+            payload.get("tasks").is_some(),
+            "expected tasks at plan root"
+        );
+        assert_eq!(
+            payload.get("status").and_then(|v| v.as_str()),
+            Some("draft")
+        );
         assert_eq!(
             payload.get("batches").cloned(),
             Some(serde_json::json!([["c.s.t"]])),
@@ -9362,7 +9657,11 @@ mod tests {
             ]
         });
         DataEngineerSuite::normalize_plan_json_payload("cleanse_plan", &mut payload);
-        let wgs = payload.get("work_groups").and_then(|v| v.as_array()).cloned().unwrap();
+        let wgs = payload
+            .get("work_groups")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap();
         assert_eq!(wgs.len(), 1);
         assert_eq!(wgs[0].get("group_id").and_then(|v| v.as_str()), Some("wg1"));
     }
@@ -9388,8 +9687,14 @@ mod tests {
             .and_then(|v| v.as_object())
             .cloned()
             .expect("work group");
-        assert!(wg.get("task_names").is_none(), "legacy task_names should be removed");
-        assert!(wg.get("status").is_none(), "unknown status key should be removed");
+        assert!(
+            wg.get("task_names").is_none(),
+            "legacy task_names should be removed"
+        );
+        assert!(
+            wg.get("status").is_none(),
+            "unknown status key should be removed"
+        );
         let items = wg
             .get("items")
             .and_then(|v| v.as_array())
@@ -9475,7 +9780,11 @@ mod tests {
                 .collect(),
         };
         let payload = DataEngineerSuite::compile_model_candidates_payload(&cands);
-        let tasks = payload.get("tasks").and_then(|v| v.as_array()).cloned().unwrap();
+        let tasks = payload
+            .get("tasks")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap();
         let batches = payload
             .get("batches")
             .and_then(|v| v.as_array())
@@ -9893,14 +10202,17 @@ mod tests {
         let loaded = crate::data_engineer::plan::load_cleanse_plan(&actx)
             .await
             .expect("plan");
-        assert_eq!(loaded.status, crate::data_engineer::plan::PlanStatus::Approved);
+        assert_eq!(
+            loaded.status,
+            crate::data_engineer::plan::PlanStatus::Approved
+        );
         assert_eq!(loaded.progress.last_applied_step_idx, 123);
 
         let log2 = thread_store.get(thread_id).await.expect("thread log");
         let last_phase = log2.steps.iter().rev().find_map(|s| match s {
-            react_core::session::ThreadStep::Phase { phase, reason_code, .. } => {
-                Some((phase.clone(), reason_code.clone()))
-            }
+            react_core::session::ThreadStep::Phase {
+                phase, reason_code, ..
+            } => Some((phase.clone(), reason_code.clone())),
             _ => None,
         });
         let (p, rc) = last_phase.expect("phase");
@@ -9917,7 +10229,11 @@ mod tests {
         let sctx = SuiteCtx::default();
 
         // For model plan approval grounding, we need at least one staging model present under models/staging/.
-        let base = sctx.keyspace.dbt_prefix(&sctx.scope).trim_end_matches('/').to_string();
+        let base = sctx
+            .keyspace
+            .dbt_prefix(&sctx.scope)
+            .trim_end_matches('/')
+            .to_string();
         let stg_rel = "models/staging/stg_test_raw_raw_orders.sql";
         let stg_key = format!("{}/{}", base, stg_rel);
         sctx.storage
@@ -10009,14 +10325,17 @@ mod tests {
         let loaded = crate::data_engineer::plan::load_model_plan(&actx)
             .await
             .expect("plan");
-        assert_eq!(loaded.status, crate::data_engineer::plan::PlanStatus::Approved);
+        assert_eq!(
+            loaded.status,
+            crate::data_engineer::plan::PlanStatus::Approved
+        );
         assert_eq!(loaded.progress.last_applied_step_idx, 77);
 
         let log2 = thread_store.get(thread_id).await.expect("thread log");
         let last_phase = log2.steps.iter().rev().find_map(|s| match s {
-            react_core::session::ThreadStep::Phase { phase, reason_code, .. } => {
-                Some((phase.clone(), reason_code.clone()))
-            }
+            react_core::session::ThreadStep::Phase {
+                phase, reason_code, ..
+            } => Some((phase.clone(), reason_code.clone())),
             _ => None,
         });
         let (p, rc) = last_phase.expect("phase");
@@ -10275,12 +10594,20 @@ mod tests {
         );
         // YAML/schema hints should be schema-class.
         assert_eq!(
-            classify_validate_failure(false, Some("Error in models/schema.yml: duplicate definitions"), None),
+            classify_validate_failure(
+                false,
+                Some("Error in models/schema.yml: duplicate definitions"),
+                None
+            ),
             ValidateFailureClass::SchemaOrPrecheck
         );
         // Compilation errors should be SQL/runtime-class.
         assert_eq!(
-            classify_validate_failure(false, Some("Compilation Error: syntax error near FROM"), None),
+            classify_validate_failure(
+                false,
+                Some("Compilation Error: syntax error near FROM"),
+                None
+            ),
             ValidateFailureClass::SqlOrRuntime
         );
     }
@@ -10419,5 +10746,4 @@ mod tests {
             "expected NoSuchKey signature"
         );
     }
-
 }

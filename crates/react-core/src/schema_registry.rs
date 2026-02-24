@@ -434,9 +434,7 @@ pub fn json_schema(id: SchemaId) -> Value {
         );
         m
     });
-    map.get(&id)
-        .cloned()
-        .unwrap_or_else(|| schema_for_id(id))
+    map.get(&id).cloned().unwrap_or_else(|| schema_for_id(id))
 }
 
 pub fn validate(id: SchemaId, instance: &Value) -> Result<(), String> {
@@ -488,8 +486,8 @@ mod tests {
                 s.get("type").and_then(|v| v.as_str()),
                 Some("object"),
                 "schema {} must be a top-level object schema for OpenAI; schema={}",
-                id.name()
-                , s
+                id.name(),
+                s
             );
         }
     }
@@ -514,4 +512,3 @@ mod tests {
         );
     }
 }
-

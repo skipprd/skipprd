@@ -30,17 +30,32 @@ mod tests {
     fn suite_prompts_do_not_include_legacy_or_format_pollution_strings() {
         let prompts: Vec<(&str, String)> = vec![
             ("ask.system_prompt", super::ask::system_prompt()),
-            ("ask.tool_card", super::ask::tool_card()),
-            ("cleanse.system_prompt", super::cleanse::cleanse_system_prompt()),
-            ("cleanse.tool_card", super::cleanse::cleanse_tool_card()),
+            (
+                "cleanse.system_prompt",
+                super::cleanse::cleanse_system_prompt(),
+            ),
             ("model.system_prompt", super::model::model_system_prompt()),
-            ("model.tool_card", super::model::model_tool_card()),
-            ("plan.cleanse_plan_system_prompt", super::plan::cleanse_plan_system_prompt()),
-            ("plan.model_plan_system_prompt", super::plan::model_plan_system_prompt()),
+            (
+                "plan.cleanse_plan_system_prompt",
+                super::plan::cleanse_plan_system_prompt(),
+            ),
+            (
+                "plan.model_plan_system_prompt",
+                super::plan::model_plan_system_prompt(),
+            ),
             ("review.system_prompt", super::review::system_prompt()),
-            ("patch_contract.llm_patch_response_contract", super::patch_contract::llm_patch_response_contract().to_string()),
-            ("patch_contract.file_patch_contract", super::patch_contract::file_patch_contract().to_string()),
-            ("kb.system_prompt", crate::kb::prompts::system_prompt().to_string()),
+            (
+                "patch_contract.llm_patch_response_contract",
+                super::patch_contract::llm_patch_response_contract().to_string(),
+            ),
+            (
+                "patch_contract.file_patch_contract",
+                super::patch_contract::file_patch_contract().to_string(),
+            ),
+            (
+                "kb.system_prompt",
+                crate::kb::prompts::system_prompt().to_string(),
+            ),
             ("kb.tool_card", crate::kb::prompts::tool_card().to_string()),
         ];
         for (label, s) in prompts.iter() {

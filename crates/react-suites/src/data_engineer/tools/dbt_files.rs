@@ -9,7 +9,7 @@ use react_core::agent::AgentCtx;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
-use crate::data_engineer::patch_contract::{SingleFilePatchArgs, normalize_hunks_only_patch_text};
+use crate::data_engineer::patch_contract::{normalize_hunks_only_patch_text, SingleFilePatchArgs};
 use crate::data_engineer::project_fs;
 
 pub struct DbtFilesTool {
@@ -23,7 +23,11 @@ where
     let v: Option<String> = Option::deserialize(deserializer)?;
     Ok(v.and_then(|s| {
         let t = s.trim().to_string();
-        if t.is_empty() { None } else { Some(t) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
     }))
 }
 
@@ -202,7 +206,9 @@ pub(crate) fn extract_final_select_output_columns(sql: &str) -> Result<BTreeSet<
 
         let mut idx = 0usize;
         while idx < lower.len() {
-            let Some(pos) = lower[idx..].find(&want) else { break };
+            let Some(pos) = lower[idx..].find(&want) else {
+                break;
+            };
             let start = idx + pos;
             let prev = lower[..start].chars().rev().next();
             if !is_boundary(prev) {
@@ -303,7 +309,9 @@ pub(crate) fn extract_final_select_output_columns(sql: &str) -> Result<BTreeSet<
             if bytes[i] == b'\n' {
                 let mut j = i + 1;
                 // Skip indentation.
-                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\r') {
+                while j < bytes.len()
+                    && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\r')
+                {
                     j += 1;
                 }
                 if j + 4 <= bytes.len() && &lower[j..j + 4] == "from" {
@@ -319,10 +327,10 @@ pub(crate) fn extract_final_select_output_columns(sql: &str) -> Result<BTreeSet<
             }
             i += 1;
         }
-        let from_kw_start =
-            from_kw_start.ok_or_else(|| "unable to find FROM for final SELECT in staging SQL".to_string())?;
-        let from_list_end =
-            from_list_end.ok_or_else(|| "unable to find FROM for final SELECT in staging SQL".to_string())?;
+        let from_kw_start = from_kw_start
+            .ok_or_else(|| "unable to find FROM for final SELECT in staging SQL".to_string())?;
+        let from_list_end = from_list_end
+            .ok_or_else(|| "unable to find FROM for final SELECT in staging SQL".to_string())?;
 
         fn strip_sql_line_comments_outside_quotes_full_text(s: &str) -> String {
             // Remove `-- ...` line comments (outside quotes/backticks) from the full select-list
@@ -613,13 +621,8 @@ pub(crate) async fn validate_staging_schema_ymls(
         if !(rel.starts_with("models/staging/") && rel.ends_with(".yml")) {
             continue;
         }
-        let yml_root: serde_yaml::Value = serde_yaml::from_str(&o.content).map_err(|e| {
-            format!(
-                "invalid YAML in {}: {}",
-                rel,
-                e.to_string().trim()
-            )
-        })?;
+        let yml_root: serde_yaml::Value = serde_yaml::from_str(&o.content)
+            .map_err(|e| format!("invalid YAML in {}: {}", rel, e.to_string().trim()))?;
 
         // Validate each staging model declared by name in this YAML file.
         // We intentionally do NOT require a sibling SQL for the YAML file's own stem,
@@ -737,7 +740,9 @@ pub(crate) async fn validate_staging_schema_ymls(
                         "\nDuplicate columns under models[].columns[]:\n- {}\n",
                         duplicates.into_iter().collect::<Vec<_>>().join("\n- ")
                     ));
-                    msg.push_str("\nFix: de-duplicate YAML columns so each output column appears once.\n");
+                    msg.push_str(
+                        "\nFix: de-duplicate YAML columns so each output column appears once.\n",
+                    );
                     return Err(msg);
                 }
 
@@ -805,7 +810,8 @@ Staging SQL (defines allowed output columns): {}\n",
                 return Err(msg);
             }
 
-            if contract_enforced_any && (!missing_cols.is_empty() || !missing_data_type.is_empty()) {
+            if contract_enforced_any && (!missing_cols.is_empty() || !missing_data_type.is_empty())
+            {
                 let mut msg = format!(
                     "schema contract is incomplete for contracted staging model '{}'.\n\
 File: {}\n\
@@ -993,9 +999,9 @@ impl Tool for DbtFilesTool {
                     }
                 }
 
-                let normalized = normalize_hunks_only_patch_text(parsed.patch_text.as_str(), &want_rel).map_err(|e| {
-                    format!("file op=patch contract violation: {}", e)
-                })?;
+                let normalized =
+                    normalize_hunks_only_patch_text(parsed.patch_text.as_str(), &want_rel)
+                        .map_err(|e| format!("file op=patch contract violation: {}", e))?;
                 let patch_in = normalized.patch_text;
 
                 validate_sql_model_folder_policy(&want_rel)?;
@@ -1011,7 +1017,9 @@ impl Tool for DbtFilesTool {
                 )
                 .await?;
 
-                if outcome.base_sha256 == outcome.new_sha256 && (outcome.lines_added + outcome.lines_removed) == 0 {
+                if outcome.base_sha256 == outcome.new_sha256
+                    && (outcome.lines_added + outcome.lines_removed) == 0
+                {
                     return Err("patch produced no file changes".to_string());
                 }
 
@@ -1063,10 +1071,7 @@ impl Tool for DbtFilesTool {
                     }]
                 }))
             }
-            _ => Err(
-                "unsupported op; use 'list', 'get', 'patch', 'rm', or 'mv'"
-                    .to_string(),
-            ),
+            _ => Err("unsupported op; use 'list', 'get', 'patch', 'rm', or 'mv'".to_string()),
         }
     }
 }
@@ -1169,16 +1174,16 @@ mod tests {
             .expect("preload");
 
         let obs = tool
-            .call(
-                serde_json::json!({"op":"rm","path":"models/x.sql"}),
-                &ctx,
-            )
+            .call(serde_json::json!({"op":"rm","path":"models/x.sql"}), &ctx)
             .await
             .expect("rm ok");
 
         assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
         assert_eq!(obs.get("mutated").and_then(|v| v.as_bool()), Some(true));
-        assert!(storage.get_bytes(&key).await.is_err(), "file should be removed");
+        assert!(
+            storage.get_bytes(&key).await.is_err(),
+            "file should be removed"
+        );
     }
 
     #[tokio::test]
@@ -1222,7 +1227,10 @@ mod tests {
         assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
         assert_eq!(obs.get("mutated").and_then(|v| v.as_bool()), Some(true));
 
-        assert!(storage.get_bytes(&from_key).await.is_err(), "from should be removed");
+        assert!(
+            storage.get_bytes(&from_key).await.is_err(),
+            "from should be removed"
+        );
         let bytes = storage.get_bytes(&to_key).await.expect("to exists");
         assert_eq!(String::from_utf8_lossy(&bytes), "select 1\n");
 
@@ -1625,8 +1633,8 @@ with cleaned as (
 select c.*
 from cleaned as c
 "#;
-        let cols =
-            extract_final_select_output_columns(sql).expect("should infer from cleaned CTE via alias.*");
+        let cols = extract_final_select_output_columns(sql)
+            .expect("should infer from cleaned CTE via alias.*");
         let got = cols.into_iter().collect::<Vec<_>>();
         assert_eq!(got, vec!["x_raw", "y_raw", "z"]);
     }

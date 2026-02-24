@@ -184,11 +184,19 @@ mod tests {
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         assert_eq!(rf.get("type").and_then(|x| x.as_str()), Some("json_schema"));
-        let js = rf.get("json_schema").cloned().unwrap_or(serde_json::Value::Null);
-        assert_eq!(js.get("name").and_then(|x| x.as_str()), Some("agent.step.v1"));
+        let js = rf
+            .get("json_schema")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert_eq!(
+            js.get("name").and_then(|x| x.as_str()),
+            Some("agent.step.v1")
+        );
         assert_eq!(js.get("strict").and_then(|x| x.as_bool()), Some(true));
         assert_eq!(
-            js.get("schema").and_then(|x| x.get("type")).and_then(|x| x.as_str()),
+            js.get("schema")
+                .and_then(|x| x.get("type"))
+                .and_then(|x| x.as_str()),
             Some("object")
         );
     }

@@ -164,7 +164,8 @@ fn render_plan_driven_instructions(
             .as_ref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
-        let include = it.status != crate::data_engineer::plan::ChecklistItemStatus::Done || has_details;
+        let include =
+            it.status != crate::data_engineer::plan::ChecklistItemStatus::Done || has_details;
         if !include {
             continue;
         }
@@ -185,7 +186,12 @@ fn render_plan_driven_instructions(
         out.push_str(", origin=");
         out.push_str(origin);
         out.push(')');
-        if let Some(d) = it.details.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some(d) = it
+            .details
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             out.push_str(": ");
             out.push_str(d);
         }
@@ -257,12 +263,10 @@ impl Tool for GoldModelTool {
         let plan_opt = plan::load_model_plan(ctx).await;
         let global_semantic_context = ctx
             .storage
-            .get_json(
-                &ctx.keyspace.semantic_key(
-                    &ctx.scope,
-                    react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
-                ),
-            )
+            .get_json(&ctx.keyspace.semantic_key(
+                &ctx.scope,
+                react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
+            ))
             .await
             .ok()
             .unwrap_or(serde_json::Value::Null);
@@ -446,7 +450,12 @@ impl Tool for GoldModelTool {
                 continue;
             }
 
-            let (plan_invariants, plan_checklist, plan_expected_model_path, plan_implementation_spec) = plan_opt
+            let (
+                plan_invariants,
+                plan_checklist,
+                plan_expected_model_path,
+                plan_implementation_spec,
+            ) = plan_opt
                 .as_ref()
                 .and_then(|p| p.tasks.iter().find(|t| t.name.trim() == name))
                 .map(|t| {
@@ -526,12 +535,17 @@ impl Tool for GoldModelTool {
                 repl_validate.insert(ph.clone(), ctx.warehouse.quote_fqn(&id));
                 // Materialize: ref('stg_*') only for named inputs; path-like inputs are invalid for gold.
                 if inp.trim().contains('/') || inp.trim().ends_with(".sql") {
-                    errors.push(format!("{name}: gold inputs must be stg_* names, not paths ('{inp}')"));
+                    errors.push(format!(
+                        "{name}: gold inputs must be stg_* names, not paths ('{inp}')"
+                    ));
                     continue;
                 }
                 repl_materialize.insert(ph.clone(), format!("{{{{ ref('{}') }}}}", inp.trim()));
             }
-            if errors.iter().any(|e| e.starts_with(&format!("{name}: gold inputs must")) || e.starts_with(&format!("{name}: cannot validate"))) {
+            if errors.iter().any(|e| {
+                e.starts_with(&format!("{name}: gold inputs must"))
+                    || e.starts_with(&format!("{name}: cannot validate"))
+            }) {
                 continue;
             }
 
@@ -559,7 +573,12 @@ impl Tool for GoldModelTool {
                 let sys_msg = if attempt == 1 {
                     sys.clone()
                 } else {
-                    build_gold_sys_prompt(provider_name, &dialect, max_items, &provider_prompt_rules)
+                    build_gold_sys_prompt(
+                        provider_name,
+                        &dialect,
+                        max_items,
+                        &provider_prompt_rules,
+                    )
                 };
 
                 let d = match sql_first::llm_draft_sql_json(

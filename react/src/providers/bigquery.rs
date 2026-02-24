@@ -6,10 +6,10 @@
 //! Auth: Set GOOGLE_APPLICATION_CREDENTIALS to a service account JSON path.
 
 use async_trait::async_trait;
-use gcp_bigquery_client::Client;
 use gcp_bigquery_client::model::query_request::QueryRequest;
 use gcp_bigquery_client::model::table_cell::TableCell;
 use gcp_bigquery_client::table::ListOptions;
+use gcp_bigquery_client::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -112,11 +112,10 @@ impl BigQueryProvider {
                     .to_string()
             })?;
 
-        let cred_path = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
-            .map_err(|_| {
-                "BigQuery requires GOOGLE_APPLICATION_CREDENTIALS (path to service account JSON)"
-                    .to_string()
-            })?;
+        let cred_path = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").map_err(|_| {
+            "BigQuery requires GOOGLE_APPLICATION_CREDENTIALS (path to service account JSON)"
+                .to_string()
+        })?;
         let client = Client::from_service_account_key_file(&cred_path)
             .await
             .map_err(|e| format!("BigQuery client init failed: {}", e))?;
@@ -343,7 +342,10 @@ impl WarehouseNaming for BigQueryProvider {
                 database: self.inner.dataset.clone(),
                 table: parts[0].to_string(),
             }),
-            _ => Err("dataset id must be <project>.<dataset>.<table> (or <dataset>.<table> or <table>)".to_string()),
+            _ => Err(
+                "dataset id must be <project>.<dataset>.<table> (or <dataset>.<table> or <table>)"
+                    .to_string(),
+            ),
         }
     }
 
@@ -372,7 +374,9 @@ impl WarehouseNaming for BigQueryProvider {
     fn unsupported_sql_reason(&self, sql: &str) -> Option<String> {
         let s = sql.to_ascii_lowercase();
         if s.contains("try_cast(") {
-            return Some("BigQuery does not support try_cast(); use SAFE_CAST(...) instead.".to_string());
+            return Some(
+                "BigQuery does not support try_cast(); use SAFE_CAST(...) instead.".to_string(),
+            );
         }
         if has_obvious_same_select_alias_reuse(sql) {
             return Some("BigQuery cannot reference a SELECT-list alias inside another expression in the same SELECT list; move the dependent expression to an outer SELECT/CTE.".to_string());

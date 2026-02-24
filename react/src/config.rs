@@ -244,9 +244,9 @@ pub struct ServerResolved {
 
 #[derive(Clone, Debug)]
 pub struct StorageResolved {
-    pub mode: String,              // local|s3
-    pub bucket: Option<String>,     // required for s3
-    pub path: Option<String>,       // required for local (absolute)
+    pub mode: String,           // local|s3
+    pub bucket: Option<String>, // required for s3
+    pub path: Option<String>,   // required for local (absolute)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -372,7 +372,11 @@ impl ReactResolvedConfig {
         let mode = match mode.as_str() {
             "local" => "local".to_string(),
             "s3" => "s3".to_string(),
-            other => return Err(format!("unsupported storage.mode '{other}' (expected local|s3)")),
+            other => {
+                return Err(format!(
+                    "unsupported storage.mode '{other}' (expected local|s3)"
+                ))
+            }
         };
 
         fn abs_path(p: &str) -> Result<String, String> {
@@ -767,7 +771,11 @@ mod tests {
     #[test]
     fn resolve_defaults_to_local_storage_without_bucket() {
         let _g = ENV_LOCK.lock().unwrap();
-        clear_env(&["SKIPPR_S3_BUCKET", "REACT_STORAGE_MODE", "REACT_STORAGE_PATH"]);
+        clear_env(&[
+            "SKIPPR_S3_BUCKET",
+            "REACT_STORAGE_MODE",
+            "REACT_STORAGE_PATH",
+        ]);
         let file = ReactConfigFile {
             providers: Some(ProvidersFile {
                 warehouse: Some(WarehouseFile::Postgres {

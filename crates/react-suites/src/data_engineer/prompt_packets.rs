@@ -56,10 +56,7 @@ pub fn render_envelope(envelope: &PromptEnvelope) -> String {
     s.push_str(&format!("Goal: {}\n", envelope.goal.trim()));
     s.push_str(&format!("Phase: {}\n\n", envelope.phase.trim()));
     s.push_str("Context packet (typed envelope):\n");
-    s.push_str(
-        &serde_json::to_string_pretty(envelope).unwrap_or_else(|_| "{}".to_string()),
-    );
+    s.push_str(&serde_json::to_string_pretty(envelope).unwrap_or_else(|_| "{}".to_string()));
     s.push('\n');
     s
 }
-

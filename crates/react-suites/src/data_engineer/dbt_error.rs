@@ -493,11 +493,11 @@ pub fn summarize_dbt_failure_llm(
     };
     let resp = llm.chat(
         &[
-        react_core::llm::ChatMessage {
-            role: "system".to_string(),
-            content: sys.to_string(),
-        },
-        msg,
+            react_core::llm::ChatMessage {
+                role: "system".to_string(),
+                content: sys.to_string(),
+            },
+            msg,
         ],
         &react_core::llm::LlmCallOptions {
             prompt_id: "data_engineer.dbt_error.summarize",

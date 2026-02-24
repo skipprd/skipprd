@@ -352,11 +352,19 @@ mod tests {
             .and_then(|t| t.get("format"))
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        assert_eq!(fmt.get("type").and_then(|x| x.as_str()), Some("json_schema"));
-        assert_eq!(fmt.get("name").and_then(|x| x.as_str()), Some("agent.step.v1"));
+        assert_eq!(
+            fmt.get("type").and_then(|x| x.as_str()),
+            Some("json_schema")
+        );
+        assert_eq!(
+            fmt.get("name").and_then(|x| x.as_str()),
+            Some("agent.step.v1")
+        );
         assert_eq!(fmt.get("strict").and_then(|x| x.as_bool()), Some(true));
         assert_eq!(
-            fmt.get("schema").and_then(|x| x.get("type")).and_then(|x| x.as_str()),
+            fmt.get("schema")
+                .and_then(|x| x.get("type"))
+                .and_then(|x| x.as_str()),
             Some("object")
         );
     }

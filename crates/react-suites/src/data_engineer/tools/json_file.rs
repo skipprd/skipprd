@@ -13,7 +13,10 @@ impl Tool for JsonFileTool {
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
-        let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get_item");
+        let op = args
+            .get("op")
+            .and_then(|x| x.as_str())
+            .unwrap_or("get_item");
         match op {
             "get_item" => get_item(args, ctx).await,
             "query" => query(args, ctx).await,
@@ -114,7 +117,10 @@ async fn query(args: Value, ctx: &AgentCtx) -> Result<Value, String> {
         Value::Object(map) => {
             for (k, v) in map {
                 let node_name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
-                let node_rt = v.get("resource_type").and_then(|x| x.as_str()).unwrap_or("");
+                let node_rt = v
+                    .get("resource_type")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
                 if let Some(want) = unique_id {
                     if k != want {
                         continue;
@@ -162,7 +168,10 @@ async fn query(args: Value, ctx: &AgentCtx) -> Result<Value, String> {
             for v in arr {
                 let node_uid = v.get("unique_id").and_then(|x| x.as_str()).unwrap_or("");
                 let node_name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
-                let node_rt = v.get("resource_type").and_then(|x| x.as_str()).unwrap_or("");
+                let node_rt = v
+                    .get("resource_type")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
                 if let Some(want) = unique_id {
                     if node_uid != want {
                         continue;

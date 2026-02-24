@@ -82,7 +82,10 @@ pub async fn run_discovery_cached(
         .trim_end_matches("/threads")
         .trim_end_matches('/')
         .to_string();
-    let key = format!("{}/state/{}/discovery_{}_k{}.json", root, thread_id, qhash, k);
+    let key = format!(
+        "{}/state/{}/discovery_{}_k{}.json",
+        root, thread_id, qhash, k
+    );
 
     if let Ok(v) = sctx.storage.get_json(&key).await {
         if let Some(arr) = v.get("datasets").and_then(|x| x.as_array()) {

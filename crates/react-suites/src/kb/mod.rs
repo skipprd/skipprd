@@ -73,43 +73,36 @@ impl KbSuite {
             runtime: None,
         };
 
-        match Agent::run_until_block(
-            &registry,
-            &actx,
-            sys,
-            tools_card,
-            question,
+        match Agent::run_until_block(&registry, &actx, sys, tools_card, question, {
+            // OpenAI Responses output_tokens includes reasoning tokens; ensure we have enough
+            // room for the JSON payload by defaulting to LOW reasoning and a higher token cap.
+            let max_out: u32 = std::env::var("LLM_KB_MAX_TOKENS")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(4_000)
+                .max(800)
+                .min(32_000);
+            let effort = match std::env::var("LLM_KB_REASONING_EFFORT")
+                .ok()
+                .map(|s| s.trim().to_lowercase())
+                .as_deref()
             {
-                // OpenAI Responses output_tokens includes reasoning tokens; ensure we have enough
-                // room for the JSON payload by defaulting to LOW reasoning and a higher token cap.
-                let max_out: u32 = std::env::var("LLM_KB_MAX_TOKENS")
-                    .ok()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(4_000)
-                    .max(800)
-                    .min(32_000);
-                let effort = match std::env::var("LLM_KB_REASONING_EFFORT")
-                    .ok()
-                    .map(|s| s.trim().to_lowercase())
-                    .as_deref()
-                {
-                    Some("none") => react_core::llm::ReasoningEffort::None,
-                    Some("low") | None | Some("") => react_core::llm::ReasoningEffort::Low,
-                    Some("medium") => react_core::llm::ReasoningEffort::Medium,
-                    Some("high") => react_core::llm::ReasoningEffort::High,
-                    _ => react_core::llm::ReasoningEffort::Low,
-                };
-                react_core::llm::LlmCallOptions {
-                    prompt_id: "kb.run",
-                    thread_id: Some(thread_id.to_string()),
-                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                    max_output_tokens: Some(max_out),
-                    reasoning_effort: Some(effort),
-                    temperature: None,
-                    top_p: None,
-                }
-            },
-        )
+                Some("none") => react_core::llm::ReasoningEffort::None,
+                Some("low") | None | Some("") => react_core::llm::ReasoningEffort::Low,
+                Some("medium") => react_core::llm::ReasoningEffort::Medium,
+                Some("high") => react_core::llm::ReasoningEffort::High,
+                _ => react_core::llm::ReasoningEffort::Low,
+            };
+            react_core::llm::LlmCallOptions {
+                prompt_id: "kb.run",
+                thread_id: Some(thread_id.to_string()),
+                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                max_output_tokens: Some(max_out),
+                reasoning_effort: Some(effort),
+                temperature: None,
+                top_p: None,
+            }
+        })
         .await
         {
             Ok(RunOutcome::Final {

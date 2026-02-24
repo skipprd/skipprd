@@ -25,4 +25,3 @@ impl EventHub {
         let _ = self.tx.send(msg);
     }
 }
-

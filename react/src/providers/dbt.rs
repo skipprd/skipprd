@@ -6,8 +6,8 @@ use std::{io::BufRead, process::Stdio};
 use crate::adapters::storage::StorageAdapter;
 use crate::providers::{Keyspace, RequestScope};
 
-use react_core::providers::{DbtProvider, DbtValidateArgs, DbtValidateResult};
 use crate::ws::terminal::{self, TerminalEvent};
+use react_core::providers::{DbtProvider, DbtValidateArgs, DbtValidateResult};
 
 #[derive(Clone)]
 pub struct DbtProjectProvider {
@@ -330,10 +330,13 @@ impl DbtProgressState {
                 self.total = Some(self.total.unwrap_or(0).max(total));
             }
             let st = parse_status(status);
-            let item = self.items_by_idx.entry(idx).or_insert_with(|| DbtItemState {
-                status: st,
-                ..Default::default()
-            });
+            let item = self
+                .items_by_idx
+                .entry(idx)
+                .or_insert_with(|| DbtItemState {
+                    status: st,
+                    ..Default::default()
+                });
             item.status = st;
 
             // Try to extract a compact name for START/running display.
@@ -473,10 +476,7 @@ impl DbtProgressState {
                         .collect();
                     base.push_str(" · running: ");
                     base.push_str(&shown.join(", "));
-                    let remaining = self
-                        .running_names_set
-                        .len()
-                        .saturating_sub(shown.len());
+                    let remaining = self.running_names_set.len().saturating_sub(shown.len());
                     if remaining > 0 {
                         base.push_str(&format!(" +{remaining}"));
                     }

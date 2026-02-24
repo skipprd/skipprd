@@ -184,7 +184,9 @@ fn test_mapping_has_single_key(v: &YamlValue) -> bool {
 }
 
 fn mapping_single_key_name(v: &YamlValue) -> Option<String> {
-    let YamlValue::Mapping(m) = v else { return None };
+    let YamlValue::Mapping(m) = v else {
+        return None;
+    };
     if m.len() != 1 {
         return None;
     }
@@ -196,7 +198,9 @@ fn mapping_single_key_name(v: &YamlValue) -> Option<String> {
 }
 
 fn mapping_single_key_value<'a>(v: &'a YamlValue) -> Option<&'a YamlValue> {
-    let YamlValue::Mapping(m) = v else { return None };
+    let YamlValue::Mapping(m) = v else {
+        return None;
+    };
     if m.len() != 1 {
         return None;
     }
@@ -223,11 +227,21 @@ fn sanitize_tests_seq(
             return false;
         }
         // If config has `where:`, ensure identifiers are within allowed_cols.
-        let Some(_test_name) = mapping_single_key_name(it) else { return true };
-        let Some(cfg) = mapping_single_key_value(it) else { return true };
-        let YamlValue::Mapping(cfgm) = cfg else { return true };
-        let Some(where_v) = cfgm.get("where") else { return true };
-        let Some(where_s) = where_v.as_str() else { return true };
+        let Some(_test_name) = mapping_single_key_name(it) else {
+            return true;
+        };
+        let Some(cfg) = mapping_single_key_value(it) else {
+            return true;
+        };
+        let YamlValue::Mapping(cfgm) = cfg else {
+            return true;
+        };
+        let Some(where_v) = cfgm.get("where") else {
+            return true;
+        };
+        let Some(where_s) = where_v.as_str() else {
+            return true;
+        };
         let ids = conservative_identifiers_in_where(where_s);
         let unknown: Vec<String> = ids
             .into_iter()
@@ -261,7 +275,9 @@ pub fn sanitize_models_schema_yml(
         return Err("schema.yml root must be a mapping".to_string());
     };
     let models_key = YamlValue::String("models".to_string());
-    let models_v = map.entry(models_key).or_insert_with(|| YamlValue::Sequence(vec![]));
+    let models_v = map
+        .entry(models_key)
+        .or_insert_with(|| YamlValue::Sequence(vec![]));
     let YamlValue::Sequence(models_seq) = models_v else {
         return Err("schema.yml models must be a sequence".to_string());
     };
@@ -298,7 +314,9 @@ pub fn sanitize_models_schema_yml(
         let allowed = allowed_by_model.get(&name).cloned().unwrap_or_default();
         let forbid_tests = allowed.allowed_columns.is_empty();
         if let Some(err) = allowed.error.as_ref() {
-            warnings.push(format!("{name}: allowed_columns unavailable ({err}); tests removed"));
+            warnings.push(format!(
+                "{name}: allowed_columns unavailable ({err}); tests removed"
+            ));
         }
 
         // Model-level tests.
@@ -313,12 +331,15 @@ pub fn sanitize_models_schema_yml(
         // Column-level tests: keep docs, but strip tests when ungrounded.
         if let Some(YamlValue::Sequence(ref mut cols)) = mm.get_mut("columns") {
             for c in cols.iter_mut() {
-                let YamlValue::Mapping(ref mut cm) = c else { continue };
+                let YamlValue::Mapping(ref mut cm) = c else {
+                    continue;
+                };
                 let col_name = yaml_get_str(&YamlValue::Mapping(cm.clone()), "name")
                     .unwrap_or("")
                     .trim()
                     .to_string();
-                let col_is_allowed = !col_name.is_empty() && allowed.allowed_columns.contains(&col_name);
+                let col_is_allowed =
+                    !col_name.is_empty() && allowed.allowed_columns.contains(&col_name);
                 if let Some(YamlValue::Sequence(ref mut tests)) = cm.get_mut("tests") {
                     if forbid_tests || !col_is_allowed {
                         if !tests.is_empty() {
@@ -328,11 +349,7 @@ pub fn sanitize_models_schema_yml(
                         }
                         tests.clear();
                     } else {
-                        warnings.extend(sanitize_tests_seq(
-                            tests,
-                            &allowed.allowed_columns,
-                            false,
-                        ));
+                        warnings.extend(sanitize_tests_seq(tests, &allowed.allowed_columns, false));
                     }
                 }
             }
@@ -342,7 +359,8 @@ pub fn sanitize_models_schema_yml(
     }
     *models_seq = out_models;
 
-    let out = serde_yaml::to_string(&root).map_err(|e| format!("failed to render schema.yml: {e}"))?;
+    let out =
+        serde_yaml::to_string(&root).map_err(|e| format!("failed to render schema.yml: {e}"))?;
     Ok((out, warnings))
 }
 
@@ -475,16 +493,22 @@ fn normalize_model_yaml_doc_for_dedupe(
 
     // Also dedupe test blocks inside each model/column.
     for m in out.iter_mut() {
-        let Some(mm) = m.as_mapping_mut() else { continue };
+        let Some(mm) = m.as_mapping_mut() else {
+            continue;
+        };
         if let Some(YamlValue::Sequence(tests)) = mm.get_mut("tests") {
             let removed = dedupe_yaml_seq(tests);
             if removed > 0 {
-                warnings.push(format!("{rel_path}: removed {removed} duplicate model-level test(s)"));
+                warnings.push(format!(
+                    "{rel_path}: removed {removed} duplicate model-level test(s)"
+                ));
             }
         }
         if let Some(YamlValue::Sequence(cols)) = mm.get_mut("columns") {
             for c in cols.iter_mut() {
-                let Some(cm) = c.as_mapping_mut() else { continue };
+                let Some(cm) = c.as_mapping_mut() else {
+                    continue;
+                };
                 if let Some(YamlValue::Sequence(tests)) = cm.get_mut("tests") {
                     let removed = dedupe_yaml_seq(tests);
                     if removed > 0 {
@@ -511,7 +535,9 @@ fn normalize_model_yaml_doc_for_dedupe(
 
 /// Normalize DBT schema YAML artifacts before validate/build to avoid deterministic compile loops
 /// from duplicate model/test definitions.
-pub async fn normalize_schema_artifacts_for_validate(ctx: &AgentCtx) -> Result<Vec<String>, String> {
+pub async fn normalize_schema_artifacts_for_validate(
+    ctx: &AgentCtx,
+) -> Result<Vec<String>, String> {
     let mut notes: Vec<String> = Vec::new();
     let schema_rel = project_files::MODELS_SCHEMA_YML;
     let schema_key = project_fs::join_storage_key(ctx, schema_rel);
@@ -523,7 +549,9 @@ pub async fn normalize_schema_artifacts_for_validate(ctx: &AgentCtx) -> Result<V
                 .put_bytes(&schema_key, normalized.as_bytes(), "text/yaml")
                 .await
                 .map_err(|e| format!("failed to write {schema_rel}: {e}"))?;
-            notes.push(format!("normalized duplicate model/test entries in {schema_rel}"));
+            notes.push(format!(
+                "normalized duplicate model/test entries in {schema_rel}"
+            ));
         }
         notes.append(&mut warn);
     }
@@ -591,8 +619,9 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Stri
         }
         Err(_) => None, // missing schema.yml is fine for early projects
     };
-    let staging_yml_model_names =
-        collect_staging_model_names_from_ymls(ctx, 200).await.unwrap_or_default();
+    let staging_yml_model_names = collect_staging_model_names_from_ymls(ctx, 200)
+        .await
+        .unwrap_or_default();
     let mut schema_model_names: HashSet<String> = HashSet::new();
     if let Some(models) = schema_map
         .as_ref()
@@ -691,9 +720,7 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Stri
             let sql_rel = format!("models/staging/{name}.sql");
             let sql_key = project_fs::join_storage_key(ctx, &sql_rel);
             let sql_bytes = ctx.storage.get_bytes(&sql_key).await.map_err(|_| {
-                format!(
-                    "cannot validate {rel}: missing staging SQL {sql_rel} for model '{name}'"
-                )
+                format!("cannot validate {rel}: missing staging SQL {sql_rel} for model '{name}'")
             })?;
             let sql_text = String::from_utf8_lossy(&sql_bytes).to_string();
             let allowed =
@@ -803,7 +830,8 @@ mod tests {
             .await
             .unwrap();
 
-        let stg_key = project_fs::join_storage_key(&ctx, "models/staging/stg_test_raw_raw_customers.yml");
+        let stg_key =
+            project_fs::join_storage_key(&ctx, "models/staging/stg_test_raw_raw_customers.yml");
         ctx.storage
             .put_bytes(
                 &stg_key,
@@ -836,7 +864,8 @@ mod tests {
             .expect("normalize ok");
         assert!(!notes.is_empty());
 
-        let got = String::from_utf8_lossy(&ctx.storage.get_bytes(&schema_key).await.unwrap()).to_string();
+        let got =
+            String::from_utf8_lossy(&ctx.storage.get_bytes(&schema_key).await.unwrap()).to_string();
         // Only one model stanza remains.
         assert_eq!(got.matches("name: dim_orders").count(), 1);
         assert!(got.contains("customer_id"));
@@ -896,4 +925,3 @@ mod tests {
         assert!(err.contains("models/core/fct_orders.sql"));
     }
 }
-

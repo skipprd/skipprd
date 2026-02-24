@@ -154,7 +154,11 @@ impl LocalFileStorageAdapter {
             .map(|c| c.as_os_str().to_string_lossy().to_string())
             .collect::<Vec<_>>()
             .join("/");
-        if s.is_empty() { None } else { Some(s) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     }
 
     fn list_files_recursive(&self, dir: &Path, out: &mut Vec<String>) {
@@ -298,7 +302,10 @@ mod tests {
         assert!(et.is_some());
 
         let keys = st.list_prefix("a/b/").await.expect("list");
-        assert_eq!(keys, vec!["a/b/c.txt".to_string(), "a/b/d.json".to_string()]);
+        assert_eq!(
+            keys,
+            vec!["a/b/c.txt".to_string(), "a/b/d.json".to_string()]
+        );
 
         st.delete_object("a/b/c.txt").await.expect("delete");
         assert!(st.head_etag("a/b/c.txt").await.unwrap().is_none());

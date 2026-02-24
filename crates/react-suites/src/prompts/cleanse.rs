@@ -25,13 +25,3 @@ Cleanse-specific rules:
     );
     s
 }
-
-pub fn cleanse_tool_card() -> String {
-    crate::prompts::shared::build_common_tool_card(
-        "",
-        r#"
-- For staging_model: keep batches small (max 5 dataset_ids per call). If more are provided, the tool will only process the first 5 and return deferred_dataset_ids for follow-up calls.
-- Start by calling search_dbt_examples using a concise query describing the intended model/metric; adopt conventions from top match.
-- Use vect_query scope:"artifact" to list any artifacts."#,
-    )
-}

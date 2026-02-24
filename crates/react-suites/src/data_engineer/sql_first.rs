@@ -5,11 +5,15 @@ use react_core::agent::AgentCtx;
 use react_core::llm::{ChatMessage, LlmCallOptions, LlmExpectedFormat};
 
 fn env_u32(key: &str) -> Option<u32> {
-    std::env::var(key).ok().and_then(|s| s.trim().parse::<u32>().ok())
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
 fn env_usize(key: &str) -> Option<usize> {
-    std::env::var(key).ok().and_then(|s| s.trim().parse::<usize>().ok())
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
 }
 
 pub fn sql_first_max_output_tokens(default: u32) -> u32 {
@@ -48,7 +52,9 @@ pub fn reject_non_sql_surface(sql: &str) -> Result<(), String> {
     }
     let low = t.to_ascii_lowercase();
     if low.contains("{{") || low.contains("}}") {
-        return Err("sql_first: draft SQL must not contain Jinja delimiters '{{' / '}}'".to_string());
+        return Err(
+            "sql_first: draft SQL must not contain Jinja delimiters '{{' / '}}'".to_string(),
+        );
     }
     // Disallow dbt-only macros/functions in the SQL-first surface.
     for bad in ["ref(", "source(", "doc("] {
@@ -100,11 +106,7 @@ pub fn expand_select_star_from_placeholder(
         if !alias.is_empty() {
             let pat2 = format!("select {}.* from {}", alias, ph);
             if let Some(idx2) = low.rfind(&pat2) {
-                let repl = format!(
-                    "select {} from {}",
-                    select_exprs.join(", "),
-                    placeholder
-                );
+                let repl = format!("select {} from {}", select_exprs.join(", "), placeholder);
                 let out = format!("{}{}{}", &norm[..idx2], repl, &norm[idx2 + pat2.len()..]);
                 return Some(out);
             }
@@ -128,14 +130,17 @@ fn normalize_output_column_name(name: &str) -> String {
 
 fn duplicate_output_columns(header: &[String]) -> Vec<String> {
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut first_seen: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut first_seen: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for h in header.iter() {
         let norm = normalize_output_column_name(h);
         if norm.is_empty() {
             continue;
         }
         *counts.entry(norm.clone()).or_insert(0) += 1;
-        first_seen.entry(norm).or_insert_with(|| h.trim().to_string());
+        first_seen
+            .entry(norm)
+            .or_insert_with(|| h.trim().to_string());
     }
     counts
         .into_iter()
@@ -249,7 +254,9 @@ mod tests {
             "placed_at".to_string(),
         ];
         let dups = duplicate_output_columns(&header);
-        assert_eq!(dups, vec!["customer_id".to_string(), "order_id".to_string()]);
+        assert_eq!(
+            dups,
+            vec!["customer_id".to_string(), "order_id".to_string()]
+        );
     }
 }
-

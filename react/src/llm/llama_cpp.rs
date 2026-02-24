@@ -321,7 +321,8 @@ mod inner {
         // cap new tokens; use smaller cap for structured JSON outputs
         let is_strict_json = matches!(
             options.expected_format,
-            react_core::llm::LlmExpectedFormat::JsonObject | react_core::llm::LlmExpectedFormat::JsonSchema(_)
+            react_core::llm::LlmExpectedFormat::JsonObject
+                | react_core::llm::LlmExpectedFormat::JsonSchema(_)
         );
         let max_new_tokens: i32 = if is_strict_json {
             // Allow larger responses for structured JSON outputs. Scale with context.

@@ -9,9 +9,9 @@ use react_core::tools::Tool;
 
 use crate::data_engineer::naming;
 use crate::data_engineer::plan;
-use crate::data_engineer::schema_policy;
 use crate::data_engineer::project_files;
 use crate::data_engineer::project_fs;
+use crate::data_engineer::schema_policy;
 use crate::data_engineer::tools::dbt_files;
 
 fn escape_yaml_doc_preamble(s: String) -> String {
@@ -44,8 +44,10 @@ fn sanitize_staging_schema_yml_to_allowed_columns(
     model_name: &str,
     allowed_columns: &[String],
 ) -> Result<String, String> {
-    let allowed: std::collections::HashSet<String> =
-        allowed_columns.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let allowed: std::collections::HashSet<String> = allowed_columns
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
     let mut root: serde_yaml::Value =
         serde_yaml::from_str(yml_text).map_err(|e| format!("invalid YAML: {}", e))?;
 
@@ -64,7 +66,9 @@ fn sanitize_staging_schema_yml_to_allowed_columns(
     };
 
     for m in models.iter_mut() {
-        let Some(mm) = m.as_mapping_mut() else { continue };
+        let Some(mm) = m.as_mapping_mut() else {
+            continue;
+        };
         let name = mm
             .get(&serde_yaml::Value::String("name".to_string()))
             .and_then(|v| v.as_str())
@@ -80,7 +84,9 @@ fn sanitize_staging_schema_yml_to_allowed_columns(
             continue;
         };
         cols.retain(|c| {
-            let Some(cm) = c.as_mapping() else { return true };
+            let Some(cm) = c.as_mapping() else {
+                return true;
+            };
             let col = cm
                 .get(&serde_yaml::Value::String("name".to_string()))
                 .and_then(|v| v.as_str())
@@ -255,7 +261,9 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
         for ds in batch.iter() {
             let Some((_cat, schema, table)) = parse_dataset_id_3(ds) else {
                 failed.push(ds.clone());
-                errors.push(format!("{ds}: invalid dataset_id (expected <catalog>.<schema>.<table>)"));
+                errors.push(format!(
+                    "{ds}: invalid dataset_id (expected <catalog>.<schema>.<table>)"
+                ));
                 continue;
             };
 
@@ -347,7 +355,8 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             // column names (e.g. *_norm) that are not actually produced by the sibling SQL. Rather than
             // failing the whole batch repeatedly, sanitize the YAML to only allowed columns and retry validation.
             let mut outcome = outcome;
-            if outcome.rel_path.starts_with("models/staging/") && outcome.rel_path.ends_with(".yml") {
+            if outcome.rel_path.starts_with("models/staging/") && outcome.rel_path.ends_with(".yml")
+            {
                 match sanitize_staging_schema_yml_to_allowed_columns(
                     &outcome.content,
                     &model_name,
@@ -444,8 +453,14 @@ impl Tool for ApplyNextModelSchemaBatchTool {
         }
 
         // Plan auto-heal (semantic): validate + single repair attempt before executing.
-        let stg = crate::data_engineer::dataset_truth::discover_staging_models_from_storage(ctx).await;
-        let v = plan::ensure_model_plan_semantically_valid_or_repaired(ctx, &mut plan, &stg.allowed_models).await?;
+        let stg =
+            crate::data_engineer::dataset_truth::discover_staging_models_from_storage(ctx).await;
+        let v = plan::ensure_model_plan_semantically_valid_or_repaired(
+            ctx,
+            &mut plan,
+            &stg.allowed_models,
+        )
+        .await?;
         if !v.ok {
             return Ok(serde_json::json!({
                 "ok": false,
@@ -458,11 +473,8 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             }));
         }
 
-        let names = plan::model_pending_for_checklist(
-            &plan,
-            plan::CHECKLIST_SQL_MODEL,
-            &checklist_item_id,
-        );
+        let names =
+            plan::model_pending_for_checklist(&plan, plan::CHECKLIST_SQL_MODEL, &checklist_item_id);
         if names.is_empty() {
             return Ok(serde_json::json!({
                 "ok": true,
@@ -494,8 +506,10 @@ impl Tool for ApplyNextModelSchemaBatchTool {
         // Provide just the model names + expected SQL rel paths to keep the patch focused.
         let mut models: Vec<Value> = Vec::new();
         let mut touched: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut allowed_by_model: std::collections::HashMap<String, schema_policy::ModelAllowedColumns> =
-            std::collections::HashMap::new();
+        let mut allowed_by_model: std::collections::HashMap<
+            String,
+            schema_policy::ModelAllowedColumns,
+        > = std::collections::HashMap::new();
         for n in names.iter() {
             if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
                 touched.insert(t.name.clone());
@@ -545,42 +559,45 @@ impl Tool for ApplyNextModelSchemaBatchTool {
         })
         .to_string();
 
-        let (outcome, _notes) = match crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
-            ctx,
-            self.datasets.as_ref(),
-            schema_yml_sys_prompt_models_schema_yml(),
-            user_payload,
-            expected_rel,
-            6,
-            Some(LlmCallOptions {
-                prompt_id: "data_engineer.apply_next_schema_batch.models_schema_patch",
-                thread_id: ctx.thread_id.clone(),
-                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                temperature: Some(0.05),
-                top_p: Some(1.0),
-                max_output_tokens: Some(
-                    crate::data_engineer::patch_protocol::default_patch_loop_max_output_tokens(),
-                ),
-                reasoning_effort: None,
-            }),
-        )
-        .await {
-            Ok(v) => v,
-            Err(e) => {
-                for n in names.iter() {
-                    plan::model_schema_contract_mark_needs_update(&mut plan, n);
+        let (outcome, _notes) =
+            match crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
+                ctx,
+                self.datasets.as_ref(),
+                schema_yml_sys_prompt_models_schema_yml(),
+                user_payload,
+                expected_rel,
+                6,
+                Some(LlmCallOptions {
+                    prompt_id: "data_engineer.apply_next_schema_batch.models_schema_patch",
+                    thread_id: ctx.thread_id.clone(),
+                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                    temperature: Some(0.05),
+                    top_p: Some(1.0),
+                    max_output_tokens: Some(
+                        crate::data_engineer::patch_protocol::default_patch_loop_max_output_tokens(
+                        ),
+                    ),
+                    reasoning_effort: None,
+                }),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    for n in names.iter() {
+                        plan::model_schema_contract_mark_needs_update(&mut plan, n);
+                    }
+                    update_failure_counters(&mut plan.progress, false);
+                    let _ = plan::save_model_plan(ctx, &plan).await;
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "attempted_item_names": attempted_names.clone(),
+                        "succeeded_item_names": [],
+                        "failed_item_names": attempted_names,
+                        "errors": [format!("models/schema.yml patch failed: {e}")],
+                    }));
                 }
-                update_failure_counters(&mut plan.progress, false);
-                let _ = plan::save_model_plan(ctx, &plan).await;
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "attempted_item_names": attempted_names.clone(),
-                    "succeeded_item_names": [],
-                    "failed_item_names": attempted_names,
-                    "errors": [format!("models/schema.yml patch failed: {e}")],
-                }));
-            }
-        };
+            };
 
         // Deterministic post-check: enforce schema ownership + strip unsafe tests for touched models.
         let (sanitized_text, warnings) = match schema_policy::sanitize_models_schema_yml(
@@ -606,7 +623,8 @@ impl Tool for ApplyNextModelSchemaBatchTool {
         };
 
         let key = project_fs::join_storage_key(ctx, expected_rel);
-        if let Err(e) = ctx.storage
+        if let Err(e) = ctx
+            .storage
             .put_bytes(&key, sanitized_text.as_bytes(), "text/yaml")
             .await
         {
@@ -657,7 +675,7 @@ mod tests {
     use react_core::session::ExecutionContext;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
     use std::sync::Arc;
-    use std::sync::{Mutex};
+    use std::sync::Mutex;
 
     #[derive(Default)]
     struct ScriptedLlm {
@@ -670,7 +688,10 @@ mod tests {
             _messages: &[ChatMessage],
             _options: &react_core::llm::LlmCallOptions,
         ) -> Result<String, String> {
-            let mut g = self.replies.lock().map_err(|_| "mutex poisoned".to_string())?;
+            let mut g = self
+                .replies
+                .lock()
+                .map_err(|_| "mutex poisoned".to_string())?;
             if g.is_empty() {
                 return Err("no more replies".to_string());
             }
@@ -699,8 +720,8 @@ mod tests {
                 .find(|m| m.role == "user")
                 .map(|m| m.content.clone())
                 .unwrap_or_default();
-            let v: serde_json::Value =
-                serde_json::from_str(&user).map_err(|e| format!("expected JSON user payload: {e}"))?;
+            let v: serde_json::Value = serde_json::from_str(&user)
+                .map_err(|e| format!("expected JSON user payload: {e}"))?;
             let allowed = v
                 .get("input")
                 .and_then(|x| x.get("models"))
@@ -723,7 +744,10 @@ mod tests {
                     .map_err(|_| "mutex poisoned".to_string())?;
                 *g = true;
             } else {
-                return Err(format!("allowed_columns missing expected items: {:?}", allowed_strs));
+                return Err(format!(
+                    "allowed_columns missing expected items: {:?}",
+                    allowed_strs
+                ));
             }
             Ok(self.reply.clone())
         }
@@ -822,7 +846,9 @@ mod tests {
             project_snapshot: serde_json::json!({}),
             tasks: vec![plan::CleanseTask {
                 dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
-                expected_model_path: Some("models/staging/stg_test_raw_raw_customers.sql".to_string()),
+                expected_model_path: Some(
+                    "models/staging/stg_test_raw_raw_customers.sql".to_string(),
+                ),
                 invariants: vec![],
                 implementation_spec: plan::CleanseImplementationSpec {
                     spec_version: 1,
@@ -871,7 +897,10 @@ mod tests {
         let sql_rel = "models/staging/stg_test_raw_raw_customers.sql";
         let sql_key = project_fs::join_storage_key(&ctx, sql_rel);
         let sql = "with source as (\n  select * from {{ source('test_raw','raw_customers') }}\n)\nselect\n  customer_id_raw,\n  email_raw\nfrom source\n";
-        ctx.storage.put_bytes(&sql_key, sql.as_bytes(), "text/sql").await.unwrap();
+        ctx.storage
+            .put_bytes(&sql_key, sql.as_bytes(), "text/sql")
+            .await
+            .unwrap();
 
         let tool = ApplyNextCleanseSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
@@ -938,7 +967,9 @@ mod tests {
             project_snapshot: serde_json::json!({}),
             tasks: vec![plan::CleanseTask {
                 dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
-                expected_model_path: Some("models/staging/stg_test_raw_raw_customers.sql".to_string()),
+                expected_model_path: Some(
+                    "models/staging/stg_test_raw_raw_customers.sql".to_string(),
+                ),
                 invariants: vec![],
                 implementation_spec: plan::CleanseImplementationSpec {
                     spec_version: 1,
@@ -987,13 +1018,18 @@ mod tests {
         let sql_rel = "models/staging/stg_test_raw_raw_customers.sql";
         let sql_key = project_fs::join_storage_key(&ctx, sql_rel);
         let sql = "with source as (\n  select * from {{ source('test_raw','raw_customers') }}\n)\nselect\n  customer_id_raw,\n  email_raw\nfrom source\n";
-        ctx.storage.put_bytes(&sql_key, sql.as_bytes(), "text/sql").await.unwrap();
+        ctx.storage
+            .put_bytes(&sql_key, sql.as_bytes(), "text/sql")
+            .await
+            .unwrap();
 
         let tool = ApplyNextCleanseSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
         assert!(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
 
-        let got_plan = plan::load_cleanse_plan_by_key(&ctx, &plan_key).await.unwrap();
+        let got_plan = plan::load_cleanse_plan_by_key(&ctx, &plan_key)
+            .await
+            .unwrap();
         let t = got_plan
             .tasks
             .iter()
@@ -1234,7 +1270,11 @@ mod tests {
         assert!(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
 
         let got_plan = plan::load_model_plan_by_key(&ctx, &plan_key).await.unwrap();
-        let t = got_plan.tasks.iter().find(|t| t.name == "dim_customers").unwrap();
+        let t = got_plan
+            .tasks
+            .iter()
+            .find(|t| t.name == "dim_customers")
+            .unwrap();
         let st = t
             .checklist
             .iter()
@@ -1472,5 +1512,3 @@ mod tests {
         assert!(got.contains("dim_customers"));
     }
 }
-
-

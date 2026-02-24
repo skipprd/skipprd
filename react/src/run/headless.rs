@@ -42,7 +42,12 @@ fn summarize_failure_state(st: &react_core::session::ThreadState) -> Option<Stri
     if let Some(ev) = last_failed_event {
         phase = ev.phase.clone();
         tool = ev.clean_name.clone().or_else(|| ev.name.clone());
-        if let Some(err) = ev.error.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some(err) = ev
+            .error
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             detail = err.to_string();
         }
     }
@@ -109,12 +114,18 @@ pub async fn run_headless(ctx: SuiteCtx, opts: RunOpts) -> Result<(i32, String),
                         api::ServerMessage::Phase(r) => {
                             if plain_progress {
                                 let from = r.from_phase.unwrap_or_else(|| "-".to_string());
-                                println!(
-                                    "phase {} -> {} ({})",
-                                    from,
-                                    r.phase,
-                                    r.ts
-                                );
+                                if from == r.phase {
+                                    let reason = r
+                                        .reason_code
+                                        .map(|x| format!("{:?}", x))
+                                        .unwrap_or_else(|| "checkpoint".to_string());
+                                    println!(
+                                        "phase checkpoint {} [{}] ({})",
+                                        r.phase, reason, r.ts
+                                    );
+                                } else {
+                                    println!("phase {} -> {} ({})", from, r.phase, r.ts);
+                                }
                             }
                         }
                         api::ServerMessage::ToolStart(r) => {
@@ -233,4 +244,3 @@ pub async fn run_headless(ctx: SuiteCtx, opts: RunOpts) -> Result<(i32, String),
 pub fn _sink_terminal(_hub: &EventHub) -> broadcast::Receiver<api::ServerMessage> {
     _hub.subscribe()
 }
-

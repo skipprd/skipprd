@@ -229,15 +229,24 @@ impl LocalKeyspace {
 
 impl Keyspace for LocalKeyspace {
     fn threads_prefix(&self, scope: &RequestScope) -> String {
-        DefaultKeyspace { bucket: "".to_string() }.threads_prefix(scope)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .threads_prefix(scope)
     }
 
     fn thread_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String> {
-        DefaultKeyspace { bucket: "".to_string() }.thread_key(scope, thread_id)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .thread_key(scope, thread_id)
     }
 
     fn thread_state_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String> {
-        DefaultKeyspace { bucket: "".to_string() }.thread_state_key(scope, thread_id)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .thread_state_key(scope, thread_id)
     }
 
     fn thread_artifact_key(
@@ -246,31 +255,52 @@ impl Keyspace for LocalKeyspace {
         thread_id: &str,
         artifact_id: &str,
     ) -> Result<String, String> {
-        DefaultKeyspace { bucket: "".to_string() }.thread_artifact_key(scope, thread_id, artifact_id)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .thread_artifact_key(scope, thread_id, artifact_id)
     }
 
     fn logs_prefix(&self, scope: &RequestScope) -> String {
-        DefaultKeyspace { bucket: "".to_string() }.logs_prefix(scope)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .logs_prefix(scope)
     }
 
     fn thread_log_key(&self, scope: &RequestScope, thread_id: &str) -> Result<String, String> {
-        DefaultKeyspace { bucket: "".to_string() }.thread_log_key(scope, thread_id)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .thread_log_key(scope, thread_id)
     }
 
     fn catalog_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
-        DefaultKeyspace { bucket: "".to_string() }.catalog_key(scope, dataset_id)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .catalog_key(scope, dataset_id)
     }
 
     fn semantic_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
-        DefaultKeyspace { bucket: "".to_string() }.semantic_key(scope, dataset_id)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .semantic_key(scope, dataset_id)
     }
 
     fn stats_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
-        DefaultKeyspace { bucket: "".to_string() }.stats_key(scope, dataset_id)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .stats_key(scope, dataset_id)
     }
 
     fn manifest_key(&self, scope: &RequestScope, dataset_id: &str) -> String {
-        DefaultKeyspace { bucket: "".to_string() }.manifest_key(scope, dataset_id)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .manifest_key(scope, dataset_id)
     }
 
     fn lancedb_uri(&self, scope: &RequestScope) -> String {
@@ -286,23 +316,38 @@ impl Keyspace for LocalKeyspace {
     }
 
     fn dbt_prefix(&self, scope: &RequestScope) -> String {
-        DefaultKeyspace { bucket: "".to_string() }.dbt_prefix(scope)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .dbt_prefix(scope)
     }
 
     fn dbt_project_key(&self, scope: &RequestScope) -> String {
-        DefaultKeyspace { bucket: "".to_string() }.dbt_project_key(scope)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .dbt_project_key(scope)
     }
 
     fn dbt_models_prefix(&self, scope: &RequestScope) -> String {
-        DefaultKeyspace { bucket: "".to_string() }.dbt_models_prefix(scope)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .dbt_models_prefix(scope)
     }
 
     fn dbt_metrics_prefix(&self, scope: &RequestScope) -> String {
-        DefaultKeyspace { bucket: "".to_string() }.dbt_metrics_prefix(scope)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .dbt_metrics_prefix(scope)
     }
 
     fn dbt_target_prefix(&self, scope: &RequestScope) -> String {
-        DefaultKeyspace { bucket: "".to_string() }.dbt_target_prefix(scope)
+        DefaultKeyspace {
+            bucket: "".to_string(),
+        }
+        .dbt_target_prefix(scope)
     }
 }
 

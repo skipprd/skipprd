@@ -446,7 +446,11 @@ fn ensure_expected_model_paths_cleanse(ctx: Option<&AgentCtx>, plan: &mut Cleans
             .unwrap_or_default();
         if cur != canonical {
             changed = true;
-            let from = if cur.is_empty() { "(missing)".to_string() } else { cur };
+            let from = if cur.is_empty() {
+                "(missing)".to_string()
+            } else {
+                cur
+            };
             let msg = format!(
                 "canonicalized cleanse expected_model_path for {}: {} -> {}",
                 t.dataset_id, from, canonical
@@ -754,7 +758,9 @@ pub struct PlanSemanticValidation {
 fn is_runnable_checklist_status(s: ChecklistItemStatus) -> bool {
     matches!(
         s,
-        ChecklistItemStatus::Pending | ChecklistItemStatus::InProgress | ChecklistItemStatus::NeedsUpdate
+        ChecklistItemStatus::Pending
+            | ChecklistItemStatus::InProgress
+            | ChecklistItemStatus::NeedsUpdate
     )
 }
 
@@ -877,7 +883,12 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
             ));
         }
         for it in g.items.iter() {
-            if plan.tasks.iter().find(|t| t.dataset_id == it.task_id).is_none() {
+            if plan
+                .tasks
+                .iter()
+                .find(|t| t.dataset_id == it.task_id)
+                .is_none()
+            {
                 errors.push(format!(
                     "work_group {} references unknown dataset_id task_id={}",
                     g.group_id, it.task_id
@@ -978,10 +989,10 @@ fn normalize_cleanse_plan_defaults(plan: &mut CleansePlan) {
             if missing_path {
                 let parts: Vec<&str> = t.dataset_id.split('.').collect();
                 if parts.len() == 3 {
-                    t.expected_model_path = Some(crate::data_engineer::naming::canonical_staging_rel_path(
-                        parts[1],
-                        parts[2],
-                    ));
+                    t.expected_model_path =
+                        Some(crate::data_engineer::naming::canonical_staging_rel_path(
+                            parts[1], parts[2],
+                        ));
                 } else {
                     let safe = t
                         .dataset_id
@@ -1029,7 +1040,9 @@ pub fn validate_model_plan_semantics(
                 t.name
             ));
         }
-        if t.implementation_spec.output_fields.is_empty() && t.implementation_spec.metrics.is_empty() {
+        if t.implementation_spec.output_fields.is_empty()
+            && t.implementation_spec.metrics.is_empty()
+        {
             errors.push(format!(
                 "{}: implementation_spec must include output_fields and/or metrics (design detail required)",
                 t.name
@@ -1542,7 +1555,8 @@ fn group_is_complete_cleanse(plan: &CleansePlan, g: &PlanWorkGroup) -> bool {
         let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == it.task_id) else {
             return false;
         };
-        if checklist_status(&t.checklist, it.checklist_item_id.as_str()) != ChecklistItemStatus::Done
+        if checklist_status(&t.checklist, it.checklist_item_id.as_str())
+            != ChecklistItemStatus::Done
         {
             return false;
         }
@@ -1558,7 +1572,8 @@ fn group_is_complete_model(plan: &ModelPlan, g: &PlanWorkGroup) -> bool {
         let Some(t) = plan.tasks.iter().find(|t| t.name == it.task_id) else {
             return false;
         };
-        if checklist_status(&t.checklist, it.checklist_item_id.as_str()) != ChecklistItemStatus::Done
+        if checklist_status(&t.checklist, it.checklist_item_id.as_str())
+            != ChecklistItemStatus::Done
         {
             return false;
         }
@@ -1607,12 +1622,10 @@ pub fn cleanse_next_action(plan: &CleansePlan) -> Option<(WorkGroupKind, Vec<Str
         let mut out: Vec<String> = Vec::new();
         for it in g.items.iter() {
             let need = match plan.tasks.iter().find(|t| t.dataset_id == it.task_id) {
-                Some(t) => {
-                    is_runnable_checklist_status(checklist_status(
-                        &t.checklist,
-                        it.checklist_item_id.as_str(),
-                    ))
-                }
+                Some(t) => is_runnable_checklist_status(checklist_status(
+                    &t.checklist,
+                    it.checklist_item_id.as_str(),
+                )),
                 None => true,
             };
             if need {
@@ -1667,12 +1680,10 @@ pub fn cleanse_next_work_item_ctx(plan: &CleansePlan) -> Option<NextWorkItemCtx>
         }
         for it in g.items.iter() {
             let need = match plan.tasks.iter().find(|t| t.dataset_id == it.task_id) {
-                Some(t) => {
-                    is_runnable_checklist_status(checklist_status(
-                        &t.checklist,
-                        it.checklist_item_id.as_str(),
-                    ))
-                }
+                Some(t) => is_runnable_checklist_status(checklist_status(
+                    &t.checklist,
+                    it.checklist_item_id.as_str(),
+                )),
                 None => true,
             };
             if need {
@@ -1719,12 +1730,10 @@ pub fn model_next_action(plan: &ModelPlan) -> Option<(WorkGroupKind, Vec<String>
         let mut out: Vec<String> = Vec::new();
         for it in g.items.iter() {
             let need = match plan.tasks.iter().find(|t| t.name == it.task_id) {
-                Some(t) => {
-                    is_runnable_checklist_status(checklist_status(
-                        &t.checklist,
-                        it.checklist_item_id.as_str(),
-                    ))
-                }
+                Some(t) => is_runnable_checklist_status(checklist_status(
+                    &t.checklist,
+                    it.checklist_item_id.as_str(),
+                )),
                 None => true,
             };
             if need {
@@ -1767,12 +1776,10 @@ pub fn model_next_work_item_ctx(plan: &ModelPlan) -> Option<NextWorkItemCtx> {
         }
         for it in g.items.iter() {
             let need = match plan.tasks.iter().find(|t| t.name == it.task_id) {
-                Some(t) => {
-                    is_runnable_checklist_status(checklist_status(
-                        &t.checklist,
-                        it.checklist_item_id.as_str(),
-                    ))
-                }
+                Some(t) => is_runnable_checklist_status(checklist_status(
+                    &t.checklist,
+                    it.checklist_item_id.as_str(),
+                )),
                 None => true,
             };
             if need {
@@ -1908,10 +1915,16 @@ fn task_status_from_checklist(items: &[PlanChecklistItem]) -> TaskStatus {
     {
         return TaskStatus::NeedsUpdate;
     }
-    if items.iter().any(|it| it.status == ChecklistItemStatus::Blocked) {
+    if items
+        .iter()
+        .any(|it| it.status == ChecklistItemStatus::Blocked)
+    {
         return TaskStatus::Blocked;
     }
-    if items.iter().all(|it| it.status == ChecklistItemStatus::Done) {
+    if items
+        .iter()
+        .all(|it| it.status == ChecklistItemStatus::Done)
+    {
         return TaskStatus::Done;
     }
     if items
@@ -1921,7 +1934,10 @@ fn task_status_from_checklist(items: &[PlanChecklistItem]) -> TaskStatus {
         return TaskStatus::InProgress;
     }
     // If some items are complete but others remain pending, surface as in_progress.
-    if items.iter().any(|it| it.status == ChecklistItemStatus::Done) {
+    if items
+        .iter()
+        .any(|it| it.status == ChecklistItemStatus::Done)
+    {
         return TaskStatus::InProgress;
     }
     TaskStatus::Pending
@@ -2151,8 +2167,7 @@ pub fn cleanse_schema_contract_mark_in_progress(plan: &mut CleansePlan, dataset_
 
 pub fn cleanse_mark_needs_update(plan: &mut CleansePlan, dataset_id: &str) {
     if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == dataset_id) {
-        let it =
-            ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
+        let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
         set_checklist_status(it, ChecklistItemStatus::NeedsUpdate, None);
         recompute_cleanse_task_status(t);
     }
@@ -2168,8 +2183,7 @@ pub fn model_mark_needs_update(plan: &mut ModelPlan, name: &str) {
 
 pub fn cleanse_mark_in_progress(plan: &mut CleansePlan, dataset_id: &str) {
     if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == dataset_id) {
-        let it =
-            ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
+        let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
         set_checklist_status(it, ChecklistItemStatus::InProgress, None);
         recompute_cleanse_task_status(t);
     }
@@ -2186,18 +2200,18 @@ pub fn model_mark_in_progress(plan: &mut ModelPlan, name: &str) {
 pub fn cleanse_all_done(plan: &CleansePlan) -> bool {
     !plan.tasks.is_empty()
         && plan.tasks.iter().all(|t| {
-            required_checklist_item_ids().into_iter().all(|id| {
-                checklist_status(&t.checklist, id) == ChecklistItemStatus::Done
-            })
+            required_checklist_item_ids()
+                .into_iter()
+                .all(|id| checklist_status(&t.checklist, id) == ChecklistItemStatus::Done)
         })
 }
 
 pub fn model_all_done(plan: &ModelPlan) -> bool {
     !plan.tasks.is_empty()
         && plan.tasks.iter().all(|t| {
-            required_checklist_item_ids().into_iter().all(|id| {
-                checklist_status(&t.checklist, id) == ChecklistItemStatus::Done
-            })
+            required_checklist_item_ids()
+                .into_iter()
+                .all(|id| checklist_status(&t.checklist, id) == ChecklistItemStatus::Done)
         })
 }
 
@@ -2286,7 +2300,13 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                     set_checklist_status(
                         it,
                         ChecklistItemStatus::Done,
-                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                        Some(evidence_from_tool_end(
+                            idx,
+                            "tool_end_ok",
+                            name,
+                            tool_id,
+                            ts,
+                        )),
                     );
                     recompute_cleanse_task_status(t);
                 }
@@ -2306,7 +2326,13 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                         set_checklist_status(
                             it,
                             ChecklistItemStatus::NeedsUpdate,
-                            Some(evidence_from_tool_end(idx, "tool_end_failed", name, tool_id, ts)),
+                            Some(evidence_from_tool_end(
+                                idx,
+                                "tool_end_failed",
+                                name,
+                                tool_id,
+                                ts,
+                            )),
                         );
                         recompute_cleanse_task_status(t);
                     }
@@ -2320,7 +2346,12 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
             let checklist_item_id = step_ctx
                 .as_ref()
                 .and_then(|c| c.checklist_item_id.as_deref())
-                .or_else(|| observation.extra.get("checklist_item_id").and_then(|v| v.as_str()))
+                .or_else(|| {
+                    observation
+                        .extra
+                        .get("checklist_item_id")
+                        .and_then(|v| v.as_str())
+                })
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| CHECKLIST_SCHEMA_CONTRACT.to_string());
@@ -2385,7 +2416,13 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                     set_checklist_status(
                         it,
                         ChecklistItemStatus::Done,
-                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                        Some(evidence_from_tool_end(
+                            idx,
+                            "tool_end_ok",
+                            name,
+                            tool_id,
+                            ts,
+                        )),
                     );
                     recompute_cleanse_task_status(t);
                 }
@@ -2475,7 +2512,13 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                         set_checklist_status(
                             it,
                             ChecklistItemStatus::NeedsUpdate,
-                            Some(evidence_from_tool_end(idx, "tool_end_failed", name, tool_id, ts)),
+                            Some(evidence_from_tool_end(
+                                idx,
+                                "tool_end_failed",
+                                name,
+                                tool_id,
+                                ts,
+                            )),
                         );
                         recompute_cleanse_task_status(t);
                     }
@@ -2561,7 +2604,10 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                         let Some(st) = file_stem(p) else {
                             continue;
                         };
-                        if stems.is_empty() || stems.iter().any(|s| s == &st) || paths.iter().any(|pp| pp.trim() == "models/schema.yml") {
+                        if stems.is_empty()
+                            || stems.iter().any(|s| s == &st)
+                            || paths.iter().any(|pp| pp.trim() == "models/schema.yml")
+                        {
                             let it = if schema_checklist_item_id == CHECKLIST_SCHEMA_CONTRACT {
                                 ensure_checklist_item(
                                     &mut t.checklist,
@@ -2569,7 +2615,10 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                                     "Author schema contract",
                                 )
                             } else {
-                                ensure_checklist_item_any(&mut t.checklist, &schema_checklist_item_id)
+                                ensure_checklist_item_any(
+                                    &mut t.checklist,
+                                    &schema_checklist_item_id,
+                                )
                             };
                             let ev_kind = if ok { "tool_end_ok" } else { "tool_end_failed" };
                             let new_status = if ok {
@@ -2600,7 +2649,8 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
             if ok {
                 for t in plan.tasks.iter_mut() {
                     // Mark validate done for tasks that have authored their SQL.
-                    if checklist_status(&t.checklist, CHECKLIST_SQL_MODEL) != ChecklistItemStatus::Done
+                    if checklist_status(&t.checklist, CHECKLIST_SQL_MODEL)
+                        != ChecklistItemStatus::Done
                     {
                         continue;
                     }
@@ -2611,7 +2661,13 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                     set_checklist_status(
                         v,
                         ChecklistItemStatus::Done,
-                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                        Some(evidence_from_tool_end(
+                            idx,
+                            "tool_end_ok",
+                            name,
+                            tool_id,
+                            ts,
+                        )),
                     );
                     recompute_cleanse_task_status(t);
                 }
@@ -2621,11 +2677,14 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                     .get("logs")
                     .cloned()
                     .unwrap_or(Value::Null);
-                let failed = crate::data_engineer::dbt_error::extract_failed_models_from_logs(&logs);
+                let failed =
+                    crate::data_engineer::dbt_error::extract_failed_models_from_logs(&logs);
                 let runtime =
                     crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(&logs);
                 let contract_data_type_missing =
-                    crate::data_engineer::dbt_error::logs_indicate_contract_data_type_missing(&logs);
+                    crate::data_engineer::dbt_error::logs_indicate_contract_data_type_missing(
+                        &logs,
+                    );
 
                 let mut names: Vec<String> = Vec::new();
                 for f in failed.iter() {
@@ -2669,7 +2728,13 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                     set_checklist_status(
                         v,
                         ChecklistItemStatus::NeedsUpdate,
-                        Some(evidence_from_tool_end(idx, "tool_end_failed", name, tool_id, ts)),
+                        Some(evidence_from_tool_end(
+                            idx,
+                            "tool_end_failed",
+                            name,
+                            tool_id,
+                            ts,
+                        )),
                     );
                     if contract_data_type_missing {
                         let sc = ensure_checklist_item(
@@ -2753,7 +2818,11 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
             for n in attempted.iter() {
                 if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
                     let it = if checklist_item_id == CHECKLIST_SQL_MODEL {
-                        ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author gold SQL")
+                        ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SQL_MODEL,
+                            "Author gold SQL",
+                        )
                     } else {
                         ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
                     };
@@ -2768,14 +2837,24 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
             for n in succeeded.iter() {
                 if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
                     let it = if checklist_item_id == CHECKLIST_SQL_MODEL {
-                        ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author gold SQL")
+                        ensure_checklist_item(
+                            &mut t.checklist,
+                            CHECKLIST_SQL_MODEL,
+                            "Author gold SQL",
+                        )
                     } else {
                         ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
                     };
                     set_checklist_status(
                         it,
                         ChecklistItemStatus::Done,
-                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                        Some(evidence_from_tool_end(
+                            idx,
+                            "tool_end_ok",
+                            name,
+                            tool_id,
+                            ts,
+                        )),
                     );
                     recompute_model_task_status(t);
                 }
@@ -2784,7 +2863,11 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                 for n in failed.iter() {
                     if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
                         let it = if checklist_item_id == CHECKLIST_SQL_MODEL {
-                            ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author gold SQL")
+                            ensure_checklist_item(
+                                &mut t.checklist,
+                                CHECKLIST_SQL_MODEL,
+                                "Author gold SQL",
+                            )
                         } else {
                             ensure_checklist_item_any(&mut t.checklist, &checklist_item_id)
                         };
@@ -2811,7 +2894,12 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
             let checklist_item_id = step_ctx
                 .as_ref()
                 .and_then(|c| c.checklist_item_id.as_deref())
-                .or_else(|| observation.extra.get("checklist_item_id").and_then(|v| v.as_str()))
+                .or_else(|| {
+                    observation
+                        .extra
+                        .get("checklist_item_id")
+                        .and_then(|v| v.as_str())
+                })
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| CHECKLIST_SCHEMA_CONTRACT.to_string());
@@ -2876,7 +2964,13 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                     set_checklist_status(
                         it,
                         ChecklistItemStatus::Done,
-                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                        Some(evidence_from_tool_end(
+                            idx,
+                            "tool_end_ok",
+                            name,
+                            tool_id,
+                            ts,
+                        )),
                     );
                     recompute_model_task_status(t);
                 }
@@ -2964,7 +3058,13 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                     set_checklist_status(
                         it,
                         ChecklistItemStatus::Done,
-                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                        Some(evidence_from_tool_end(
+                            idx,
+                            "tool_end_ok",
+                            name,
+                            tool_id,
+                            ts,
+                        )),
                     );
                     recompute_model_task_status(t);
                 }
@@ -3005,15 +3105,18 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
             if ok {
                 // Treat a successful validate as satisfying `validate` for the whole plan.
                 for t in plan.tasks.iter_mut() {
-                    let it = ensure_checklist_item(
-                        &mut t.checklist,
-                        CHECKLIST_VALIDATE,
-                        "Validate DBT",
-                    );
+                    let it =
+                        ensure_checklist_item(&mut t.checklist, CHECKLIST_VALIDATE, "Validate DBT");
                     set_checklist_status(
                         it,
                         ChecklistItemStatus::Done,
-                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
+                        Some(evidence_from_tool_end(
+                            idx,
+                            "tool_end_ok",
+                            name,
+                            tool_id,
+                            ts,
+                        )),
                     );
                     recompute_model_task_status(t);
                 }
@@ -3111,7 +3214,9 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                             .and_then(|v| v.as_str())
                             .map(|p| p.trim().replace('\\', "/") == "models/schema.yml")
                             .unwrap_or(false);
-                        let has_diff_git = pt.lines().any(|l| l.trim_start().starts_with("diff --git "));
+                        let has_diff_git = pt
+                            .lines()
+                            .any(|l| l.trim_start().starts_with("diff --git "));
                         let mut in_target = guarded_schema && !has_diff_git;
                         let mut added: Vec<String> = Vec::new();
                         for line in pt.lines() {
@@ -3124,7 +3229,11 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                             if !in_target {
                                 continue;
                             }
-                            if t.starts_with("--- ") || t.starts_with("+++ ") || t.starts_with("@@ ") || t == "@@" {
+                            if t.starts_with("--- ")
+                                || t.starts_with("+++ ")
+                                || t.starts_with("@@ ")
+                                || t == "@@"
+                            {
                                 continue;
                             }
                             if let Some(rest) = t.strip_prefix('+') {
@@ -3147,8 +3256,12 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                                         .map(|s| s.trim().to_string())
                                         .filter(|s| !s.is_empty());
                                     if let Some(nm) = model_name {
-                                        if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == nm) {
-                                            let it = if schema_checklist_item_id == CHECKLIST_SCHEMA_CONTRACT {
+                                        if let Some(t) =
+                                            plan.tasks.iter_mut().find(|t| t.name == nm)
+                                        {
+                                            let it = if schema_checklist_item_id
+                                                == CHECKLIST_SCHEMA_CONTRACT
+                                            {
                                                 ensure_checklist_item(
                                                     &mut t.checklist,
                                                     CHECKLIST_SCHEMA_CONTRACT,
@@ -3427,7 +3540,10 @@ mod tests {
         };
         let v = validate_cleanse_plan_semantics(&plan);
         assert!(!v.ok);
-        assert!(v.errors.iter().any(|e| e.contains("implementation_spec.output_fields is empty")));
+        assert!(v
+            .errors
+            .iter()
+            .any(|e| e.contains("implementation_spec.output_fields is empty")));
     }
 
     #[test]
@@ -3481,7 +3597,10 @@ mod tests {
         let allowed = std::collections::BTreeSet::from(["stg_x".to_string()]);
         let v = validate_model_plan_semantics(&plan, Some(&allowed));
         assert!(!v.ok);
-        assert!(v.errors.iter().any(|e| e.contains("implementation_spec.grain is empty")));
+        assert!(v
+            .errors
+            .iter()
+            .any(|e| e.contains("implementation_spec.grain is empty")));
     }
 
     #[test]
@@ -3513,11 +3632,10 @@ mod tests {
         let allowed = std::collections::BTreeSet::from(["stg_orders".to_string()]);
         let v = validate_model_plan_semantics(&plan, Some(&allowed));
         assert!(!v.ok);
-        assert!(
-            v.errors
-                .iter()
-                .any(|e| e.contains("references unknown model task_id=missing_task"))
-        );
+        assert!(v
+            .errors
+            .iter()
+            .any(|e| e.contains("references unknown model task_id=missing_task")));
     }
 
     fn status_of(items: &[PlanChecklistItem], id: &str) -> ChecklistItemStatus {
@@ -4147,7 +4265,9 @@ mod tests {
             tasks: vec![
                 CleanseTask {
                     dataset_id: "AwsDataCatalog.test_raw.raw_orders".to_string(),
-                    expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
+                    expected_model_path: Some(
+                        "models/staging/stg_test_raw_raw_orders.sql".to_string(),
+                    ),
                     invariants: vec![],
                     implementation_spec: dummy_cleanse_spec(),
                     status: TaskStatus::Pending,
@@ -4175,7 +4295,8 @@ mod tests {
 
         // Pretend SQL authoring is done so validate can be marked complete.
         for t in plan.tasks.iter_mut() {
-            let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
+            let it =
+                ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
             it.status = ChecklistItemStatus::Done;
             recompute_cleanse_task_status(t);
         }
@@ -4207,7 +4328,9 @@ mod tests {
             tasks: vec![
                 CleanseTask {
                     dataset_id: "AwsDataCatalog.test_raw.raw_orders".to_string(),
-                    expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
+                    expected_model_path: Some(
+                        "models/staging/stg_test_raw_raw_orders.sql".to_string(),
+                    ),
                     invariants: vec![],
                     implementation_spec: dummy_cleanse_spec(),
                     status: TaskStatus::Pending,
@@ -4235,7 +4358,8 @@ mod tests {
 
         // Mark both as SQL-done so validate failures are meaningful.
         for t in plan.tasks.iter_mut() {
-            let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
+            let it =
+                ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
             it.status = ChecklistItemStatus::Done;
             recompute_cleanse_task_status(t);
         }

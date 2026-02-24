@@ -1,6 +1,6 @@
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde::Deserialize;
 use tracing::debug;
 
 use super::types::{CatalogField, DataCatalog};
@@ -190,7 +190,10 @@ fn global_semantic_key(
     keyspace: &Arc<dyn crate::providers::Keyspace>,
     scope: &crate::providers::RequestScope,
 ) -> String {
-    keyspace.semantic_key(scope, react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID)
+    keyspace.semantic_key(
+        scope,
+        react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
+    )
 }
 
 async fn read_global_semantic_context(
@@ -222,17 +225,15 @@ fn clamp_and_filter_global_context(
     // Confidence gating (authoritative only).
     ctx.audiences
         .retain(|a| a.confidence >= GLOBAL_CONTEXT_MIN_CONFIDENCE && !a.audience.trim().is_empty());
-    ctx.context_bullets.retain(|b| {
-        b.confidence >= GLOBAL_CONTEXT_MIN_CONFIDENCE && !b.text.trim().is_empty()
-    });
+    ctx.context_bullets
+        .retain(|b| b.confidence >= GLOBAL_CONTEXT_MIN_CONFIDENCE && !b.text.trim().is_empty());
     ctx.dataset_groups.retain(|g| {
         g.confidence >= GLOBAL_CONTEXT_MIN_CONFIDENCE
             && !g.group_name.trim().is_empty()
             && !g.dataset_ids.is_empty()
     });
-    ctx.assumptions_and_gaps.retain(|a| {
-        a.confidence >= GLOBAL_CONTEXT_MIN_CONFIDENCE && !a.text.trim().is_empty()
-    });
+    ctx.assumptions_and_gaps
+        .retain(|a| a.confidence >= GLOBAL_CONTEXT_MIN_CONFIDENCE && !a.text.trim().is_empty());
 
     // Bound sizes.
     ctx.audiences.truncate(12);
@@ -242,7 +243,8 @@ fn clamp_and_filter_global_context(
 
     // Normalize simple dedup.
     let mut seen = std::collections::HashSet::<String>::new();
-    ctx.audiences.retain(|a| seen.insert(a.audience.trim().to_string()));
+    ctx.audiences
+        .retain(|a| seen.insert(a.audience.trim().to_string()));
     let mut seen = std::collections::HashSet::<String>::new();
     ctx.context_bullets
         .retain(|b| seen.insert(b.text.trim().to_string()));
@@ -279,12 +281,24 @@ fn compact_catalog_for_global_context(
     let max_fields = 40usize;
     let mut out_fields: Vec<serde_json::Value> = Vec::new();
     for f in fields.into_iter().take(max_fields) {
-        let name = f.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let name = f
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         if name.trim().is_empty() {
             continue;
         }
-        let ty = f.get("type").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let role = f.get("role").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let ty = f
+            .get("type")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let role = f
+            .get("role")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let stats = f.get("stats").cloned().unwrap_or(serde_json::Value::Null);
         // Stats can be heavy; keep only a small subset if present.
         let stats = if let Some(obj) = stats.as_object() {
@@ -315,7 +329,12 @@ fn compact_catalog_for_global_context(
 }
 
 fn deterministic_dataset_description(dataset_id: &str, fields: &[String]) -> String {
-    let short = fields.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    let short = fields
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     if short.is_empty() {
         format!(
             "Dataset {} contains operational records used for downstream analytics modeling.",
@@ -351,7 +370,8 @@ fn deterministic_global_context_from_compact(
     }];
     if !dataset_ids.is_empty() {
         bullets.push(react_core::providers::catalog::types::GlobalContextBullet {
-            text: "Catalog refresh confirms schema-driven planning context is available.".to_string(),
+            text: "Catalog refresh confirms schema-driven planning context is available."
+                .to_string(),
             confidence: 0.85,
             evidence: dataset_ids
                 .iter()
@@ -429,7 +449,12 @@ pub async fn enrich_dataset_with_llm(
         lines.push(format!("Dataset: {}", dataset_id));
         lines.push(format!(
             "Fields: {}",
-            field_names.iter().take(10).cloned().collect::<Vec<_>>().join(", ")
+            field_names
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
         let reason_prompt = format!(
             "You are preparing semantic notes for a dataset catalog entry.\n\
@@ -1062,31 +1087,37 @@ Reasoning memo:\n{memo}\n\nOutput JSON only:",
                 context_bullets: parsed
                     .context_bullets
                     .into_iter()
-                    .map(|b| react_core::providers::catalog::types::GlobalContextBullet {
-                        text: b.text,
-                        confidence: b.confidence,
-                        evidence: b.evidence,
-                    })
+                    .map(
+                        |b| react_core::providers::catalog::types::GlobalContextBullet {
+                            text: b.text,
+                            confidence: b.confidence,
+                            evidence: b.evidence,
+                        },
+                    )
                     .collect(),
                 dataset_groups: parsed
                     .dataset_groups
                     .into_iter()
-                    .map(|g| react_core::providers::catalog::types::GlobalDatasetGroup {
-                        group_name: g.group_name,
-                        dataset_ids: g.dataset_ids,
-                        confidence: g.confidence,
-                        evidence: g.evidence,
-                    })
+                    .map(
+                        |g| react_core::providers::catalog::types::GlobalDatasetGroup {
+                            group_name: g.group_name,
+                            dataset_ids: g.dataset_ids,
+                            confidence: g.confidence,
+                            evidence: g.evidence,
+                        },
+                    )
                     .collect(),
                 assumptions_and_gaps: parsed
                     .assumptions_and_gaps
                     .into_iter()
-                    .map(|a| react_core::providers::catalog::types::GlobalAssumptionGap {
-                        text: a.text,
-                        confidence: a.confidence,
-                        evidence: a.evidence,
-                        suggested_probe: a.suggested_probe,
-                    })
+                    .map(
+                        |a| react_core::providers::catalog::types::GlobalAssumptionGap {
+                            text: a.text,
+                            confidence: a.confidence,
+                            evidence: a.evidence,
+                            suggested_probe: a.suggested_probe,
+                        },
+                    )
                     .collect(),
             };
             next = Some(clamp_and_filter_global_context(typed));
@@ -1142,7 +1173,9 @@ pub async fn run_llm_global_context_enrichment_all(
             continue;
         };
         let compact = compact_catalog_for_global_context(ds, &cat_json);
-        let add_chars = serde_json::to_string(&compact).map(|s| s.len()).unwrap_or(0);
+        let add_chars = serde_json::to_string(&compact)
+            .map(|s| s.len())
+            .unwrap_or(0);
         if !batch.is_empty() && (batch_chars + add_chars) > max_batch_chars {
             if let Some(compact_batch) = flush_batch(&mut batch) {
                 wrote |= process_global_context_batch(

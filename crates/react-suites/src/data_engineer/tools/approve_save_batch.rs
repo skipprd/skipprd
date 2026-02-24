@@ -60,7 +60,9 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
             return Ok(serde_json::json!({"ok": true, "keys": []}));
         }
         if args.get("preview_diff").is_some() {
-            return Err("preview_diff is no longer supported; remove it from the request".to_string());
+            return Err(
+                "preview_diff is no longer supported; remove it from the request".to_string(),
+            );
         }
         let mut out_keys: Vec<String> = Vec::new();
         let mut out_files: Vec<Value> = Vec::new();
@@ -186,8 +188,9 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
             }
 
             let old_text = existing.clone().unwrap_or_default();
-            let patch_text =
-                crate::data_engineer::project_fs::hunks_only_full_replace_patch(&old_text, &content);
+            let patch_text = crate::data_engineer::project_fs::hunks_only_full_replace_patch(
+                &old_text, &content,
+            );
             let outcome = crate::data_engineer::project_fs::apply_patch(
                 ctx,
                 self.datasets.as_ref(),

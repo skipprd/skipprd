@@ -83,7 +83,10 @@ fn extract_hunks_from_git_or_unified_patch(
         );
     }
     if sections.len() != 1 {
-        return Err("patch_text contains multiple file sections; only single-file patches are supported".to_string());
+        return Err(
+            "patch_text contains multiple file sections; only single-file patches are supported"
+                .to_string(),
+        );
     }
 
     let (old_idx, new_idx) = sections[0];
@@ -160,25 +163,32 @@ pub fn normalize_hunks_only_patch_text(
     });
     let starts_with_hunk = patch_in.trim_start().starts_with("@@");
 
-    let (source_lines, git_headers_stripped, git_metadata_lines_dropped) =
-        if starts_with_hunk && !has_git_headers {
-            (
-                patch_in.lines().map(|s| s.to_string()).collect::<Vec<String>>(),
-                false,
-                0usize,
-            )
-        } else if has_hunks && has_git_headers {
-            let (out, dropped) = extract_hunks_from_git_or_unified_patch(patch_in, expected_rel_path)?;
-            (out, true, dropped)
-        } else if has_hunks {
-            (
-                patch_in.lines().map(|s| s.to_string()).collect::<Vec<String>>(),
-                false,
-                0usize,
-            )
-        } else {
-            return Err("patch_text must contain at least one hunk header ('@@')".to_string());
-        };
+    let (source_lines, git_headers_stripped, git_metadata_lines_dropped) = if starts_with_hunk
+        && !has_git_headers
+    {
+        (
+            patch_in
+                .lines()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>(),
+            false,
+            0usize,
+        )
+    } else if has_hunks && has_git_headers {
+        let (out, dropped) = extract_hunks_from_git_or_unified_patch(patch_in, expected_rel_path)?;
+        (out, true, dropped)
+    } else if has_hunks {
+        (
+            patch_in
+                .lines()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>(),
+            false,
+            0usize,
+        )
+    } else {
+        return Err("patch_text must contain at least one hunk header ('@@')".to_string());
+    };
 
     let mut out: Vec<String> = Vec::new();
     let mut rewritten = 0usize;
@@ -196,7 +206,9 @@ pub fn normalize_hunks_only_patch_text(
         .map(|l| l.trim_start().starts_with("@@"))
         .unwrap_or(false)
     {
-        return Err("patch_text must normalize to Cursor/Aider hunks-only and start with '@@'".to_string());
+        return Err(
+            "patch_text must normalize to Cursor/Aider hunks-only and start with '@@'".to_string(),
+        );
     }
 
     Ok(PatchTextNormalization {

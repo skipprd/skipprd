@@ -1587,7 +1587,10 @@ pub async fn run_headless_with_hub(
     }
     impl futures::sink::Sink<Message> for CaptureSink {
         type Error = String;
-        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
         fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
@@ -1600,10 +1603,16 @@ pub async fn run_headless_with_hub(
             }
             Ok(())
         }
-        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
-        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
     }
@@ -2171,7 +2180,12 @@ fn map_checklist_item(it: de_plan::PlanChecklistItem) -> api::PlanChecklistItem 
     out.details = it.details;
     out.origin_step_idx = it.origin_step_idx.map(|x| x as i32);
     if !it.evidence.is_empty() {
-        out.evidence = Some(it.evidence.into_iter().map(map_checklist_evidence).collect());
+        out.evidence = Some(
+            it.evidence
+                .into_iter()
+                .map(map_checklist_evidence)
+                .collect(),
+        );
     }
     out
 }
@@ -2190,7 +2204,8 @@ fn map_work_group(wg: de_plan::PlanWorkGroup) -> api::PlanWorkGroup {
         .into_iter()
         .map(|it| api::PlanWorkGroupItemRef::new(it.task_id, it.checklist_item_id))
         .collect::<Vec<_>>();
-    let mut out = api::PlanWorkGroup::new(wg.group_id, wg.label, map_work_group_kind(wg.kind), items);
+    let mut out =
+        api::PlanWorkGroup::new(wg.group_id, wg.label, map_work_group_kind(wg.kind), items);
     out.depends_on_group_ids = wg.depends_on_group_ids;
     out
 }
@@ -2351,8 +2366,11 @@ async fn load_latest_plans(
             .tasks
             .into_iter()
             .map(|t| {
-                let checklist =
-                    t.checklist.into_iter().map(map_checklist_item).collect::<Vec<_>>();
+                let checklist = t
+                    .checklist
+                    .into_iter()
+                    .map(map_checklist_item)
+                    .collect::<Vec<_>>();
                 let mut snap = api::CleanseTaskSnapshot::new(
                     t.dataset_id.clone(),
                     t.dataset_id.clone(),
@@ -2469,8 +2487,11 @@ async fn load_latest_plans(
             .tasks
             .into_iter()
             .map(|t| {
-                let checklist =
-                    t.checklist.into_iter().map(map_checklist_item).collect::<Vec<_>>();
+                let checklist = t
+                    .checklist
+                    .into_iter()
+                    .map(map_checklist_item)
+                    .collect::<Vec<_>>();
                 let mut snap = api::ModelTaskSnapshot::new(
                     t.name.clone(),
                     t.name.clone(),
@@ -3084,11 +3105,6 @@ async fn run_agent_with_processing_suite(
     write: &mut (impl SinkExt<Message> + Unpin),
 ) -> Result<(), String> {
     let headless = env_bool("REACT_HEADLESS", false) || terminal::enabled();
-    let go_text = std::env::var("REACT_HEADLESS_GO")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "go!".to_string());
     let auto_approve = if headless {
         env_bool("REACT_HEADLESS_AUTO_APPROVE", true)
     } else {
@@ -3139,15 +3155,15 @@ async fn run_agent_with_processing_suite(
             let tid_scope = thread_id_s.clone();
             crate::llm::thread_ctx::scope_thread_id(&tid_scope, async move {
                 match run_kind {
-                    SuiteRunKind::New => suite2
-                        .handle_new(&thread_id_s, &q, &agent_s, &sctx3)
-                        .await,
-                    SuiteRunKind::Open => suite2
-                        .handle_open(&thread_id_s, &q, &agent_s, &sctx3)
-                        .await,
-                    SuiteRunKind::User => suite2
-                        .handle_user(&thread_id_s, &q, &agent_s, &sctx3)
-                        .await,
+                    SuiteRunKind::New => {
+                        suite2.handle_new(&thread_id_s, &q, &agent_s, &sctx3).await
+                    }
+                    SuiteRunKind::Open => {
+                        suite2.handle_open(&thread_id_s, &q, &agent_s, &sctx3).await
+                    }
+                    SuiteRunKind::User => {
+                        suite2.handle_user(&thread_id_s, &q, &agent_s, &sctx3).await
+                    }
                 }
             })
             .await
@@ -3189,13 +3205,17 @@ async fn run_agent_with_processing_suite(
         // Best-effort: update terminal from typed messages (no JSON parsing).
         if let Some(t) = state.term() {
             match &msg {
-                api::ServerMessage::ThreadState(r) => t.emit(TerminalEvent::ThreadState(r.state.clone())),
+                api::ServerMessage::ThreadState(r) => {
+                    t.emit(TerminalEvent::ThreadState(r.state.clone()))
+                }
                 api::ServerMessage::Plans(r) => t.emit(TerminalEvent::Plans {
                     thread_id: r.thread_id.clone(),
                     cleanse: r.cleanse.clone(),
                     model: r.model.clone(),
                 }),
-                api::ServerMessage::PlansChanged(r) => t.emit(TerminalEvent::PlansChanged(r.clone())),
+                api::ServerMessage::PlansChanged(r) => {
+                    t.emit(TerminalEvent::PlansChanged(r.clone()))
+                }
                 api::ServerMessage::Phase(r) => t.emit(TerminalEvent::Phase(r.clone())),
                 api::ServerMessage::ToolStart(r) => t.emit(TerminalEvent::ToolStart(r.clone())),
                 api::ServerMessage::ToolEnd(r) => t.emit(TerminalEvent::ToolEnd(r.clone())),
@@ -3824,50 +3844,19 @@ async fn run_agent_with_processing_suite(
                                 )
                                 .await;
                             }
-                            // In headless `react run`, some suite guards indicate the run cannot proceed
-                            // automatically (e.g. batch_locked requires a human/applied patch).
-                            if cid == "headless"
-                                && (prompt.contains("Plan-batched authoring is locked")
-                                    || prompt.contains("kind: batch_locked")
-                                    || prompt.contains("batch_locked"))
-                            {
+                            // Headless runs are non-interactive. Any ask_user is a hard error:
+                            // upstream policy/guarding should keep deterministic runs self-contained.
+                            if cid == "headless" {
                                 if let Some(t) = state.term() {
                                     t.emit(TerminalEvent::Info(format!(
-                                        "headless: stopping due to batch_locked guard (prompt='{}')",
+                                        "headless: ask_user is unsupported (prompt='{}')",
                                         truncate_str(&prompt, 220)
                                     )));
                                 }
                                 return Err(format!(
-                                    "batch_locked: {}",
+                                    "ask_user_not_supported_in_headless: {}",
                                     truncate_str(&prompt, 1200)
                                 ));
-                            }
-                            if headless && auto_turns < 32 {
-                                auto_turns += 1;
-                                // Auto-answer with "go!" (headless terminal mode).
-                                {
-                                    let store = state.thread_store();
-                                    let _ = store
-                                        .append_step(
-                                            thread_id,
-                                            ThreadStep::User {
-                                                text: go_text.clone(),
-                                                observation: Observation::ok(),
-                                                ts: chrono::Utc::now().to_rfc3339(),
-                                                agent: agent.to_string(),
-                                            },
-                                        )
-                                        .await;
-                                }
-                                if let Some(t) = state.term() {
-                                    t.emit(TerminalEvent::Info(format!(
-                                        "headless: auto user='{}' (prompt='{}')",
-                                        go_text,
-                                        prompt
-                                    )));
-                                }
-                                rerun = Some((SuiteRunKind::User, go_text.clone()));
-                                break;
                             }
                             let tseq = state.next_thread_seq(thread_id);
                             let resp = api::AwaitUserResponse::new(
@@ -4864,13 +4853,19 @@ mod tests {
 
         let v: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
         let cleanse_snap = v.get("cleanse").expect("cleanse");
-        let tasks = cleanse_snap.get("tasks").and_then(|x| x.as_array()).unwrap();
+        let tasks = cleanse_snap
+            .get("tasks")
+            .and_then(|x| x.as_array())
+            .unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(
             tasks[0].get("taskKind").and_then(|x| x.as_str()),
             Some("cleanse")
         );
-        let cl = tasks[0].get("checklist").and_then(|x| x.as_array()).unwrap();
+        let cl = tasks[0]
+            .get("checklist")
+            .and_then(|x| x.as_array())
+            .unwrap();
         assert_eq!(
             cl[0].get("checklistItemId").and_then(|x| x.as_str()),
             Some("sql_model")
@@ -4918,8 +4913,14 @@ mod tests {
             cleanse_snap.get("status").and_then(|x| x.as_str()),
             Some("cancelled")
         );
-        let tasks = cleanse_snap.get("tasks").and_then(|x| x.as_array()).unwrap();
-        let cl = tasks[0].get("checklist").and_then(|x| x.as_array()).unwrap();
+        let tasks = cleanse_snap
+            .get("tasks")
+            .and_then(|x| x.as_array())
+            .unwrap();
+        let cl = tasks[0]
+            .get("checklist")
+            .and_then(|x| x.as_array())
+            .unwrap();
         assert_eq!(
             cl[0].get("checklistItemId").and_then(|x| x.as_str()),
             Some("parse_error")

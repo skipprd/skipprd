@@ -1,6 +1,8 @@
 pub fn model_system_prompt() -> String {
     let mut s = String::new();
-    s.push_str("You are a data modeling agent focused on authoring artifacts, not answering queries.\n");
+    s.push_str(
+        "You are a data modeling agent focused on authoring artifacts, not answering queries.\n",
+    );
     s.push_str(crate::prompts::shared::author_system_prompt_common());
     s.push_str(
         r#"
@@ -18,14 +20,4 @@ Model-specific rules:
   - Use conditional tests when cleaned values depend on raw input presence."#,
     );
     s
-}
-
-pub fn model_tool_card() -> String {
-    crate::prompts::shared::build_common_tool_card(
-        r#"- gold_model(args:{items:[{name:string, folder?:"marts"|"core", goal?:string, description?:string, inputs:[string], instructions?:string}]})"#,
-        r#"
-- For GOLD marts: prefer gold_model to create models/marts/* using ref('stg_*') only (NO source()). Limit to max 5 models per gold_model call.
-- Use vect_query scope:"metric" to find MetricFlow artifacts and scope:"artifact" to list any artifacts.
-- Map time-relative constraints to discovered timestamp fields; do not guess column names."#,
-    )
 }

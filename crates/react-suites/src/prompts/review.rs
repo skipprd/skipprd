@@ -45,26 +45,3 @@ Finalization:
 - No SQL is required in the final. Put the complete review text in `final.payload.text`."#
         .to_string()
 }
-
-pub fn tool_card() -> String {
-    r#"Tools:
-- artifacts(args:{op:"list", dataset_id?:string, type?:"model"|"metric", limit?:int} | {op:"get", dataset_id:string, type:"model"|"metric", name:string})
-- file(args:{op:"list", prefix?:string, limit?:int} | {op:"get", path:string, max_chars?:int})
-- json_file(args:{op:"get_item", path:string, pointer?:string} | {op:"query", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})
-- vect_query(args:{scope:"dataset"|"field"|"doc"|"artifact"|"metric"|"model", query_text:string, k:int})
-- sql_schema(args:{table?:string}) -> {"ok":true,"tables":[...]} or {"ok":true,"columns":[{"name":string,"type":string}]}
-- sql_stats(args:{table:string, field:string}) -> {"ok":true,"stats":{...}}
-- sql_sample(args:{table:string, field:string, k:int}) -> {"ok":true,"values":[...]}
-
-Usage guidance:
-- Stay read-only; do not attempt to publish or edit files.
-- If you need to inspect manifest nodes, use json_file(query path:\"target/manifest.json\" pointer:\"/nodes\" ...filters...).
-- Do NOT use path:\"manifest.json\" or storage-key-like paths for manifest lookups.
-- Keep recommendations compatible with executable plan invariants (work_groups + dependencies + checklist integrity).
-- If you need to understand the current DBT project, start with file(get path:\"models/schema.yml\") and inspect relevant model SQL under models/ via file(list prefix:\"models/\").
-- artifacts(list/get) may not include models stored under nested paths (e.g. models/staging/**); prefer file for project inspection.
-- Use vect_query(scope=\"artifact\"|\"model\") to locate relevant models quickly.
-- Use sql_schema/sql_stats/sql_sample to validate key/timestamp candidates and spot grain problems (high nulls, low distinctness, etc.).
-- Always output only JSON."#
-        .to_string()
-}

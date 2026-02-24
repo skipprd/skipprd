@@ -6,12 +6,12 @@ use tracing::info;
 use crate::keyspace::Keyspace;
 use crate::llm::{ChatMessage, LlmCallOptions, LlmExpectedFormat};
 use crate::llm_observability::PartInput;
-use crate::providers::{
-    DbtProvider, QueryProvider, VectorStore, WarehouseProvider,
-};
+use crate::providers::{DbtProvider, QueryProvider, VectorStore, WarehouseProvider};
 use crate::schema_registry::{AgentStepTypeV1, AgentStepV1, SchemaId};
 use crate::scope::RequestScope;
-use crate::session::{ExecutionContext, Observation, ThreadResult, ThreadStep, ThreadStore, ToolObservation};
+use crate::session::{
+    ExecutionContext, Observation, ThreadResult, ThreadStep, ThreadStore, ToolObservation,
+};
 use crate::storage::StorageAdapter;
 use crate::tools::ToolRegistry;
 use async_trait::async_trait;
@@ -620,18 +620,14 @@ impl Agent {
         let cleaned = Self::strip_markdown_code_fences(raw);
         let trimmed = cleaned.trim();
 
-        fn parse_json_from_model_string_field(
-            raw_json: &str,
-            what: &str,
-        ) -> Result<Value, String> {
+        fn parse_json_from_model_string_field(raw_json: &str, what: &str) -> Result<Value, String> {
             match serde_json::from_str::<Value>(raw_json) {
                 Ok(v) => Ok(v),
                 Err(e) => {
                     // Repair raw control chars inside JSON strings (literal newlines, etc).
                     let repaired = Agent::escape_control_chars_in_json_strings(raw_json);
-                    serde_json::from_str::<Value>(&repaired).map_err(|_| {
-                        format!("{what} is not valid JSON string: {e}")
-                    })
+                    serde_json::from_str::<Value>(&repaired)
+                        .map_err(|_| format!("{what} is not valid JSON string: {e}"))
                 }
             }
         }
@@ -647,8 +643,13 @@ impl Agent {
         };
 
         crate::schema_registry::validate(SchemaId::AgentStepV1, &v)?;
-        let step: AgentStepV1 = serde_json::from_value::<AgentStepV1>(v)
-            .map_err(|e| format!("failed to deserialize {}: {}", SchemaId::AgentStepV1.name(), e))?;
+        let step: AgentStepV1 = serde_json::from_value::<AgentStepV1>(v).map_err(|e| {
+            format!(
+                "failed to deserialize {}: {}",
+                SchemaId::AgentStepV1.name(),
+                e
+            )
+        })?;
 
         match step.type_ {
             AgentStepTypeV1::Tool => {
@@ -660,7 +661,8 @@ impl Agent {
                 };
                 if step.final_.is_some() {
                     return Err(
-                        "agent.step.v1 validation error: tool step must not include final".to_string(),
+                        "agent.step.v1 validation error: tool step must not include final"
+                            .to_string(),
                     );
                 }
                 let args: Value = parse_json_from_model_string_field(
@@ -829,7 +831,10 @@ impl Agent {
         // Enforce a best-effort max prompt size budget by dropping tail lines.
         let max_prompt_chars = crate::error_context::estimate_max_prompt_chars(ctx).max(1024);
         loop {
-            let used_chars: usize = transcript.iter().map(|l| l.chars().count() + 1).sum::<usize>()
+            let used_chars: usize = transcript
+                .iter()
+                .map(|l| l.chars().count() + 1)
+                .sum::<usize>()
                 + output_contract_line.chars().count()
                 + 1;
             if used_chars <= max_prompt_chars {
@@ -905,8 +910,7 @@ impl Agent {
             }
 
             // Ask model for next action.
-            let prompt =
-                Self::prompt_from_transcript(ctx, &mut transcript, &output_contract_line);
+            let prompt = Self::prompt_from_transcript(ctx, &mut transcript, &output_contract_line);
             let mut raw = Self::llm_chat_once(ctx, prompt, llm_options.clone()).await?;
             // If the provider returned a deterministic error payload as "text", do not enter the
             // invalid-JSON repair ladder (it only wastes tokens and repeats the same failure).
@@ -953,7 +957,12 @@ impl Agent {
                     }
                     // Keep a small tail of the transcript for local context.
                     let tail_n = 12usize.min(transcript.len());
-                    keep.extend(transcript.iter().skip(transcript.len().saturating_sub(tail_n)).cloned());
+                    keep.extend(
+                        transcript
+                            .iter()
+                            .skip(transcript.len().saturating_sub(tail_n))
+                            .cloned(),
+                    );
                     keep.push(format!(
                         "User: IMPORTANT: Your previous response did not match schema {}. Error: {}. Return ONLY one JSON object that matches the schema.",
                         SchemaId::AgentStepV1.name(),
@@ -982,8 +991,10 @@ impl Agent {
                                 SchemaId::AgentStepV1.name(),
                                 e2
                             ));
-                            let retry_prompt2 = format!("{}\n{}", keep2.join("\n"), output_contract_line);
-                            raw = Self::llm_chat_once(ctx, retry_prompt2, llm_options.clone()).await?;
+                            let retry_prompt2 =
+                                format!("{}\n{}", keep2.join("\n"), output_contract_line);
+                            raw = Self::llm_chat_once(ctx, retry_prompt2, llm_options.clone())
+                                .await?;
                             Self::parse_agent_step(&raw)?
                         }
                     }
@@ -1311,8 +1322,8 @@ mod tests {
                 reasoning_effort: None,
             },
         )
-            .await
-            .expect("ok");
+        .await
+        .expect("ok");
         match out {
             RunOutcome::Final { result, .. } => {
                 assert_eq!(result.kind, "generic");
@@ -1327,8 +1338,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_until_block_passes_llm_call_options_through() {
-        let last_opts: Arc<Mutex<Option<crate::llm::LlmCallOptions>>> =
-            Arc::new(Mutex::new(None));
+        let last_opts: Arc<Mutex<Option<crate::llm::LlmCallOptions>>> = Arc::new(Mutex::new(None));
         let llm = Arc::new(CapturingOptionsModel {
             replies: Arc::new(Mutex::new(vec![
                 "{\"type\":\"final\",\"name\":null,\"args\":null,\"final\":{\"kind\":\"generic\",\"payload\":\"{\\\"text\\\":\\\"ok\\\"}\",\"display\":null}}".to_string(),
@@ -1377,11 +1387,7 @@ mod tests {
         let _out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q", opts)
             .await
             .expect("ok");
-        let got = last_opts
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
-            .expect("opts");
+        let got = last_opts.lock().ok().and_then(|g| g.clone()).expect("opts");
         assert_eq!(got.temperature, Some(0.9));
         assert_eq!(got.top_p, Some(0.8));
         assert_eq!(got.max_output_tokens, Some(1234));
@@ -1442,8 +1448,8 @@ mod tests {
                 reasoning_effort: None,
             },
         )
-            .await
-            .expect("ok");
+        .await
+        .expect("ok");
         match out {
             RunOutcome::Final { result, .. } => {
                 assert_eq!(result.kind, "generic");
@@ -1465,7 +1471,11 @@ mod tests {
             ParsedStep::Final { final_env } => {
                 assert_eq!(final_env.kind, "generic");
                 assert_eq!(
-                    final_env.payload.get("text").and_then(|x| x.as_str()).unwrap(),
+                    final_env
+                        .payload
+                        .get("text")
+                        .and_then(|x| x.as_str())
+                        .unwrap(),
                     "line1\nline2"
                 );
             }
@@ -1578,7 +1588,9 @@ mod tests {
             // If the agent incorrectly retries, it would consume this.
             "{\"type\":\"tool\",\"name\":\"noop\",\"args\":\"{}\",\"final\":null}".to_string(),
         ]));
-        let llm = Arc::new(ScriptedModel { replies: replies.clone() });
+        let llm = Arc::new(ScriptedModel {
+            replies: replies.clone(),
+        });
         let storage = Arc::new(InMemoryStorageAdapter::default());
         let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
         let scope = RequestScope {

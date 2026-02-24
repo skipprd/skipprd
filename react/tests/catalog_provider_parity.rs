@@ -3,8 +3,8 @@ use std::sync::Arc;
 use react::providers::catalog::DefaultCatalogProvider;
 use react_core::keyspace::{DefaultKeyspace, Keyspace};
 use react_core::llm::{LargeLanguageModel, NullModel};
-use react_core::providers::{CatalogProvider, DataCatalog, SemanticModel};
 use react_core::providers::catalog::types::GlobalSemanticContext;
+use react_core::providers::{CatalogProvider, DataCatalog, SemanticModel};
 use react_core::scope::RequestScope;
 use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
 
@@ -94,7 +94,10 @@ async fn global_semantic_context_is_written_under_semantic_global_key() {
             _messages: &[react_core::llm::ChatMessage],
             _options: &react_core::llm::LlmCallOptions,
         ) -> Result<String, String> {
-            let mut g = self.replies.lock().map_err(|_| "mutex poisoned".to_string())?;
+            let mut g = self
+                .replies
+                .lock()
+                .map_err(|_| "mutex poisoned".to_string())?;
             if g.is_empty() {
                 return Err("no more replies".to_string());
             }
@@ -176,8 +179,14 @@ async fn global_semantic_context_is_written_under_semantic_global_key() {
     .await
     .expect("global context enrichment");
 
-    let gkey = keyspace.semantic_key(&scope, react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID);
-    let raw = storage.get_json(&gkey).await.expect("global semantic stored");
+    let gkey = keyspace.semantic_key(
+        &scope,
+        react_core::providers::catalog::types::GLOBAL_SEMANTIC_DATASET_ID,
+    );
+    let raw = storage
+        .get_json(&gkey)
+        .await
+        .expect("global semantic stored");
     let ctx: GlobalSemanticContext = serde_json::from_value(raw).expect("deserializable");
     assert!(ctx.audiences.iter().any(|a| a.audience == "finance"));
     assert!(!ctx

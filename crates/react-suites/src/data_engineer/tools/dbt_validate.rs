@@ -42,7 +42,9 @@ async fn derive_select_terms(ctx: &AgentCtx, args: &Value) -> Vec<String> {
         return vec![];
     };
     match store.get(thread_id).await {
-        Ok(log) => crate::data_engineer::control_flow::derive_targeted_select_terms(ctx, &log).await,
+        Ok(log) => {
+            crate::data_engineer::control_flow::derive_targeted_select_terms(ctx, &log).await
+        }
         Err(_) => vec![],
     }
 }
@@ -72,7 +74,11 @@ async fn probe_compiled_model_sql(
     select_terms: &[String],
 ) -> Result<serde_json::Value, String> {
     let compiled_prefix = format!("{}target/compiled/", ctx.keyspace.dbt_prefix(&ctx.scope));
-    let mut keys = ctx.storage.list_prefix(&compiled_prefix).await.unwrap_or_default();
+    let mut keys = ctx
+        .storage
+        .list_prefix(&compiled_prefix)
+        .await
+        .unwrap_or_default();
     keys.sort();
     keys.dedup();
     let keys: Vec<String> = keys
@@ -109,7 +115,8 @@ async fn probe_compiled_model_sql(
         match ctx.warehouse.query(&probe_sql).await {
             Ok(qr) => {
                 probed = probed.saturating_add(1);
-                let dups = crate::data_engineer::sql_first::detect_duplicate_output_columns(&qr.header);
+                let dups =
+                    crate::data_engineer::sql_first::detect_duplicate_output_columns(&qr.header);
                 if !dups.is_empty() {
                     failures.push(serde_json::json!({
                         "key": key,
@@ -303,16 +310,17 @@ impl Tool for DbtValidateTool {
                         select: Some(select_terms.clone()),
                         exclude: None,
                     };
-                    let (res2, rep2) = crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
-                        ctx,
-                        dbt,
-                        &selective_args,
-                        max_iters,
-                        self.datasets.as_ref(),
-                        self.catalog.as_ref(),
-                        dataset_ids.as_deref(),
-                    )
-                    .await?;
+                    let (res2, rep2) =
+                        crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
+                            ctx,
+                            dbt,
+                            &selective_args,
+                            max_iters,
+                            self.datasets.as_ref(),
+                            self.catalog.as_ref(),
+                            dataset_ids.as_deref(),
+                        )
+                        .await?;
                     ladder.push(ValidationLadderPhase {
                         phase: "selective_build".to_string(),
                         select_terms: select_terms.clone(),
@@ -336,16 +344,17 @@ impl Tool for DbtValidateTool {
                             select: None,
                             exclude: None,
                         };
-                        let (res3, rep3) = crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
-                            ctx,
-                            dbt,
-                            &full_args,
-                            max_iters,
-                            self.datasets.as_ref(),
-                            self.catalog.as_ref(),
-                            dataset_ids.as_deref(),
-                        )
-                        .await?;
+                        let (res3, rep3) =
+                            crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
+                                ctx,
+                                dbt,
+                                &full_args,
+                                max_iters,
+                                self.datasets.as_ref(),
+                                self.catalog.as_ref(),
+                                dataset_ids.as_deref(),
+                            )
+                            .await?;
                         ladder.push(ValidationLadderPhase {
                             phase: "full_build".to_string(),
                             select_terms: vec![],
@@ -369,16 +378,17 @@ impl Tool for DbtValidateTool {
                         select: None,
                         exclude: None,
                     };
-                    let (res3, rep3) = crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
-                        ctx,
-                        dbt,
-                        &full_args,
-                        max_iters,
-                        self.datasets.as_ref(),
-                        self.catalog.as_ref(),
-                        dataset_ids.as_deref(),
-                    )
-                    .await?;
+                    let (res3, rep3) =
+                        crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
+                            ctx,
+                            dbt,
+                            &full_args,
+                            max_iters,
+                            self.datasets.as_ref(),
+                            self.catalog.as_ref(),
+                            dataset_ids.as_deref(),
+                        )
+                        .await?;
                     ladder.push(ValidationLadderPhase {
                         phase: "full_build".to_string(),
                         select_terms: vec![],
@@ -393,24 +403,25 @@ impl Tool for DbtValidateTool {
                 }
             }
         } else {
-            let (res, repair_report) = crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
-                ctx,
-                dbt,
-                &react_core::providers::DbtValidateArgs {
-                    project_name: project_name.to_string(),
-                    profiles_dir: profiles_dir.clone(),
-                    target: target.clone(),
-                    run,
-                    build,
-                    select: None,
-                    exclude: None,
-                },
-                max_iters,
-                self.datasets.as_ref(),
-                self.catalog.as_ref(),
-                dataset_ids.as_deref(),
-            )
-            .await?;
+            let (res, repair_report) =
+                crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
+                    ctx,
+                    dbt,
+                    &react_core::providers::DbtValidateArgs {
+                        project_name: project_name.to_string(),
+                        profiles_dir: profiles_dir.clone(),
+                        target: target.clone(),
+                        run,
+                        build,
+                        select: None,
+                        exclude: None,
+                    },
+                    max_iters,
+                    self.datasets.as_ref(),
+                    self.catalog.as_ref(),
+                    dataset_ids.as_deref(),
+                )
+                .await?;
             ladder.push(ValidationLadderPhase {
                 phase: "default".to_string(),
                 select_terms: vec![],

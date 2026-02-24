@@ -28,30 +28,6 @@ Finalization criteria:
     .to_string()
 }
 
-pub fn tool_card() -> String {
-    r#"Tools:
-- vect_query(args:{scope:"dataset"|"field"|"doc", query_text:string, k:int}) -> {"ok":true,"items":[{"kind":string,"namespace":string,"dataset":string,"field":string?,"text":string,"score":float}]}
-- sql_schema(args:{table?:string}) -> {"ok":true,"tables":[...]} or {"ok":true,"columns":[{"name":string,"type":string}]} (tables should be fully-qualified when known)
-- sql_stats(args:{table:string, field:string}) -> {"ok":true,"stats":{"distinct":int?,"min":float?,"max":float?,"max_len":int?,"nulls":int}}
-- sql_sample(args:{table:string, field:string, k:int}) -> {"ok":true,"values":[{"value":string,"count":int}]}
-- run_sql(args:{sql:string}) -> {"ok":true,"header":[string], "rows":[[string]]} or {"ok":false,"error":string}
- - ask_user(args:{prompt:string}) -> {"ok":true,"prompt":string}
- - artifacts(args:{op:"list", dataset_id?:string, type?:"model"|"metric", limit?:int} | {op:"get", dataset_id:string, type:"model"|"metric", name:string})
-
-Usage guidance:
-- When a vect_query item includes dataset, treat it as the authoritative fully-qualified table name and use it for sql_schema/sql_stats/sql_sample/run_sql.
-- Never invent or default the schema/catalog (e.g., do not use 'default.<ns>'). If dataset is missing, first call vect_query again (scope="dataset") to obtain it.
-- Use vect_query scope="doc" to retrieve company context if helpful (and to validate your assumptions).
-- Use vect_query scope="dataset"/"field" to discover adjacent datasets or fields that may improve the answer (joins, identifiers, time columns).
-- Use sql_schema/sql_stats/sql_sample to validate fields and types before writing SQL.
-- Use run_sql to validate and obtain actual numbers before finalizing the answer.
-- For “activity/conversion yesterday”, prefer:
-  - Headline metric: COUNT(*) or an obvious measure for the period.
-  - Breakdown: TOP-N by a relevant dimension (e.g., type/event/device) to identify the primary driver.
-  - Context: compare to the prior day or week if possible using the data at hand."#
-        .to_string()
-}
-
 pub fn intent_extraction(user_q: &str) -> String {
     format!(
         r#"You are a data analyst. Extract the analysis intent from the Question.

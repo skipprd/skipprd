@@ -565,7 +565,7 @@ pub async fn remediate_dbt_sql_keys_with_llm(
             },
         ];
         let call_opts = LlmCallOptions {
-        prompt_id: "data_engineer.dbt_dialect_remediation",
+            prompt_id: "data_engineer.dbt_dialect_remediation",
             thread_id: ctx.thread_id.clone(),
             expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
             temperature: Some(0.0),
@@ -1185,25 +1185,24 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         })
         .to_string();
 
-        let (outcome, _notes) =
-            crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
-                ctx,
-                None,
-                sys_prompt,
-                user_payload,
-                &rel,
-                4,
-                Some(LlmCallOptions {
-                    prompt_id: "data_engineer.dbt_grounded_repair_patch",
-                    thread_id: ctx.thread_id.clone(),
-                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                    max_output_tokens: None,
-                    temperature: Some(0.0),
-                    top_p: Some(1.0),
-                    reasoning_effort: None,
-                }),
-            )
-            .await?;
+        let (outcome, _notes) = crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
+            ctx,
+            None,
+            sys_prompt,
+            user_payload,
+            &rel,
+            4,
+            Some(LlmCallOptions {
+                prompt_id: "data_engineer.dbt_grounded_repair_patch",
+                thread_id: ctx.thread_id.clone(),
+                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                max_output_tokens: None,
+                temperature: Some(0.0),
+                top_p: Some(1.0),
+                reasoning_effort: None,
+            }),
+        )
+        .await?;
 
         // Safety: ensure the file we patched matches the base we scoped this remediation to.
         if outcome.base_sha256 != expected_base {
@@ -1612,25 +1611,24 @@ pub async fn remediate_unresolved_columns_with_llm(
         })
         .to_string();
 
-        let (outcome, _notes) =
-            crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
-                ctx,
-                None,
-                sys_prompt,
-                user_payload,
-                &rel,
-                4,
-                Some(LlmCallOptions {
-                    prompt_id: "data_engineer.dbt_resolve_missing_columns_patch",
-                    thread_id: ctx.thread_id.clone(),
-                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                    max_output_tokens: None,
-                    temperature: Some(0.0),
-                    top_p: Some(1.0),
-                    reasoning_effort: None,
-                }),
-            )
-            .await?;
+        let (outcome, _notes) = crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
+            ctx,
+            None,
+            sys_prompt,
+            user_payload,
+            &rel,
+            4,
+            Some(LlmCallOptions {
+                prompt_id: "data_engineer.dbt_resolve_missing_columns_patch",
+                thread_id: ctx.thread_id.clone(),
+                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                max_output_tokens: None,
+                temperature: Some(0.0),
+                top_p: Some(1.0),
+                reasoning_effort: None,
+            }),
+        )
+        .await?;
 
         if outcome.base_sha256 != expected_base {
             return Err(format!(

@@ -128,8 +128,8 @@ async fn agent_default_policy_accepts_typed_final() {
             reasoning_effort: None,
         },
     )
-        .await
-        .expect("run");
+    .await
+    .expect("run");
     match out {
         RunOutcome::Final { result, .. } => {
             assert_eq!(result.kind, "kb");
@@ -191,8 +191,8 @@ async fn agent_does_not_special_case_ask_user_tool_name() {
             reasoning_effort: None,
         },
     )
-        .await
-        .expect("run");
+    .await
+    .expect("run");
     match out {
         // OK: did not become AwaitUser automatically from tool name; it simply hit fallback.
         RunOutcome::AwaitUser { .. } => {}
@@ -252,8 +252,8 @@ async fn agent_interrupts_only_when_policy_requests_it() {
             reasoning_effort: None,
         },
     )
-        .await
-        .expect("run");
+    .await
+    .expect("run");
     match out {
         RunOutcome::AwaitUser { prompt, .. } => assert_eq!(prompt, "hi"),
         _ => panic!("expected AwaitUser"),
