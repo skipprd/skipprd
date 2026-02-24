@@ -1595,6 +1595,67 @@ fn group_deps_satisfied(
     deps.iter().all(|d| completed.contains(d))
 }
 
+fn next_action_from_work_groups(
+    work_groups: &[PlanWorkGroup],
+    completed: &std::collections::HashSet<String>,
+    mut item_needs_work: impl FnMut(&WorkGroupItemRef) -> bool,
+) -> Option<(WorkGroupKind, Vec<String>)> {
+    for g in work_groups.iter() {
+        if completed.contains(&g.group_id) {
+            continue;
+        }
+        if !group_deps_satisfied(completed, g.depends_on_group_ids.as_ref()) {
+            continue;
+        }
+        if g.kind == WorkGroupKind::Validate {
+            return Some((WorkGroupKind::Validate, vec![]));
+        }
+
+        let mut out: Vec<String> = Vec::new();
+        for it in g.items.iter() {
+            if item_needs_work(it) {
+                if !out.contains(&it.task_id) {
+                    out.push(it.task_id.clone());
+                }
+                if out.len() >= 5 {
+                    break;
+                }
+            }
+        }
+        return Some((g.kind, out));
+    }
+    Some((WorkGroupKind::Validate, vec![]))
+}
+
+fn next_work_item_ctx_from_work_groups(
+    work_groups: &[PlanWorkGroup],
+    completed: &std::collections::HashSet<String>,
+    mut item_needs_work: impl FnMut(&WorkGroupItemRef) -> bool,
+) -> Option<NextWorkItemCtx> {
+    for g in work_groups.iter() {
+        if completed.contains(&g.group_id) {
+            continue;
+        }
+        if !group_deps_satisfied(completed, g.depends_on_group_ids.as_ref()) {
+            continue;
+        }
+        if g.kind == WorkGroupKind::Validate {
+            return None;
+        }
+        for it in g.items.iter() {
+            if item_needs_work(it) {
+                return Some(NextWorkItemCtx {
+                    workgroup_id: g.group_id.clone(),
+                    workgroup_label: Some(g.label.clone()).filter(|s| !s.trim().is_empty()),
+                    task_id: it.task_id.clone(),
+                    checklist_item_id: it.checklist_item_id.clone(),
+                });
+            }
+        }
+    }
+    None
+}
+
 /// Returns the next work-group driven action for the cleanse plan.
 /// - If `work_groups` is empty, returns None because the plan is non-executable.
 /// - For `AuthorSql` / `AuthorSchema`, returns up to 5 task_ids that still need that checklist item.
@@ -1610,41 +1671,15 @@ fn cleanse_next_action_from_work_groups(plan: &CleansePlan) -> Option<(WorkGroup
             completed.insert(g.group_id.clone());
         }
     }
-
-    for g in plan.work_groups.iter() {
-        if completed.contains(&g.group_id) {
-            continue;
+    next_action_from_work_groups(&plan.work_groups, &completed, |it| {
+        match plan.tasks.iter().find(|t| t.dataset_id == it.task_id) {
+            Some(t) => is_runnable_checklist_status(checklist_status(
+                &t.checklist,
+                it.checklist_item_id.as_str(),
+            )),
+            None => true,
         }
-        if !group_deps_satisfied(&completed, g.depends_on_group_ids.as_ref()) {
-            continue;
-        }
-
-        if g.kind == WorkGroupKind::Validate {
-            return Some((WorkGroupKind::Validate, vec![]));
-        }
-
-        let mut out: Vec<String> = Vec::new();
-        for it in g.items.iter() {
-            let need = match plan.tasks.iter().find(|t| t.dataset_id == it.task_id) {
-                Some(t) => is_runnable_checklist_status(checklist_status(
-                    &t.checklist,
-                    it.checklist_item_id.as_str(),
-                )),
-                None => true,
-            };
-            if need {
-                if !out.contains(&it.task_id) {
-                    out.push(it.task_id.clone());
-                }
-                if out.len() >= 5 {
-                    break;
-                }
-            }
-        }
-        return Some((g.kind, out));
-    }
-
-    Some((WorkGroupKind::Validate, vec![]))
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1671,36 +1706,15 @@ pub fn cleanse_next_work_item_ctx(plan: &CleansePlan) -> Option<NextWorkItemCtx>
             completed.insert(g.group_id.clone());
         }
     }
-
-    for g in plan.work_groups.iter() {
-        if completed.contains(&g.group_id) {
-            continue;
+    next_work_item_ctx_from_work_groups(&plan.work_groups, &completed, |it| {
+        match plan.tasks.iter().find(|t| t.dataset_id == it.task_id) {
+            Some(t) => is_runnable_checklist_status(checklist_status(
+                &t.checklist,
+                it.checklist_item_id.as_str(),
+            )),
+            None => true,
         }
-        if !group_deps_satisfied(&completed, g.depends_on_group_ids.as_ref()) {
-            continue;
-        }
-        if g.kind == WorkGroupKind::Validate {
-            return None;
-        }
-        for it in g.items.iter() {
-            let need = match plan.tasks.iter().find(|t| t.dataset_id == it.task_id) {
-                Some(t) => is_runnable_checklist_status(checklist_status(
-                    &t.checklist,
-                    it.checklist_item_id.as_str(),
-                )),
-                None => true,
-            };
-            if need {
-                return Some(NextWorkItemCtx {
-                    workgroup_id: g.group_id.clone(),
-                    workgroup_label: Some(g.label.clone()).filter(|s| !s.trim().is_empty()),
-                    task_id: it.task_id.clone(),
-                    checklist_item_id: it.checklist_item_id.clone(),
-                });
-            }
-        }
-    }
-    None
+    })
 }
 
 /// Returns the next work-group driven action for the model plan.
@@ -1718,41 +1732,15 @@ fn model_next_action_from_work_groups(plan: &ModelPlan) -> Option<(WorkGroupKind
             completed.insert(g.group_id.clone());
         }
     }
-
-    for g in plan.work_groups.iter() {
-        if completed.contains(&g.group_id) {
-            continue;
+    next_action_from_work_groups(&plan.work_groups, &completed, |it| {
+        match plan.tasks.iter().find(|t| t.name == it.task_id) {
+            Some(t) => is_runnable_checklist_status(checklist_status(
+                &t.checklist,
+                it.checklist_item_id.as_str(),
+            )),
+            None => true,
         }
-        if !group_deps_satisfied(&completed, g.depends_on_group_ids.as_ref()) {
-            continue;
-        }
-
-        if g.kind == WorkGroupKind::Validate {
-            return Some((WorkGroupKind::Validate, vec![]));
-        }
-
-        let mut out: Vec<String> = Vec::new();
-        for it in g.items.iter() {
-            let need = match plan.tasks.iter().find(|t| t.name == it.task_id) {
-                Some(t) => is_runnable_checklist_status(checklist_status(
-                    &t.checklist,
-                    it.checklist_item_id.as_str(),
-                )),
-                None => true,
-            };
-            if need {
-                if !out.contains(&it.task_id) {
-                    out.push(it.task_id.clone());
-                }
-                if out.len() >= 5 {
-                    break;
-                }
-            }
-        }
-        return Some((g.kind, out));
-    }
-
-    Some((WorkGroupKind::Validate, vec![]))
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1802,36 +1790,15 @@ pub fn model_next_work_item_ctx(plan: &ModelPlan) -> Option<NextWorkItemCtx> {
             completed.insert(g.group_id.clone());
         }
     }
-
-    for g in plan.work_groups.iter() {
-        if completed.contains(&g.group_id) {
-            continue;
+    next_work_item_ctx_from_work_groups(&plan.work_groups, &completed, |it| {
+        match plan.tasks.iter().find(|t| t.name == it.task_id) {
+            Some(t) => is_runnable_checklist_status(checklist_status(
+                &t.checklist,
+                it.checklist_item_id.as_str(),
+            )),
+            None => true,
         }
-        if !group_deps_satisfied(&completed, g.depends_on_group_ids.as_ref()) {
-            continue;
-        }
-        if g.kind == WorkGroupKind::Validate {
-            return None;
-        }
-        for it in g.items.iter() {
-            let need = match plan.tasks.iter().find(|t| t.name == it.task_id) {
-                Some(t) => is_runnable_checklist_status(checklist_status(
-                    &t.checklist,
-                    it.checklist_item_id.as_str(),
-                )),
-                None => true,
-            };
-            if need {
-                return Some(NextWorkItemCtx {
-                    workgroup_id: g.group_id.clone(),
-                    workgroup_label: Some(g.label.clone()).filter(|s| !s.trim().is_empty()),
-                    task_id: it.task_id.clone(),
-                    checklist_item_id: it.checklist_item_id.clone(),
-                });
-            }
-        }
-    }
-    None
+    })
 }
 
 pub fn cleanse_pending_schema_contracts(plan: &CleansePlan) -> Vec<String> {
