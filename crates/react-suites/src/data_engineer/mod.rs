@@ -290,6 +290,17 @@ struct SubjectiveRetryState {
     last_ts: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlanningLlmProfile {
+    DiscoveryCleanse,
+    DiscoveryModel,
+    DesignMemo,
+    DesignCritique,
+    SkeletonOrCandidates,
+    EnrichmentCompile,
+    EnrichmentReason,
+}
+
 impl DataEngineerSuite {
     fn subjective_retry_limit() -> usize {
         std::env::var("AGENT_MAX_SUBJECTIVE_RETRIES")
@@ -343,6 +354,246 @@ impl DataEngineerSuite {
                 }),
             )
             .await;
+    }
+
+    fn planning_llm_options(
+        profile: PlanningLlmProfile,
+        prompt_id: &'static str,
+        thread_id: Option<String>,
+    ) -> LlmCallOptions {
+        match profile {
+            PlanningLlmProfile::DiscoveryCleanse => {
+                let max_tokens = std::env::var("LLM_PLAN_MAX_TOKENS_CLEANSE")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(96_000)
+                    .max(4_000);
+                let reasoning_effort =
+                    Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT_CLEANSE")
+                        .or_else(|| Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT"))
+                        .unwrap_or(react_core::llm::ReasoningEffort::Medium);
+                LlmCallOptions {
+                    prompt_id,
+                    thread_id,
+                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                    temperature: Some(0.20),
+                    top_p: Some(1.0),
+                    max_output_tokens: Some(max_tokens),
+                    reasoning_effort: Some(reasoning_effort),
+                }
+            }
+            PlanningLlmProfile::DiscoveryModel => {
+                let max_tokens = std::env::var("LLM_PLAN_MAX_TOKENS_MODEL")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(128_000)
+                    .max(8_000);
+                let reasoning_effort =
+                    Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT_MODEL")
+                        .or_else(|| Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT"))
+                        .unwrap_or(react_core::llm::ReasoningEffort::Medium);
+                LlmCallOptions {
+                    prompt_id,
+                    thread_id,
+                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                    temperature: Some(0.55),
+                    top_p: Some(0.95),
+                    max_output_tokens: Some(max_tokens),
+                    reasoning_effort: Some(reasoning_effort),
+                }
+            }
+            PlanningLlmProfile::DesignMemo => {
+                let max_tokens = std::env::var("LLM_PLAN_MEMO_MAX_TOKENS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(64_000)
+                    .max(8_000);
+                let reasoning_effort = Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT")
+                    .unwrap_or(react_core::llm::ReasoningEffort::Medium);
+                LlmCallOptions {
+                    prompt_id,
+                    thread_id,
+                    expected_format: react_core::llm::LlmExpectedFormat::Text,
+                    temperature: Some(0.2),
+                    top_p: Some(1.0),
+                    max_output_tokens: Some(max_tokens),
+                    reasoning_effort: Some(reasoning_effort),
+                }
+            }
+            PlanningLlmProfile::DesignCritique => {
+                let max_tokens = std::env::var("LLM_PLAN_CRITIQUE_MAX_TOKENS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(16_000)
+                    .max(4_000);
+                LlmCallOptions {
+                    prompt_id,
+                    thread_id,
+                    expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(
+                        react_core::schema_registry::SchemaId::PlanDesignCritiqueV1,
+                    ),
+                    temperature: Some(0.10),
+                    top_p: Some(1.0),
+                    max_output_tokens: Some(max_tokens),
+                    reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
+                }
+            }
+            PlanningLlmProfile::SkeletonOrCandidates => {
+                let max_tokens = std::env::var("LLM_PLAN_SKELETON_MAX_TOKENS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(24_000)
+                    .max(6_000);
+                LlmCallOptions {
+                    prompt_id,
+                    thread_id,
+                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                    temperature: Some(0.1),
+                    top_p: Some(1.0),
+                    max_output_tokens: Some(max_tokens),
+                    reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
+                }
+            }
+            PlanningLlmProfile::EnrichmentCompile => {
+                let max_tokens = std::env::var("LLM_PLAN_ENRICH_MAX_TOKENS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(32_000)
+                    .max(6_000);
+                LlmCallOptions {
+                    prompt_id,
+                    thread_id,
+                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                    temperature: Some(0.10),
+                    top_p: Some(1.0),
+                    max_output_tokens: Some(max_tokens),
+                    reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
+                }
+            }
+            PlanningLlmProfile::EnrichmentReason => {
+                let max_tokens = std::env::var("LLM_PLAN_ENRICH_REASON_MAX_TOKENS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(8_000)
+                    .max(2_000);
+                LlmCallOptions {
+                    prompt_id,
+                    thread_id,
+                    expected_format: react_core::llm::LlmExpectedFormat::Text,
+                    temperature: Some(0.20),
+                    top_p: Some(1.0),
+                    max_output_tokens: Some(max_tokens),
+                    reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
+                }
+            }
+        }
+    }
+
+    fn first_column_name_from_sql_schema_observation(obs: &serde_json::Value) -> Option<String> {
+        obs.get("columns")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter().find_map(|c| {
+                    c.get("name")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+            })
+    }
+
+    fn is_valid_grounding_evidence_tool(name: &str, args: &serde_json::Value) -> bool {
+        match name {
+            "sql_stats" | "sql_sample" => {
+                args.get("table")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+                    && args
+                        .get("field")
+                        .and_then(|v| v.as_str())
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false)
+            }
+            "run_sql" => args
+                .get("sql")
+                .and_then(|v| v.as_str())
+                .map(|sql| {
+                    let q = sql.to_ascii_lowercase();
+                    q.contains("count(") || q.contains(" limit ")
+                })
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    async fn run_deterministic_probe_for_table(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+        actx: &AgentCtx,
+        sql_schema_tool: &tools::sql_schema::SqlSchemaTool,
+        sql_stats_tool: &tools::sql_stats::SqlStatsTool,
+        sql_sample_tool: &tools::sql_sample::SqlSampleTool,
+        run_sql_tool: &tools::sql_run::SqlRunTool,
+        table: &str,
+        sql_schema_timeout: u64,
+        sql_stats_timeout: u64,
+        sql_sample_timeout: u64,
+        run_sql_timeout: u64,
+    ) -> (bool, Option<String>) {
+        let schema_obs = control_flow::call_and_record_tool(
+            thread_store,
+            thread_id,
+            Some("agent".to_string()),
+            sql_schema_tool,
+            serde_json::json!({"table": table}),
+            actx,
+            sql_schema_timeout,
+        )
+        .await;
+        let first_field = Self::first_column_name_from_sql_schema_observation(&schema_obs);
+        if let Some(field) = first_field.as_ref() {
+            let stats_obs = control_flow::call_and_record_tool(
+                thread_store,
+                thread_id,
+                Some("agent".to_string()),
+                sql_stats_tool,
+                serde_json::json!({"table": table, "field": field}),
+                actx,
+                sql_stats_timeout,
+            )
+            .await;
+            if stats_obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return (true, Some(field.clone()));
+            }
+            let sample_obs = control_flow::call_and_record_tool(
+                thread_store,
+                thread_id,
+                Some("agent".to_string()),
+                sql_sample_tool,
+                serde_json::json!({"table": table, "field": field, "k": 10}),
+                actx,
+                sql_sample_timeout,
+            )
+            .await;
+            if sample_obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return (true, Some(field.clone()));
+            }
+        }
+        let run_obs = control_flow::call_and_record_tool(
+            thread_store,
+            thread_id,
+            Some("agent".to_string()),
+            run_sql_tool,
+            serde_json::json!({"sql": format!("SELECT count(*) AS total FROM {}", table)}),
+            actx,
+            run_sql_timeout,
+        )
+        .await;
+        (
+            run_obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            first_field,
+        )
     }
 
     fn review_retry_kind(decision: ReviewDecision) -> Option<&'static str> {
@@ -863,8 +1114,42 @@ impl DataEngineerSuite {
     ) -> Result<(T, Vec<String>), String> {
         let v = Self::parse_json_object_lenient(raw)?;
         let (sv, stripped) = Self::sanitize_impl_spec_value(v, is_cleanse);
+        Self::validate_output_field_kind_contract(&sv)?;
         let spec = serde_json::from_value::<T>(sv).map_err(|e| e.to_string())?;
         Ok((spec, stripped))
+    }
+
+    fn validate_output_field_kind_contract(v: &serde_json::Value) -> Result<(), String> {
+        let Some(obj) = v.as_object() else {
+            return Ok(());
+        };
+        let Some(output_fields) = obj.get("output_fields") else {
+            return Ok(());
+        };
+        let Some(arr) = output_fields.as_array() else {
+            return Ok(());
+        };
+        let mut errs: Vec<String> = Vec::new();
+        for (idx, it) in arr.iter().enumerate() {
+            let Some(kv) = it.get("kind") else {
+                continue;
+            };
+            let Some(ks) = kv.as_str() else {
+                errs.push(format!("output_fields[{idx}].kind must be a string"));
+                continue;
+            };
+            if !matches!(ks, "raw" | "clean" | "derived" | "quality_flag") {
+                errs.push(format!("output_fields[{idx}].kind='{}' is invalid", ks));
+            }
+        }
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{}; allowed kind values: raw, clean, derived, quality_flag",
+                errs.join("; ")
+            ))
+        }
     }
 
     fn push_snapshot_array_event(
@@ -909,23 +1194,11 @@ impl DataEngineerSuite {
             "Planning kind: {kind}\n\nContext:\n{}\n\nWrite the design memo.",
             Self::excerpt(planning_context, 120_000)
         );
-        let max_tokens: u32 = std::env::var("LLM_PLAN_MEMO_MAX_TOKENS")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(64_000)
-            .max(8_000);
-        let opts = LlmCallOptions {
-            prompt_id: "data_engineer.plan_design_memo",
-            thread_id: ctx.thread_id.clone(),
-            expected_format: react_core::llm::LlmExpectedFormat::Text,
-            temperature: Some(0.2),
-            top_p: Some(1.0),
-            max_output_tokens: Some(max_tokens),
-            reasoning_effort: Some(
-                Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT")
-                    .unwrap_or(react_core::llm::ReasoningEffort::Medium),
-            ),
-        };
+        let opts = Self::planning_llm_options(
+            PlanningLlmProfile::DesignMemo,
+            "data_engineer.plan_design_memo",
+            ctx.thread_id.clone(),
+        );
         ctx.llm.chat(&[
             ChatMessage {
                 role: "system".to_string(),
@@ -946,23 +1219,11 @@ impl DataEngineerSuite {
     ) -> Result<react_core::schema_registry::PlanDesignCritiqueV1, String> {
         use react_core::llm::ChatMessage;
         let kind = if is_cleanse { "cleanse_plan" } else { "model_plan" };
-        let opts = LlmCallOptions {
-            prompt_id: "data_engineer.plan_design_critique",
-            thread_id: ctx.thread_id.clone(),
-            expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(
-                react_core::schema_registry::SchemaId::PlanDesignCritiqueV1,
-            ),
-            temperature: Some(0.1),
-            top_p: Some(1.0),
-            max_output_tokens: Some(
-                std::env::var("LLM_PLAN_CRITIQUE_MAX_TOKENS")
-                    .ok()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(16_000)
-                    .max(2_000),
-            ),
-            reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
-        };
+        let opts = Self::planning_llm_options(
+            PlanningLlmProfile::DesignCritique,
+            "data_engineer.plan_design_critique",
+            ctx.thread_id.clone(),
+        );
         let sys = crate::prompts::plan::plan_design_critique_system_prompt(kind);
         let user = format!(
             "Planning kind: {kind}\n\nContext:\n{}\n\nDesign memo:\n{}\n\nReturn critique JSON.",
@@ -1028,23 +1289,14 @@ Apply these fixes in the output.",
         critique: &react_core::schema_registry::PlanDesignCritiqueV1,
     ) -> Result<react_core::schema_registry::CleansePlanSkeletonV1, String> {
         use react_core::llm::ChatMessage;
-        let opts = LlmCallOptions {
-            prompt_id: "data_engineer.cleanse_plan_skeleton",
-            thread_id: ctx.thread_id.clone(),
-            expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(
-                react_core::schema_registry::SchemaId::CleansePlanSkeletonV1,
-            ),
-            temperature: Some(0.1),
-            top_p: Some(1.0),
-            max_output_tokens: Some(
-                std::env::var("LLM_PLAN_SKELETON_MAX_TOKENS")
-                    .ok()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(24_000)
-                    .max(4_000),
-            ),
-            reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
-        };
+        let mut opts = Self::planning_llm_options(
+            PlanningLlmProfile::SkeletonOrCandidates,
+            "data_engineer.cleanse_plan_skeleton",
+            ctx.thread_id.clone(),
+        );
+        opts.expected_format = react_core::llm::LlmExpectedFormat::JsonSchema(
+            react_core::schema_registry::SchemaId::CleansePlanSkeletonV1,
+        );
         let sys = crate::prompts::plan::cleanse_plan_skeleton_system_prompt();
         let user = format!(
             "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nReturn skeleton JSON.",
@@ -1075,23 +1327,14 @@ Apply these fixes in the output.",
         critique: &react_core::schema_registry::PlanDesignCritiqueV1,
     ) -> Result<react_core::schema_registry::ModelPlanCandidatesV1, String> {
         use react_core::llm::ChatMessage;
-        let opts = LlmCallOptions {
-            prompt_id: "data_engineer.model_plan_candidates",
-            thread_id: ctx.thread_id.clone(),
-            expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(
-                react_core::schema_registry::SchemaId::ModelPlanCandidatesV1,
-            ),
-            temperature: Some(0.1),
-            top_p: Some(1.0),
-            max_output_tokens: Some(
-                std::env::var("LLM_PLAN_SKELETON_MAX_TOKENS")
-                    .ok()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(24_000)
-                    .max(4_000),
-            ),
-            reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
-        };
+        let mut opts = Self::planning_llm_options(
+            PlanningLlmProfile::SkeletonOrCandidates,
+            "data_engineer.model_plan_candidates",
+            ctx.thread_id.clone(),
+        );
+        opts.expected_format = react_core::llm::LlmExpectedFormat::JsonSchema(
+            react_core::schema_registry::SchemaId::ModelPlanCandidatesV1,
+        );
         let sys = crate::prompts::plan::model_plan_candidates_system_prompt();
         let user = format!(
             "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nReturn candidate-selection JSON.",
@@ -1289,23 +1532,40 @@ Apply these fixes in the output.",
                 summary,
                 serde_json::to_string_pretty(&chunk_vec).unwrap_or_else(|_| "[]".to_string())
             );
-            let opts = LlmCallOptions {
-                prompt_id: "data_engineer.cleanse_plan_enrich",
-                thread_id: ctx.thread_id.clone(),
-                expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(
-                    react_core::schema_registry::SchemaId::CleansePlanEnrichmentV1,
+            let reason_user = format!(
+                "Think through the enrichment strategy for these task_ids. Return plain text only, no JSON.\n\n{}",
+                base_user
+            );
+            let reason_memo = ctx.llm.chat(
+                &[
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: crate::prompts::plan::plan_enrichment_reason_system_prompt(),
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: reason_user,
+                    },
+                ],
+                &Self::planning_llm_options(
+                    PlanningLlmProfile::EnrichmentReason,
+                    "data_engineer.cleanse_plan_enrich_reason",
+                    ctx.thread_id.clone(),
                 ),
-                temperature: Some(0.15),
-                top_p: Some(1.0),
-                max_output_tokens: Some(
-                    std::env::var("LLM_PLAN_ENRICH_MAX_TOKENS")
-                        .ok()
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(32_000)
-                        .max(6_000),
-                ),
-                reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
-            };
+            )?;
+            let compile_user = format!(
+                "Reason memo:\n{}\n\n{}",
+                Self::excerpt(&reason_memo, 8_000),
+                base_user
+            );
+            let mut opts = Self::planning_llm_options(
+                PlanningLlmProfile::EnrichmentCompile,
+                "data_engineer.cleanse_plan_enrich",
+                ctx.thread_id.clone(),
+            );
+            opts.expected_format = react_core::llm::LlmExpectedFormat::JsonSchema(
+                react_core::schema_registry::SchemaId::CleansePlanEnrichmentV1,
+            );
             let raw = ctx.llm.chat(
                 &[
                     ChatMessage {
@@ -1314,7 +1574,7 @@ Apply these fixes in the output.",
                     },
                     ChatMessage {
                         role: "user".to_string(),
-                        content: base_user,
+                        content: compile_user,
                     },
                 ],
                 &opts,
@@ -1326,7 +1586,7 @@ Apply these fixes in the output.",
                 Self::apply_cleanse_enrichment_items(plan, &chunk_vec, enrich.items);
             if !failed.is_empty() {
                 let retry_hint = format!(
-                    "You previously returned invalid implementation_spec_json.\nErrors:\n{}\nOnly emit keys: spec_version,row_preserving,output_fields,prohibited_ops.\nNo wrappers, no extra fields.",
+                    "You previously returned invalid implementation_spec_json.\nErrors:\n{}\nOnly emit keys: spec_version,row_preserving,output_fields,prohibited_ops.\noutput_fields[].kind MUST be exactly one of: raw, clean, derived, quality_flag.\nDo not use synonyms like passthrough/source/base/quality.\nNo wrappers, no extra fields.",
                     failure_errors.join("\n")
                 );
                 let retry_user = format!(
@@ -1338,7 +1598,10 @@ Apply these fixes in the output.",
                     serde_json::to_string_pretty(&failed).unwrap_or_else(|_| "[]".to_string()),
                     retry_hint
                 );
-                let retry_opts = LlmCallOptions { prompt_id: "data_engineer.cleanse_plan_enrich_retry", ..opts };
+                let retry_opts = LlmCallOptions {
+                    prompt_id: "data_engineer.cleanse_plan_enrich_retry",
+                    ..opts
+                };
                 let retry_raw = ctx.llm.chat(
                     &[
                         ChatMessage {
@@ -1389,23 +1652,40 @@ Apply these fixes in the output.",
                 summary,
                 serde_json::to_string_pretty(&chunk_vec).unwrap_or_else(|_| "[]".to_string())
             );
-            let opts = LlmCallOptions {
-                prompt_id: "data_engineer.model_plan_enrich",
-                thread_id: ctx.thread_id.clone(),
-                expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(
-                    react_core::schema_registry::SchemaId::ModelPlanEnrichmentV1,
+            let reason_user = format!(
+                "Think through the enrichment strategy for these task_ids. Return plain text only, no JSON.\n\n{}",
+                base_user
+            );
+            let reason_memo = ctx.llm.chat(
+                &[
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: crate::prompts::plan::plan_enrichment_reason_system_prompt(),
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: reason_user,
+                    },
+                ],
+                &Self::planning_llm_options(
+                    PlanningLlmProfile::EnrichmentReason,
+                    "data_engineer.model_plan_enrich_reason",
+                    ctx.thread_id.clone(),
                 ),
-                temperature: Some(0.15),
-                top_p: Some(1.0),
-                max_output_tokens: Some(
-                    std::env::var("LLM_PLAN_ENRICH_MAX_TOKENS")
-                        .ok()
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(32_000)
-                        .max(6_000),
-                ),
-                reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
-            };
+            )?;
+            let compile_user = format!(
+                "Reason memo:\n{}\n\n{}",
+                Self::excerpt(&reason_memo, 8_000),
+                base_user
+            );
+            let mut opts = Self::planning_llm_options(
+                PlanningLlmProfile::EnrichmentCompile,
+                "data_engineer.model_plan_enrich",
+                ctx.thread_id.clone(),
+            );
+            opts.expected_format = react_core::llm::LlmExpectedFormat::JsonSchema(
+                react_core::schema_registry::SchemaId::ModelPlanEnrichmentV1,
+            );
             let raw = ctx.llm.chat(
                 &[
                     ChatMessage {
@@ -1414,7 +1694,7 @@ Apply these fixes in the output.",
                     },
                     ChatMessage {
                         role: "user".to_string(),
-                        content: base_user,
+                        content: compile_user,
                     },
                 ],
                 &opts,
@@ -1427,7 +1707,7 @@ Apply these fixes in the output.",
                 Self::apply_model_enrichment_items(plan, &chunk_vec, enrich.items);
             if !failed.is_empty() {
                 let retry_hint = format!(
-                    "You previously returned invalid implementation_spec_json.\nErrors:\n{}\nOnly emit keys: spec_version,grain,inputs,joins,metrics,output_fields,assumptions.\nNo wrappers, no extra fields.",
+                    "You previously returned invalid implementation_spec_json.\nErrors:\n{}\nOnly emit keys: spec_version,grain,inputs,joins,metrics,output_fields,assumptions.\noutput_fields[].kind MUST be exactly one of: raw, clean, derived, quality_flag.\nDo not use synonyms like passthrough/source/base/quality.\nNo wrappers, no extra fields.",
                     failure_errors.join("\n")
                 );
                 let retry_user = format!(
@@ -1439,7 +1719,10 @@ Apply these fixes in the output.",
                     serde_json::to_string_pretty(&failed).unwrap_or_else(|_| "[]".to_string()),
                     retry_hint
                 );
-                let retry_opts = LlmCallOptions { prompt_id: "data_engineer.model_plan_enrich_retry", ..opts };
+                let retry_opts = LlmCallOptions {
+                    prompt_id: "data_engineer.model_plan_enrich_retry",
+                    ..opts
+                };
                 let retry_raw = ctx.llm.chat(
                     &[
                         ChatMessage {
@@ -4112,20 +4395,31 @@ Apply these fixes in the output.",
                         let mut saw_sql_schema = false;
                         let mut saw_evidence = false;
                         for s in l.steps.iter().skip(start + 1) {
-                            let name_opt: Option<&str> = match s {
-                                react_core::session::ThreadStep::ToolStart { name, .. } => {
-                                    Some(name.as_str())
-                                }
-                                react_core::session::ThreadStep::ToolEnd { name, .. } => {
-                                    Some(name.as_str())
-                                }
-                                _ => None,
+                            let (name_opt, ok_opt, args_opt): (
+                                Option<&str>,
+                                Option<bool>,
+                                Option<&serde_json::Value>,
+                            ) = match s {
+                                react_core::session::ThreadStep::ToolEnd {
+                                    name,
+                                    observation,
+                                    args,
+                                    ..
+                                } => (Some(name.as_str()), Some(observation.ok), Some(args)),
+                                _ => (None, None, None),
                             };
-                            if let Some(name) = name_opt {
+                            if let (Some(name), Some(true)) = (name_opt, ok_opt) {
                                 match name {
                                     "dbt_files" => saw_dbt_files = true,
                                     "sql_schema" => saw_sql_schema = true,
-                                    "sql_stats" | "sql_sample" | "run_sql" => saw_evidence = true,
+                                    "sql_stats" | "sql_sample" | "run_sql" => {
+                                        if args_opt
+                                            .map(|a| Self::is_valid_grounding_evidence_tool(name, a))
+                                            .unwrap_or(false)
+                                        {
+                                            saw_evidence = true;
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -4146,6 +4440,13 @@ Apply these fixes in the output.",
                                 datasets: sctx.datasets.clone(),
                                 catalog: sctx.catalog.clone(),
                             };
+                            let sql_stats_tool = tools::sql_stats::SqlStatsTool {
+                                catalog: sctx.catalog.clone(),
+                                datasets: sctx.datasets.clone(),
+                            };
+                            let sql_sample_tool = tools::sql_sample::SqlSampleTool {
+                                query: query.clone(),
+                            };
                             let run_sql_tool = tools::sql_run::SqlRunTool {
                                 query: query.clone(),
                             };
@@ -4157,6 +4458,8 @@ Apply these fixes in the output.",
                             };
                             let dbt_files_timeout = tool_timeout("dbt_files");
                             let sql_schema_timeout = tool_timeout("sql_schema");
+                            let sql_stats_timeout = tool_timeout("sql_stats");
+                            let sql_sample_timeout = tool_timeout("sql_sample");
                             let run_sql_timeout = tool_timeout("run_sql");
 
                             let models_list = control_flow::call_and_record_tool(
@@ -4221,28 +4524,27 @@ Apply these fixes in the output.",
                                 .unwrap_or_default();
 
                             let mut probed: Option<String> = None;
+                            let mut probed_field: Option<String> = None;
+                            let mut probe_ok = false;
                             if let Some(first) = tables.first() {
-                                let _cols = control_flow::call_and_record_tool(
+                                let (ok, field) = Self::run_deterministic_probe_for_table(
                                     &thread_store,
                                     thread_id,
-                                    Some("agent".to_string()),
+                                    &actx,
                                     &sql_schema_tool,
-                                    serde_json::json!({"table": first}),
-                                    &actx,
-                                    sql_schema_timeout,
-                                )
-                                .await;
-                                let _cnt = control_flow::call_and_record_tool(
-                                    &thread_store,
-                                    thread_id,
-                                    Some("agent".to_string()),
+                                    &sql_stats_tool,
+                                    &sql_sample_tool,
                                     &run_sql_tool,
-                                    serde_json::json!({"sql": format!("SELECT count(*) AS total FROM {}", first)}),
-                                    &actx,
+                                    first,
+                                    sql_schema_timeout,
+                                    sql_stats_timeout,
+                                    sql_sample_timeout,
                                     run_sql_timeout,
                                 )
                                 .await;
                                 probed = Some(first.clone());
+                                probed_field = field;
+                                probe_ok = ok;
                             }
 
                             let model_count = models_list
@@ -4253,10 +4555,12 @@ Apply these fixes in the output.",
                             let mut head_tables = tables.clone();
                             head_tables.truncate(10);
                             bootstrap_summary = Some(format!(
-                                "Deterministic bootstrap (suite-provided):\n- models/ listed: {} item(s)\n- tables discovered (head): {:?}\n- probed table for evidence: {:?}\n\nIf models/ is empty, that's OK; proceed using sql_schema discovery.",
+                                "Deterministic bootstrap (suite-provided):\n- models/ listed: {} item(s)\n- tables discovered (head): {:?}\n- probed table for evidence: {:?}\n- probed field: {:?}\n- probe_ok: {}\n\nIf models/ is empty, that's OK; proceed using sql_schema discovery.",
                                 model_count,
                                 head_tables,
-                                probed
+                                probed,
+                                probed_field,
+                                probe_ok
                             ));
                         }
                     }
@@ -4374,44 +4678,17 @@ Apply these fixes in the output.",
                     }
 
                     let llm_options = if is_cleanse {
-                        let plan_max_tokens_cleanse: u32 = std::env::var("LLM_PLAN_MAX_TOKENS_CLEANSE")
-                            .ok()
-                            .and_then(|s| s.parse::<u32>().ok())
-                            .unwrap_or(96_000)
-                            .max(4_000);
-                        let reasoning_effort = Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT_CLEANSE")
-                            .or_else(|| Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT"))
-                            .unwrap_or(react_core::llm::ReasoningEffort::Medium);
-                        LlmCallOptions {
-                            prompt_id: "data_engineer.cleanse_plan",
-                            thread_id: None,
-                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                            temperature: Some(0.20),
-                            top_p: Some(1.0),
-                            // Planning uses high reasoning effort; give enough headroom to emit full,
-                            // explicit JSON (otherwise Responses can truncate before any output_text).
-                            max_output_tokens: Some(plan_max_tokens_cleanse),
-                            reasoning_effort: Some(reasoning_effort),
-                        }
+                        Self::planning_llm_options(
+                            PlanningLlmProfile::DiscoveryCleanse,
+                            "data_engineer.cleanse_plan",
+                            None,
+                        )
                     } else {
-                        let plan_max_tokens_model: u32 = std::env::var("LLM_PLAN_MAX_TOKENS_MODEL")
-                            .ok()
-                            .and_then(|s| s.parse::<u32>().ok())
-                            .unwrap_or(128_000)
-                            .max(8_000);
-                        let reasoning_effort = Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT_MODEL")
-                            .or_else(|| Self::parse_reasoning_effort_env("LLM_PLAN_REASONING_EFFORT"))
-                            .unwrap_or(react_core::llm::ReasoningEffort::Medium);
-                        LlmCallOptions {
-                            prompt_id: "data_engineer.model_plan",
-                            thread_id: None,
-                            expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                            temperature: Some(0.55),
-                            top_p: Some(0.95),
-                            // Model planning tends to be larger than cleanse planning (more tasks, joins, semantics).
-                            max_output_tokens: Some(plan_max_tokens_model),
-                            reasoning_effort: Some(reasoning_effort),
-                        }
+                        Self::planning_llm_options(
+                            PlanningLlmProfile::DiscoveryModel,
+                            "data_engineer.model_plan",
+                            None,
+                        )
                     };
                     match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q, llm_options).await {
                         Ok(RunOutcome::Final {
@@ -4429,23 +4706,87 @@ Apply these fixes in the output.",
                                 let mut saw_sql_schema = false;
                                 let mut saw_evidence = false;
                                 for s in l.steps.iter().skip(start + 1) {
-                                    let name_opt: Option<&str> = match s {
-                                        react_core::session::ThreadStep::ToolStart {
-                                            name, ..
-                                        } => Some(name.as_str()),
+                                    let (name_opt, ok_opt, args_opt): (
+                                        Option<&str>,
+                                        Option<bool>,
+                                        Option<&serde_json::Value>,
+                                    ) = match s {
                                         react_core::session::ThreadStep::ToolEnd {
-                                            name, ..
-                                        } => Some(name.as_str()),
-                                        _ => None,
+                                            name,
+                                            observation,
+                                            args,
+                                            ..
+                                        } => (Some(name.as_str()), Some(observation.ok), Some(args)),
+                                        _ => (None, None, None),
                                     };
-                                    if let Some(name) = name_opt {
+                                    if let (Some(name), Some(true)) = (name_opt, ok_opt) {
                                         match name {
                                             "dbt_files" => saw_dbt_files = true,
                                             "sql_schema" => saw_sql_schema = true,
                                             "sql_stats" | "sql_sample" | "run_sql" => {
-                                                saw_evidence = true
+                                                if args_opt
+                                                    .map(|a| {
+                                                        Self::is_valid_grounding_evidence_tool(
+                                                            name, a,
+                                                        )
+                                                    })
+                                                    .unwrap_or(false)
+                                                {
+                                                    saw_evidence = true
+                                                }
                                             }
                                             _ => {}
+                                        }
+                                    }
+                                }
+                                if saw_dbt_files && saw_sql_schema && !saw_evidence {
+                                    if let (Some(query), Some(ds)) =
+                                        (sctx.query.as_ref(), sctx.datasets.as_ref())
+                                    {
+                                        if let Ok(items) = ds.list_datasets().await {
+                                            if let Some(first_table) =
+                                                items.first().map(|d| d.fqn()).filter(|s| !s.is_empty())
+                                            {
+                                                let sql_schema_tool = tools::sql_schema::SqlSchemaTool {
+                                                    query: query.clone(),
+                                                    datasets: sctx.datasets.clone(),
+                                                    catalog: sctx.catalog.clone(),
+                                                };
+                                                let sql_stats_tool = tools::sql_stats::SqlStatsTool {
+                                                    catalog: sctx.catalog.clone(),
+                                                    datasets: sctx.datasets.clone(),
+                                                };
+                                                let sql_sample_tool = tools::sql_sample::SqlSampleTool {
+                                                    query: query.clone(),
+                                                };
+                                                let run_sql_tool = tools::sql_run::SqlRunTool {
+                                                    query: query.clone(),
+                                                };
+                                                let tool_timeout = |name: &str| {
+                                                    actx.policy
+                                                        .timeout_for_tool(name)
+                                                        .unwrap_or(actx.per_step_timeout_secs)
+                                                };
+                                                let (probe_ok, _field) =
+                                                    Self::run_deterministic_probe_for_table(
+                                                        &thread_store,
+                                                        thread_id,
+                                                        &actx,
+                                                        &sql_schema_tool,
+                                                        &sql_stats_tool,
+                                                        &sql_sample_tool,
+                                                        &run_sql_tool,
+                                                        &first_table,
+                                                        tool_timeout("sql_schema"),
+                                                        tool_timeout("sql_stats"),
+                                                        tool_timeout("sql_sample"),
+                                                        tool_timeout("run_sql"),
+                                                    )
+                                                    .await;
+                                                if probe_ok {
+                                                    saw_evidence = true;
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -4823,10 +5164,7 @@ Apply these fixes in the output.",
                                     continue;
                                 }
 
-                                // Hard cutover: remove LLM "plan design critique" from the hot path.
-                                // We rely on deterministic semantic validation + conservative defaults instead.
-
-                                // Persist a small design-review marker for downstream review/UI.
+                                // Persist design-review details from the critique pass for downstream review/UI.
                                 if plan.project_snapshot.is_null() {
                                     plan.project_snapshot = serde_json::json!({});
                                 }
@@ -4834,8 +5172,10 @@ Apply these fixes in the output.",
                                     obj.insert(
                                         "plan_design_review".to_string(),
                                         serde_json::json!({
-                                            "ok": true,
+                                            "ok": design_critique.ok,
                                             "kind": "cleanse_plan",
+                                            "blockers": design_critique.blockers,
+                                            "fixes": design_critique.fixes,
                                             "ts": chrono::Utc::now().to_rfc3339(),
                                         }),
                                     );
@@ -5196,10 +5536,7 @@ Apply these fixes in the output.",
                                     continue;
                                 }
 
-                                // Hard cutover: remove LLM "plan design critique" from the hot path.
-                                // We rely on deterministic semantic validation instead.
-
-                                // Persist a small design-review marker for downstream review/UI.
+                                // Persist design-review details from the critique pass for downstream review/UI.
                                 if plan.project_snapshot.is_null() {
                                     plan.project_snapshot = serde_json::json!({});
                                 }
@@ -5207,8 +5544,10 @@ Apply these fixes in the output.",
                                     obj.insert(
                                         "plan_design_review".to_string(),
                                         serde_json::json!({
-                                            "ok": true,
+                                            "ok": design_critique.ok,
                                             "kind": "model_plan",
+                                            "blockers": design_critique.blockers,
+                                            "fixes": design_critique.fixes,
                                             "ts": chrono::Utc::now().to_rfc3339(),
                                         }),
                                     );
@@ -9531,6 +9870,40 @@ mod tests {
             classify_validate_failure(false, Some("Compilation Error: syntax error near FROM"), None),
             ValidateFailureClass::SqlOrRuntime
         );
+    }
+
+    #[test]
+    fn grounding_evidence_requires_valid_probe_args() {
+        assert!(DataEngineerSuite::is_valid_grounding_evidence_tool(
+            "sql_stats",
+            &serde_json::json!({"table":"AwsDataCatalog.db.tbl","field":"id"})
+        ));
+        assert!(!DataEngineerSuite::is_valid_grounding_evidence_tool(
+            "sql_stats",
+            &serde_json::json!({"table":"AwsDataCatalog.db.tbl"})
+        ));
+        assert!(DataEngineerSuite::is_valid_grounding_evidence_tool(
+            "run_sql",
+            &serde_json::json!({"sql":"SELECT count(*) FROM AwsDataCatalog.db.tbl"})
+        ));
+        assert!(!DataEngineerSuite::is_valid_grounding_evidence_tool(
+            "run_sql",
+            &serde_json::json!({"sql":"SELECT 1"})
+        ));
+    }
+
+    #[test]
+    fn output_field_kind_contract_rejects_unknown_variants() {
+        let ok = serde_json::json!({
+            "output_fields": [{"name":"a","kind":"raw"},{"name":"b","kind":"quality_flag"}]
+        });
+        assert!(DataEngineerSuite::validate_output_field_kind_contract(&ok).is_ok());
+        let bad = serde_json::json!({
+            "output_fields": [{"name":"a","kind":"passthrough"}]
+        });
+        let err = DataEngineerSuite::validate_output_field_kind_contract(&bad)
+            .expect_err("expected invalid kind");
+        assert!(err.contains("allowed kind values: raw, clean, derived, quality_flag"));
     }
 
 }

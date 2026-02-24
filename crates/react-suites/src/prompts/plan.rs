@@ -14,6 +14,10 @@ Discovery requirements:
 - dbt_files: inspect existing dbt project files under models/ and key root files.
 - sql_schema: list available relations and inspect relevant raw tables.
 - For first-batch candidate datasets, gather at least one evidence signal via sql_stats/sql_sample/run_sql.
+- IMPORTANT: sql_stats/sql_sample require BOTH args.table and args.field.
+- Never call sql_stats/sql_sample with table-only args.
+- Never use non-contract args like relation/op for sql_stats/sql_sample.
+- If field is unknown, call sql_schema(args:{table}) first, then pick a concrete field.
 - Prefer bounded reads and targeted probes.
 
 When finished:
@@ -40,6 +44,10 @@ Discovery requirements:
 - dbt_files: inspect staging/core/marts files and key dbt project files.
 - Ensure candidate model inputs are grounded in existing staging models.
 - For first-batch candidate models, gather evidence for grain/keys/metrics using dbt_files/sql_schema/sql_stats/sql_sample/run_sql.
+- IMPORTANT: sql_stats/sql_sample require BOTH args.table and args.field.
+- Never call sql_stats/sql_sample with table-only args.
+- Never use non-contract args like relation/op for sql_stats/sql_sample.
+- If field is unknown, call sql_schema(args:{table}) first, then pick a concrete field.
 
 When finished:
 - final.kind MUST be "plan_discovery_ready".
@@ -90,11 +98,20 @@ Rules:\n\
         .to_string()
 }
 
+pub fn plan_enrichment_reason_system_prompt() -> String {
+    "You are a planning assistant.\n\
+Return concise plain text reasoning for implementation choices and constraints.\n\
+Do not output JSON."
+        .to_string()
+}
+
 pub fn cleanse_plan_enrichment_system_prompt() -> String {
     "Return CLEANSE enrichment JSON only for requested task_ids.\n\
 Each item MUST include {task_id, implementation_spec_json}.\n\
 Do not re-design the plan; this pass only compiles requested specs from provided context.\n\
 implementation_spec_json must decode to a valid CleanseImplementationSpec object.\n\
+For every output_fields item, kind MUST be exactly one of: raw, clean, derived, quality_flag.\n\
+Do not use synonyms (e.g. passthrough/source/base/quality).\n\
 The JSON string MUST contain only these top-level keys:\n\
 - spec_version\n\
 - row_preserving\n\
@@ -109,6 +126,8 @@ pub fn model_plan_enrichment_system_prompt() -> String {
 Each item MUST include {task_id, implementation_spec_json}.\n\
 Do not re-design the plan; this pass only compiles requested specs from provided context.\n\
 implementation_spec_json must decode to a valid ModelImplementationSpec object.\n\
+For every output_fields item, kind MUST be exactly one of: raw, clean, derived, quality_flag.\n\
+Do not use synonyms (e.g. passthrough/source/base/quality).\n\
 The JSON string MUST contain only these top-level keys:\n\
 - spec_version\n\
 - grain\n\

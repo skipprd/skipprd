@@ -74,6 +74,10 @@ pub fn tool_card_common_prefix() -> &'static str {
 
 Usage guidance:
 - Prefer batch scaffolding: use batch tools when available; for dbt_files op=patch, patch one file per call.
+- Probe contract discipline:
+  - sql_stats/sql_sample require args.table + args.field.
+  - Do NOT call sql_stats/sql_sample with table-only args.
+  - Do NOT use non-contract keys (e.g. relation/op) for sql_stats/sql_sample.
 - Use `dbt_files op=patch` for ALL DBT project files, including model SQL under models/.
 - For `dbt_files op=patch`, provide `patch_text` as Cursor/Aider hunks-only unified diff:
   - args.path is REQUIRED and is the single file to mutate.
