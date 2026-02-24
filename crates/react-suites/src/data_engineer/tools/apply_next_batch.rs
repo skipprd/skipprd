@@ -168,13 +168,33 @@ impl Tool for ApplyNextCleanseBatchTool {
             }));
         }
 
-        // Keep batch selection consistent with the suite driver: work-group driven only.
-        let next_action = plan::cleanse_next_action(&plan);
-        let batch = match next_action.as_ref() {
-            Some((plan::WorkGroupKind::AuthorSql, ds)) => ds.clone(),
-            _ => Vec::new(),
-        };
+        // Keep batch selection consistent with the suite driver via shared next-action resolution.
+        let next_action = plan::cleanse_next_authoring_action(&plan);
+        let batch = next_action.author_sql_ids();
         if batch.is_empty() {
+            if let plan::AuthoringNextAction::AuthorSchema(ids) = &next_action {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "kind": "defer_schema_batch",
+                    "message": "next deterministic action is schema checklist work; call apply_next_cleanse_schema_batch",
+                    "pending_schema_contract_dataset_ids": ids,
+                    "attempted_dataset_ids": [],
+                    "succeeded_dataset_ids": [],
+                    "failed_dataset_ids": [],
+                    "errors": [],
+                }));
+            }
+            if matches!(next_action, plan::AuthoringNextAction::Validate) {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "kind": "defer_validate",
+                    "message": "next deterministic action is validate; transition to cleanse_validate",
+                    "attempted_dataset_ids": [],
+                    "succeeded_dataset_ids": [],
+                    "failed_dataset_ids": [],
+                    "errors": [],
+                }));
+            }
             let pending_schema = plan::cleanse_pending_schema_contracts(&plan);
             if !pending_schema.is_empty() {
                 return Ok(serde_json::json!({
@@ -208,11 +228,13 @@ impl Tool for ApplyNextCleanseBatchTool {
                 }
                 blocked.sort();
                 blocked.dedup();
+                let msg = "no runnable cleanse SQL tasks remain, but plan is not complete (blocked tasks exist)";
                 return Ok(serde_json::json!({
                     "ok": false,
                     "kind": "plan_blocked",
                     "plan_key": plan.plan_key,
-                    "message": "no runnable cleanse SQL tasks remain, but plan is not complete (blocked tasks exist)",
+                    "message": msg,
+                    "errors": [msg],
                     "blocked_dataset_ids": blocked,
                     "attempted_dataset_ids": [],
                     "succeeded_dataset_ids": [],
@@ -445,13 +467,33 @@ impl Tool for ApplyNextModelBatchTool {
             }));
         }
 
-        // Keep batch selection consistent with the suite driver: work-group driven only.
-        let next_action = plan::model_next_action(&plan);
-        let batch_names = match next_action.as_ref() {
-            Some((plan::WorkGroupKind::AuthorSql, names)) => names.clone(),
-            _ => Vec::new(),
-        };
+        // Keep batch selection consistent with the suite driver via shared next-action resolution.
+        let next_action = plan::model_next_authoring_action(&plan);
+        let batch_names = next_action.author_sql_ids();
         if batch_names.is_empty() {
+            if let plan::AuthoringNextAction::AuthorSchema(ids) = &next_action {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "kind": "defer_schema_batch",
+                    "message": "next deterministic action is schema checklist work; call apply_next_model_schema_batch",
+                    "pending_schema_contract_item_names": ids,
+                    "attempted_item_names": [],
+                    "succeeded_item_names": [],
+                    "failed_item_names": [],
+                    "errors": [],
+                }));
+            }
+            if matches!(next_action, plan::AuthoringNextAction::Validate) {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "kind": "defer_validate",
+                    "message": "next deterministic action is validate; transition to model_validate",
+                    "attempted_item_names": [],
+                    "succeeded_item_names": [],
+                    "failed_item_names": [],
+                    "errors": [],
+                }));
+            }
             let pending_schema = plan::model_pending_schema_contracts(&plan);
             if !pending_schema.is_empty() {
                 return Ok(serde_json::json!({
@@ -485,11 +527,13 @@ impl Tool for ApplyNextModelBatchTool {
                 }
                 blocked.sort();
                 blocked.dedup();
+                let msg = "no runnable model SQL tasks remain, but plan is not complete (blocked tasks exist)";
                 return Ok(serde_json::json!({
                     "ok": false,
                     "kind": "plan_blocked",
                     "plan_key": plan.plan_key,
-                    "message": "no runnable model SQL tasks remain, but plan is not complete (blocked tasks exist)",
+                    "message": msg,
+                    "errors": [msg],
                     "blocked_item_names": blocked,
                     "attempted_item_names": [],
                     "succeeded_item_names": [],

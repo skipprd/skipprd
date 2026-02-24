@@ -818,10 +818,8 @@ fn unresolved_mutation_failures_in_phase(log: &ThreadLog, phase: Phase) -> Vec<S
             continue;
         }
         let err = obs
-            .errors
-            .first()
-            .map(|s| s.as_str())
-            .unwrap_or("unknown error");
+            .first_error_or_context()
+            .unwrap_or_else(|| "unknown error".to_string());
         failures.push(format!("{}: {}", name, err));
         if failures.len() >= 10 {
             break;

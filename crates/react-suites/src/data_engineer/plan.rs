@@ -1506,7 +1506,9 @@ pub fn cleanse_executable_plan_issues(plan: &CleansePlan) -> Vec<String> {
             }
         }
     }
-    if !cleanse_all_done(plan) && cleanse_next_action(plan).is_none() {
+    if !cleanse_all_done(plan)
+        && matches!(cleanse_next_authoring_action(plan), AuthoringNextAction::None)
+    {
         issues.push("plan has pending checklist work but no actionable work-group".to_string());
     }
     issues
@@ -1541,7 +1543,9 @@ pub fn model_executable_plan_issues(plan: &ModelPlan) -> Vec<String> {
             }
         }
     }
-    if !model_all_done(plan) && model_next_action(plan).is_none() {
+    if !model_all_done(plan)
+        && matches!(model_next_authoring_action(plan), AuthoringNextAction::None)
+    {
         issues.push("plan has pending checklist work but no actionable work-group".to_string());
     }
     issues
@@ -1595,7 +1599,7 @@ fn group_deps_satisfied(
 /// - If `work_groups` is empty, returns None because the plan is non-executable.
 /// - For `AuthorSql` / `AuthorSchema`, returns up to 5 task_ids that still need that checklist item.
 /// - For `Validate`, returns the kind and an empty vec (caller should transition phases).
-pub fn cleanse_next_action(plan: &CleansePlan) -> Option<(WorkGroupKind, Vec<String>)> {
+fn cleanse_next_action_from_work_groups(plan: &CleansePlan) -> Option<(WorkGroupKind, Vec<String>)> {
     if plan.work_groups.is_empty() {
         return None;
     }
@@ -1703,7 +1707,7 @@ pub fn cleanse_next_work_item_ctx(plan: &CleansePlan) -> Option<NextWorkItemCtx>
 /// - If `work_groups` is empty, returns None because the plan is non-executable.
 /// - For `AuthorSql` / `AuthorSchema`, returns up to 5 task_ids that still need that checklist item.
 /// - For `Validate`, returns the kind and an empty vec (caller should transition phases).
-pub fn model_next_action(plan: &ModelPlan) -> Option<(WorkGroupKind, Vec<String>)> {
+fn model_next_action_from_work_groups(plan: &ModelPlan) -> Option<(WorkGroupKind, Vec<String>)> {
     if plan.work_groups.is_empty() {
         return None;
     }
@@ -1749,6 +1753,41 @@ pub fn model_next_action(plan: &ModelPlan) -> Option<(WorkGroupKind, Vec<String>
     }
 
     Some((WorkGroupKind::Validate, vec![]))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthoringNextAction {
+    AuthorSql(Vec<String>),
+    AuthorSchema(Vec<String>),
+    Validate,
+    None,
+}
+
+impl AuthoringNextAction {
+    pub fn author_sql_ids(&self) -> Vec<String> {
+        match self {
+            Self::AuthorSql(ids) => ids.clone(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+pub fn cleanse_next_authoring_action(plan: &CleansePlan) -> AuthoringNextAction {
+    match cleanse_next_action_from_work_groups(plan) {
+        Some((WorkGroupKind::AuthorSql, ids)) => AuthoringNextAction::AuthorSql(ids),
+        Some((WorkGroupKind::AuthorSchema, ids)) => AuthoringNextAction::AuthorSchema(ids),
+        Some((WorkGroupKind::Validate, _)) => AuthoringNextAction::Validate,
+        None => AuthoringNextAction::None,
+    }
+}
+
+pub fn model_next_authoring_action(plan: &ModelPlan) -> AuthoringNextAction {
+    match model_next_action_from_work_groups(plan) {
+        Some((WorkGroupKind::AuthorSql, ids)) => AuthoringNextAction::AuthorSql(ids),
+        Some((WorkGroupKind::AuthorSchema, ids)) => AuthoringNextAction::AuthorSchema(ids),
+        Some((WorkGroupKind::Validate, _)) => AuthoringNextAction::Validate,
+        None => AuthoringNextAction::None,
+    }
 }
 
 /// Returns the next concrete work item (group + single checklist ref) for the model plan.

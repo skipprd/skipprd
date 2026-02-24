@@ -6520,13 +6520,9 @@ Apply these fixes in the output.",
                             if plan.progress.consecutive_batch_failures
                             >= crate::data_engineer::tools::apply_next_batch::MAX_CONSECUTIVE_BATCH_FAILURES
                         {
-                            let next = match crate::data_engineer::plan::cleanse_next_action(&plan)
-                            {
-                                Some((crate::data_engineer::plan::WorkGroupKind::AuthorSql, ds)) => {
-                                    ds
-                                }
-                                _ => Vec::new(),
-                            };
+                            let next =
+                                crate::data_engineer::plan::cleanse_next_authoring_action(&plan)
+                                    .author_sql_ids();
                             let mut expected_paths: Vec<String> = Vec::new();
                             for ds in next.iter() {
                                 if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
@@ -6576,14 +6572,8 @@ Apply these fixes in the output.",
                             }
                             // Work-group driven selection only (hard cutover).
                             let next_action =
-                                crate::data_engineer::plan::cleanse_next_action(&plan);
-                            let next = match next_action.as_ref() {
-                                Some((
-                                    crate::data_engineer::plan::WorkGroupKind::AuthorSql,
-                                    ds,
-                                )) => ds.clone(),
-                                _ => Vec::new(),
-                            };
+                                crate::data_engineer::plan::cleanse_next_authoring_action(&plan);
+                            let next = next_action.author_sql_ids();
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_cleanse_batch; force repair-mode guidance.
@@ -6619,10 +6609,8 @@ Apply these fixes in the output.",
                                 (ctx, None)
                             } else if hard_mutation_repair_mode {
                                 // Schema/precheck failures: prefer schema batch tools when schema checklist work remains.
-                                if let Some((
-                                    crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
-                                    ids,
-                                )) = next_action.as_ref()
+                                if let crate::data_engineer::plan::AuthoringNextAction::AuthorSchema(ids) =
+                                    &next_action
                                 {
                                     let checklist_item_id = actx
                                         .exec_ctx
@@ -6688,10 +6676,8 @@ Apply these fixes in the output.",
                                 // If work-groups exist, interpret "no next SQL batch" as:
                                 // - either we're blocked on schema checklist authoring, OR
                                 // - we're ready to transition to validate.
-                                if let Some((
-                                    crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
-                                    ids,
-                                )) = next_action.as_ref()
+                                if let crate::data_engineer::plan::AuthoringNextAction::AuthorSchema(ids) =
+                                    &next_action
                                 {
                                     let checklist_item_id = actx
                                         .exec_ctx
@@ -6726,11 +6712,10 @@ Apply these fixes in the output.",
                                     ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                                     (ctx, None)
                                 } else {
-                                    if let Some((
-                                        crate::data_engineer::plan::WorkGroupKind::Validate,
-                                        _ids,
-                                    )) = next_action.as_ref()
-                                    {
+                                    if matches!(
+                                        &next_action,
+                                        crate::data_engineer::plan::AuthoringNextAction::Validate
+                                    ) {
                                         control_flow::append_phase_with_reason(
                                             &thread_store,
                                             thread_id,
@@ -6911,12 +6896,9 @@ Apply these fixes in the output.",
                             if plan.progress.consecutive_batch_failures
                             >= crate::data_engineer::tools::apply_next_batch::MAX_CONSECUTIVE_BATCH_FAILURES
                         {
-                            let next = match crate::data_engineer::plan::model_next_action(&plan) {
-                                Some((crate::data_engineer::plan::WorkGroupKind::AuthorSql, names)) => {
-                                    names
-                                }
-                                _ => Vec::new(),
-                            };
+                            let next =
+                                crate::data_engineer::plan::model_next_authoring_action(&plan)
+                                    .author_sql_ids();
                             let mut expected_paths: Vec<String> = Vec::new();
                             for n in next.iter() {
                                 if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
@@ -6965,14 +6947,9 @@ Apply these fixes in the output.",
                                 continue;
                             }
                             // Work-group driven selection only (hard cutover).
-                            let next_action = crate::data_engineer::plan::model_next_action(&plan);
-                            let next_names = match next_action.as_ref() {
-                                Some((
-                                    crate::data_engineer::plan::WorkGroupKind::AuthorSql,
-                                    names,
-                                )) => names.clone(),
-                                _ => Vec::new(),
-                            };
+                            let next_action =
+                                crate::data_engineer::plan::model_next_authoring_action(&plan);
+                            let next_names = next_action.author_sql_ids();
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_model_batch; force repair-mode guidance.
@@ -7007,10 +6984,8 @@ Apply these fixes in the output.",
                                 ctx.push_str("\nIMPORTANT: Defer any new checklist expansion or schema contract work until dbt_validate passes.\n");
                                 (ctx, None)
                             } else if hard_mutation_repair_mode {
-                                if let Some((
-                                    crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
-                                    ids,
-                                )) = next_action.as_ref()
+                                if let crate::data_engineer::plan::AuthoringNextAction::AuthorSchema(ids) =
+                                    &next_action
                                 {
                                     let checklist_item_id = actx
                                         .exec_ctx
@@ -7071,10 +7046,8 @@ Apply these fixes in the output.",
                                     (ctx, None)
                                 }
                             } else if next_names.is_empty() {
-                                if let Some((
-                                    crate::data_engineer::plan::WorkGroupKind::AuthorSchema,
-                                    ids,
-                                )) = next_action.as_ref()
+                                if let crate::data_engineer::plan::AuthoringNextAction::AuthorSchema(ids) =
+                                    &next_action
                                 {
                                     // Deterministic pre-check: if models/schema.yml already contains model stanzas
                                     // for these pending items, mark schema_contract done and re-run planning for the
@@ -7186,11 +7159,10 @@ Apply these fixes in the output.",
                                     ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                                     (ctx, None)
                                 } else {
-                                    if let Some((
-                                        crate::data_engineer::plan::WorkGroupKind::Validate,
-                                        _ids,
-                                    )) = next_action.as_ref()
-                                    {
+                                    if matches!(
+                                        &next_action,
+                                        crate::data_engineer::plan::AuthoringNextAction::Validate
+                                    ) {
                                         control_flow::append_phase_with_reason(
                                             &thread_store,
                                             thread_id,

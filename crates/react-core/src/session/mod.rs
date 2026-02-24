@@ -172,6 +172,60 @@ impl ToolObservation {
         }
     }
 
+    fn non_empty_string_field(extra: &BTreeMap<String, Value>, key: &str) -> Option<String> {
+        extra
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn extract_errors_from_extra(extra: &BTreeMap<String, Value>) -> Vec<String> {
+        if let Some(Value::Array(arr)) = extra.get("errors") {
+            let out: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !out.is_empty() {
+                return out;
+            }
+        }
+        if let Some(v) = extra.get("error") {
+            match v {
+                Value::String(s) => {
+                    let t = s.trim();
+                    if !t.is_empty() {
+                        return vec![t.to_string()];
+                    }
+                }
+                other => {
+                    let s = other.to_string();
+                    if !s.trim().is_empty() {
+                        return vec![s];
+                    }
+                }
+            }
+        }
+        for key in ["message", "reason", "detail"] {
+            if let Some(s) = Self::non_empty_string_field(extra, key) {
+                return vec![s];
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn first_error_or_context(&self) -> Option<String> {
+        self.errors.first().cloned().or_else(|| {
+            for key in ["message", "reason", "detail"] {
+                if let Some(s) = Self::non_empty_string_field(&self.extra, key) {
+                    return Some(s);
+                }
+            }
+            None
+        })
+    }
+
     /// Convert any legacy tool output `Value` into the canonical envelope:
     /// - `errors` is ALWAYS present (even if 0/1)
     /// - legacy `error: string` is converted into `errors: [error]` and removed from `extra`
@@ -187,21 +241,7 @@ impl ToolObservation {
 
         let ok = extra.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
 
-        let errors = if let Some(Value::Array(arr)) = extra.get("errors") {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .filter(|s| !s.trim().is_empty())
-                .collect::<Vec<_>>()
-        } else if let Some(err) = extra.get("error").and_then(|x| x.as_str()) {
-            let s = err.trim().to_string();
-            if s.is_empty() {
-                Vec::new()
-            } else {
-                vec![s]
-            }
-        } else {
-            Vec::new()
-        };
+        let errors = Self::extract_errors_from_extra(&extra);
 
         let warnings = if let Some(Value::Array(arr)) = extra.get("warnings") {
             arr.iter()
@@ -212,26 +252,7 @@ impl ToolObservation {
             Vec::new()
         };
 
-        // If this is a failure and we still have no errors, try legacy `error` field.
         let mut errors = errors;
-        if !ok && errors.is_empty() {
-            if let Some(v) = extra.get("error") {
-                match v {
-                    Value::String(s) => {
-                        let t = s.trim();
-                        if !t.is_empty() {
-                            errors.push(t.to_string());
-                        }
-                    }
-                    other => {
-                        let s = other.to_string();
-                        if !s.trim().is_empty() {
-                            errors.push(s);
-                        }
-                    }
-                }
-            }
-        }
 
         // Remove canonical envelope keys from extra (and legacy `error`).
         extra.remove("ok");
@@ -1097,9 +1118,7 @@ fn apply_step_to_state(
 
                 if status == "failed" || !observation.ok {
                     let summary = observation
-                        .errors
-                        .first()
-                        .cloned()
+                        .first_error_or_context()
                         .unwrap_or_else(|| "unknown error".to_string());
                     ent.last_error = Some(ThreadItemError {
                         summary,
@@ -1111,7 +1130,7 @@ fn apply_step_to_state(
                 let err_out = if observation.ok {
                     None
                 } else {
-                    observation.errors.first().cloned()
+                    observation.first_error_or_context()
                 };
                 (ent.runtime_ms, ent.outputs.clone(), err_out)
             };
