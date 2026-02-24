@@ -845,6 +845,14 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
                 ));
             }
         }
+        let missing = missing_required_checklist_items(&t.checklist);
+        if !missing.is_empty() {
+            errors.push(format!(
+                "{}: missing required checklist items: {}",
+                t.dataset_id,
+                missing.join(", ")
+            ));
+        }
     }
     // Batch references should exist in tasks.
     for (bi, b) in plan.batches.iter().enumerate() {
@@ -857,6 +865,9 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
         }
     }
     // Work-group refs should exist in tasks.
+    if plan.work_groups.is_empty() {
+        errors.push("work_groups is empty".to_string());
+    }
     for g in plan.work_groups.iter() {
         if g.items.len() > 5 {
             errors.push(format!(
@@ -888,6 +899,16 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
                         g.group_id, cid, it.task_id
                     ));
                 }
+            }
+        }
+    }
+    for t in plan.tasks.iter() {
+        for checklist_id in required_checklist_item_ids() {
+            if !work_groups_cover_task_checklist(&plan.work_groups, &t.dataset_id, checklist_id) {
+                errors.push(format!(
+                    "task {} checklist '{}' is not scheduled in work_groups",
+                    t.dataset_id, checklist_id
+                ));
             }
         }
     }
@@ -1041,6 +1062,14 @@ pub fn validate_model_plan_semantics(
                 }
             }
         }
+        let missing = missing_required_checklist_items(&t.checklist);
+        if !missing.is_empty() {
+            errors.push(format!(
+                "{}: missing required checklist items: {}",
+                t.name,
+                missing.join(", ")
+            ));
+        }
     }
     // Batch references should exist in tasks.
     for (bi, b) in plan.batches.iter().enumerate() {
@@ -1053,6 +1082,9 @@ pub fn validate_model_plan_semantics(
         }
     }
     // Work-group refs should exist in tasks.
+    if plan.work_groups.is_empty() {
+        errors.push("work_groups is empty".to_string());
+    }
     for g in plan.work_groups.iter() {
         if g.items.len() > 5 {
             errors.push(format!(
@@ -1084,6 +1116,16 @@ pub fn validate_model_plan_semantics(
                         g.group_id, cid, it.task_id
                     ));
                 }
+            }
+        }
+    }
+    for t in plan.tasks.iter() {
+        for checklist_id in required_checklist_item_ids() {
+            if !work_groups_cover_task_checklist(&plan.work_groups, &t.name, checklist_id) {
+                errors.push(format!(
+                    "task {} checklist '{}' is not scheduled in work_groups",
+                    t.name, checklist_id
+                ));
             }
         }
     }
@@ -1288,6 +1330,210 @@ pub const CHECKLIST_SQL_MODEL: &str = "sql_model";
 pub const CHECKLIST_SCHEMA_CONTRACT: &str = "schema_contract";
 pub const CHECKLIST_VALIDATE: &str = "validate";
 
+fn required_checklist_item_ids() -> [&'static str; 3] {
+    [
+        CHECKLIST_SQL_MODEL,
+        CHECKLIST_SCHEMA_CONTRACT,
+        CHECKLIST_VALIDATE,
+    ]
+}
+
+fn checklist_label_for_kind(is_cleanse: bool, checklist_item_id: &str) -> &'static str {
+    match checklist_item_id {
+        CHECKLIST_SQL_MODEL if is_cleanse => "Author staging SQL",
+        CHECKLIST_SQL_MODEL => "Author gold SQL",
+        CHECKLIST_SCHEMA_CONTRACT => "Author schema contract",
+        CHECKLIST_VALIDATE => "Validate",
+        _ => "Checklist item",
+    }
+}
+
+pub fn canonical_task_checklist(is_cleanse: bool) -> Vec<PlanChecklistItem> {
+    required_checklist_item_ids()
+        .into_iter()
+        .map(|id| PlanChecklistItem {
+            checklist_item_id: id.to_string(),
+            label: checklist_label_for_kind(is_cleanse, id).to_string(),
+            details: None,
+            status: ChecklistItemStatus::Pending,
+            origin: ChecklistOrigin::Initial,
+            origin_step_idx: None,
+            evidence: vec![],
+        })
+        .collect()
+}
+
+fn missing_required_checklist_items(items: &[PlanChecklistItem]) -> Vec<String> {
+    required_checklist_item_ids()
+        .into_iter()
+        .filter(|id| !items.iter().any(|it| it.checklist_item_id.trim() == *id))
+        .map(|id| id.to_string())
+        .collect()
+}
+
+fn work_groups_cover_task_checklist(
+    work_groups: &[PlanWorkGroup],
+    task_id: &str,
+    checklist_item_id: &str,
+) -> bool {
+    work_groups.iter().any(|g| {
+        g.items.iter().any(|it| {
+            it.task_id.trim() == task_id.trim()
+                && it.checklist_item_id.trim() == checklist_item_id.trim()
+        })
+    })
+}
+
+pub fn canonical_work_groups_from_batches(
+    batches: &[Vec<String>],
+    item_prefix: &str,
+) -> Vec<PlanWorkGroup> {
+    let mut out: Vec<PlanWorkGroup> = Vec::new();
+    let mut schema_group_ids: Vec<String> = Vec::new();
+    for (idx, b) in batches.iter().enumerate() {
+        let mut item_ids: Vec<String> = Vec::new();
+        for item in b.iter() {
+            let id = item.trim();
+            if id.is_empty() {
+                continue;
+            }
+            if !item_ids.iter().any(|x| x == id) {
+                item_ids.push(id.to_string());
+            }
+        }
+        if item_ids.is_empty() {
+            continue;
+        }
+        let ord = idx + 1;
+        let sql_group_id = format!("{item_prefix}_author_sql_{ord:03}");
+        let schema_group_id = format!("{item_prefix}_author_schema_{ord:03}");
+        out.push(PlanWorkGroup {
+            group_id: sql_group_id.clone(),
+            label: format!("Author SQL batch {}", ord),
+            kind: WorkGroupKind::AuthorSql,
+            items: item_ids
+                .iter()
+                .map(|task_id| WorkGroupItemRef {
+                    task_id: task_id.clone(),
+                    checklist_item_id: CHECKLIST_SQL_MODEL.to_string(),
+                })
+                .collect(),
+            depends_on_group_ids: None,
+        });
+        out.push(PlanWorkGroup {
+            group_id: schema_group_id.clone(),
+            label: format!("Author schema batch {}", ord),
+            kind: WorkGroupKind::AuthorSchema,
+            items: item_ids
+                .iter()
+                .map(|task_id| WorkGroupItemRef {
+                    task_id: task_id.clone(),
+                    checklist_item_id: CHECKLIST_SCHEMA_CONTRACT.to_string(),
+                })
+                .collect(),
+            depends_on_group_ids: Some(vec![sql_group_id]),
+        });
+        schema_group_ids.push(schema_group_id);
+    }
+    if !schema_group_ids.is_empty() {
+        let mut validate_items: Vec<WorkGroupItemRef> = Vec::new();
+        for b in batches.iter() {
+            for item in b.iter() {
+                let id = item.trim();
+                if id.is_empty() {
+                    continue;
+                }
+                if !validate_items.iter().any(|it| it.task_id == id) {
+                    validate_items.push(WorkGroupItemRef {
+                        task_id: id.to_string(),
+                        checklist_item_id: CHECKLIST_VALIDATE.to_string(),
+                    });
+                }
+            }
+        }
+        if !validate_items.is_empty() {
+            out.push(PlanWorkGroup {
+                group_id: format!("{item_prefix}_validate"),
+                label: "Validate plan".to_string(),
+                kind: WorkGroupKind::Validate,
+                items: validate_items,
+                depends_on_group_ids: Some(schema_group_ids),
+            });
+        }
+    }
+    out
+}
+
+pub fn cleanse_executable_plan_issues(plan: &CleansePlan) -> Vec<String> {
+    let mut issues: Vec<String> = Vec::new();
+    if plan.tasks.is_empty() {
+        issues.push("tasks is empty".to_string());
+    }
+    if plan.batches.is_empty() {
+        issues.push("batches is empty".to_string());
+    }
+    if plan.work_groups.is_empty() {
+        issues.push("work_groups is empty".to_string());
+    }
+    for t in plan.tasks.iter() {
+        let missing = missing_required_checklist_items(&t.checklist);
+        if !missing.is_empty() {
+            issues.push(format!(
+                "task {} missing checklist items: {}",
+                t.dataset_id,
+                missing.join(", ")
+            ));
+        }
+        for checklist_id in required_checklist_item_ids() {
+            if !work_groups_cover_task_checklist(&plan.work_groups, &t.dataset_id, checklist_id) {
+                issues.push(format!(
+                    "task {} checklist '{}' missing work-group scheduling",
+                    t.dataset_id, checklist_id
+                ));
+            }
+        }
+    }
+    if !cleanse_all_done(plan) && cleanse_next_action(plan).is_none() {
+        issues.push("plan has pending checklist work but no actionable work-group".to_string());
+    }
+    issues
+}
+
+pub fn model_executable_plan_issues(plan: &ModelPlan) -> Vec<String> {
+    let mut issues: Vec<String> = Vec::new();
+    if plan.tasks.is_empty() {
+        issues.push("tasks is empty".to_string());
+    }
+    if plan.batches.is_empty() {
+        issues.push("batches is empty".to_string());
+    }
+    if plan.work_groups.is_empty() {
+        issues.push("work_groups is empty".to_string());
+    }
+    for t in plan.tasks.iter() {
+        let missing = missing_required_checklist_items(&t.checklist);
+        if !missing.is_empty() {
+            issues.push(format!(
+                "task {} missing checklist items: {}",
+                t.name,
+                missing.join(", ")
+            ));
+        }
+        for checklist_id in required_checklist_item_ids() {
+            if !work_groups_cover_task_checklist(&plan.work_groups, &t.name, checklist_id) {
+                issues.push(format!(
+                    "task {} checklist '{}' missing work-group scheduling",
+                    t.name, checklist_id
+                ));
+            }
+        }
+    }
+    if !model_all_done(plan) && model_next_action(plan).is_none() {
+        issues.push("plan has pending checklist work but no actionable work-group".to_string());
+    }
+    issues
+}
+
 fn group_is_complete_cleanse(plan: &CleansePlan, g: &PlanWorkGroup) -> bool {
     if g.items.is_empty() {
         return true;
@@ -1331,7 +1577,7 @@ fn group_deps_satisfied(
 }
 
 /// Returns the next work-group driven action for the cleanse plan.
-/// - If `work_groups` is empty, returns None (caller should fall back to `batches` heuristics).
+/// - If `work_groups` is empty, returns None because the plan is non-executable.
 /// - For `AuthorSql` / `AuthorSchema`, returns up to 5 task_ids that still need that checklist item.
 /// - For `Validate`, returns the kind and an empty vec (caller should transition phases).
 pub fn cleanse_next_action(plan: &CleansePlan) -> Option<(WorkGroupKind, Vec<String>)> {
@@ -1443,7 +1689,7 @@ pub fn cleanse_next_work_item_ctx(plan: &CleansePlan) -> Option<NextWorkItemCtx>
 }
 
 /// Returns the next work-group driven action for the model plan.
-/// - If `work_groups` is empty, returns None (caller should fall back to `batches` heuristics).
+/// - If `work_groups` is empty, returns None because the plan is non-executable.
 /// - For `AuthorSql` / `AuthorSchema`, returns up to 5 task_ids that still need that checklist item.
 /// - For `Validate`, returns the kind and an empty vec (caller should transition phases).
 pub fn model_next_action(plan: &ModelPlan) -> Option<(WorkGroupKind, Vec<String>)> {
@@ -1938,11 +2184,21 @@ pub fn model_mark_in_progress(plan: &mut ModelPlan, name: &str) {
 }
 
 pub fn cleanse_all_done(plan: &CleansePlan) -> bool {
-    plan.tasks.iter().all(|t| t.status == TaskStatus::Done)
+    !plan.tasks.is_empty()
+        && plan.tasks.iter().all(|t| {
+            required_checklist_item_ids().into_iter().all(|id| {
+                checklist_status(&t.checklist, id) == ChecklistItemStatus::Done
+            })
+        })
 }
 
 pub fn model_all_done(plan: &ModelPlan) -> bool {
-    plan.tasks.iter().all(|t| t.status == TaskStatus::Done)
+    !plan.tasks.is_empty()
+        && plan.tasks.iter().all(|t| {
+            required_checklist_item_ids().into_iter().all(|id| {
+                checklist_status(&t.checklist, id) == ChecklistItemStatus::Done
+            })
+        })
 }
 
 pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog) {
@@ -2220,80 +2476,6 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                             it,
                             ChecklistItemStatus::NeedsUpdate,
                             Some(evidence_from_tool_end(idx, "tool_end_failed", name, tool_id, ts)),
-                        );
-                        recompute_cleanse_task_status(t);
-                    }
-                }
-            }
-            plan.progress.last_applied_step_idx = idx + 1;
-            continue;
-        }
-
-        // Direct authoring tool (legacy / non-batched): track staging_model success/failure as sql_model progress.
-        if name == "staging_model" {
-            let ok = observation.ok;
-            let args_dataset_ids: Vec<String> = args
-                .get("dataset_ids")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let succeeded: Vec<String> = observation
-                .extra
-                .get("succeeded_dataset_ids")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            for ds in args_dataset_ids.iter() {
-                if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-                    let it =
-                        ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
-                    set_checklist_status(
-                        it,
-                        ChecklistItemStatus::InProgress,
-                        Some(evidence_from_tool_end(idx, "tool_end", name, tool_id, ts)),
-                    );
-                    recompute_cleanse_task_status(t);
-                }
-            }
-            for ds in succeeded.iter() {
-                if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-                    let it =
-                        ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
-                    set_checklist_status(
-                        it,
-                        ChecklistItemStatus::Done,
-                        Some(evidence_from_tool_end(idx, "tool_end_ok", name, tool_id, ts)),
-                    );
-                    recompute_cleanse_task_status(t);
-                }
-            }
-            if !ok {
-                for ds in args_dataset_ids.iter() {
-                    if succeeded.contains(ds) {
-                        continue;
-                    }
-                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
-                        let it =
-                            ensure_checklist_item(&mut t.checklist, CHECKLIST_SQL_MODEL, "Author staging SQL");
-                        set_checklist_status(
-                            it,
-                            ChecklistItemStatus::NeedsUpdate,
-                            Some(evidence_from_tool_end(
-                                idx,
-                                "tool_end_failed",
-                                name,
-                                tool_id,
-                                ts,
-                            )),
                         );
                         recompute_cleanse_task_status(t);
                     }
@@ -3249,6 +3431,30 @@ mod tests {
     }
 
     #[test]
+    fn validate_cleanse_plan_semantics_rejects_empty_work_groups() {
+        let plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![CleanseTask {
+                dataset_id: "a.b.c".to_string(),
+                expected_model_path: Some("models/staging/stg_b_c.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: dummy_cleanse_spec(),
+                status: TaskStatus::Pending,
+                checklist: std_checklist("Author staging SQL"),
+            }],
+            batches: vec![vec!["a.b.c".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        let v = validate_cleanse_plan_semantics(&plan);
+        assert!(!v.ok);
+        assert!(v.errors.iter().any(|e| e.contains("work_groups is empty")));
+    }
+
+    #[test]
     fn validate_model_plan_semantics_rejects_missing_grain_in_design_spec() {
         let mut bad_spec = dummy_model_spec();
         bad_spec.grain = "".to_string();
@@ -3276,6 +3482,42 @@ mod tests {
         let v = validate_model_plan_semantics(&plan, Some(&allowed));
         assert!(!v.ok);
         assert!(v.errors.iter().any(|e| e.contains("implementation_spec.grain is empty")));
+    }
+
+    #[test]
+    fn validate_model_plan_semantics_rejects_invalid_work_group_item_refs() {
+        let mut plan = ModelPlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![ModelTask {
+                name: "fct_orders".to_string(),
+                folder: "marts".to_string(),
+                goal: "orders fact".to_string(),
+                inputs: vec!["stg_orders".to_string()],
+                expected_model_path: Some("models/marts/fct_orders.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: dummy_model_spec(),
+                status: TaskStatus::Pending,
+                checklist: std_checklist("Author gold SQL"),
+            }],
+            batches: vec![vec!["fct_orders".to_string()]],
+            work_groups: canonical_work_groups_from_batches(
+                &[vec!["fct_orders".to_string()]],
+                "model",
+            ),
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        plan.work_groups[0].items[0].task_id = "missing_task".to_string();
+        let allowed = std::collections::BTreeSet::from(["stg_orders".to_string()]);
+        let v = validate_model_plan_semantics(&plan, Some(&allowed));
+        assert!(!v.ok);
+        assert!(
+            v.errors
+                .iter()
+                .any(|e| e.contains("references unknown model task_id=missing_task"))
+        );
     }
 
     fn status_of(items: &[PlanChecklistItem], id: &str) -> ChecklistItemStatus {
@@ -3409,6 +3651,33 @@ mod tests {
         assert!(!model_all_done(&plan));
         // Note: PlanStatus::Completed is set only after dbt_validate passes.
         assert_eq!(plan.status, PlanStatus::Approved);
+    }
+
+    #[test]
+    fn completion_predicate_requires_checklist_done_not_task_status() {
+        let mut plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![CleanseTask {
+                dataset_id: "a.b.c".to_string(),
+                expected_model_path: Some("models/staging/stg_b_c.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: dummy_cleanse_spec(),
+                status: TaskStatus::Done,
+                checklist: std_checklist("Author staging SQL"),
+            }],
+            batches: vec![vec!["a.b.c".to_string()]],
+            work_groups: canonical_work_groups_from_batches(
+                &[vec!["a.b.c".to_string()]],
+                "cleanse",
+            ),
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        // Force stale task status while checklist remains incomplete.
+        plan.tasks[0].status = TaskStatus::Done;
+        assert!(!cleanse_all_done(&plan));
     }
 
     #[test]

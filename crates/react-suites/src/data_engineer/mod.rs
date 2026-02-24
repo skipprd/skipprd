@@ -731,12 +731,14 @@ impl DataEngineerSuite {
                     prohibited_ops: vec![],
                 },
                 status: crate::data_engineer::plan::TaskStatus::Pending,
-                checklist: vec![],
+                checklist: crate::data_engineer::plan::canonical_task_checklist(true),
             })
             .collect::<Vec<_>>();
         let batches = ids.chunks(5).map(|c| c.to_vec()).collect::<Vec<_>>();
         plan.tasks = tasks;
         plan.batches = batches;
+        plan.work_groups =
+            crate::data_engineer::plan::canonical_work_groups_from_batches(&plan.batches, "cleanse");
         true
     }
 
@@ -912,6 +914,14 @@ impl DataEngineerSuite {
             ReviewDecision::PatchImpl => Some("review_patch_impl"),
             ReviewDecision::Proceed => None,
         }
+    }
+
+    fn churn_audit_acceptance_criteria() -> serde_json::Value {
+        serde_json::json!({
+            "no_false_completion": "plans are never marked completed while checklist items remain pending",
+            "no_non_executable_authoring": "authoring exits to planning when executable work-group structure is invalid",
+            "no_review_churn_from_missing_staging": "model plan grounding loops must not be caused by skipped upstream authoring",
+        })
     }
 
     fn catalog_bootstrap_semaphore_key(sctx: &SuiteCtx, thread_id: &str) -> String {
@@ -1670,11 +1680,33 @@ Apply these fixes in the output.",
     fn compile_cleanse_skeleton_payload(
         skeleton: &react_core::schema_registry::CleansePlanSkeletonV1,
     ) -> serde_json::Value {
+        let task_ids: Vec<String> = skeleton
+            .tasks
+            .iter()
+            .map(|t| t.dataset_id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect();
+        let tasks: Vec<serde_json::Value> = task_ids
+            .iter()
+            .map(|dataset_id| {
+                serde_json::json!({
+                    "dataset_id": dataset_id,
+                    "checklist": crate::data_engineer::plan::canonical_task_checklist(true),
+                })
+            })
+            .collect();
+        let batches: Vec<Vec<String>> = if skeleton.batches.is_empty() {
+            task_ids.chunks(5).map(|c| c.to_vec()).collect()
+        } else {
+            skeleton.batches.clone()
+        };
+        let work_groups =
+            crate::data_engineer::plan::canonical_work_groups_from_batches(&batches, "cleanse");
         serde_json::json!({
             "status": "draft",
-            "tasks": skeleton.tasks,
-            "batches": skeleton.batches,
-            "work_groups": [],
+            "tasks": tasks,
+            "batches": batches,
+            "work_groups": work_groups,
             "mutations": [],
             "progress": {
                 "last_applied_step_idx": 0,
@@ -1721,13 +1753,20 @@ Apply these fixes in the output.",
         let batches: Vec<Vec<String>> = task_names.chunks(5).map(|c| c.to_vec()).collect();
         let tasks: Vec<serde_json::Value> = task_names
             .into_iter()
-            .map(|name| serde_json::json!({ "name": name }))
+            .map(|name| {
+                serde_json::json!({
+                    "name": name,
+                    "checklist": crate::data_engineer::plan::canonical_task_checklist(false),
+                })
+            })
             .collect();
+        let work_groups =
+            crate::data_engineer::plan::canonical_work_groups_from_batches(&batches, "model");
         serde_json::json!({
             "status": "draft",
             "tasks": tasks,
             "batches": batches,
-            "work_groups": [],
+            "work_groups": work_groups,
             "mutations": [],
             "progress": {
                 "last_applied_step_idx": 0,
@@ -6168,24 +6207,35 @@ Apply these fixes in the output.",
                                     continue;
                                 }
                             };
-                            // Safety: do not allow authoring to proceed with an empty/invalid approved plan,
-                            // otherwise the phase will fast-forward (plan_tasks_done) without doing work.
-                            if plan.tasks.is_empty() || plan.batches.is_empty() {
+                            if let control_flow::AuthoringGate::Block { reason } =
+                                control_flow::gate_author_phase_execution_cleanse(&plan)
+                            {
                                 let plan_key = plan.plan_key.clone();
                                 plan.status = crate::data_engineer::plan::PlanStatus::Cancelled;
                                 let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
                                     .await;
+                                let step = react_core::session::ThreadStep::GuardBlock {
+                                    phase: phase.as_str().to_string(),
+                                    kind: GuardBlockKind::PlanSemanticInvalid,
+                                    reason: reason.clone(),
+                                    observation: react_core::session::Observation::fail(vec![
+                                        reason.clone(),
+                                    ]),
+                                    ts: chrono::Utc::now().to_rfc3339(),
+                                    agent: "agent".to_string(),
+                                };
+                                let _ = thread_store.append_step(thread_id, step).await;
                                 control_flow::append_phase_with_reason(
                                     &thread_store,
                                     thread_id,
                                     Some("agent".to_string()),
                                     Some(phase),
                                     Phase::CleansePlan,
-                                    Some(PhaseReasonCode::PlanInvalidEmpty),
+                                    Some(PhaseReasonCode::PlanSemanticInvalid),
                                     Some(serde_json::json!({
                                         "plan_key": plan_key,
-                                        "tasks_len": plan.tasks.len(),
-                                        "batches_len": plan.batches.len(),
+                                        "reason": reason,
+                                        "audit_acceptance": Self::churn_audit_acceptance_criteria(),
                                     })),
                                 )
                                 .await?;
@@ -6354,63 +6404,32 @@ Apply these fixes in the output.",
                                     ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                                     (ctx, None)
                                 } else {
-                                    let pending_schema =
-                                        crate::data_engineer::plan::cleanse_pending_for_checklist(
-                                            &plan,
-                                            crate::data_engineer::plan::CHECKLIST_SQL_MODEL,
-                                            crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
-                                        );
-                                    if !pending_schema.is_empty() {
-                                        let checklist_item_id = crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT;
-                                        let mut expected_paths: Vec<String> = Vec::new();
-                                        for ds in pending_schema.iter() {
-                                            if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
-                                                if let Some(p) = t.expected_model_path.as_deref() {
-                                                    if !p.trim().is_empty() {
-                                                        expected_paths.push(p.trim().to_string());
-                                                    }
-                                                }
-                                            }
+                                    let mut ctx = format!(
+                                        "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                        plan.plan_key,
+                                        crate::data_engineer::patch_contract::single_file_patch_good_example_json()
+                                    );
+                                    if !last_validate_failed_models.is_empty() {
+                                        for fm in last_validate_failed_models.iter().take(6) {
+                                            let name = fm
+                                                .get("name")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("unknown_model");
+                                            let file = fm
+                                                .get("file")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("(unknown file)");
+                                            ctx.push_str(&format!("- {} ({})\n", name, file));
                                         }
-                                        expected_paths.sort();
-                                        expected_paths.dedup();
-                                        let mut ctx = format!(
-                                            "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
-                                            plan.plan_key,
-                                            checklist_item_id,
-                                            pending_schema.join("\n- "),
-                                            expected_paths.join("\n- "),
-                                        );
-                                        ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
-                                        (ctx, None)
+                                    } else if let Some(ref brief) = last_validate_brief {
+                                        ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
+                                        ctx.push_str("\nLast dbt_validate summary:\n");
+                                        ctx.push_str(brief);
+                                        ctx.push('\n');
                                     } else {
-                                let mut ctx = format!(
-                                "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
-                                plan.plan_key,
-                                crate::data_engineer::patch_contract::single_file_patch_good_example_json()
-                            );
-                                if !last_validate_failed_models.is_empty() {
-                                    for fm in last_validate_failed_models.iter().take(6) {
-                                        let name = fm
-                                            .get("name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown_model");
-                                        let file = fm
-                                            .get("file")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("(unknown file)");
-                                        ctx.push_str(&format!("- {} ({})\n", name, file));
+                                        ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
                                     }
-                                } else if let Some(ref brief) = last_validate_brief {
-                                    ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
-                                    ctx.push_str("\nLast dbt_validate summary:\n");
-                                    ctx.push_str(brief);
-                                    ctx.push('\n');
-                                } else {
-                                    ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
-                                }
-                                (ctx, None)
-                                    }
+                                    (ctx, None)
                                 }
                             } else if next.is_empty() {
                                 // If work-groups exist, interpret "no next SQL batch" as:
@@ -6502,53 +6521,40 @@ Apply these fixes in the output.",
                                             ctx,
                                             None, // allow freeform file patching for targeted repair
                                         )
+                                    } else if crate::data_engineer::plan::cleanse_all_done(&plan) {
+                                        control_flow::append_phase_with_reason(
+                                            &thread_store,
+                                            thread_id,
+                                            Some("agent".to_string()),
+                                            Some(phase),
+                                            Phase::CleanseValidate,
+                                            Some(PhaseReasonCode::PlanTasksDone),
+                                            Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                                        )
+                                        .await?;
+                                        continue;
                                     } else {
-                                        // If schema checklist work remains, stay in authoring and request YAML patching.
-                                        let pending_schema =
-                                            crate::data_engineer::plan::cleanse_pending_for_checklist(
-                                                &plan,
-                                                crate::data_engineer::plan::CHECKLIST_SQL_MODEL,
-                                                crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
-                                            );
-                                        if !pending_schema.is_empty() {
-                                            let checklist_item_id = crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT;
-                                            let mut expected_paths: Vec<String> = Vec::new();
-                                            for ds in pending_schema.iter() {
-                                                if let Some(t) =
-                                                    plan.tasks.iter().find(|t| t.dataset_id == *ds)
-                                                {
-                                                    if let Some(p) = t.expected_model_path.as_deref() {
-                                                        if !p.trim().is_empty() {
-                                                            expected_paths.push(p.trim().to_string());
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            expected_paths.sort();
-                                            expected_paths.dedup();
-                                            let mut ctx = format!(
-                                                "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
-                                                plan.plan_key,
-                                                checklist_item_id,
-                                                pending_schema.join("\n- "),
-                                                expected_paths.join("\n- "),
-                                            );
-                                            ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
-                                            (ctx, None)
-                                        } else {
-                                            // All SQL + schema tasks are done; advance to validate.
-                                            control_flow::append_phase_with_reason(
-                                                &thread_store,
-                                                thread_id,
-                                                Some("agent".to_string()),
-                                                Some(phase),
-                                                Phase::CleanseValidate,
-                                                Some(PhaseReasonCode::PlanTasksDone),
-                                                Some(serde_json::json!({ "plan_key": plan.plan_key })),
-                                            )
-                                            .await?;
-                                            continue;
-                                        }
+                                        let reason = "approved cleanse plan is not executable: no next work-group action while checklist work remains".to_string();
+                                        let step = react_core::session::ThreadStep::GuardBlock {
+                                            phase: phase.as_str().to_string(),
+                                            kind: GuardBlockKind::PlanSemanticInvalid,
+                                            reason: reason.clone(),
+                                            observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                                            ts: chrono::Utc::now().to_rfc3339(),
+                                            agent: "agent".to_string(),
+                                        };
+                                        let _ = thread_store.append_step(thread_id, step).await;
+                                        control_flow::append_phase_with_reason(
+                                            &thread_store,
+                                            thread_id,
+                                            Some("agent".to_string()),
+                                            Some(phase),
+                                            Phase::CleansePlan,
+                                            Some(PhaseReasonCode::PlanSemanticInvalid),
+                                            Some(serde_json::json!({ "plan_key": plan.plan_key, "reason": reason })),
+                                        )
+                                        .await?;
+                                        continue;
                                     }
                                 }
                             } else {
@@ -6585,24 +6591,35 @@ Apply these fixes in the output.",
                                     continue;
                                 }
                             };
-                            // Safety: do not allow authoring to proceed with an empty/invalid approved plan,
-                            // otherwise the phase will fast-forward (plan_tasks_done) without doing work.
-                            if plan.tasks.is_empty() || plan.batches.is_empty() {
+                            if let control_flow::AuthoringGate::Block { reason } =
+                                control_flow::gate_author_phase_execution_model(&plan)
+                            {
                                 let plan_key = plan.plan_key.clone();
                                 plan.status = crate::data_engineer::plan::PlanStatus::Cancelled;
                                 let _ =
                                     crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
+                                let step = react_core::session::ThreadStep::GuardBlock {
+                                    phase: phase.as_str().to_string(),
+                                    kind: GuardBlockKind::PlanSemanticInvalid,
+                                    reason: reason.clone(),
+                                    observation: react_core::session::Observation::fail(vec![
+                                        reason.clone(),
+                                    ]),
+                                    ts: chrono::Utc::now().to_rfc3339(),
+                                    agent: "agent".to_string(),
+                                };
+                                let _ = thread_store.append_step(thread_id, step).await;
                                 control_flow::append_phase_with_reason(
                                     &thread_store,
                                     thread_id,
                                     Some("agent".to_string()),
                                     Some(phase),
                                     Phase::ModelPlan,
-                                    Some(PhaseReasonCode::PlanInvalidEmpty),
+                                    Some(PhaseReasonCode::PlanSemanticInvalid),
                                     Some(serde_json::json!({
                                         "plan_key": plan_key,
-                                        "tasks_len": plan.tasks.len(),
-                                        "batches_len": plan.batches.len(),
+                                        "reason": reason,
+                                        "audit_acceptance": Self::churn_audit_acceptance_criteria(),
                                     })),
                                 )
                                 .await?;
@@ -6766,63 +6783,32 @@ Apply these fixes in the output.",
                                     ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                                     (ctx, None)
                                 } else {
-                                    let pending_schema =
-                                        crate::data_engineer::plan::model_pending_for_checklist(
-                                            &plan,
-                                            crate::data_engineer::plan::CHECKLIST_SQL_MODEL,
-                                            crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
-                                        );
-                                    if !pending_schema.is_empty() {
-                                        let checklist_item_id = crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT;
-                                        let mut expected_paths: Vec<String> = Vec::new();
-                                        for n in pending_schema.iter() {
-                                            if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
-                                                if let Some(p) = t.expected_model_path.as_deref() {
-                                                    if !p.trim().is_empty() {
-                                                        expected_paths.push(p.trim().to_string());
-                                                    }
-                                                }
-                                            }
+                                    let mut ctx = format!(
+                                        "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                        plan.plan_key,
+                                        crate::data_engineer::patch_contract::single_file_patch_good_example_json()
+                                    );
+                                    if !last_validate_failed_models.is_empty() {
+                                        for fm in last_validate_failed_models.iter().take(6) {
+                                            let name = fm
+                                                .get("name")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("unknown_model");
+                                            let file = fm
+                                                .get("file")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("(unknown file)");
+                                            ctx.push_str(&format!("- {} ({})\n", name, file));
                                         }
-                                        expected_paths.sort();
-                                        expected_paths.dedup();
-                                        let mut ctx = format!(
-                                            "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
-                                            plan.plan_key,
-                                            checklist_item_id,
-                                            pending_schema.join("\n- "),
-                                            expected_paths.join("\n- "),
-                                        );
-                                        ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
-                                        (ctx, None)
+                                    } else if let Some(ref brief) = last_validate_brief {
+                                        ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
+                                        ctx.push_str("\nLast dbt_validate summary:\n");
+                                        ctx.push_str(brief);
+                                        ctx.push('\n');
                                     } else {
-                                let mut ctx = format!(
-                                "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
-                                plan.plan_key,
-                                crate::data_engineer::patch_contract::single_file_patch_good_example_json()
-                            );
-                                if !last_validate_failed_models.is_empty() {
-                                    for fm in last_validate_failed_models.iter().take(6) {
-                                        let name = fm
-                                            .get("name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown_model");
-                                        let file = fm
-                                            .get("file")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("(unknown file)");
-                                        ctx.push_str(&format!("- {} ({})\n", name, file));
+                                        ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
                                     }
-                                } else if let Some(ref brief) = last_validate_brief {
-                                    ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
-                                    ctx.push_str("\nLast dbt_validate summary:\n");
-                                    ctx.push_str(brief);
-                                    ctx.push('\n');
-                                } else {
-                                    ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
-                                }
-                                (ctx, None)
-                                    }
+                                    (ctx, None)
                                 }
                             } else if next_names.is_empty() {
                                 if let Some((
@@ -6985,138 +6971,40 @@ Apply these fixes in the output.",
                                         ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
                                     }
                                     (ctx, None)
+                                } else if crate::data_engineer::plan::model_all_done(&plan) {
+                                    control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        Phase::ModelValidate,
+                                        Some(PhaseReasonCode::PlanTasksDone),
+                                        Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                                    )
+                                    .await?;
+                                    continue;
                                 } else {
-                                    let pending_schema =
-                                        crate::data_engineer::plan::model_pending_for_checklist(
-                                            &plan,
-                                            crate::data_engineer::plan::CHECKLIST_SQL_MODEL,
-                                            crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
-                                        );
-                                    if !pending_schema.is_empty() {
-                                        // Deterministic pre-check: if models/schema.yml already contains these
-                                        // models, mark the current schema checklist item done and restart.
-                                        {
-                                            let key =
-                                                crate::data_engineer::project_fs::join_storage_key(
-                                                    &actx,
-                                                    crate::data_engineer::project_files::MODELS_SCHEMA_YML,
-                                                );
-                                            if let Ok(bytes) = actx.storage.get_bytes(&key).await {
-                                                let content =
-                                                    String::from_utf8_lossy(&bytes).to_string();
-                                                if let Ok(vy) = serde_yaml::from_str::<
-                                                    serde_yaml::Value,
-                                                >(&content)
-                                                {
-                                                    let mut names_in_schema: std::collections::HashSet<String> =
-                                                        std::collections::HashSet::new();
-                                                    if let Some(models) = vy
-                                                        .get("models")
-                                                        .and_then(|m| m.as_sequence())
-                                                    {
-                                                        for m in models.iter() {
-                                                            if let Some(nm) = m
-                                                                .get("name")
-                                                                .and_then(|n| n.as_str())
-                                                                .map(|s| s.trim().to_string())
-                                                                .filter(|s| !s.is_empty())
-                                                            {
-                                                                names_in_schema.insert(nm);
-                                                            }
-                                                        }
-                                                    }
-                                                    let mut changed = false;
-                                                    let checklist_item_id = actx
-                                                        .exec_ctx
-                                                        .as_ref()
-                                                        .and_then(|c| c.checklist_item_id.as_deref())
-                                                        .unwrap_or(
-                                                            crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT,
-                                                        )
-                                                        .trim()
-                                                        .to_string();
-                                                    for n in pending_schema.iter() {
-                                                        if !names_in_schema.contains(n) {
-                                                            continue;
-                                                        }
-                                                        if let Some(t) = plan
-                                                            .tasks
-                                                            .iter()
-                                                            .find(|t| t.name == *n)
-                                                        {
-                                                            let done = t
-                                                                .checklist
-                                                                .iter()
-                                                                .find(|it| it.checklist_item_id == checklist_item_id)
-                                                                .map(|it| {
-                                                                    it.status
-                                                                        == crate::data_engineer::plan::ChecklistItemStatus::Done
-                                                                })
-                                                                .unwrap_or(false);
-                                                            if !done {
-                                                                changed = true;
-                                                            }
-                                                        }
-                                                        crate::data_engineer::plan::model_checklist_mark_status(
-                                                            &mut plan,
-                                                            n,
-                                                            &checklist_item_id,
-                                                            crate::data_engineer::plan::ChecklistItemStatus::Done,
-                                                        );
-                                                    }
-                                                    if changed {
-                                                        crate::data_engineer::plan::save_model_plan(
-                                                            &actx,
-                                                            &plan,
-                                                        )
-                                                        .await?;
-                                                        continue;
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        let mut expected_paths: Vec<String> = Vec::new();
-                                        for n in pending_schema.iter() {
-                                            if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
-                                                if let Some(p) = t.expected_model_path.as_deref() {
-                                                    if !p.trim().is_empty() {
-                                                        expected_paths.push(p.trim().to_string());
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        expected_paths.sort();
-                                        expected_paths.dedup();
-                                        let checklist_item_id = actx
-                                            .exec_ctx
-                                            .as_ref()
-                                            .and_then(|c| c.checklist_item_id.as_deref())
-                                            .unwrap_or(crate::data_engineer::plan::CHECKLIST_SCHEMA_CONTRACT)
-                                            .trim()
-                                            .to_string();
-                                        let mut ctx = format!(
-                                            "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
-                                            plan.plan_key,
-                                            checklist_item_id,
-                                            pending_schema.join("\n- "),
-                                            expected_paths.join("\n- "),
-                                        );
-                                        ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
-                                        (ctx, None)
-                                    } else {
-                                        control_flow::append_phase_with_reason(
-                                            &thread_store,
-                                            thread_id,
-                                            Some("agent".to_string()),
-                                            Some(phase),
-                                            Phase::ModelValidate,
-                                            Some(PhaseReasonCode::PlanTasksDone),
-                                            Some(serde_json::json!({ "plan_key": plan.plan_key })),
-                                        )
-                                        .await?;
-                                        continue;
-                                    }
+                                    let reason = "approved model plan is not executable: no next work-group action while checklist work remains".to_string();
+                                    let step = react_core::session::ThreadStep::GuardBlock {
+                                        phase: phase.as_str().to_string(),
+                                        kind: GuardBlockKind::PlanSemanticInvalid,
+                                        reason: reason.clone(),
+                                        observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                                        ts: chrono::Utc::now().to_rfc3339(),
+                                        agent: "agent".to_string(),
+                                    };
+                                    let _ = thread_store.append_step(thread_id, step).await;
+                                    control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        Phase::ModelPlan,
+                                        Some(PhaseReasonCode::PlanSemanticInvalid),
+                                        Some(serde_json::json!({ "plan_key": plan.plan_key, "reason": reason })),
+                                    )
+                                    .await?;
+                                    continue;
                                 }
                                 }
                             } else {
@@ -7212,6 +7100,7 @@ Apply these fixes in the output.",
                     q.push_str("\nIMPORTANT: Tool-call argument shapes are strict. In particular: vect_query uses args.query_text (NOT args.query) and scope must be \"dataset\"|\"field\"|\"doc\"|\"artifact\"|\"metric\"|\"model\".");
                     q.push_str("\nIMPORTANT: sql_stats and sql_sample both require args.field. To sample rows, use run_sql with a LIMIT.");
                     q.push_str("\nIMPORTANT: This authoring phase is plan-driven. Follow the Plan context below. If it says to patch failing DBT files, do that first; if it provides a next batch, execute it. Do NOT ask for approval; approvals happen in plan phases.");
+                    q.push_str("\nIMPORTANT: No downstream compensation exists for incomplete plan structure. If execution context is incomplete, return to planning; do not invent fallback execution.");
                     q.push_str("\n\nPlan context:\n");
                     q.push_str(&plan_context);
                     // Auto-attach authoritative schema facts (no ambiguity) for this phase.
@@ -8133,8 +8022,10 @@ Apply these fixes in the output.",
                                 .await;
                         }
 
-                        // Mark the active plan completed only after validate passes.
+                        // Mark the active plan completed only when validate passes AND checklist execution is complete.
                         let latest_log = thread_store.get(thread_id).await.ok();
+                        let mut plan_incomplete_after_validate = false;
+                        let mut active_plan_key: Option<String> = None;
                         if phase == Phase::CleanseValidate {
                             if let Some(mut p) =
                                 crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
@@ -8144,7 +8035,13 @@ Apply these fixes in the output.",
                                         &mut p, l,
                                     );
                                 }
-                                p.status = crate::data_engineer::plan::PlanStatus::Completed;
+                                active_plan_key = Some(p.plan_key.clone());
+                                if crate::data_engineer::plan::cleanse_all_done(&p) {
+                                    p.status = crate::data_engineer::plan::PlanStatus::Completed;
+                                } else {
+                                    plan_incomplete_after_validate = true;
+                                    p.status = crate::data_engineer::plan::PlanStatus::Approved;
+                                }
                                 let _ =
                                     crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
                             }
@@ -8157,10 +8054,54 @@ Apply these fixes in the output.",
                                         &mut p, l,
                                     );
                                 }
-                                p.status = crate::data_engineer::plan::PlanStatus::Completed;
+                                active_plan_key = Some(p.plan_key.clone());
+                                if crate::data_engineer::plan::model_all_done(&p) {
+                                    p.status = crate::data_engineer::plan::PlanStatus::Completed;
+                                } else {
+                                    plan_incomplete_after_validate = true;
+                                    p.status = crate::data_engineer::plan::PlanStatus::Approved;
+                                }
                                 let _ =
                                     crate::data_engineer::plan::save_model_plan(&actx, &p).await;
                             }
+                        }
+
+                        if plan_incomplete_after_validate {
+                            let signal = "ValidatePassPlanIncomplete";
+                            let reason = format!(
+                                "{}: dbt_validate succeeded but plan checklist work is still pending; returning to authoring",
+                                signal
+                            );
+                            let step = react_core::session::ThreadStep::GuardBlock {
+                                phase: phase.as_str().to_string(),
+                                kind: GuardBlockKind::AuthoringCompletion,
+                                reason: reason.clone(),
+                                observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                                ts: chrono::Utc::now().to_rfc3339(),
+                                agent: "agent".to_string(),
+                            };
+                            let _ = thread_store.append_step(thread_id, step).await;
+                            let to_phase = if phase == Phase::CleanseValidate {
+                                Phase::CleanseAuthor
+                            } else {
+                                Phase::ModelAuthor
+                            };
+                            control_flow::append_phase_with_reason(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                Some(phase),
+                                to_phase,
+                                Some(PhaseReasonCode::PhaseBlocked),
+                                Some(serde_json::json!({
+                                    "signal": signal,
+                                    "plan_key": active_plan_key,
+                                    "dbt_validate_observation": obs,
+                                    "audit_acceptance": Self::churn_audit_acceptance_criteria(),
+                                })),
+                            )
+                            .await?;
+                            continue;
                         }
 
                         let trigger_step_idx = thread_store
@@ -9901,10 +9842,13 @@ mod tests {
                     prohibited_ops: vec![],
                 },
                 status: crate::data_engineer::plan::TaskStatus::Pending,
-                checklist: vec![],
+                checklist: crate::data_engineer::plan::canonical_task_checklist(true),
             }],
             batches: vec![vec![ds.clone()]],
-            work_groups: vec![],
+            work_groups: crate::data_engineer::plan::canonical_work_groups_from_batches(
+                &[vec![ds.clone()]],
+                "cleanse",
+            ),
             mutations: vec![],
             progress: crate::data_engineer::plan::PlanProgress::default(),
         };
@@ -10014,10 +9958,13 @@ mod tests {
                     assumptions: vec![],
                 },
                 status: crate::data_engineer::plan::TaskStatus::Pending,
-                checklist: vec![],
+                checklist: crate::data_engineer::plan::canonical_task_checklist(false),
             }],
             batches: vec![vec!["fct_orders".to_string()]],
-            work_groups: vec![],
+            work_groups: crate::data_engineer::plan::canonical_work_groups_from_batches(
+                &[vec!["fct_orders".to_string()]],
+                "model",
+            ),
             mutations: vec![],
             progress: crate::data_engineer::plan::PlanProgress::default(),
         };

@@ -889,6 +889,45 @@ pub fn gate_authoring_completion(log: Option<&ThreadLog>, phase: Phase) -> Autho
     }
 }
 
+pub fn gate_author_phase_execution_cleanse(
+    plan: &crate::data_engineer::plan::CleansePlan,
+) -> AuthoringGate {
+    let issues = crate::data_engineer::plan::cleanse_executable_plan_issues(plan);
+    if issues.is_empty() {
+        return AuthoringGate::Allow;
+    }
+    let mut msg = String::from(
+        "Approved cleanse plan is not executable. Re-enter planning before authoring:\n",
+    );
+    for issue in issues.iter().take(8) {
+        msg.push_str("- ");
+        msg.push_str(issue);
+        msg.push('\n');
+    }
+    AuthoringGate::Block {
+        reason: msg.trim().to_string(),
+    }
+}
+
+pub fn gate_author_phase_execution_model(
+    plan: &crate::data_engineer::plan::ModelPlan,
+) -> AuthoringGate {
+    let issues = crate::data_engineer::plan::model_executable_plan_issues(plan);
+    if issues.is_empty() {
+        return AuthoringGate::Allow;
+    }
+    let mut msg =
+        String::from("Approved model plan is not executable. Re-enter planning before authoring:\n");
+    for issue in issues.iter().take(8) {
+        msg.push_str("- ");
+        msg.push_str(issue);
+        msg.push('\n');
+    }
+    AuthoringGate::Block {
+        reason: msg.trim().to_string(),
+    }
+}
+
 pub struct DeterministicDbtValidateOnce;
 
 impl DeterministicDbtValidateOnce {
@@ -2116,5 +2155,77 @@ mod tests {
         };
         let sel = derive_targeted_select_terms(&ctx, &log).await;
         assert!(sel.is_empty());
+    }
+
+    #[test]
+    fn author_execution_gate_blocks_non_executable_cleanse_plan() {
+        let plan = crate::data_engineer::plan::CleansePlan {
+            plan_key: "k".to_string(),
+            status: crate::data_engineer::plan::PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![crate::data_engineer::plan::CleanseTask {
+                dataset_id: "a.b.c".to_string(),
+                expected_model_path: Some("models/staging/stg_b_c.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: crate::data_engineer::plan::CleanseImplementationSpec {
+                    spec_version: 1,
+                    row_preserving: true,
+                    output_fields: vec![],
+                    prohibited_ops: vec![],
+                },
+                status: crate::data_engineer::plan::TaskStatus::Pending,
+                checklist: vec![],
+            }],
+            batches: vec![vec!["a.b.c".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: crate::data_engineer::plan::PlanProgress::default(),
+        };
+        match gate_author_phase_execution_cleanse(&plan) {
+            AuthoringGate::Block { reason } => {
+                assert!(reason.contains("not executable"));
+                assert!(reason.contains("work_groups is empty"));
+            }
+            other => panic!("expected Block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn author_execution_gate_allows_executable_model_plan() {
+        let names = vec![vec!["fct_orders".to_string()]];
+        let plan = crate::data_engineer::plan::ModelPlan {
+            plan_key: "k".to_string(),
+            status: crate::data_engineer::plan::PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![crate::data_engineer::plan::ModelTask {
+                name: "fct_orders".to_string(),
+                folder: "marts".to_string(),
+                goal: "orders fact".to_string(),
+                inputs: vec!["stg_orders".to_string()],
+                expected_model_path: Some("models/marts/fct_orders.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: crate::data_engineer::plan::ModelImplementationSpec {
+                    spec_version: 1,
+                    grain: "1 row per order".to_string(),
+                    inputs: vec!["stg_orders".to_string()],
+                    joins: vec![],
+                    metrics: vec![],
+                    output_fields: vec![],
+                    assumptions: vec![],
+                },
+                status: crate::data_engineer::plan::TaskStatus::Pending,
+                checklist: crate::data_engineer::plan::canonical_task_checklist(false),
+            }],
+            batches: names.clone(),
+            work_groups: crate::data_engineer::plan::canonical_work_groups_from_batches(
+                &names, "model",
+            ),
+            mutations: vec![],
+            progress: crate::data_engineer::plan::PlanProgress::default(),
+        };
+        match gate_author_phase_execution_model(&plan) {
+            AuthoringGate::Allow => {}
+            other => panic!("expected Allow, got {:?}", other),
+        }
     }
 }

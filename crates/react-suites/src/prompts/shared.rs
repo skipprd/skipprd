@@ -39,6 +39,10 @@ Hard rules:
 - Approval flow:
   - In agent mode, approvals happen in the plan phases (cleanse_plan/model_plan). Do NOT call ask_approval during authoring; just execute the approved plan.
   - If you need to revise scope/order, return to planning by asking the user to reject/adjust the plan (do not spam approvals mid-authoring).
+- Execution invariants (hard cutover):
+  - Authoring is checklist/work-group driven from an approved executable plan.
+  - Do NOT assume downstream phases will compensate for missing work_groups/checklist structure.
+  - If plan structure is incomplete, return to planning instead of improvising.
 - For build/publish: ALWAYS require approval before any dbt build. Use `publish_dbt_to_provider` (first call returns await_approval; on approval call again with confirm=true).
 - At the outset, search for relevant DBT examples using search_dbt_examples with a short query inferred from the dataset/problem, and follow the top match's conventions (naming, structure).
 - Use run_sql ONLY to validate authored SQL fragments; NEVER to answer.
@@ -73,6 +77,7 @@ pub fn tool_card_common_prefix() -> &'static str {
 
 Usage guidance:
 - Prefer batch scaffolding: use batch tools when available; for file op=patch, patch one file per call.
+- Execution model is work-group/checklist driven; do not invent off-plan fallback execution.
 - Probe contract discipline:
   - artifacts supports only ops: list|get. Do NOT call artifacts with get_json.
   - json_file supports ops: get_item|query.
@@ -136,6 +141,13 @@ mod tests {
         let c = tool_card_common_prefix();
         assert!(c.contains("path:\\\"target/manifest.json\\\""));
         assert!(c.contains("Do NOT use path:\\\"manifest.json\\\""));
+    }
+
+    #[test]
+    fn tool_card_mentions_executable_plan_invariants() {
+        let c = author_system_prompt_common();
+        assert!(c.contains("checklist/work-group driven"));
+        assert!(c.contains("downstream phases will compensate"));
     }
 }
 

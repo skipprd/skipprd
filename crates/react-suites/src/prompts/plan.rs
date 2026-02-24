@@ -69,7 +69,12 @@ pub fn plan_design_memo_system_prompt(kind: &str) -> String {
     format!(
         "You are a principal analytics engineer writing a planning design memo for {kind}.\n\
 Return plain text only.\n\
-Cover: goals, entities, dependencies, risks, sequencing, and validation strategy.\n\
+Cover all executable-plan sections explicitly:\n\
+- task inventory (what will be authored)\n\
+- checklist requirements per task (sql_model, schema_contract, validate)\n\
+- work-group sequencing + dependencies\n\
+- validation criteria/invariants for completion\n\
+Also cover goals, entities, risks, and validation strategy.\n\
 Be specific and grounded; do not output JSON."
     )
 }
@@ -94,7 +99,8 @@ Rules:\n\
 - tasks[].dataset_id MUST reference discovered RAW source tables only (catalog/database/table form).\n\
 - Do NOT emit silver/gold dataset identifiers in CLEANSE skeleton tasks.\n\
 - batches entries must be subset of tasks[].dataset_id values.\n\
-No implementation_spec, no checklist, no work_groups, no prose."
+No implementation_spec, no checklist, no work_groups, no prose.\n\
+This skeleton is compile input only: downstream compile will build executable checklist/work-group structure for every task."
         .to_string()
 }
 
@@ -113,6 +119,7 @@ Rules:\n\
 pub fn plan_enrichment_reason_system_prompt() -> String {
     "You are a planning assistant.\n\
 Return concise plain text reasoning for implementation choices and constraints.\n\
+Explicitly reason about work-group ordering, dependency correctness, and checklist coverage.\n\
 Do not output JSON."
         .to_string()
 }
@@ -131,7 +138,8 @@ implementation_spec MUST contain only these top-level keys:\n\
 - prohibited_ops\n\
 Do not emit batch_id, dependencies, data_quality, wrappers, commentary, or any non-schema keys.\n\
 Each output_fields item MUST include: name, kind, expression.\n\
-spec_version MUST be an integer number (not a string)."
+spec_version MUST be an integer number (not a string).\n\
+Your specs must be complete enough for executable plan completion (author + validate checklist items can be finished without downstream guesswork)."
         .to_string()
 }
 
@@ -152,7 +160,8 @@ implementation_spec MUST contain only these top-level keys:\n\
 - assumptions\n\
 Do not emit batch_id, dependencies, data_quality, wrappers, commentary, or any non-schema keys.\n\
 Each output_fields item MUST include: name, kind, expression.\n\
-spec_version MUST be an integer number (not a string)."
+spec_version MUST be an integer number (not a string).\n\
+Your specs must be complete enough for executable plan completion (author + validate checklist items can be finished without downstream guesswork)."
         .to_string()
 }
 
@@ -165,5 +174,13 @@ mod tests {
         let p = model_plan_system_prompt();
         assert!(p.contains("path:\\\"target/manifest.json\\\""));
         assert!(p.contains("Do NOT use path:\\\"manifest.json\\\""));
+    }
+
+    #[test]
+    fn design_memo_prompt_requires_executable_sections() {
+        let p = plan_design_memo_system_prompt("cleanse");
+        assert!(p.contains("task inventory"));
+        assert!(p.contains("checklist requirements per task"));
+        assert!(p.contains("work-group sequencing + dependencies"));
     }
 }
