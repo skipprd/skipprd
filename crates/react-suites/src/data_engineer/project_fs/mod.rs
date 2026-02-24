@@ -282,7 +282,7 @@ pub async fn get_file(ctx: &AgentCtx, path: &str, max_chars: usize) -> Result<Va
             let existing_had_trailing_newline = text.ends_with('\n');
             let content = if max_chars > 0 && text.len() > max_chars {
                 let mut s = text.chars().take(max_chars).collect::<String>();
-                s.push_str("\n... (truncated; use dbt_files op=get_json or op=manifest_find for structured access)\n");
+                s.push_str("\n... (truncated; use file op=get with higher max_chars for additional content)\n");
                 s
             } else {
                 text
@@ -323,128 +323,6 @@ pub async fn get_file(ctx: &AgentCtx, path: &str, max_chars: usize) -> Result<Va
             }))
         },
     }
-}
-
-pub async fn get_json(ctx: &AgentCtx, path: &str, pointer: Option<&str>) -> Result<Value, String> {
-    let rel = normalize_rel_path(path)?;
-    let key = join_storage_key(ctx, &rel);
-    let bytes = match ctx.storage.get_bytes(&key).await {
-        Ok(b) => b,
-        Err(e) => {
-            return Ok(
-                serde_json::json!({"ok": false, "path": rel, "key": key, "error": format!("not found or failed to fetch: {}", e)}),
-            )
-        }
-    };
-    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
-        Ok(v) => v,
-        Err(e) => {
-            return Ok(
-                serde_json::json!({"ok": false, "path": rel, "key": key, "error": format!("failed to parse json: {}", e)}),
-            );
-        }
-    };
-    if let Some(ptr) = pointer {
-        let ptr = ptr.trim();
-        if ptr.is_empty() {
-            return Ok(serde_json::json!({"ok": true, "path": rel, "key": key, "json": v}));
-        }
-        if let Some(sub) = v.pointer(ptr) {
-            return Ok(
-                serde_json::json!({"ok": true, "path": rel, "key": key, "pointer": ptr, "json": sub}),
-            );
-        }
-        return Ok(
-            serde_json::json!({"ok": false, "path": rel, "key": key, "pointer": ptr, "error": "pointer not found"}),
-        );
-    }
-    Ok(serde_json::json!({"ok": true, "path": rel, "key": key, "json": v}))
-}
-
-pub async fn manifest_find(
-    ctx: &AgentCtx,
-    path: &str,
-    unique_id: Option<&str>,
-    name: Option<&str>,
-    resource_type: Option<&str>,
-    limit: usize,
-) -> Result<Value, String> {
-    let rel = normalize_rel_path(path)?;
-    let key = join_storage_key(ctx, &rel);
-    let bytes = match ctx.storage.get_bytes(&key).await {
-        Ok(b) => b,
-        Err(e) => {
-            return Ok(
-                serde_json::json!({"ok": false, "path": rel, "key": key, "error": format!("not found or failed to fetch: {}", e)}),
-            )
-        }
-    };
-    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
-        Ok(v) => v,
-        Err(e) => {
-            return Ok(
-                serde_json::json!({"ok": false, "path": rel, "key": key, "error": format!("failed to parse json: {}", e)}),
-            );
-        }
-    };
-    let nodes = match v.get("nodes").and_then(|n| n.as_object()) {
-        Some(n) => n,
-        None => {
-            return Ok(
-                serde_json::json!({"ok": false, "path": rel, "key": key, "error": "manifest missing nodes"}),
-            )
-        }
-    };
-
-    let mut out: Vec<serde_json::Value> = Vec::new();
-    for (uid, node) in nodes.iter() {
-        if let Some(ref u) = unique_id {
-            if uid != u {
-                continue;
-            }
-        }
-        if let Some(ref n) = name {
-            let node_name = node.get("name").and_then(|x| x.as_str()).unwrap_or("");
-            if node_name != *n {
-                continue;
-            }
-        }
-        if let Some(ref rt) = resource_type {
-            let node_rt = node
-                .get("resource_type")
-                .and_then(|x| x.as_str())
-                .unwrap_or("");
-            if node_rt != *rt {
-                continue;
-            }
-        }
-        let mut slim = serde_json::Map::new();
-        slim.insert("unique_id".to_string(), serde_json::json!(uid));
-        for k in [
-            "resource_type",
-            "name",
-            "original_file_path",
-            "path",
-            "package_name",
-            "database",
-            "schema",
-            "alias",
-        ]
-        .iter()
-        {
-            if let Some(vv) = node.get(*k) {
-                slim.insert((*k).to_string(), vv.clone());
-            }
-        }
-        if let Some(dep) = node.get("depends_on") {
-            slim.insert("depends_on".to_string(), dep.clone());
-        }
-        out.push(Value::Object(slim));
-        if out.len() >= limit {
-            break;
-        }
-    }
-    Ok(serde_json::json!({"ok": true, "path": rel, "key": key, "items": out}))
 }
 
 pub async fn remove_file(

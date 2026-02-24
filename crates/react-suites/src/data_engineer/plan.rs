@@ -60,7 +60,7 @@ fn file_stem(s: &str) -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
-fn extract_dbt_files_paths(op: &str, args: &Value) -> Vec<String> {
+fn extract_file_paths(op: &str, args: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
     match op {
@@ -528,6 +528,11 @@ pub fn prune_model_plan_to_grounded_staging_models(
     plan.tasks.retain(|t| {
         let name = t.name.trim();
         if name.is_empty() {
+            removed.push(t.name.clone());
+            return false;
+        }
+        let has_any_input = t.inputs.iter().any(|inp| !inp.trim().is_empty());
+        if !has_any_input {
             removed.push(t.name.clone());
             return false;
         }
@@ -2298,12 +2303,12 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
             continue;
         }
 
-        if name == "dbt_files" {
+        if name == "file" {
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
             if op == "patch" || op == "mv" {
                 let ok = observation.ok;
 
-                let paths = extract_dbt_files_paths(op, args);
+                let paths = extract_file_paths(op, args);
                 // SQL patching can be used for targeted remediation; treat successful patches as progress.
                 let mut stems: Vec<String> = paths.iter().filter_map(|p| file_stem(p)).collect();
                 stems.sort();
@@ -2890,12 +2895,12 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
             continue;
         }
 
-        // Capture dbt_files patch activity and map to schema-contract checklist items.
-        if name == "dbt_files" {
+        // Capture file patch activity and map to schema-contract checklist items.
+        if name == "file" {
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
             if op == "patch" {
                 let ok = observation.ok;
-                let paths = extract_dbt_files_paths(op, args);
+                let paths = extract_file_paths(op, args);
                 let mut stems: Vec<String> = paths.iter().filter_map(|p| file_stem(p)).collect();
                 stems.sort();
                 stems.dedup();
@@ -3576,7 +3581,7 @@ mod tests {
 
         let log = ThreadLog {
             steps: vec![step_with_ctx(
-                "dbt_files",
+                "file",
                 serde_json::json!({
                     "op":"patch",
                     "path": "models/schema.yml",
@@ -3696,6 +3701,35 @@ mod tests {
         assert_eq!(plan.tasks[0].name, "fct_ok");
         assert_eq!(plan.batches.len(), 1);
         assert_eq!(plan.batches[0], vec!["fct_ok".to_string()]);
+    }
+
+    #[test]
+    fn prune_model_plan_to_grounded_staging_models_prunes_tasks_with_empty_inputs() {
+        let mut plan = ModelPlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![ModelTask {
+                name: "fct_missing_inputs".to_string(),
+                folder: "marts".to_string(),
+                goal: "x".to_string(),
+                inputs: vec![],
+                expected_model_path: None,
+                invariants: vec![],
+                implementation_spec: dummy_model_spec(),
+                status: TaskStatus::Pending,
+                checklist: vec![],
+            }],
+            batches: vec![vec!["fct_missing_inputs".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        let mut allowed = std::collections::BTreeSet::new();
+        allowed.insert("stg_customers".to_string());
+        prune_model_plan_to_grounded_staging_models(&mut plan, &allowed);
+        assert!(plan.tasks.is_empty());
+        assert!(plan.batches.is_empty());
     }
 
     #[test]
@@ -3821,7 +3855,7 @@ mod tests {
         };
         let log = ThreadLog {
             steps: vec![step(
-                "dbt_files",
+                "file",
                 serde_json::json!({
                     "op":"patch",
                     "path": "models/staging/stg_test_raw_raw_customers.sql",

@@ -458,7 +458,7 @@ mod tests {
     fn agent_step_schema_accepts_tool_and_final() {
         let tool = serde_json::json!({
             "type": "tool",
-            "name": "dbt_files",
+            "name": "file",
             "args": "{\"op\":\"list\",\"prefix\":\"models/\"}",
             "final": null
         });
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn agent_step_schema_rejects_legacy_action_envelope() {
-        let legacy = serde_json::json!({ "action": "dbt_files", "args": { "op": "list" } });
+        let legacy = serde_json::json!({ "action": "file", "args": { "op": "list" } });
         let err = validate(SchemaId::AgentStepV1, &legacy).expect_err("should reject legacy");
         assert!(err.contains("validation error"), "err={err}");
     }

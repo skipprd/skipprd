@@ -11,7 +11,7 @@ Hard rules:
 - Keep outputs concise and factual.
 
 Discovery requirements:
-- dbt_files: inspect existing dbt project files under models/ and key root files.
+- file: inspect existing dbt project files under models/ and key root files.
 - sql_schema: list available relations and inspect relevant raw tables.
 - For first-batch candidate datasets, gather at least one evidence signal via sql_stats/sql_sample/run_sql.
 - IMPORTANT: sql_stats/sql_sample require BOTH args.table and args.field.
@@ -41,9 +41,13 @@ Hard rules:
 - Keep outputs concise and factual.
 
 Discovery requirements:
-- dbt_files: inspect staging/core/marts files and key dbt project files.
+- file: inspect staging/core/marts files and key dbt project files.
 - Ensure candidate model inputs are grounded in existing staging models.
-- For first-batch candidate models, gather evidence for grain/keys/metrics using dbt_files/sql_schema/sql_stats/sql_sample/run_sql.
+- For first-batch candidate models, gather evidence for grain/keys/metrics using file/sql_schema/sql_stats/sql_sample/run_sql.
+- Tool contract discipline:
+  - artifacts supports only ops: list|get (never get_json).
+  - Use file with list/get ops for project inspection.
+  - Use json_file for structured manifest inspection (get_item for pointer reads, query for filtered node lookups).
 - IMPORTANT: sql_stats/sql_sample require BOTH args.table and args.field.
 - Never call sql_stats/sql_sample with table-only args.
 - Never use non-contract args like relation/op for sql_stats/sql_sample.

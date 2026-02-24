@@ -14,6 +14,7 @@ use crate::suite::SuiteCtx;
 use super::control_flow::Phase;
 use super::plan as de_plan;
 use super::tools::dbt_files::DbtFilesTool;
+use super::tools::json_file::JsonFileTool;
 use super::tools::sql_schema::SqlSchemaTool;
 use crate::data_engineer::{facts, naming};
 
@@ -1061,10 +1062,10 @@ async fn build_project_context(actx: &AgentCtx) -> Vec<ProjectFile> {
 }
 
 async fn read_project_json_pointer(actx: &AgentCtx, path: &str, pointer: &str) -> Option<Value> {
-    let tool = DbtFilesTool { datasets: None };
+    let tool = JsonFileTool;
     let obs = tool
         .call(
-            serde_json::json!({"op":"get_json","path": path, "pointer": pointer}),
+            serde_json::json!({"op":"get_item","path": path, "pointer": pointer}),
             actx,
         )
         .await

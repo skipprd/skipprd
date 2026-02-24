@@ -1384,7 +1384,7 @@ mod tests {
             steps: vec![
                 ThreadStep::ToolStart {
                     tool_id: "t1".to_string(),
-                    name: "dbt_files".to_string(),
+                    name: "file".to_string(),
                     clean_name: "Read file".to_string(),
                     args: serde_json::json!({"op":"get"}),
                     status: "running".to_string(),
@@ -1395,7 +1395,7 @@ mod tests {
                 },
                 ThreadStep::ToolEnd {
                     tool_id: "t1".to_string(),
-                    name: "dbt_files".to_string(),
+                    name: "file".to_string(),
                     clean_name: "Read file".to_string(),
                     args: serde_json::json!({"op":"get"}),
                     status: "ok".to_string(),

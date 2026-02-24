@@ -128,7 +128,7 @@ Plan:\n\
     if !expected_paths.is_empty() {
         s.push_str("\nRecommended next step:\n");
         s.push_str(
-            "- Apply a targeted `dbt_files op=patch` to fix the failing artifact(s):\n",
+            "- Apply a targeted `file op=patch` to fix the failing artifact(s):\n",
         );
         for p in expected_paths.iter().take(6) {
             s.push_str("  - ");
@@ -140,7 +140,7 @@ Plan:\n\
         );
     } else {
         s.push_str(
-            "\nRecommended next step:\n- Apply a targeted `dbt_files op=patch` to the failing DBT artifact(s), then retry.\n",
+            "\nRecommended next step:\n- Apply a targeted `file op=patch` to the failing DBT artifact(s), then retry.\n",
         );
     }
     s
@@ -209,7 +209,7 @@ impl AgentPolicy for InterruptOnlyPolicy {
             "approve_and_save_artifact" => 120,
 
             // Storage reads/writes sometimes hit network latency.
-            "dbt_files" => 120,
+            "file" => 120,
 
             // Discovery tools.
             "sql_schema" => 120,
@@ -354,6 +354,12 @@ impl DataEngineerSuite {
                 }),
             )
             .await;
+    }
+
+    fn should_reset_subjective_retry_after_plan_save(entered_from_actionable_review: bool) -> bool {
+        // Preserve retry lifecycle when review requested plan edits; this keeps loopback guards
+        // monotonic across cleanse/model/publish review feedback cycles.
+        !entered_from_actionable_review
     }
 
     fn planning_llm_options(
@@ -1656,7 +1662,17 @@ Apply these fixes in the output.",
                         );
                     }
                     if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == it.task_id) {
+                        let spec_inputs = spec.inputs.clone();
                         t.implementation_spec = spec;
+                        if !spec_inputs.is_empty() {
+                            t.inputs = spec_inputs;
+                        }
+                        if t.goal.trim().is_empty() {
+                            t.goal = format!(
+                                "Build {} from grounded staging inputs.",
+                                t.name.trim()
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -2556,7 +2572,7 @@ Apply these fixes in the output.",
                 "approve_and_save_artifact"
                 | "approve_and_save_artifact_batch"
                 | "staging_model" => true,
-                "dbt_files" => args
+                "file" => args
                     .get("op")
                     .and_then(|v| v.as_str())
                     .map(|op| op == "put")
@@ -2599,7 +2615,7 @@ Apply these fixes in the output.",
                 ..
             } => {
                 let args_v = match name.as_str() {
-                    "dbt_files" => serde_json::json!({
+                    "file" => serde_json::json!({
                         "op": args.get("op"),
                         "path": args.get("path"),
                     }),
@@ -2830,7 +2846,7 @@ Apply these fixes in the output.",
                     if guard.last_validate_failed && !guard.mutated_since_fail {
                         return Err(
                             "dbt_validate is blocked after a failed validation until you APPLY A FIX to the dbt project.\n\
-                             Next step must be a mutating fix action (e.g. `staging_model` or `dbt_files op=patch` to update schema/tests)."
+                             Next step must be a mutating fix action (e.g. `staging_model` or `file op=patch` to update schema/tests)."
                                 .to_string(),
                         );
                     }
@@ -2880,7 +2896,7 @@ Apply these fixes in the output.",
                 #[async_trait::async_trait]
                 impl react_core::tools::Tool for ReadOnlyDbtFilesTool {
                     fn name(&self) -> &'static str {
-                        "dbt_files"
+                        "file"
                     }
                     async fn call(
                         &self,
@@ -2890,7 +2906,7 @@ Apply these fixes in the output.",
                         let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
                         if matches!(op, "patch" | "rm" | "mv") {
                             return Err(
-                                "dbt_files is read-only for review; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string(),
+                                "file is read-only for review; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string(),
                             );
                         }
                         self.inner.call(args, ctx).await
@@ -2986,9 +3002,9 @@ Apply these fixes in the output.",
         single_target_repair_path: Option<String>,
     ) -> Result<(ToolRegistry, String), String> {
         use crate::data_engineer::tools::{
-            artifacts::ArtifactsTool, dbt_files::DbtFilesTool, sql_run::SqlRunTool,
-            sql_sample::SqlSampleTool, sql_schema::SqlSchemaTool, sql_stats::SqlStatsTool,
-            vect_query::VectQueryTool,
+            artifacts::ArtifactsTool, dbt_files::DbtFilesTool, json_file::JsonFileTool,
+            sql_run::SqlRunTool, sql_sample::SqlSampleTool, sql_schema::SqlSchemaTool,
+            sql_stats::SqlStatsTool, vect_query::VectQueryTool,
         };
 
         let query = sctx
@@ -3026,14 +3042,14 @@ Apply these fixes in the output.",
                 });
                 reg.register(tools::dbt_examples::SearchDbtExamplesTool);
 
-                // Read-only dbt_files (no patch).
+                // Read-only file tool (no patch).
                 struct ReadOnlyDbtFilesTool {
                     inner: DbtFilesTool,
                 }
                 #[async_trait::async_trait]
                 impl react_core::tools::Tool for ReadOnlyDbtFilesTool {
                     fn name(&self) -> &'static str {
-                        "dbt_files"
+                        "file"
                     }
                     async fn call(
                         &self,
@@ -3043,7 +3059,7 @@ Apply these fixes in the output.",
                         let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
                         if matches!(op, "patch" | "rm" | "mv") {
                             return Err(
-                                "dbt_files is read-only in plan phases; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string(),
+                                "file is read-only in plan phases; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string(),
                             );
                         }
                         self.inner.call(args, ctx).await
@@ -3054,17 +3070,19 @@ Apply these fixes in the output.",
                         datasets: sctx.datasets.clone(),
                     },
                 });
+                reg.register(JsonFileTool);
 
                 tools_card_lines = vec![
                     "Allowed tools (plan phase, read-only):",
-                    "- dbt_files(args:{op:\"list\", prefix?:string, limit?:int} | {op:\"get\", path:string, max_chars?:int} | {op:\"get_json\", path:string, pointer?:string} | {op:\"manifest_find\", path?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})",
+                    "- file(args:{op:\"list\", prefix?:string, limit?:int} | {op:\"get\", path:string, max_chars?:int})",
+                    "- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})",
                     "  - IMPORTANT: use args.op (NOT args.type). For list use args.prefix (NOT path:\".\").",
                     "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
                     "- run_sql (targeted probes)",
                     "- artifacts",
                     "- ask_user",
                     "",
-                    "Not available: staging_model, gold_model, dbt_files patch/rm/mv, dbt_validate, publish_dbt_to_provider.",
+                    "Not available: staging_model, gold_model, file patch/rm/mv, dbt_validate, publish_dbt_to_provider.",
                 ];
             }
             control_flow::Phase::CleanseAuthor | control_flow::Phase::ModelAuthor => {
@@ -3077,7 +3095,7 @@ Apply these fixes in the output.",
                 reg.register(tools::ask_user::AskUserTool);
 
                 if hard_mutation_only {
-                    // Mutation-only dbt_files to avoid "read-only thrash" when we require a mutation next.
+                    // Mutation-only file tool to avoid "read-only thrash" when we require a mutation next.
                     struct PutOnlyDbtFilesTool {
                         inner: DbtFilesTool,
                         single_target_path: Option<String>,
@@ -3085,7 +3103,7 @@ Apply these fixes in the output.",
                     #[async_trait::async_trait]
                     impl react_core::tools::Tool for PutOnlyDbtFilesTool {
                         fn name(&self) -> &'static str {
-                            "dbt_files"
+                            "file"
                         }
                         async fn call(
                             &self,
@@ -3094,10 +3112,10 @@ Apply these fixes in the output.",
                         ) -> Result<serde_json::Value, String> {
                             let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
                             if self.single_target_path.is_some() && op != "patch" {
-                                return Err("dbt_files is in deterministic single-target repair mode; only op='patch' is allowed.".to_string());
+                                return Err("file is in deterministic single-target repair mode; only op='patch' is allowed.".to_string());
                             }
                             if self.single_target_path.is_none() && !matches!(op, "patch" | "rm" | "mv") {
-                                return Err("dbt_files is mutation-only right now (a mutating fix is required before any further validation). Allowed ops: patch/rm/mv.".to_string());
+                                return Err("file is mutation-only right now (a mutating fix is required before any further validation). Allowed ops: patch/rm/mv.".to_string());
                             }
                             if let Some(want) = self.single_target_path.as_ref() {
                                 fn collect_paths(v: &serde_json::Value) -> Vec<String> {
@@ -3116,13 +3134,13 @@ Apply these fixes in the output.",
                                 paths.dedup();
                                 if paths.is_empty() {
                                     return Err(format!(
-                                        "dbt_files deterministic repair mode requires explicit path='{}'.",
+                                        "file deterministic repair mode requires explicit path='{}'.",
                                         want
                                     ));
                                 }
                                 if paths.len() != 1 || paths[0] != *want {
                                     return Err(format!(
-                                        "dbt_files deterministic single-target repair mode violation: only '{}' may be patched right now (got: {}).",
+                                        "file deterministic single-target repair mode violation: only '{}' may be patched right now (got: {}).",
                                         want,
                                         paths.join(", ")
                                     ));
@@ -3249,7 +3267,7 @@ Apply these fixes in the output.",
 
                     // Even in hard_mutation_only, schema batch tools are safe to expose because they are
                     // inherently mutating and can resolve common "YAML contract" failures without manual
-                    // dbt_files patching.
+                    // file tool patching.
                     let mut tool_lines: Vec<&'static str> = vec![
                         "Allowed tools (authoring phase; HARD constraint: mutation required next):",
                     ];
@@ -3266,7 +3284,7 @@ Apply these fixes in the output.",
                         tool_lines.push("- apply_next_model_schema_batch(args:{instructions?:string})");
                     }
                     tool_lines.extend_from_slice(&[
-                        "- dbt_files(args:{op:\"patch\"|\"rm\"|\"mv\", ...})",
+                        "- file(args:{op:\"patch\"|\"rm\"|\"mv\", ...})",
                         "  - op=patch args: {path:string, patch_text:string} (Cursor/Aider hunks-only; patch_text starts with '@@' and MUST NOT include ---/+++ or diff --git)",
                         "  - op=rm args: {path:string, expected_sha256?:string}",
                         "  - op=mv args: {from:string, to:string, expected_sha256?:string}",
@@ -3276,7 +3294,7 @@ Apply these fixes in the output.",
                         "Not available: read/explore tools, dbt_validate, publish_dbt_to_provider.",
                     ]);
                     if single_target_repair_path.is_some() {
-                        tool_lines.push("Deterministic single-target repair mode is active: only dbt_files op=patch for the current failing model file is allowed.");
+                        tool_lines.push("Deterministic single-target repair mode is active: only file op=patch for the current failing model file is allowed.");
                     }
                     tools_card_lines = tool_lines;
                 } else {
@@ -3326,6 +3344,7 @@ Apply these fixes in the output.",
                     reg.register(DbtFilesTool {
                         datasets: sctx.datasets.clone(),
                     });
+                    reg.register(JsonFileTool);
 
                     let plan_batched_cleanse = phase == control_flow::Phase::CleanseAuthor
                         && matches!(allowed_batch, Some(AllowedBatch::CleanseDatasetIds(_)));
@@ -3336,7 +3355,8 @@ Apply these fixes in the output.",
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_cleanse_batch(args:{instructions?:string})",
 							"- apply_next_cleanse_schema_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\", prefix?:string, path?:string, pointer?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})",
+							"- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})",
+							"- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -3349,7 +3369,8 @@ Apply these fixes in the output.",
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_model_batch(args:{instructions?:string})",
 							"- apply_next_model_schema_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\", prefix?:string, path?:string, pointer?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})",
+							"- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})",
+							"- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -3370,7 +3391,8 @@ Apply these fixes in the output.",
 							"  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
 							"- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})",
 							"  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\", prefix?:string, path?:string, pointer?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})",
+							"- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})",
+							"- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})",
 							"- ask_user(args:{prompt:string})",
 							"",
 							"Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).",
@@ -3388,7 +3410,7 @@ Apply these fixes in the output.",
                 #[async_trait::async_trait]
                 impl react_core::tools::Tool for ReadOnlyDbtFilesTool {
                     fn name(&self) -> &'static str {
-                        "dbt_files"
+                        "file"
                     }
                     async fn call(
                         &self,
@@ -3397,7 +3419,7 @@ Apply these fixes in the output.",
                     ) -> Result<serde_json::Value, String> {
                         let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
                         if matches!(op, "patch" | "rm" | "mv") {
-                            return Err("dbt_files is read-only in review phases; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string());
+                            return Err("file is read-only in review phases; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string());
                         }
                         self.inner.call(args, ctx).await
                     }
@@ -3407,10 +3429,12 @@ Apply these fixes in the output.",
                         datasets: sctx.datasets.clone(),
                     },
                 });
+                reg.register(JsonFileTool);
 
                 tools_card_lines = vec![
                     "Allowed tools (review phase, read-only):",
-                    "- dbt_files (list/get/get_json/manifest_find)",
+                    "- file (list/get)",
+                    "- json_file (get_item/query)",
                     "- artifacts",
                     "- sql_schema / sql_stats / sql_sample / vect_query (read-only context)",
                     "",
@@ -4050,6 +4074,13 @@ Apply these fixes in the output.",
                 .unwrap_or(3)
                 .max(1)
                 .min(12);
+        let max_review_patch_plan_streak: usize =
+            std::env::var("AGENT_MAX_REVIEW_PATCH_PLAN_STREAK")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(2)
+                .max(1)
+                .min(12);
 
         let phase_index = |p: Phase| -> usize {
             match p {
@@ -4566,7 +4597,7 @@ Apply these fixes in the output.",
                     // Generate a new draft plan via LLM and then ask the user to approve it.
                     Self::ensure_catalog_bootstrap_semaphored(thread_id, sctx).await?;
                     // Deterministic bootstrap: ensure the plan phase ALWAYS has grounded context recorded
-                    // in the thread history. This prevents LLM loops that repeatedly call dbt_files list
+                    // in the thread history. This prevents LLM loops that repeatedly call file list
                     // and never reach sql_schema/evidence, which would trip the plan_grounding guard.
                     //
                     // Important: we do NOT decide the plan here; we just provide enough reality to
@@ -4593,7 +4624,7 @@ Apply these fixes in the output.",
                             };
                             if let (Some(name), Some(true)) = (name_opt, ok_opt) {
                                 match name {
-                                    "dbt_files" => saw_dbt_files = true,
+                                    "file" => saw_dbt_files = true,
                                     "sql_schema" => saw_sql_schema = true,
                                     "sql_stats" | "sql_sample" | "run_sql" => {
                                         if args_opt
@@ -4639,7 +4670,7 @@ Apply these fixes in the output.",
                                     .timeout_for_tool(name)
                                     .unwrap_or(actx.per_step_timeout_secs)
                             };
-                            let dbt_files_timeout = tool_timeout("dbt_files");
+                            let dbt_files_timeout = tool_timeout("file");
                             let sql_schema_timeout = tool_timeout("sql_schema");
                             let sql_stats_timeout = tool_timeout("sql_stats");
                             let sql_sample_timeout = tool_timeout("sql_sample");
@@ -4880,7 +4911,7 @@ Apply these fixes in the output.",
                         }) => {
                             // Deterministic enforcement: planning must be grounded in actual project state.
                             // Require at least:
-                            // - 1 dbt_files call
+                            // - 1 file call
                             // - 1 sql_schema call
                             // - 1 of (sql_stats/sql_sample/run_sql)
                             if let Ok(ref l) = thread_store.get(thread_id).await {
@@ -4904,7 +4935,7 @@ Apply these fixes in the output.",
                                     };
                                     if let (Some(name), Some(true)) = (name_opt, ok_opt) {
                                         match name {
-                                            "dbt_files" => saw_dbt_files = true,
+                                            "file" => saw_dbt_files = true,
                                             "sql_schema" => saw_sql_schema = true,
                                             "sql_stats" | "sql_sample" | "run_sql" => {
                                                 if args_opt
@@ -4978,10 +5009,10 @@ Apply these fixes in the output.",
                                     let miss = format!(
                                         "Plan is missing required grounding steps.\n\
                                          Required before finalizing a plan:\n\
-                                         - dbt_files (inventory existing dbt project)\n\
+                                         - file (inventory existing dbt project)\n\
                                          - sql_schema (list tables)\n\
                                          - evidence via sql_stats/sql_sample/run_sql\n\n\
-                                         Seen: dbt_files={saw_dbt_files}, sql_schema={saw_sql_schema}, evidence={saw_evidence}\n\
+                                         Seen: file={saw_dbt_files}, sql_schema={saw_sql_schema}, evidence={saw_evidence}\n\
                                          Please retry plan generation and include those discovery steps."
                                     );
                                     let ts = chrono::Utc::now().to_rfc3339();
@@ -5020,7 +5051,7 @@ Apply these fixes in the output.",
                                     if tries > Self::subjective_retry_limit() {
                                         return Ok(vec![FlowFrame::AwaitUser {
                                             prompt: format!(
-                                                "Plan grounding did not converge after {} retries. Missing required discovery steps: dbt_files={}, sql_schema={}, evidence={}. Please provide targeted guidance and retry.",
+                                                "Plan grounding did not converge after {} retries. Missing required discovery steps: file={}, sql_schema={}, evidence={}. Please provide targeted guidance and retry.",
                                                 tries,
                                                 saw_dbt_files,
                                                 saw_sql_schema,
@@ -5373,7 +5404,11 @@ Apply these fixes in the output.",
                                 }
 
                                 crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await?;
-                                Self::reset_subjective_retry(&thread_store, thread_id).await;
+                                if Self::should_reset_subjective_retry_after_plan_save(
+                                    entered_from_actionable_review,
+                                ) {
+                                    Self::reset_subjective_retry(&thread_store, thread_id).await;
+                                }
                                 if entered_from_actionable_review {
                                     let mut detail = serde_json::json!({
                                         "plan_key": plan.plan_key,
@@ -5745,7 +5780,11 @@ Apply these fixes in the output.",
                                 }
 
                                 crate::data_engineer::plan::save_model_plan(&actx, &plan).await?;
-                                Self::reset_subjective_retry(&thread_store, thread_id).await;
+                                if Self::should_reset_subjective_retry_after_plan_save(
+                                    entered_from_actionable_review,
+                                ) {
+                                    Self::reset_subjective_retry(&thread_store, thread_id).await;
+                                }
                                 if entered_from_actionable_review {
                                     let mut detail = serde_json::json!({
                                         "plan_key": plan.plan_key,
@@ -6035,7 +6074,7 @@ Apply these fixes in the output.",
                                 // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
                                 // Even if schema checklist work remains, fix failing SQL targets first.
                                 let mut ctx = format!(
-                                    "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call dbt_files op=patch with path + patch_text. patch_text MUST be Cursor/Aider hunks-only ('@@ ... @@', no line-number headers, no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
+                                    "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call file op=patch with path + patch_text. patch_text MUST be Cursor/Aider hunks-only ('@@ ... @@', no line-number headers, no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
                                     plan.plan_key,
                                     crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                 );
@@ -6088,7 +6127,7 @@ Apply these fixes in the output.",
                                     expected_paths.sort();
                                     expected_paths.dedup();
                                     let mut ctx = format!(
-                                        "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                        "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
                                         plan.plan_key,
                                         checklist_item_id,
                                         ids.join("\n- "),
@@ -6118,7 +6157,7 @@ Apply these fixes in the output.",
                                         expected_paths.sort();
                                         expected_paths.dedup();
                                         let mut ctx = format!(
-                                            "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                            "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
                                             plan.plan_key,
                                             checklist_item_id,
                                             pending_schema.join("\n- "),
@@ -6128,7 +6167,7 @@ Apply these fixes in the output.",
                                         (ctx, None)
                                     } else {
                                 let mut ctx = format!(
-                                "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
                                 plan.plan_key,
                                 crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                             );
@@ -6186,7 +6225,7 @@ Apply these fixes in the output.",
                                     expected_paths.sort();
                                     expected_paths.dedup();
                                     let mut ctx = format!(
-                                        "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                        "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
                                         plan.plan_key,
                                         checklist_item_id,
                                         ids.join("\n- "),
@@ -6217,7 +6256,7 @@ Apply these fixes in the output.",
                                     // Run a repair authoring pass grounded in the failing model/file evidence.
                                     if guard.last_validate_failed {
                                         let mut ctx = format!(
-                                        "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                        "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
                                         plan.plan_key,
                                         crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                     );
@@ -6243,7 +6282,7 @@ Apply these fixes in the output.",
                                         }
                                         (
                                             ctx,
-                                            None, // allow freeform dbt_files patching for targeted repair
+                                            None, // allow freeform file patching for targeted repair
                                         )
                                     } else {
                                         // If schema checklist work remains, stay in authoring and request YAML patching.
@@ -6270,7 +6309,7 @@ Apply these fixes in the output.",
                                             expected_paths.sort();
                                             expected_paths.dedup();
                                             let mut ctx = format!(
-                                                "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                                "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
                                                 plan.plan_key,
                                                 checklist_item_id,
                                                 pending_schema.join("\n- "),
@@ -6448,7 +6487,7 @@ Apply these fixes in the output.",
                                 // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
                                 // Even if schema checklist work remains, fix failing SQL targets first.
                                 let mut ctx = format!(
-                                    "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call dbt_files op=patch with path + patch_text. patch_text MUST be Cursor/Aider hunks-only ('@@ ... @@', no line-number headers, no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
+                                    "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call file op=patch with path + patch_text. patch_text MUST be Cursor/Aider hunks-only ('@@ ... @@', no line-number headers, no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
                                     plan.plan_key,
                                     crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                 );
@@ -6500,7 +6539,7 @@ Apply these fixes in the output.",
                                     expected_paths.sort();
                                     expected_paths.dedup();
                                     let mut ctx = format!(
-                                        "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                        "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
                                         plan.plan_key,
                                         checklist_item_id,
                                         ids.join("\n- "),
@@ -6530,7 +6569,7 @@ Apply these fixes in the output.",
                                         expected_paths.sort();
                                         expected_paths.dedup();
                                         let mut ctx = format!(
-                                            "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                            "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
                                             plan.plan_key,
                                             checklist_item_id,
                                             pending_schema.join("\n- "),
@@ -6540,7 +6579,7 @@ Apply these fixes in the output.",
                                         (ctx, None)
                                     } else {
                                 let mut ctx = format!(
-                                "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
                                 plan.plan_key,
                                 crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                             );
@@ -6673,7 +6712,7 @@ Apply these fixes in the output.",
                                         .trim()
                                         .to_string();
                                     let mut ctx = format!(
-                                        "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                        "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
                                         plan.plan_key,
                                         checklist_item_id,
                                         ids.join("\n- "),
@@ -6703,7 +6742,7 @@ Apply these fixes in the output.",
                                     if guard.last_validate_failed {
                                     // Same repair-mode behavior as cleanse: run authoring to patch failing files.
                                     let mut ctx = format!(
-                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
                                     plan.plan_key,
                                     crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                 );
@@ -6839,7 +6878,7 @@ Apply these fixes in the output.",
                                             .trim()
                                             .to_string();
                                         let mut ctx = format!(
-                                            "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call dbt_files directly).\n\nExpected model SQL paths:\n- {}\n",
+                                            "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
                                             plan.plan_key,
                                             checklist_item_id,
                                             pending_schema.join("\n- "),
@@ -7085,7 +7124,7 @@ Apply these fixes in the output.",
                         q.push_str("\n- Do NOT patch, move, or remove any other file until this target validates.\n");
                     }
 
-                    // When the suite is in hard_mutation_only, dbt_files is patch-only (no op=get),
+                    // When the suite is in hard_mutation_only, file is patch-only (no op=get),
                     // so we MUST include the raw file content for at least the primary failing target.
                     if hard_mutation_repair_mode && !last_validate_failed_models.is_empty()
                     {
@@ -7182,7 +7221,7 @@ Apply these fixes in the output.",
                         .await
                         .unwrap_or(false);
                     if !has_models {
-                        q.push_str("\n\nIMPORTANT: invariant failed: there are no DBT model SQL files yet. Your first task is to create at least one staging model under models/ using staging_model or dbt_files op=patch.");
+                        q.push_str("\n\nIMPORTANT: invariant failed: there are no DBT model SQL files yet. Your first task is to create at least one staging model under models/ using staging_model or file op=patch.");
                     }
 
                     // Hard cutover: deterministic repair-mode mini-context.
@@ -7232,7 +7271,7 @@ Apply these fixes in the output.",
                                 ladder_step: ladder.clone(),
                                 last_validate_brief: last_validate_brief.clone(),
                                 patch_contract: Some(
-                                    crate::prompts::patch_contract::dbt_files_patch_contract()
+                                    crate::prompts::patch_contract::file_patch_contract()
                                         .to_string(),
                                 ),
                             }),
@@ -7241,7 +7280,7 @@ Apply these fixes in the output.",
                             crate::data_engineer::prompt_packets::render_envelope(&envelope);
 
                         repair.push_str("\nRules:\n");
-                        repair.push_str("- You MUST call dbt_files op=patch next.\n");
+                        repair.push_str("- You MUST call file op=patch next.\n");
                         repair.push_str("- You MUST patch ONLY the target file above.\n");
                         match ladder {
                             crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile => {
@@ -8326,6 +8365,8 @@ Apply these fixes in the output.",
                     if meta.review_ref.is_none() {
                         meta.review_ref = review_ref_from_trigger;
                     }
+                    let patch_plan_streak =
+                        control_flow::review_patch_plan_streak(log.as_ref(), phase);
                     let patch_impl_streak =
                         control_flow::review_patch_impl_streak(log.as_ref(), phase);
                     let mut review_retry_count = 0usize;
@@ -8335,18 +8376,27 @@ Apply these fixes in the output.",
                     } else {
                         Self::reset_subjective_retry(&thread_store, thread_id).await;
                     }
+                    let forced_by_patch_plan_streak = matches!(meta.decision, ReviewDecision::PatchPlan)
+                        && patch_plan_streak >= max_review_patch_plan_streak;
                     let forced_by_patch_impl_streak = matches!(meta.decision, ReviewDecision::PatchImpl)
                         && !guard.last_validate_failed
                         && patch_impl_streak >= max_review_patch_impl_streak;
                     let forced_by_subjective_retry =
                         Self::review_retry_kind(meta.decision).is_some()
                             && review_retry_count > Self::subjective_retry_limit();
-                    let forced_progress = forced_by_patch_impl_streak || forced_by_subjective_retry;
+                    let forced_progress = forced_by_patch_plan_streak
+                        || forced_by_patch_impl_streak
+                        || forced_by_subjective_retry;
                     if forced_progress {
                         let reason = if forced_by_subjective_retry {
                             format!(
                                 "subjective review retry limit reached ({})",
                                 review_retry_count
+                            )
+                        } else if forced_by_patch_plan_streak {
+                            format!(
+                                "patch_plan streak reached {} (threshold {})",
+                                patch_plan_streak, max_review_patch_plan_streak
                             )
                         } else {
                             format!(
@@ -8361,8 +8411,9 @@ Apply these fixes in the output.",
                         );
                         meta.decision = ReviewDecision::Proceed;
                         answer.push_str(&format!(
-                            "\n\nProgress guard: review remained subjective without convergence (retry_count={}, patch_impl_streak={}). Proceeding to next phase to avoid non-convergent review loops.",
+                            "\n\nProgress guard: review remained subjective without convergence (retry_count={}, patch_plan_streak={}, patch_impl_streak={}). Proceeding to next phase to avoid non-convergent review loops.",
                             review_retry_count,
+                            patch_plan_streak,
                             patch_impl_streak
                         ));
                         Self::reset_subjective_retry(&thread_store, thread_id).await;
@@ -8378,8 +8429,10 @@ Apply these fixes in the output.",
                         "answer": answer,
                         "forced_progress_guard": forced_progress,
                         "forced_progress_by_subjective_retry": forced_by_subjective_retry,
+                        "forced_progress_by_patch_plan_streak": forced_by_patch_plan_streak,
                         "forced_progress_by_patch_impl_streak": forced_by_patch_impl_streak,
                         "review_subjective_retry_count": review_retry_count,
+                        "review_patch_plan_streak": patch_plan_streak,
                         "review_patch_impl_streak": patch_impl_streak,
                         "trigger_step_idx": trigger_step_idx,
                         "trigger_step": trigger_step,
@@ -8853,8 +8906,8 @@ Apply these fixes in the output.",
                              Failing tests:\n{}\n{}\
                              IMPORTANT: Your very next step MUST be a FIX to dbt artifacts (prefer fixing silver models under models/staging/; do NOT relax/remove tests unless nullable-by-design is justified).\n\
                              Recommended flow:\n\
-                             - Use `dbt_files op=manifest_find` (or `dbt_files op=get_json`) to target `target/manifest.json` WITHOUT dumping the full file.\n\
-                               - Find the failing test node(s) by name, then find the referenced model node via depends_on.\n\
+                             - Use `json_file op=query` on `target/manifest.json` (pointer=/nodes) to locate failing test/model nodes (by name/resource_type).\n\
+                               - Find the failing test node(s), then follow depends_on to the referenced model node.\n\
                                - From the model node, compute the physical relation: <database>.<schema>.<alias>.\n\
                              - Use `sql_schema` on that relation to determine the tested column type.\n\
                              - Use `run_sql` to probe the actual data before editing:\n\
@@ -8862,7 +8915,7 @@ Apply these fixes in the output.",
                                - If string-ish: SELECT count_if(trim(cast({{col}} AS varchar)) = '') AS empty FROM {{relation}}\n\
                                - If time-like by type: SELECT count_if(try_cast(nullif(trim(cast({{col}} AS varchar)), '') AS timestamp) IS NULL) AS unparseable FROM {{relation}}\n\
                                - Sample failing: SELECT {{col}} FROM {{relation}} WHERE {{col}} IS NULL LIMIT 50\n\
-                             - Apply a fix using `staging_model` or `dbt_files op=patch`.\n\
+                             - Apply a fix using `staging_model` or `file op=patch`.\n\
                              - You MUST NOT claim fixed unless a probe query shows the failure condition is now 0 rows.\n\
                              Only AFTER applying a fix should you re-run `dbt_validate` with build=true.",
                             attempt + 1,
@@ -8871,7 +8924,7 @@ Apply these fixes in the output.",
                         );
                     } else {
                         prompt = format!(
-                            "Auto-remediation attempt {}: dbt_validate/build failed.\n\nError summary:\n{}\n\nAutomatically fix the DBT project:\n- Prefer calling `staging_model` to update silver models under models/staging/ (nested fields, cleansing, naming).\n- Use dbt_files or artifacts to inspect/edit existing files.\n- Re-run dbt_validate with build=true.\nRepeat until compile_ok=true AND run_ok=true.",
+                            "Auto-remediation attempt {}: dbt_validate/build failed.\n\nError summary:\n{}\n\nAutomatically fix the DBT project:\n- Prefer calling `staging_model` to update silver models under models/staging/ (nested fields, cleansing, naming).\n- Use file or artifacts to inspect/edit existing files.\n- Re-run dbt_validate with build=true.\nRepeat until compile_ok=true AND run_ok=true.",
                             attempt + 1,
                             brief
                         );
@@ -9414,10 +9467,10 @@ mod tests {
             .await
             .is_ok());
 
-        // dbt_files get should be blocked (put-only wrapper)
+        // file get should be blocked (put-only wrapper)
         assert!(reg
             .call(
-                "dbt_files",
+                "file",
                 serde_json::json!({"op":"get","path":"dbt_project.yml"}),
                 &actx
             )
@@ -9497,7 +9550,7 @@ mod tests {
 
         let err = reg
             .call(
-                "dbt_files",
+                "file",
                 serde_json::json!({
                     "op":"patch",
                     "path":"models/marts/fct_customers.sql",
@@ -10006,13 +10059,13 @@ mod tests {
             Some(false)
         );
 
-        // Then a successful dbt_files patch (even if no-op) should flip patched_since_fail.
+        // Then a successful file patch (even if no-op) should flip patched_since_fail.
         let _ = store
             .append_step(
                 tid,
                 ThreadStep::ToolEnd {
                     tool_id: "t3".to_string(),
-                    name: "dbt_files".to_string(),
+                    name: "file".to_string(),
                     clean_name: "Patch files".to_string(),
                     args: serde_json::json!({"op": "patch"}),
                     status: "ok".to_string(),

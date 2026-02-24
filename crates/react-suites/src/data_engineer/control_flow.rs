@@ -170,7 +170,7 @@ pub async fn append_phase_with_reason(
 pub struct DerivedGuardState {
     pub last_validate_failed: bool,
     pub mutated_since_fail: bool,
-    /// True if at least one successful dbt_files op=patch occurred since the failing validate,
+    /// True if at least one successful file op=patch occurred since the failing validate,
     /// even if it ended up being a no-op write (mutated=false).
     ///
     /// This is used as a conservative "we did try to apply a fix" signal to avoid deadlocking
@@ -193,7 +193,7 @@ fn is_mutation_step(step: &ThreadStep) -> bool {
             | "apply_next_cleanse_schema_batch"
             | "apply_next_model_batch"
             | "apply_next_model_schema_batch" => true,
-            "dbt_files" => {
+            "file" => {
                 args.get("op")
                     .and_then(|v| v.as_str())
                     .map(|s| matches!(s, "patch" | "rm" | "mv"))
@@ -241,7 +241,7 @@ fn is_effective_mutation_step(step: &ThreadStep) -> bool {
             .and_then(|v| v.as_array())
             .map(|a| !a.is_empty())
             .unwrap_or(false),
-        "dbt_files" => {
+        "file" => {
             if !observation.ok {
                 return false;
             }
@@ -409,7 +409,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
                 _ => false,
             };
             if ok {
-                // Successful dbt_files patch counts as "patch applied", even if no-op.
+                // Successful file patch counts as "patch applied", even if no-op.
                 if let ThreadStep::ToolEnd {
                     name,
                     args,
@@ -417,13 +417,13 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
                     ..
                 } = step
                 {
-                    if name == "dbt_files" && observation.ok {
-                        let is_dbt_files_mut = args
+                    if name == "file" && observation.ok {
+                        let is_file_mut = args
                             .get("op")
                             .and_then(|v| v.as_str())
                             .map(|s| matches!(s, "patch" | "rm" | "mv"))
                             .unwrap_or(false);
-                        if is_dbt_files_mut {
+                        if is_file_mut {
                             out.patched_since_fail = true;
                         }
                     }
@@ -464,7 +464,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
 }
 
 /// Derive dbt `--select` terms for a fast, targeted validation pre-check based on the most recent
-/// successful `dbt_files op=patch` step in the thread.
+/// successful `file op=patch` step in the thread.
 ///
 /// Strategy:
 /// - Prefer manifest-based mapping from patched file path -> model name (when manifest is available)
@@ -472,7 +472,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
 /// - If the patch touched global-impact files (macros/, packages.yml, dbt_project.yml), return an
 ///   empty list to indicate we should skip targeted validation and do full validation instead.
 pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Vec<String> {
-    // Find the most recent successful dbt_files mutation that should influence targeted validation.
+    // Find the most recent successful file mutation that should influence targeted validation.
     let mut patched_paths: Vec<String> = Vec::new();
     for step in log.steps.iter().rev() {
         let ThreadStep::ToolEnd {
@@ -484,7 +484,7 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
         else {
             continue;
         };
-        if name != "dbt_files" || !observation.ok {
+        if name != "file" || !observation.ok {
             continue;
         }
         let op = args
@@ -702,17 +702,13 @@ pub fn replan_backtrack_count_for_phase(log: Option<&ThreadLog>, phase: Phase) -
     count
 }
 
-/// Count consecutive review->author loopbacks caused by `review_patch_impl`.
-///
-/// This is intentionally review-phase scoped and is used as a secondary guard when
-/// validate keeps passing but review repeatedly requests more implementation patching.
-pub fn review_patch_impl_streak(log: Option<&ThreadLog>, review_phase: Phase) -> usize {
+fn review_patch_streak(
+    log: Option<&ThreadLog>,
+    review_phase: Phase,
+    reason_code_match: PhaseReasonCode,
+    expected_back_to: Phase,
+) -> usize {
     let Some(log) = log else { return 0 };
-    let expected_back_to = match review_phase {
-        Phase::CleanseReview => Phase::CleanseAuthor,
-        Phase::ModelReview | Phase::PostPublishReview => Phase::ModelAuthor,
-        _ => return 0,
-    };
 
     let mut streak = 0usize;
     for step in log.steps.iter().rev() {
@@ -734,7 +730,8 @@ pub fn review_patch_impl_streak(log: Option<&ThreadLog>, review_phase: Phase) ->
         if from != review_phase {
             continue;
         }
-        if matches!(reason_code, Some(PhaseReasonCode::ReviewPatchImpl)) && to == expected_back_to {
+        if matches!(reason_code, Some(code) if *code == reason_code_match) && to == expected_back_to
+        {
             streak = streak.saturating_add(1);
             continue;
         }
@@ -742,6 +739,39 @@ pub fn review_patch_impl_streak(log: Option<&ThreadLog>, review_phase: Phase) ->
         break;
     }
     streak
+}
+
+/// Count consecutive review->plan loopbacks caused by `review_patch_plan`.
+pub fn review_patch_plan_streak(log: Option<&ThreadLog>, review_phase: Phase) -> usize {
+    let expected_back_to = match review_phase {
+        Phase::CleanseReview => Phase::CleansePlan,
+        Phase::ModelReview | Phase::PostPublishReview => Phase::ModelPlan,
+        _ => return 0,
+    };
+    review_patch_streak(
+        log,
+        review_phase,
+        PhaseReasonCode::ReviewPatchPlan,
+        expected_back_to,
+    )
+}
+
+/// Count consecutive review->author loopbacks caused by `review_patch_impl`.
+///
+/// This is intentionally review-phase scoped and is used as a secondary guard when
+/// validate keeps passing but review repeatedly requests more implementation patching.
+pub fn review_patch_impl_streak(log: Option<&ThreadLog>, review_phase: Phase) -> usize {
+    let expected_back_to = match review_phase {
+        Phase::CleanseReview => Phase::CleanseAuthor,
+        Phase::ModelReview | Phase::PostPublishReview => Phase::ModelAuthor,
+        _ => return 0,
+    };
+    review_patch_streak(
+        log,
+        review_phase,
+        PhaseReasonCode::ReviewPatchImpl,
+        expected_back_to,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -812,13 +842,13 @@ pub fn gate_authoring_to_validate(log: Option<&ThreadLog>) -> AuthoringGate {
         if g.mutation_failures_since_validate >= 3 {
             return AuthoringGate::AwaitUser {
                 prompt: format!(
-                    "I tried to apply a mutating fix after a failed dbt_validate, but the mutation step failed {} times in a row (often due to tool timeouts or storage write failures).\n\nPlease check:\n- The runtime can write DBT files to storage (S3 prefix/permissions)\n- The agent tool timeout is sufficient for your environment\n\nThen retry. If you want a quick deterministic fix path, use `dbt_files op=patch` to edit the failing model SQL directly.",
+                    "I tried to apply a mutating fix after a failed dbt_validate, but the mutation step failed {} times in a row (often due to tool timeouts or storage write failures).\n\nPlease check:\n- The runtime can write DBT files to storage (S3 prefix/permissions)\n- The agent tool timeout is sufficient for your environment\n\nThen retry. If you want a quick deterministic fix path, use `file op=patch` to edit the failing model SQL directly.",
                     g.mutation_failures_since_validate
                 ),
             };
         }
         return AuthoringGate::Block {
-            reason: "A DBT validation previously failed and no successful mutation has been recorded since that failure. Apply a mutating fix (e.g. dbt_files op=patch or staging_model) before re-validating."
+            reason: "A DBT validation previously failed and no successful mutation has been recorded since that failure. Apply a mutating fix (e.g. file op=patch or staging_model) before re-validating."
                 .to_string(),
         };
     }
@@ -1053,7 +1083,7 @@ pub async fn call_and_record_tool(
 ) -> Value {
     fn clean_tool_name(name: &str, args: &Value) -> String {
         match name {
-            "dbt_files" => {
+            "file" => {
                 let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
                 match op {
                     "get" => {
@@ -1078,17 +1108,6 @@ pub async fn call_and_record_tool(
                         }
                         "List files".to_string()
                     }
-                    "get_json" => {
-                        let p = args
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .trim();
-                        if !p.is_empty() {
-                            return format!("Read JSON {p}");
-                        }
-                        "Read JSON".to_string()
-                    }
                     "patch" => {
                         let p = args
                             .get("path")
@@ -1102,10 +1121,22 @@ pub async fn call_and_record_tool(
                     }
                     _ => {
                         if !op.is_empty() {
-                            return format!("dbt_files {op}");
+                            return format!("file {op}");
                         }
-                        "dbt_files".to_string()
+                        "file".to_string()
                     }
+                }
+            }
+            "json_file" => {
+                let p = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if !p.is_empty() {
+                    format!("JSON {p}")
+                } else {
+                    "JSON file".to_string()
                 }
             }
             "sql_schema" => {
@@ -1221,7 +1252,7 @@ pub async fn invariant_has_any_models(ctx: &AgentCtx) -> Result<bool, String> {
         .await
         .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e}));
     if obs.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-        warn!("dbt_files list failed: {:?}", obs.get("error"));
+        warn!("file list failed: {:?}", obs.get("error"));
         return Ok(false);
     }
     let items = obs
@@ -1477,6 +1508,62 @@ mod tests {
     }
 
     #[test]
+    fn review_patch_plan_streak_counts_consecutive_review_loopbacks() {
+        let log = ThreadLog {
+            steps: vec![
+                ThreadStep::Phase {
+                    phase: "cleanse_plan".to_string(),
+                    from_phase: Some("cleanse_review".to_string()),
+                    reason_code: Some(PhaseReasonCode::ReviewPatchPlan),
+                    reason_detail: None,
+                    observation: react_core::session::Observation::ok(),
+                    ts: "2026-01-01T00:00:00Z".to_string(),
+                    agent: "test".to_string(),
+                },
+                ThreadStep::Phase {
+                    phase: "cleanse_plan".to_string(),
+                    from_phase: Some("cleanse_review".to_string()),
+                    reason_code: Some(PhaseReasonCode::ReviewPatchPlan),
+                    reason_detail: None,
+                    observation: react_core::session::Observation::ok(),
+                    ts: "2026-01-01T00:00:01Z".to_string(),
+                    agent: "test".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(review_patch_plan_streak(Some(&log), Phase::CleanseReview), 2);
+    }
+
+    #[test]
+    fn review_patch_plan_streak_stops_on_non_patch_plan_transition() {
+        let log = ThreadLog {
+            steps: vec![
+                ThreadStep::Phase {
+                    phase: "cleanse_plan".to_string(),
+                    from_phase: Some("cleanse_review".to_string()),
+                    reason_code: Some(PhaseReasonCode::ReviewPatchPlan),
+                    reason_detail: None,
+                    observation: react_core::session::Observation::ok(),
+                    ts: "2026-01-01T00:00:00Z".to_string(),
+                    agent: "test".to_string(),
+                },
+                ThreadStep::Phase {
+                    phase: "model_plan".to_string(),
+                    from_phase: Some("cleanse_review".to_string()),
+                    reason_code: Some(PhaseReasonCode::ReviewProceed),
+                    reason_detail: None,
+                    observation: react_core::session::Observation::ok(),
+                    ts: "2026-01-01T00:00:01Z".to_string(),
+                    agent: "test".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(review_patch_plan_streak(Some(&log), Phase::CleanseReview), 0);
+    }
+
+    #[test]
     fn guard_blocks_validate_until_mutation_after_failure() {
         let log = ThreadLog {
             steps: vec![
@@ -1505,7 +1592,7 @@ mod tests {
                     serde_json::json!({"ok": false, "compile_ok": false, "run_ok": false, "errors":["x"]}),
                 ),
                 step(
-                    "dbt_files",
+                    "file",
                     serde_json::json!({"op":"patch","path":"models/a.sql","patch_text":"@@ ... @@\n+select 1\n"}),
                     serde_json::json!({"ok": true, "mutated": true}),
                 ),
@@ -1527,7 +1614,7 @@ mod tests {
                     serde_json::json!({"ok": false, "compile_ok": false, "run_ok": false, "errors":["x"]}),
                 ),
                 step(
-                    "dbt_files",
+                    "file",
                     serde_json::json!({"op":"rm","path":"models/a.sql"}),
                     serde_json::json!({"ok": true, "mutated": true, "results":[{"path":"models/a.sql","mutated":true}]}),
                 ),
@@ -1549,7 +1636,7 @@ mod tests {
                     serde_json::json!({"ok": false, "compile_ok": false, "run_ok": false, "errors":["x"]}),
                 ),
                 step(
-                    "dbt_files",
+                    "file",
                     serde_json::json!({"op":"mv","from":"models/a.sql","to":"models/b.sql"}),
                     serde_json::json!({"ok": true, "mutated": true, "results":[{"path":"models/b.sql","mutated":true}]}),
                 ),
@@ -1572,7 +1659,7 @@ mod tests {
                 ),
                 // ok patch, but no-op (mutated=false)
                 step(
-                    "dbt_files",
+                    "file",
                     serde_json::json!({"op":"patch","path":"models/a.sql","patch_text":"@@ ... @@\n- select 1\n+ select 1\n"}),
                     serde_json::json!({"ok": true, "mutated": false}),
                 ),
@@ -1663,7 +1750,7 @@ mod tests {
                     serde_json::json!({"ok": false, "error": "tool timeout"}),
                 ),
                 step(
-                    "dbt_files",
+                    "file",
                     serde_json::json!({"op":"patch","path":"models/x.sql","patch_text":"@@ ... @@\n+select 1\n"}),
                     serde_json::json!({"ok": false, "error": "tool timeout"}),
                 ),
@@ -1765,7 +1852,7 @@ mod tests {
                     serde_json::json!({"ok":true}),
                 ),
                 step(
-                    "dbt_files",
+                    "file",
                     serde_json::json!({"op":"patch","path":"models/x.sql","patch_text":"@@ ... @@\n- select 1\n+ select 1\n"}),
                     serde_json::json!({"ok": false, "errors":["invalid sql"]}),
                 ),
@@ -1956,7 +2043,7 @@ mod tests {
         let ctx = make_minimal_ctx(storage);
         let log = ThreadLog {
             steps: vec![step(
-                "dbt_files",
+                "file",
                 serde_json::json!({"op":"patch"}),
                 serde_json::json!({"ok": true, "results":[{"path":"models/staging/stg_a.sql","mutated":true}]}),
             )],
@@ -2002,7 +2089,7 @@ mod tests {
 
         let log = ThreadLog {
             steps: vec![step(
-                "dbt_files",
+                "file",
                 serde_json::json!({"op":"patch"}),
                 serde_json::json!({"ok": true, "results":[{"path":"models/staging/stg_a.sql","mutated":true}]}),
             )],
@@ -2021,7 +2108,7 @@ mod tests {
         let ctx = make_minimal_ctx(storage);
         let log = ThreadLog {
             steps: vec![step(
-                "dbt_files",
+                "file",
                 serde_json::json!({"op":"patch"}),
                 serde_json::json!({"ok": true, "results":[{"path":"packages.yml","mutated":true},{"path":"models/staging/stg_a.sql","mutated":true}]}),
             )],

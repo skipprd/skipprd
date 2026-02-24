@@ -97,7 +97,7 @@ fn title_case_words(s: &str) -> String {
 
 fn clean_tool_name(name: &str, args: &Value) -> String {
     match name {
-        "dbt_files" => {
+        "file" => {
             let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
             match op {
                 "get" => {
@@ -146,9 +146,9 @@ fn clean_tool_name(name: &str, args: &Value) -> String {
                 }
                 _ => {
                     if !op.is_empty() {
-                        return format!("dbt_files {op}");
+                        return format!("file {op}");
                     }
-                    "dbt_files".to_string()
+                    "file".to_string()
                 }
             }
         }
@@ -1651,7 +1651,7 @@ mod tests {
     #[async_trait]
     impl crate::tools::Tool for CapturingDbtFilesPatchTool {
         fn name(&self) -> &'static str {
-            "dbt_files"
+            "file"
         }
 
         async fn call(&self, args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
@@ -1674,7 +1674,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn patch_protocol_response_is_wrapped_as_dbt_files_patch_action() {
+    async fn patch_protocol_response_is_wrapped_as_file_patch_action() {
         let llm = Arc::new(ScriptedModel {
             replies: Arc::new(Mutex::new(vec![
                 // Model mistakenly emits patch-protocol response object (no action/final envelope).
@@ -1691,7 +1691,7 @@ mod tests {
                 // Retry: model emits a correct tool step.
                 serde_json::json!({
                     "type": "tool",
-                    "name": "dbt_files",
+                    "name": "file",
                     "args": "{\"op\":\"patch\",\"replace_range\":{\"path\":\"models/staging/stg_x.yml\",\"start_line\":1,\"end_line\":10,\"new_text\":\"version: 2\\n\"}}",
                     "final": null
                 })
@@ -1753,7 +1753,7 @@ mod tests {
             "tools",
             "q",
             crate::llm::LlmCallOptions {
-                prompt_id: "react_core.agent.tests.dbt_files_patch_invoked",
+                prompt_id: "react_core.agent.tests.file_patch_invoked",
                 thread_id: None,
                 expected_format: crate::llm::LlmExpectedFormat::JsonObject,
                 max_output_tokens: None,
@@ -1769,7 +1769,7 @@ mod tests {
             Ok(g) => *g,
             Err(_) => false,
         };
-        assert!(saw, "expected dbt_files patch tool to be invoked");
+        assert!(saw, "expected file patch tool to be invoked");
 
         match out {
             RunOutcome::Final { result, .. } => {

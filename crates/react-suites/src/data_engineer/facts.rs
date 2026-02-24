@@ -95,11 +95,11 @@ pub struct FactsBundle {
     pub tool_contracts: Value,
 }
 
-fn dbt_files_patch_contract_value() -> Value {
+fn file_patch_contract_value() -> Value {
     // Keep this strictly mechanical and JSON-only. This is intended to be pasted into prompts
     // as an immutable contract, and reused in deterministic validators.
     serde_json::json!({
-        "dbt_files": {
+        "file": {
             "ops": {
                 "patch": {
                     "top_level_args": {
@@ -134,7 +134,7 @@ fn dbt_files_patch_contract_value() -> Value {
                         "If expected_sha256 is provided and the file exists, it MUST match the current file content sha256"
                     ],
                     "example": {
-                        "action": "dbt_files",
+                        "action": "file",
                         "args": {"op":"rm","path":"models/staging/staging.sql"}
                     }
                 },
@@ -152,7 +152,7 @@ fn dbt_files_patch_contract_value() -> Value {
                         "If expected_sha256 is provided, it MUST match the current source file sha256"
                     ],
                     "example": {
-                        "action": "dbt_files",
+                        "action": "file",
                         "args": {"op":"mv","from":"models/staging/foo.sql","to":"models/staging/stg_test_raw_raw_customers.sql"}
                     }
                 }
@@ -502,7 +502,7 @@ pub async fn build_facts_bundle_from_relations(
         dialect,
         targets,
         relations: rels,
-        tool_contracts: dbt_files_patch_contract_value(),
+        tool_contracts: file_patch_contract_value(),
     }
 }
 

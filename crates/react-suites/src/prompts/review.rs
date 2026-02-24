@@ -16,7 +16,7 @@ Hard rules:
 - Prefer concrete, actionable feedback tied to specific models/datasets/fields. If possible, cite exact model names and column names discovered via tools.
 - Coverage check (CRITICAL):
   - You MUST check whether the DBT project has modeled the available raw datasets.
-  - Concretely: compare available raw tables (via `sql_schema`) vs authored silver models under `models/staging/` (via `dbt_files list prefix:"models/staging/"`).
+  - Concretely: compare available raw tables (via `sql_schema`) vs authored silver models under `models/staging/` (via `file list prefix:"models/staging/"`).
   - Call out missing/unmodeled datasets explicitly as a prioritized gap list (top 10).
   - If sources exist in `models/schema.yml`, also compare sources vs silver models and call out any “source exists but no silver model” gaps.
   - Do not propose edits here (read-only), but recommend what the authoring agent should scaffold next (ideally in batches).
@@ -49,7 +49,8 @@ Finalization:
 pub fn tool_card() -> String {
     r#"Tools:
 - artifacts(args:{op:"list", dataset_id?:string, type?:"model"|"metric", limit?:int} | {op:"get", dataset_id:string, type:"model"|"metric", name:string})
-- dbt_files(args:{op:"list", prefix?:string, limit?:int} | {op:"get", path:string, max_chars?:int} | {op:"get_json", path:string, pointer?:string} | {op:"manifest_find", path?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})
+- file(args:{op:"list", prefix?:string, limit?:int} | {op:"get", path:string, max_chars?:int})
+- json_file(args:{op:"get_item", path:string, pointer?:string} | {op:"query", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})
 - vect_query(args:{scope:"dataset"|"field"|"doc"|"artifact"|"metric"|"model", query_text:string, k:int})
 - sql_schema(args:{table?:string}) -> {"ok":true,"tables":[...]} or {"ok":true,"columns":[{"name":string,"type":string}]}
 - sql_stats(args:{table:string, field:string}) -> {"ok":true,"stats":{...}}
@@ -57,8 +58,9 @@ pub fn tool_card() -> String {
 
 Usage guidance:
 - Stay read-only; do not attempt to publish or edit files.
-- If you need to understand the current DBT project, start with dbt_files(get path:\"target/manifest.json\") and dbt_files(get path:\"models/schema.yml\"). Then inspect relevant model SQL under models/ via dbt_files(list prefix:\"models/\").
-- artifacts(list/get) may not include models stored under nested paths (e.g. models/staging/**); prefer dbt_files for project inspection.
+- If you need to inspect manifest nodes, use json_file(query path:\"target/manifest.json\" pointer:\"/nodes\" ...filters...).
+- If you need to understand the current DBT project, start with file(get path:\"models/schema.yml\") and inspect relevant model SQL under models/ via file(list prefix:\"models/\").
+- artifacts(list/get) may not include models stored under nested paths (e.g. models/staging/**); prefer file for project inspection.
 - Use vect_query(scope=\"artifact\"|\"model\") to locate relevant models quickly.
 - Use sql_schema/sql_stats/sql_sample to validate key/timestamp candidates and spot grain problems (high nulls, low distinctness, etc.).
 - Always output only JSON."#

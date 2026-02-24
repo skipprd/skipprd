@@ -39,7 +39,7 @@ mod tests {
             ("plan.model_plan_system_prompt", super::plan::model_plan_system_prompt()),
             ("review.system_prompt", super::review::system_prompt()),
             ("patch_contract.llm_patch_response_contract", super::patch_contract::llm_patch_response_contract().to_string()),
-            ("patch_contract.dbt_files_patch_contract", super::patch_contract::dbt_files_patch_contract().to_string()),
+            ("patch_contract.file_patch_contract", super::patch_contract::file_patch_contract().to_string()),
             ("kb.system_prompt", crate::kb::prompts::system_prompt().to_string()),
             ("kb.tool_card", crate::kb::prompts::tool_card().to_string()),
         ];

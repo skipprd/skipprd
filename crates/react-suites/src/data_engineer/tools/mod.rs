@@ -13,6 +13,7 @@ pub mod dbt_examples;
 pub mod dbt_files;
 pub mod dbt_validate;
 pub mod gold_model;
+pub mod json_file;
 pub mod publish_dbt_to_provider;
 pub mod sql_register;
 pub mod sql_run;

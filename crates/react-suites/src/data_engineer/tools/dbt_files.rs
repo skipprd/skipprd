@@ -899,7 +899,7 @@ struct MoveFileArgs {
 #[async_trait]
 impl Tool for DbtFilesTool {
     fn name(&self) -> &'static str {
-        "dbt_files"
+        "file"
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
@@ -927,33 +927,10 @@ impl Tool for DbtFilesTool {
                     args.get("max_chars").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
                 project_fs::get_file(ctx, path, max_chars).await
             }
-            "get_json" => {
-                let path = args
-                    .get("path")
-                    .and_then(|x| x.as_str())
-                    .ok_or_else(|| "path required".to_string())?;
-                let pointer = args.get("pointer").and_then(|x| x.as_str());
-                project_fs::get_json(ctx, path, pointer).await
-            }
-            "manifest_find" => {
-                let path = args
-                    .get("path")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("target/manifest.json");
-                let unique_id = args.get("unique_id").and_then(|x| x.as_str());
-                let name = args.get("name").and_then(|x| x.as_str());
-                let resource_type = args.get("resource_type").and_then(|x| x.as_str());
-                let limit = args
-                    .get("limit")
-                    .and_then(|x| x.as_u64())
-                    .unwrap_or(20)
-                    .min(200) as usize;
-                project_fs::manifest_find(ctx, path, unique_id, name, resource_type, limit).await
-            }
             "rm" => {
                 let parsed = serde_json::from_value::<RemoveFileArgs>(args.clone()).map_err(|e| {
                     format!(
-                        "dbt_files op=rm contract violation: {}\n\nExpected args: {{\"op\":\"rm\",\"path\":\"...\",\"expected_sha256?\":\"...\"}}",
+                        "file op=rm contract violation: {}\n\nExpected args: {{\"op\":\"rm\",\"path\":\"...\",\"expected_sha256?\":\"...\"}}",
                         e
                     )
                 })?;
@@ -962,7 +939,7 @@ impl Tool for DbtFilesTool {
             "mv" => {
                 let parsed = serde_json::from_value::<MoveFileArgs>(args.clone()).map_err(|e| {
                     format!(
-                        "dbt_files op=mv contract violation: {}\n\nExpected args: {{\"op\":\"mv\",\"from\":\"...\",\"to\":\"...\",\"expected_sha256?\":\"...\"}}",
+                        "file op=mv contract violation: {}\n\nExpected args: {{\"op\":\"mv\",\"from\":\"...\",\"to\":\"...\",\"expected_sha256?\":\"...\"}}",
                         e
                     )
                 })?;
@@ -983,13 +960,13 @@ impl Tool for DbtFilesTool {
                     || args.get("new_text").is_some()
                     || args.get("files").is_some()
                 {
-                    return Err("dbt_files op=patch contract violation: patch primitives and new_text/files overwrites are not supported. Provide {op:\"patch\", path:\"<single file>\", patch_text:\"<Cursor/Aider hunks-only unified diff>\"}.".to_string());
+                    return Err("file op=patch contract violation: patch primitives and new_text/files overwrites are not supported. Provide {op:\"patch\", path:\"<single file>\", patch_text:\"<Cursor/Aider hunks-only unified diff>\"}.".to_string());
                 }
                 if args.get("unified_git_style_patch").is_some() {
-                    return Err("dbt_files op=patch contract violation: unified_git_style_patch is not supported. Use patch_text (Cursor/Aider hunks-only).".to_string());
+                    return Err("file op=patch contract violation: unified_git_style_patch is not supported. Use patch_text (Cursor/Aider hunks-only).".to_string());
                 }
                 if args.get("preview_diff").is_some() {
-                    return Err("dbt_files op=patch contract violation: preview_diff is not supported. Use patch_text (Cursor/Aider hunks-only).".to_string());
+                    return Err("file op=patch contract violation: preview_diff is not supported. Use patch_text (Cursor/Aider hunks-only).".to_string());
                 }
 
                 let args_wo_op = args
@@ -1003,7 +980,7 @@ impl Tool for DbtFilesTool {
 
                 let parsed = serde_json::from_value::<SingleFilePatchArgs>(args_wo_op.clone()).map_err(|e| {
                     format!(
-                        "dbt_files op=patch contract violation: {}\n\nExpected args: {{\"op\":\"patch\",\"path\":\"...\",\"patch_text\":\"...\"}}",
+                        "file op=patch contract violation: {}\n\nExpected args: {{\"op\":\"patch\",\"path\":\"...\",\"patch_text\":\"...\"}}",
                         e
                     )
                 })?;
@@ -1017,7 +994,7 @@ impl Tool for DbtFilesTool {
                 }
 
                 let normalized = normalize_hunks_only_patch_text(parsed.patch_text.as_str(), &want_rel).map_err(|e| {
-                    format!("dbt_files op=patch contract violation: {}", e)
+                    format!("file op=patch contract violation: {}", e)
                 })?;
                 let patch_in = normalized.patch_text;
 
@@ -1087,7 +1064,7 @@ impl Tool for DbtFilesTool {
                 }))
             }
             _ => Err(
-                "unsupported op; use 'list', 'get', 'get_json', 'manifest_find', 'patch', 'rm', or 'mv'"
+                "unsupported op; use 'list', 'get', 'patch', 'rm', or 'mv'"
                     .to_string(),
             ),
         }

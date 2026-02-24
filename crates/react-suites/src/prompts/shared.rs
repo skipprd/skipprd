@@ -26,7 +26,7 @@ Hard rules:
     - Your next step MUST be a FIX to DBT artifacts.
     - Do NOT immediately re-run `dbt_validate` as the very next step.
     - CRITICAL: you MUST debug the *actual data* before editing. Do this in order:
-      1) Use `dbt_files op=manifest_find` (or `dbt_files op=get_json`) to find the failing test/model node and the physical relation:
+      1) Use `json_file op=query` on `target/manifest.json` with pointer=`/nodes` to find the failing test/model node and the physical relation:
          - relation = <database>.<schema>.<alias> (Athena: database is the catalog; schema is the Glue DB).
       2) Run at least ONE `run_sql` probe against that relation to confirm why the test fails.
       3) Only then edit the responsible model/test and re-validate.
@@ -48,14 +48,13 @@ Hard rules:
 pub fn tool_card_common_prefix() -> &'static str {
     r#"Tools:
 - artifacts(args:{op:"list", dataset_id?:string, type?:"model"|"metric", limit?:int} | {op:"get", dataset_id:string, type:"model"|"metric", name:string})
-- dbt_files(
+- file(
     args:
       | {op:"list", prefix?:string, limit?:int}
       | {op:"get", path:string, max_chars?:int}
-      | {op:"get_json", path:string, pointer?:string}
-      | {op:"manifest_find", path?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int}
   | {op:"patch", path:string, patch_text:string}
   )
+- json_file(args:{op:"get_item", path:string, pointer?:string} | {op:"query", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})
 - vect_query(args:{scope:"dataset"|"field"|"doc"|"artifact"|"metric"|"model", query_text:string, k:int})
 - search_dbt_examples(args:{query:string, k?:int}) -> {"ok":true,"examples":[{project,path,s3_uri,preview,score}]}
 - sql_schema(args:{table?:string}) -> {"ok":true,"tables":[...]} or {"ok":true,"columns":[{"name":string,"type":string}]}
@@ -73,13 +72,15 @@ pub fn tool_card_common_prefix() -> &'static str {
   # - dataset_ids with exactly one item (len==1).
 
 Usage guidance:
-- Prefer batch scaffolding: use batch tools when available; for dbt_files op=patch, patch one file per call.
+- Prefer batch scaffolding: use batch tools when available; for file op=patch, patch one file per call.
 - Probe contract discipline:
+  - artifacts supports only ops: list|get. Do NOT call artifacts with get_json.
+  - json_file supports ops: get_item|query.
   - sql_stats/sql_sample require args.table + args.field.
   - Do NOT call sql_stats/sql_sample with table-only args.
   - Do NOT use non-contract keys (e.g. relation/op) for sql_stats/sql_sample.
-- Use `dbt_files op=patch` for ALL DBT project files, including model SQL under models/.
-- For `dbt_files op=patch`, provide `patch_text` as Cursor/Aider hunks-only unified diff:
+- Use `file op=patch` for ALL DBT project files, including model SQL under models/.
+- For `file op=patch`, provide `patch_text` as Cursor/Aider hunks-only unified diff:
   - args.path is REQUIRED and is the single file to mutate.
   - patch_text MUST start with `@@` and MUST NOT include git file headers (`---`/`+++`), `diff --git` preamble, or diffy-style headers (`--- original` / `+++ modified`).
   - Use Cursor/Aider hunk headers only: `@@ ... @@` (no line-number headers).
@@ -105,7 +106,7 @@ pub fn build_common_tool_card(extra_tool_lines: &str, extra_guidance: &str) -> S
         s.push_str(extra_tool_lines.trim_end());
         s.push('\n');
     }
-    s.push_str(&crate::prompts::patch_contract::dbt_files_patch_contract());
+    s.push_str(&crate::prompts::patch_contract::file_patch_contract());
     s.push_str(tool_card_common_suffix());
     if !extra_guidance.trim().is_empty() {
         s.push_str(extra_guidance.trim_end());

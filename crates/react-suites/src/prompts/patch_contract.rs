@@ -24,9 +24,9 @@ Good args example:
     )
 }
 
-pub fn dbt_files_patch_contract() -> String {
+pub fn file_patch_contract() -> String {
     format!(
-        r#"dbt_files file operations contract (MUST follow exactly):
+        r#"file operations contract (MUST follow exactly):
 - args.op MUST be one of: "patch" | "rm" | "mv"
 
 op="patch":

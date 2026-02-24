@@ -147,7 +147,7 @@ impl Tool for ApplyNextCleanseBatchTool {
         if plan.progress.consecutive_batch_failures >= MAX_CONSECUTIVE_BATCH_FAILURES {
             return Ok(serde_json::json!({
                 "ok": false,
-                "errors": ["too many consecutive batch failures; apply a targeted fix (dbt_files op=patch) or ask the user for guidance before retrying"],
+                "errors": ["too many consecutive batch failures; apply a targeted fix (file op=patch) or ask the user for guidance before retrying"],
                 "attempted_dataset_ids": [],
                 "succeeded_dataset_ids": [],
                 "failed_dataset_ids": [],
@@ -362,7 +362,7 @@ impl Tool for ApplyNextCleanseBatchTool {
                 "attempted_dataset_ids": attempted,
                 "succeeded_dataset_ids": succeeded,
                 "failed_dataset_ids": failed,
-                "errors": ["too many consecutive batch failures; ask user for guidance or apply targeted dbt_files patches before retrying"],
+                "errors": ["too many consecutive batch failures; ask user for guidance or apply targeted file patches before retrying"],
             }));
         }
 
@@ -419,7 +419,7 @@ impl Tool for ApplyNextModelBatchTool {
         if plan.progress.consecutive_batch_failures >= MAX_CONSECUTIVE_BATCH_FAILURES {
             return Ok(serde_json::json!({
                 "ok": false,
-                "errors": ["too many consecutive batch failures; apply a targeted fix (dbt_files op=patch) or ask the user for guidance before retrying"],
+                "errors": ["too many consecutive batch failures; apply a targeted fix (file op=patch) or ask the user for guidance before retrying"],
                 "attempted_item_names": [],
                 "succeeded_item_names": [],
                 "failed_item_names": [],
@@ -649,7 +649,7 @@ impl Tool for ApplyNextModelBatchTool {
                 "attempted_item_names": batch_names,
                 "succeeded_item_names": succeeded,
                 "failed_item_names": failed,
-                "errors": ["too many consecutive batch failures; ask user for guidance or apply targeted dbt_files patches before retrying"],
+                "errors": ["too many consecutive batch failures; ask user for guidance or apply targeted file patches before retrying"],
             }));
         }
 
