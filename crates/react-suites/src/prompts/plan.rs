@@ -48,10 +48,14 @@ Discovery requirements:
   - artifacts supports only ops: list|get (never get_json).
   - Use file with list/get ops for project inspection.
   - Use json_file for structured manifest inspection (get_item for pointer reads, query for filtered node lookups).
+  - Manifest lookups MUST use: json_file(args:{op:\"query\", path:\"target/manifest.json\", pointer:\"/nodes\", ...filters...}).
+  - Do NOT use path:\"manifest.json\" or any storage-key/absolute-like path for manifest reads.
 - IMPORTANT: sql_stats/sql_sample require BOTH args.table and args.field.
 - Never call sql_stats/sql_sample with table-only args.
 - Never use non-contract args like relation/op for sql_stats/sql_sample.
 - If field is unknown, call sql_schema(args:{table}) first, then pick a concrete field.
+- For run_sql probes in planning: only use concrete relation queries (e.g. SELECT ... FROM <catalog.schema.table> ...).
+- Never use metadata pseudo-SQL in run_sql (e.g. SHOW SCHEMAS / SHOW TABLES / DESCRIBE / EXPLAIN / USE).
 
 When finished:
 - final.kind MUST be "plan_discovery_ready".
@@ -150,4 +154,16 @@ Do not emit batch_id, dependencies, data_quality, wrappers, commentary, or any n
 Each output_fields item MUST include: name, kind, expression.\n\
 spec_version MUST be an integer number (not a string)."
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_plan_prompt_requires_canonical_manifest_path() {
+        let p = model_plan_system_prompt();
+        assert!(p.contains("path:\\\"target/manifest.json\\\""));
+        assert!(p.contains("Do NOT use path:\\\"manifest.json\\\""));
+    }
 }

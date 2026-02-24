@@ -59,6 +59,7 @@ pub fn tool_card() -> String {
 Usage guidance:
 - Stay read-only; do not attempt to publish or edit files.
 - If you need to inspect manifest nodes, use json_file(query path:\"target/manifest.json\" pointer:\"/nodes\" ...filters...).
+- Do NOT use path:\"manifest.json\" or storage-key-like paths for manifest lookups.
 - If you need to understand the current DBT project, start with file(get path:\"models/schema.yml\") and inspect relevant model SQL under models/ via file(list prefix:\"models/\").
 - artifacts(list/get) may not include models stored under nested paths (e.g. models/staging/**); prefer file for project inspection.
 - Use vect_query(scope=\"artifact\"|\"model\") to locate relevant models quickly.

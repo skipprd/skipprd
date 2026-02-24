@@ -76,9 +76,12 @@ Usage guidance:
 - Probe contract discipline:
   - artifacts supports only ops: list|get. Do NOT call artifacts with get_json.
   - json_file supports ops: get_item|query.
+  - For manifest node inspection, canonicalize to json_file query with path:\"target/manifest.json\" and pointer:\"/nodes\".
+  - Do NOT use path:\"manifest.json\" or storage-key-like paths for manifest lookups.
   - sql_stats/sql_sample require args.table + args.field.
   - Do NOT call sql_stats/sql_sample with table-only args.
   - Do NOT use non-contract keys (e.g. relation/op) for sql_stats/sql_sample.
+  - run_sql in planning/diagnostic probes must target concrete relations only; avoid metadata pseudo-SQL (SHOW/DESCRIBE/EXPLAIN/USE).
 - Use `file op=patch` for ALL DBT project files, including model SQL under models/.
 - For `file op=patch`, provide `patch_text` as Cursor/Aider hunks-only unified diff:
   - args.path is REQUIRED and is the single file to mutate.
@@ -121,6 +124,18 @@ pub fn user_goal_line(prefix: &str, question: &str) -> String {
         prefix.trim().to_string()
     } else {
         format!("{} {}", prefix.trim_end(), q)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_card_mentions_canonical_manifest_query_contract() {
+        let c = tool_card_common_prefix();
+        assert!(c.contains("path:\\\"target/manifest.json\\\""));
+        assert!(c.contains("Do NOT use path:\\\"manifest.json\\\""));
     }
 }
 

@@ -301,6 +301,23 @@ enum PlanningLlmProfile {
     EnrichmentReason,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ManifestLookupPathKind {
+    CanonicalTarget,
+    Ambiguous,
+    NonCanonical,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ManifestLookupRetrySignal {
+    fallback_mode: bool,
+    retry_suppressed: bool,
+    failure_signature: Option<String>,
+    repeated_failure_count: usize,
+    canonical_success_count: usize,
+    noncanonical_attempt_count: usize,
+}
+
 impl DataEngineerSuite {
     fn subjective_retry_limit() -> usize {
         std::env::var("AGENT_MAX_SUBJECTIVE_RETRIES")
@@ -508,6 +525,149 @@ impl DataEngineerSuite {
             })
     }
 
+    fn normalize_manifest_path(path: &str) -> String {
+        path.trim().trim_matches('/').replace('\\', "/")
+    }
+
+    fn classify_manifest_lookup_path(path: &str) -> Option<ManifestLookupPathKind> {
+        let norm = Self::normalize_manifest_path(path);
+        if norm.is_empty() {
+            return None;
+        }
+        if norm == "target/manifest.json" {
+            return Some(ManifestLookupPathKind::CanonicalTarget);
+        }
+        if norm.ends_with("target/manifest.json") {
+            return Some(ManifestLookupPathKind::NonCanonical);
+        }
+        if norm.ends_with("manifest.json") {
+            return Some(ManifestLookupPathKind::Ambiguous);
+        }
+        None
+    }
+
+    fn classify_manifest_lookup_failure(errors: &[String]) -> Option<&'static str> {
+        let joined = errors.join("\n").to_ascii_lowercase();
+        if joined.contains("nosuchkey")
+            || joined.contains("not found or failed to fetch")
+            || joined.contains("the specified key does not exist")
+        {
+            return Some("NoSuchKey");
+        }
+        if joined.contains("pointer not found") {
+            return Some("PointerNotFound");
+        }
+        None
+    }
+
+    fn model_plan_manifest_retry_signal(
+        log: Option<&react_core::session::ThreadLog>,
+    ) -> ManifestLookupRetrySignal {
+        let mut out = ManifestLookupRetrySignal::default();
+        let Some(l) = log else {
+            return out;
+        };
+        let Some(start) = Self::phase_start_idx(l, control_flow::Phase::ModelPlan) else {
+            return out;
+        };
+        let mut failure_counts: HashMap<String, usize> = HashMap::new();
+        for s in l.steps.iter().skip(start + 1) {
+            let react_core::session::ThreadStep::ToolEnd {
+                name,
+                args,
+                observation,
+                ..
+            } = s
+            else {
+                continue;
+            };
+            if name != "json_file" {
+                continue;
+            }
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .unwrap_or("");
+            let Some(path_kind) = Self::classify_manifest_lookup_path(path) else {
+                continue;
+            };
+            if matches!(
+                path_kind,
+                ManifestLookupPathKind::Ambiguous | ManifestLookupPathKind::NonCanonical
+            ) {
+                out.noncanonical_attempt_count = out.noncanonical_attempt_count.saturating_add(1);
+            }
+            if observation.ok {
+                if path_kind == ManifestLookupPathKind::CanonicalTarget {
+                    out.canonical_success_count = out.canonical_success_count.saturating_add(1);
+                }
+                continue;
+            }
+            if let Some(kind) = Self::classify_manifest_lookup_failure(&observation.errors) {
+                let signature = format!("{kind}:{path_kind:?}");
+                let n = failure_counts.entry(signature.clone()).or_insert(0usize);
+                *n = n.saturating_add(1);
+                if *n > out.repeated_failure_count {
+                    out.repeated_failure_count = *n;
+                    out.failure_signature = Some(signature);
+                }
+            }
+        }
+        // Deterministic suppression only when failures repeat and canonical manifest lookup has
+        // not succeeded in this model-plan phase iteration.
+        let threshold = 2usize;
+        out.retry_suppressed =
+            out.repeated_failure_count >= threshold && out.canonical_success_count == 0;
+        out.fallback_mode = out.retry_suppressed;
+        out
+    }
+
+    fn is_metadata_probe_sql(sql: &str) -> bool {
+        let q = sql.trim().to_ascii_lowercase();
+        q.starts_with("show ")
+            || q.starts_with("describe ")
+            || q.starts_with("explain ")
+            || q.starts_with("use ")
+            || q.starts_with("set ")
+    }
+
+    fn failed_metadata_probe_attempts(
+        log: Option<&react_core::session::ThreadLog>,
+        phase: control_flow::Phase,
+    ) -> usize {
+        let Some(l) = log else {
+            return 0;
+        };
+        let Some(start) = Self::phase_start_idx(l, phase) else {
+            return 0;
+        };
+        l.steps
+            .iter()
+            .skip(start + 1)
+            .filter_map(|s| {
+                let react_core::session::ThreadStep::ToolEnd {
+                    name,
+                    args,
+                    observation,
+                    ..
+                } = s
+                else {
+                    return None;
+                };
+                if name != "run_sql" || observation.ok {
+                    return None;
+                }
+                let sql = args.get("sql").and_then(|v| v.as_str())?;
+                if Self::is_metadata_probe_sql(sql) {
+                    Some(())
+                } else {
+                    None
+                }
+            })
+            .count()
+    }
+
     fn is_valid_grounding_evidence_tool(name: &str, args: &serde_json::Value) -> bool {
         match name {
             "sql_stats" | "sql_sample" => {
@@ -526,7 +686,8 @@ impl DataEngineerSuite {
                 .and_then(|v| v.as_str())
                 .map(|sql| {
                     let q = sql.to_ascii_lowercase();
-                    q.contains("count(") || q.contains(" limit ")
+                    (q.contains("count(") || q.contains(" limit "))
+                        && !Self::is_metadata_probe_sql(sql)
                 })
                 .unwrap_or(false),
             _ => false,
@@ -3000,6 +3161,7 @@ Apply these fixes in the output.",
         sctx: &SuiteCtx,
         allowed_batch: Option<AllowedBatch>,
         single_target_repair_path: Option<String>,
+        suppress_manifest_json_in_plan: bool,
     ) -> Result<(ToolRegistry, String), String> {
         use crate::data_engineer::tools::{
             artifacts::ArtifactsTool, dbt_files::DbtFilesTool, json_file::JsonFileTool,
@@ -3036,6 +3198,8 @@ Apply these fixes in the output.",
         match phase {
             control_flow::Phase::CleansePlan | control_flow::Phase::ModelPlan => {
                 // Plan phases: read-only discovery + (optional) probes. No dbt file mutations.
+                let suppress_manifest_json =
+                    suppress_manifest_json_in_plan && phase == control_flow::Phase::ModelPlan;
                 reg.register(tools::ask_user::AskUserTool);
                 reg.register(SqlRunTool {
                     query: query.clone(),
@@ -3070,20 +3234,28 @@ Apply these fixes in the output.",
                         datasets: sctx.datasets.clone(),
                     },
                 });
-                reg.register(JsonFileTool);
+                if !suppress_manifest_json {
+                    reg.register(JsonFileTool);
+                }
 
-                tools_card_lines = vec![
+                let mut plan_tools_card_lines = vec![
                     "Allowed tools (plan phase, read-only):",
                     "- file(args:{op:\"list\", prefix?:string, limit?:int} | {op:\"get\", path:string, max_chars?:int})",
-                    "- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})",
-                    "  - IMPORTANT: use args.op (NOT args.type). For list use args.prefix (NOT path:\".\").",
                     "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
                     "- run_sql (targeted probes)",
                     "- artifacts",
                     "- ask_user",
                     "",
-                    "Not available: staging_model, gold_model, file patch/rm/mv, dbt_validate, publish_dbt_to_provider.",
                 ];
+                if suppress_manifest_json {
+                    plan_tools_card_lines.push("- json_file is temporarily disabled for this model_plan retry due to repeated manifest lookup failures; use deterministic fallback evidence (file + sql_schema + sql_stats/sql_sample).");
+                } else {
+                    plan_tools_card_lines.push("- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})");
+                    plan_tools_card_lines.push("  - IMPORTANT: use args.op (NOT args.type). For list use args.prefix (NOT path:\".\").");
+                    plan_tools_card_lines.push("  - For manifest queries use canonical path: target/manifest.json (NOT manifest.json).");
+                }
+                plan_tools_card_lines.push("Not available: staging_model, gold_model, file patch/rm/mv, dbt_validate, publish_dbt_to_provider.");
+                tools_card_lines = plan_tools_card_lines;
             }
             control_flow::Phase::CleanseAuthor | control_flow::Phase::ModelAuthor => {
                 // Authoring phases: allow investigation + mutations; validation/publish are suite-driven.
@@ -4783,6 +4955,11 @@ Apply these fixes in the output.",
                     } else {
                         prompts::model_plan_system_prompt()
                     });
+                    let manifest_retry_signal = if is_cleanse {
+                        ManifestLookupRetrySignal::default()
+                    } else {
+                        Self::model_plan_manifest_retry_signal(log.as_ref())
+                    };
                     let (registry, tools_card) = Self::build_tools_for_phase(
                         phase,
                         &guard,
@@ -4790,6 +4967,7 @@ Apply these fixes in the output.",
                         sctx,
                         None,
                         None,
+                        manifest_retry_signal.fallback_mode,
                     )?;
 
                     let mut q = if is_cleanse {
@@ -4803,6 +4981,31 @@ Apply these fixes in the output.",
                             question
                         )
                     };
+                    if !is_cleanse {
+                        if manifest_retry_signal.fallback_mode {
+                            tracing::info!(
+                                "data_engineer: model_plan manifest lookup fallback enabled plan_manifest_lookup_unavailable_fallback=true manifest_retry_suppressed=true failure_signature={} repeated_failure_count={}",
+                                manifest_retry_signal
+                                    .failure_signature
+                                    .as_deref()
+                                    .unwrap_or("unknown"),
+                                manifest_retry_signal.repeated_failure_count
+                            );
+                            q.push_str(
+                                "\n\nDETERMINISTIC FALLBACK MODE (manifest lookup unavailable):\n\
+                                 - Repeated json_file manifest lookup failures were detected in this model_plan phase.\n\
+                                 - Do NOT call json_file for manifest on this retry.\n\
+                                 - Use deterministic fallback evidence only: file list/get + sql_schema + sql_stats/sql_sample/run_sql against concrete relations.\n\
+                                 - Continue plan grounding with available evidence; do not stall on manifest access.\n",
+                            );
+                        } else if manifest_retry_signal.noncanonical_attempt_count > 0 {
+                            q.push_str(
+                                "\n\nManifest contract reminder:\n\
+                                 - If you query manifest nodes, use ONLY json_file query path:\"target/manifest.json\" pointer:\"/nodes\".\n\
+                                 - Do NOT use path:\"manifest.json\" or storage-key-like manifest paths.\n",
+                            );
+                        }
+                    }
 
                     // Inject global preflight semantic context/audiences (if available).
                     // CRITICAL: global_semantic_context is intended for GOLD model planning only,
@@ -5005,6 +5208,16 @@ Apply these fixes in the output.",
                                     }
                                 }
                                 if !(saw_dbt_files && saw_sql_schema && saw_evidence) {
+                                    let metadata_probe_failures =
+                                        Self::failed_metadata_probe_attempts(Some(l), phase);
+                                    let metadata_hint = if metadata_probe_failures > 0 {
+                                        format!(
+                                            "\nObserved {} failed metadata-style run_sql probe(s). In planning, run_sql must target concrete relations (SELECT ... FROM <table> ...), not SHOW/DESCRIBE/EXPLAIN/USE.",
+                                            metadata_probe_failures
+                                        )
+                                    } else {
+                                        String::new()
+                                    };
                                     // Stay in plan phase and re-run with a hard reminder.
                                     let miss = format!(
                                         "Plan is missing required grounding steps.\n\
@@ -5013,7 +5226,8 @@ Apply these fixes in the output.",
                                          - sql_schema (list tables)\n\
                                          - evidence via sql_stats/sql_sample/run_sql\n\n\
                                          Seen: file={saw_dbt_files}, sql_schema={saw_sql_schema}, evidence={saw_evidence}\n\
-                                         Please retry plan generation and include those discovery steps."
+                                         Please retry plan generation and include those discovery steps.{}",
+                                        metadata_hint
                                     );
                                     let ts = chrono::Utc::now().to_rfc3339();
                                     let step = react_core::session::ThreadStep::GuardBlock {
@@ -5037,6 +5251,10 @@ Apply these fixes in the output.",
                                         Some(serde_json::json!({
                                             "kind": "plan_grounding",
                                             "reason": miss,
+                                            "plan_manifest_lookup_unavailable_fallback": manifest_retry_signal.fallback_mode,
+                                            "manifest_retry_suppressed": manifest_retry_signal.retry_suppressed,
+                                            "manifest_lookup_failure_signature": manifest_retry_signal.failure_signature,
+                                            "metadata_probe_failures": metadata_probe_failures,
                                             "trigger_step": step,
                                         })),
                                     )
@@ -6942,6 +7160,7 @@ Apply these fixes in the output.",
                         sctx,
                         allowed_batch.clone(),
                         single_target_repair_path.clone(),
+                        false,
                     )?;
 
                     // Ground the next authoring pass with last validation summary (if any) and guard state.
@@ -9454,6 +9673,7 @@ mod tests {
             &sctx,
             None,
             None,
+            false,
         )
         .expect("build_tools_for_phase should succeed");
 
@@ -9510,6 +9730,7 @@ mod tests {
                 "AwsDataCatalog.db.t1".to_string(),
             ])),
             None,
+            false,
         )
         .expect("build_tools_for_phase should succeed");
 
@@ -9545,6 +9766,7 @@ mod tests {
             &sctx,
             None,
             Some("models/marts/fct_orders.sql".to_string()),
+            false,
         )
         .expect("build_tools_for_phase should succeed");
 
@@ -9579,6 +9801,7 @@ mod tests {
                 "AwsDataCatalog.db.t1".to_string(),
             ])),
             None,
+            false,
         )
         .expect("build_tools_for_phase should succeed");
 
@@ -9616,6 +9839,7 @@ mod tests {
                 "fct_orders".to_string()
             ])),
             None,
+            false,
         )
         .expect("build_tools_for_phase should succeed");
 
@@ -10146,6 +10370,107 @@ mod tests {
         let err = DataEngineerSuite::validate_output_field_kind_contract(&bad)
             .expect_err("expected invalid kind");
         assert!(err.contains("allowed kind values: raw, clean, derived, quality_flag"));
+    }
+
+    #[test]
+    fn grounding_evidence_rejects_metadata_probe_sql() {
+        assert!(!DataEngineerSuite::is_valid_grounding_evidence_tool(
+            "run_sql",
+            &serde_json::json!({"sql":"SHOW SCHEMAS FROM AwsDataCatalog"})
+        ));
+        assert!(!DataEngineerSuite::is_valid_grounding_evidence_tool(
+            "run_sql",
+            &serde_json::json!({"sql":"DESCRIBE AwsDataCatalog.db.tbl"})
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_plan_can_disable_json_file_after_manifest_retry_suppression() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+        let guard = crate::data_engineer::control_flow::DerivedGuardState::default();
+        let (reg, card) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::ModelPlan,
+            &guard,
+            true,
+            &sctx,
+            None,
+            None,
+            true,
+        )
+        .expect("build_tools_for_phase should succeed");
+        let err = reg
+            .call(
+                "json_file",
+                serde_json::json!({"op":"query","path":"target/manifest.json","pointer":"/nodes"}),
+                &actx,
+            )
+            .await
+            .expect_err("json_file should be disabled in fallback mode");
+        assert!(err.contains("unknown tool"));
+        assert!(card.contains("json_file is temporarily disabled"));
+    }
+
+    #[test]
+    fn model_plan_manifest_retry_signal_detects_repeated_failures() {
+        use react_core::session::{Observation, ThreadLog, ThreadStep, ToolObservation};
+        let log = ThreadLog {
+            steps: vec![
+                ThreadStep::Phase {
+                    phase: control_flow::Phase::ModelPlan.as_str().to_string(),
+                    from_phase: Some(control_flow::Phase::CleanseReview.as_str().to_string()),
+                    reason_code: None,
+                    reason_detail: None,
+                    observation: Observation::ok(),
+                    ts: "t".to_string(),
+                    agent: "agent".to_string(),
+                },
+                ThreadStep::ToolEnd {
+                    tool_id: "j1".to_string(),
+                    name: "json_file".to_string(),
+                    clean_name: "Json File".to_string(),
+                    args: serde_json::json!({"op":"query","path":"manifest.json","pointer":"/nodes"}),
+                    status: "failed".to_string(),
+                    payload: None,
+                    ctx: None,
+                    observation: ToolObservation::fail(
+                        vec!["not found or failed to fetch: NoSuchKey".to_string()],
+                        std::collections::BTreeMap::new(),
+                    ),
+                    ts: "t".to_string(),
+                    agent: "agent".to_string(),
+                },
+                ThreadStep::ToolEnd {
+                    tool_id: "j2".to_string(),
+                    name: "json_file".to_string(),
+                    clean_name: "Json File".to_string(),
+                    args: serde_json::json!({"op":"query","path":"manifest.json","pointer":"/nodes"}),
+                    status: "failed".to_string(),
+                    payload: None,
+                    ctx: None,
+                    observation: ToolObservation::fail(
+                        vec!["not found or failed to fetch: NoSuchKey".to_string()],
+                        std::collections::BTreeMap::new(),
+                    ),
+                    ts: "t".to_string(),
+                    agent: "agent".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let signal = DataEngineerSuite::model_plan_manifest_retry_signal(Some(&log));
+        assert!(signal.fallback_mode);
+        assert!(signal.retry_suppressed);
+        assert_eq!(signal.canonical_success_count, 0);
+        assert!(
+            signal
+                .failure_signature
+                .as_deref()
+                .unwrap_or("")
+                .contains("NoSuchKey"),
+            "expected NoSuchKey signature"
+        );
     }
 
 }
