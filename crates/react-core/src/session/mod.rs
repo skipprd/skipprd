@@ -1126,7 +1126,7 @@ fn apply_step_to_state(
                 if status == "failed" || !observation.ok {
                     let summary = observation
                         .first_error_or_context()
-                        .unwrap_or_else(|| "unknown error".to_string());
+                        .unwrap_or_else(|| "no error details were captured".to_string());
                     ent.last_error = Some(ThreadItemError {
                         summary,
                         tool_step_idx: None,

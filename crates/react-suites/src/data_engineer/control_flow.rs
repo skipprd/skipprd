@@ -86,6 +86,28 @@ pub fn phase_from_log(log: Option<&ThreadLog>) -> Phase {
     Phase::Preflight
 }
 
+fn replan_backtrack_counter_cap() -> usize {
+    std::env::var("AGENT_MAX_REPLAN_BACKTRACKS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(3)
+        .max(2)
+        .min(20)
+}
+
+fn review_patch_streak_cap(reason_code_match: PhaseReasonCode) -> usize {
+    let env_key = match reason_code_match {
+        PhaseReasonCode::ReviewPatchPlan => "AGENT_MAX_REVIEW_PATCH_PLAN_STREAK",
+        _ => "AGENT_MAX_REVIEW_PATCH_IMPL_STREAK",
+    };
+    std::env::var(env_key)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(3)
+        .max(1)
+        .min(12)
+}
+
 pub async fn append_phase(
     store: &ThreadStore,
     thread_id: &str,
@@ -156,7 +178,10 @@ pub async fn append_phase_with_reason(
         let from_is_reviewish = p_l.contains("validate") || p_l.contains("review");
         let to_is_plan_or_author = n_l.contains("plan") || n_l.contains("author");
         if from_is_reviewish && to_is_plan_or_author {
-            st.replan_backtracks = st.replan_backtracks.saturating_add(1);
+            st.replan_backtracks = st
+                .replan_backtracks
+                .saturating_add(1)
+                .min(replan_backtrack_counter_cap());
         }
     }
     st.current_phase = Some(next);
@@ -660,6 +685,7 @@ pub fn replan_backtrack_count_for_phase(log: Option<&ThreadLog>, phase: Phase) -
     let start_idx = last_successful_validate_idx.unwrap_or(0);
 
     let mut count = 0usize;
+    let cap = replan_backtrack_counter_cap();
     for (i, step) in log.steps.iter().enumerate() {
         if i <= start_idx {
             continue;
@@ -695,6 +721,9 @@ pub fn replan_backtrack_count_for_phase(log: Option<&ThreadLog>, phase: Phase) -
         };
         if hit {
             count = count.saturating_add(1);
+            if count >= cap {
+                return cap;
+            }
         }
     }
     count
@@ -707,6 +736,7 @@ fn review_patch_streak(
     expected_back_to: Phase,
 ) -> usize {
     let Some(log) = log else { return 0 };
+    let cap = review_patch_streak_cap(reason_code_match);
 
     let mut streak = 0usize;
     for step in log.steps.iter().rev() {
@@ -731,6 +761,9 @@ fn review_patch_streak(
         if matches!(reason_code, Some(code) if *code == reason_code_match) && to == expected_back_to
         {
             streak = streak.saturating_add(1);
+            if streak >= cap {
+                return cap;
+            }
             continue;
         }
         // Any other decision emitted by this review phase ends the streak window.
@@ -819,7 +852,7 @@ fn unresolved_mutation_failures_in_phase(log: &ThreadLog, phase: Phase) -> Vec<S
         }
         let err = obs
             .first_error_or_context()
-            .unwrap_or_else(|| "unknown error".to_string());
+            .unwrap_or_else(|| "no error details were captured".to_string());
         failures.push(format!("{}: {}", name, err));
         if failures.len() >= 10 {
             break;
@@ -1226,7 +1259,7 @@ pub async fn call_and_record_tool(
     let clean_name = clean_tool_name(tool.name(), &args);
     let tool_id = uuid::Uuid::new_v4().to_string();
     let ts_start = chrono::Utc::now().to_rfc3339();
-    let _ = store
+    if let Err(e) = store
         .append_step(
             thread_id,
             ThreadStep::ToolStart {
@@ -1241,7 +1274,10 @@ pub async fn call_and_record_tool(
                 agent: agent.clone(),
             },
         )
-        .await;
+        .await
+    {
+        warn!("failed to append tool start step: {}", e);
+    }
 
     let raw = match timeout(
         Duration::from_secs(timeout_secs.max(1)),
@@ -1263,7 +1299,7 @@ pub async fn call_and_record_tool(
         .get("payload")
         .cloned()
         .or_else(|| obs.extra.get("ui_payload").cloned());
-    let _ = store
+    if let Err(e) = store
         .append_step(
             thread_id,
             ThreadStep::ToolEnd {
@@ -1279,7 +1315,10 @@ pub async fn call_and_record_tool(
                 agent,
             },
         )
-        .await;
+        .await
+    {
+        warn!("failed to append tool end step: {}", e);
+    }
     raw
 }
 

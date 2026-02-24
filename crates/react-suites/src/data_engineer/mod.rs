@@ -364,6 +364,7 @@ impl DataEngineerSuite {
         phase: control_flow::Phase,
         kind: &str,
     ) -> usize {
+        let cap = Self::subjective_retry_limit().saturating_add(1);
         let mut st = thread_store
             .get_thread_artifact_json(thread_id, "subjective_retry_state")
             .await
@@ -371,25 +372,28 @@ impl DataEngineerSuite {
             .and_then(|v| serde_json::from_value::<SubjectiveRetryState>(v).ok())
             .unwrap_or_default();
         if st.phase == phase.as_str() && st.kind == kind {
-            st.retries = st.retries.saturating_add(1);
+            st.retries = st.retries.saturating_add(1).min(cap);
         } else {
             st.phase = phase.as_str().to_string();
             st.kind = kind.to_string();
-            st.retries = 1;
+            st.retries = 1.min(cap);
         }
         st.last_ts = chrono::Utc::now().to_rfc3339();
-        let _ = thread_store
+        if let Err(e) = thread_store
             .put_thread_artifact_json(
                 thread_id,
                 "subjective_retry_state",
                 &serde_json::to_value(&st).unwrap_or(serde_json::json!({})),
             )
-            .await;
+            .await
+        {
+            tracing::warn!("failed to persist subjective_retry_state: {}", e);
+        }
         st.retries
     }
 
     async fn reset_subjective_retry(thread_store: &ThreadStore, thread_id: &str) {
-        let _ = thread_store
+        if let Err(e) = thread_store
             .put_thread_artifact_json(
                 thread_id,
                 "subjective_retry_state",
@@ -400,7 +404,10 @@ impl DataEngineerSuite {
                     "last_ts": chrono::Utc::now().to_rfc3339()
                 }),
             )
-            .await;
+            .await
+        {
+            tracing::warn!("failed to reset subjective_retry_state: {}", e);
+        }
     }
 
     fn should_reset_subjective_retry_after_plan_save(entered_from_actionable_review: bool) -> bool {
@@ -2305,7 +2312,9 @@ Apply these fixes in the output.",
         );
         if p.tasks.is_empty() || p.batches.is_empty() {
             p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-            let _ = crate::data_engineer::plan::save_cleanse_plan(actx, &p).await;
+            crate::data_engineer::plan::save_cleanse_plan(actx, &p)
+                .await
+                .map_err(|e| format!("failed to persist pruned-empty cleanse plan: {e}"))?;
             // Stay in plan phase; the next iteration will generate a new plan.
             control_flow::append_phase_with_reason(
                 thread_store,
@@ -2327,7 +2336,9 @@ Apply these fixes in the output.",
         .await?;
         if !v.ok {
             p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-            let _ = crate::data_engineer::plan::save_cleanse_plan(actx, &p).await;
+            crate::data_engineer::plan::save_cleanse_plan(actx, &p)
+                .await
+                .map_err(|e| format!("failed to persist semantically-invalid cleanse plan: {e}"))?;
             control_flow::append_phase_with_reason(
                 thread_store,
                 thread_id,
@@ -2344,7 +2355,9 @@ Apply these fixes in the output.",
         p.status = crate::data_engineer::plan::PlanStatus::Approved;
         // Scope progress to *this* plan instance so old tool calls can't auto-complete a newly approved plan.
         p.progress.last_applied_step_idx = log_len;
-        let _ = crate::data_engineer::plan::save_cleanse_plan(actx, &p).await;
+        crate::data_engineer::plan::save_cleanse_plan(actx, &p)
+            .await
+            .map_err(|e| format!("failed to persist approved cleanse plan: {e}"))?;
 
         control_flow::append_phase_with_reason(
             thread_store,
@@ -2384,7 +2397,9 @@ Apply these fixes in the output.",
         );
         if p.tasks.is_empty() || p.batches.is_empty() {
             p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-            let _ = crate::data_engineer::plan::save_model_plan(actx, &p).await;
+            crate::data_engineer::plan::save_model_plan(actx, &p)
+                .await
+                .map_err(|e| format!("failed to persist pruned-empty model plan: {e}"))?;
             // Stay in plan phase; the next iteration will generate a new plan.
             control_flow::append_phase_with_reason(
                 thread_store,
@@ -2408,7 +2423,9 @@ Apply these fixes in the output.",
         .await?;
         if !v.ok {
             p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-            let _ = crate::data_engineer::plan::save_model_plan(actx, &p).await;
+            crate::data_engineer::plan::save_model_plan(actx, &p)
+                .await
+                .map_err(|e| format!("failed to persist semantically-invalid model plan: {e}"))?;
             control_flow::append_phase_with_reason(
                 thread_store,
                 thread_id,
@@ -2424,7 +2441,9 @@ Apply these fixes in the output.",
 
         p.status = crate::data_engineer::plan::PlanStatus::Approved;
         p.progress.last_applied_step_idx = log_len;
-        let _ = crate::data_engineer::plan::save_model_plan(actx, &p).await;
+        crate::data_engineer::plan::save_model_plan(actx, &p)
+            .await
+            .map_err(|e| format!("failed to persist approved model plan: {e}"))?;
 
         control_flow::append_phase_with_reason(
             thread_store,
@@ -4774,10 +4793,15 @@ Apply these fixes in the output.",
                                         {
                                             p.status =
                                                 crate::data_engineer::plan::PlanStatus::Cancelled;
-                                            let _ = crate::data_engineer::plan::save_cleanse_plan(
+                                            crate::data_engineer::plan::save_cleanse_plan(
                                                 &actx, &p,
                                             )
-                                            .await;
+                                            .await
+                                            .map_err(|e| {
+                                                format!(
+                                                    "failed to persist cancelled cleanse plan after rejection: {e}"
+                                                )
+                                            })?;
                                         }
                                     } else {
                                         if let Some(mut p) =
@@ -4785,10 +4809,15 @@ Apply these fixes in the output.",
                                         {
                                             p.status =
                                                 crate::data_engineer::plan::PlanStatus::Cancelled;
-                                            let _ = crate::data_engineer::plan::save_model_plan(
+                                            crate::data_engineer::plan::save_model_plan(
                                                 &actx, &p,
                                             )
-                                            .await;
+                                            .await
+                                            .map_err(|e| {
+                                                format!(
+                                                    "failed to persist cancelled model plan after rejection: {e}"
+                                                )
+                                            })?;
                                         }
                                     }
                                 }
@@ -4858,8 +4887,13 @@ Apply these fixes in the output.",
                                 if p.tasks.is_empty() || p.batches.is_empty() {
                                     let plan_key = p.plan_key.clone();
                                     p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-                                    let _ = crate::data_engineer::plan::save_model_plan(&actx, &p)
-                                        .await;
+                                    crate::data_engineer::plan::save_model_plan(&actx, &p)
+                                        .await
+                                        .map_err(|e| {
+                                            format!(
+                                                "failed to persist cancelled invalid-empty model plan: {e}"
+                                            )
+                                        })?;
                                     let _ = control_flow::append_phase_with_reason(
                                         &thread_store,
                                         thread_id,
@@ -5622,8 +5656,13 @@ Apply these fixes in the output.",
                                     crate::data_engineer::plan::new_cleanse_plan_key(&actx);
                                 // Crash-safety: checkpoint the draft plan immediately so the thread
                                 // can be resumed even if we crash during grounding/critique.
-                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
-                                    .await;
+                                crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
+                                    .await
+                                    .map_err(|e| {
+                                        format!(
+                                            "failed to checkpoint parsed cleanse draft plan before grounding: {e}"
+                                        )
+                                    })?;
                                 // Scope progress to the current plan instance so we don't replay the full
                                 // historical log and accidentally mark tasks done from prior cycles.
                                 plan.progress.last_applied_step_idx =
@@ -5769,8 +5808,13 @@ Apply these fixes in the output.",
                                 .await?;
                                 // Crash-safety: persist the grounded/pruned draft so resume/inspection reflects
                                 // what we actually validated/critiqued (not just the initial parsed JSON).
-                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
-                                    .await;
+                                crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
+                                    .await
+                                    .map_err(|e| {
+                                        format!(
+                                            "failed to checkpoint grounded/pruned cleanse draft plan: {e}"
+                                        )
+                                    })?;
 
                                 // Quality gate 1: semantic validity (includes implementation_spec requirements).
                                 // Hard cutover: normalize conservative defaults before validating (no LLM repair).
@@ -5809,8 +5853,13 @@ Apply these fixes in the output.",
                                 };
                                 // Crash-safety: persist the normalized draft so resume/inspection reflects
                                 // what we actually validated (not just the initial parsed JSON).
-                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
-                                    .await;
+                                crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
+                                    .await
+                                    .map_err(|e| {
+                                        format!(
+                                            "failed to checkpoint normalized cleanse draft plan: {e}"
+                                        )
+                                    })?;
                                 if !sem.ok {
                                     let reason = format!(
                                         "Plan failed semantic validation (design-first). Errors:\n- {}",
@@ -6394,8 +6443,13 @@ Apply these fixes in the output.",
                             {
                                 let plan_key = plan.plan_key.clone();
                                 plan.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
-                                    .await;
+                                crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
+                                    .await
+                                    .map_err(|e| {
+                                        format!(
+                                            "failed to persist cancelled non-executable cleanse plan: {e}"
+                                        )
+                                    })?;
                                 let step = react_core::session::ThreadStep::GuardBlock {
                                     phase: phase.as_str().to_string(),
                                     kind: GuardBlockKind::PlanSemanticInvalid,
@@ -7537,7 +7591,11 @@ Apply these fixes in the output.",
                             && !target.is_empty()
                         {
                             rs.target_path = Some(target.clone());
-                            let _ = rs.save(&thread_store, thread_id).await;
+                            rs.save(&thread_store, thread_id).await.map_err(|e| {
+                                format!(
+                                    "failed to persist repair-state target path in deterministic repair mode: {e}"
+                                )
+                            })?;
                         }
                         let ladder = rs.ladder_step.clone();
 
@@ -7646,10 +7704,13 @@ Apply these fixes in the output.",
                                         crate::data_engineer::plan::load_cleanse_plan(&actx).await
                                     {
                                         crate::data_engineer::plan::update_cleanse_progress_from_log(&mut p, &latest);
-                                        let _ = crate::data_engineer::plan::save_cleanse_plan(
-                                            &actx, &p,
-                                        )
-                                        .await;
+                                        crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
+                                            .await
+                                            .map_err(|e| {
+                                                format!(
+                                                    "failed to persist cleanse progress after authoring final: {e}"
+                                                )
+                                            })?;
                                     }
                                 } else {
                                     if let Some(mut p) =
@@ -8168,7 +8229,9 @@ Apply these fixes in the output.",
                                 });
                             cs.hard_mutation_repair_mode = false;
                             cs.single_target_repair_path = None;
-                            let _ = cs.save(&thread_store, thread_id).await;
+                            cs.save(&thread_store, thread_id).await.map_err(|e| {
+                                format!("failed to persist control state after validate pass: {e}")
+                            })?;
 
                             // Clear repair state on success (best-effort).
                             let _ = crate::data_engineer::repair_state::RepairState::new()
@@ -8251,11 +8314,12 @@ Apply these fixes in the output.",
                                 Some("agent".to_string()),
                                 Some(phase),
                                 to_phase,
-                                Some(PhaseReasonCode::PhaseBlocked),
+                                Some(PhaseReasonCode::ValidatePass),
                                 Some(serde_json::json!({
                                     "signal": signal,
                                     "plan_key": active_plan_key,
                                     "dbt_validate_observation": obs,
+                                    "next_action": "resume_authoring_for_remaining_plan_work",
                                     "audit_acceptance": Self::churn_audit_acceptance_criteria(),
                                 })),
                             )
@@ -8356,7 +8420,9 @@ Apply these fixes in the output.",
                         } else {
                             Some(primary_file.trim().to_string())
                         };
-                        let _ = cs.save(&thread_store, thread_id).await;
+                        cs.save(&thread_store, thread_id).await.map_err(|e| {
+                            format!("failed to persist control state after validate failure: {e}")
+                        })?;
 
                         let mut rs = crate::data_engineer::repair_state::RepairState::load(
                             &thread_store,
@@ -8372,7 +8438,9 @@ Apply these fixes in the output.",
                             crate::data_engineer::repair_state::RepairLadderStep::PatchTarget;
                         rs.attempt_count = 0;
                         rs.consecutive_noop_patches = 0;
-                        let _ = rs.save(&thread_store, thread_id).await;
+                        rs.save(&thread_store, thread_id).await.map_err(|e| {
+                            format!("failed to persist repair state after validate failure: {e}")
+                        })?;
                     }
 
                     // Hard cutover: during deterministic repair, the plan is treated as a frozen reference.
@@ -8514,8 +8582,13 @@ Apply these fixes in the output.",
                                 reopened.sort();
                                 reopened.dedup();
                                 if !reopened.is_empty() {
-                                    let _ = crate::data_engineer::plan::save_model_plan(&actx, &p)
-                                        .await;
+                                    crate::data_engineer::plan::save_model_plan(&actx, &p)
+                                        .await
+                                        .map_err(|e| {
+                                            format!(
+                                                "failed to persist reopened model tasks after validate failure: {e}"
+                                            )
+                                        })?;
                                 }
                             }
                         }
@@ -8572,7 +8645,13 @@ Apply these fixes in the output.",
                                     }
                                 }
                             }
-                            let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
+                            crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
+                                .await
+                                .map_err(|e| {
+                                    format!(
+                                        "failed to persist cleanse validate-failure facts bundle: {e}"
+                                    )
+                                })?;
                         }
                     } else {
                         if let Some(mut p) =
@@ -8595,7 +8674,13 @@ Apply these fixes in the output.",
                                     }
                                 }
                             }
-                            let _ = crate::data_engineer::plan::save_model_plan(&actx, &p).await;
+                            crate::data_engineer::plan::save_model_plan(&actx, &p)
+                                .await
+                                .map_err(|e| {
+                                    format!(
+                                        "failed to persist model validate-failure facts bundle: {e}"
+                                    )
+                                })?;
                         }
                     }
                     control_flow::append_phase_with_reason(

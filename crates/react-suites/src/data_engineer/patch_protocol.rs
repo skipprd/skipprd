@@ -693,7 +693,7 @@ pub async fn llm_patch_loop_single_file(
     Err(format!(
         "LLM patch repair failed after {} attempt(s): {}",
         max_iters,
-        last_err.unwrap_or_else(|| "unknown error".to_string())
+        last_err.unwrap_or_else(|| "no patch error details were captured".to_string())
     ))
 }
 

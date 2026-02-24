@@ -252,7 +252,9 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                 plan::ChecklistItemStatus::InProgress,
             );
         }
-        let _ = plan::save_cleanse_plan(ctx, &plan).await;
+        plan::save_cleanse_plan(ctx, &plan)
+            .await
+            .map_err(|e| format!("failed to persist cleanse schema batch start state: {e}"))?;
 
         let mut succeeded: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
@@ -409,7 +411,9 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             );
         }
         update_failure_counters(&mut plan.progress, failed.is_empty());
-        let _ = plan::save_cleanse_plan(ctx, &plan).await;
+        plan::save_cleanse_plan(ctx, &plan)
+            .await
+            .map_err(|e| format!("failed to persist cleanse schema batch result state: {e}"))?;
 
         Ok(serde_json::json!({
             "ok": failed.is_empty(),
@@ -498,7 +502,9 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 plan::ChecklistItemStatus::InProgress,
             );
         }
-        let _ = plan::save_model_plan(ctx, &plan).await;
+        plan::save_model_plan(ctx, &plan)
+            .await
+            .map_err(|e| format!("failed to persist model schema batch start state: {e}"))?;
 
         let attempted_names = names.clone();
         let expected_rel = project_files::MODELS_SCHEMA_YML;
@@ -588,7 +594,11 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                         plan::model_schema_contract_mark_needs_update(&mut plan, n);
                     }
                     update_failure_counters(&mut plan.progress, false);
-                    let _ = plan::save_model_plan(ctx, &plan).await;
+                    plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
+                        format!(
+                            "failed to persist model schema batch failure state after patch error: {save_err}"
+                        )
+                    })?;
                     return Ok(serde_json::json!({
                         "ok": false,
                         "attempted_item_names": attempted_names.clone(),
@@ -611,7 +621,11 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                     plan::model_schema_contract_mark_needs_update(&mut plan, n);
                 }
                 update_failure_counters(&mut plan.progress, false);
-                let _ = plan::save_model_plan(ctx, &plan).await;
+                plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
+                    format!(
+                        "failed to persist model schema batch failure state after post-check error: {save_err}"
+                    )
+                })?;
                 return Ok(serde_json::json!({
                     "ok": false,
                     "attempted_item_names": attempted_names.clone(),
@@ -632,7 +646,11 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 plan::model_schema_contract_mark_needs_update(&mut plan, n);
             }
             update_failure_counters(&mut plan.progress, false);
-            let _ = plan::save_model_plan(ctx, &plan).await;
+            plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
+                format!(
+                    "failed to persist model schema batch failure state after write error: {save_err}"
+                )
+            })?;
             return Ok(serde_json::json!({
                 "ok": false,
                 "attempted_item_names": attempted_names.clone(),
@@ -651,7 +669,9 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             );
         }
         update_failure_counters(&mut plan.progress, true);
-        let _ = plan::save_model_plan(ctx, &plan).await;
+        plan::save_model_plan(ctx, &plan)
+            .await
+            .map_err(|e| format!("failed to persist model schema batch result state: {e}"))?;
 
         Ok(serde_json::json!({
             "ok": true,

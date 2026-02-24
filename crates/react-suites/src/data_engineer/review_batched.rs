@@ -216,8 +216,8 @@ async fn append_review_step(
     agent: &str,
     code: PhaseReasonCode,
     detail: Value,
-) {
-    let _ = store
+) -> Result<(), String> {
+    store
         .append_step(
             thread_id,
             ThreadStep::Phase {
@@ -230,7 +230,9 @@ async fn append_review_step(
                 agent: agent.to_string(),
             },
         )
-        .await;
+        .await
+        .map_err(|e| format!("failed to append review step: {e}"))?;
+    Ok(())
 }
 
 fn system_prompt_for_summary(plan_kind: &str) -> String {
@@ -816,7 +818,7 @@ async fn persist_review_summary_to_plan(
     plan_key: &str,
     project_notes: Vec<String>,
     project_risks: Vec<String>,
-) {
+) -> Result<(), String> {
     let ts = utc_ts();
     if plan_kind == "cleanse" {
         if let Some(mut p) = de_plan::load_cleanse_plan_by_key(actx, plan_key).await {
@@ -834,7 +836,9 @@ async fn persist_review_summary_to_plan(
                     }),
                 );
             }
-            let _ = de_plan::save_cleanse_plan(actx, &p).await;
+            de_plan::save_cleanse_plan(actx, &p)
+                .await
+                .map_err(|e| format!("failed to persist cleanse review summary: {e}"))?;
         }
     } else if plan_kind == "model" {
         if let Some(mut p) = de_plan::load_model_plan_by_key(actx, plan_key).await {
@@ -852,9 +856,12 @@ async fn persist_review_summary_to_plan(
                     }),
                 );
             }
-            let _ = de_plan::save_model_plan(actx, &p).await;
+            de_plan::save_model_plan(actx, &p)
+                .await
+                .map_err(|e| format!("failed to persist model review summary: {e}"))?;
         }
     }
+    Ok(())
 }
 
 async fn persist_review_batch_to_plan(
@@ -864,7 +871,7 @@ async fn persist_review_batch_to_plan(
     batch_idx: usize,
     batch_items: Vec<String>,
     notes: Vec<String>,
-) {
+) -> Result<(), String> {
     let ts = utc_ts();
     let entry = serde_json::json!({
         "batch_idx": batch_idx,
@@ -889,7 +896,9 @@ async fn persist_review_batch_to_plan(
                 );
                 push_batch_entry(review_obj, entry);
             }
-            let _ = de_plan::save_cleanse_plan(actx, &p).await;
+            de_plan::save_cleanse_plan(actx, &p)
+                .await
+                .map_err(|e| format!("failed to persist cleanse review batch: {e}"))?;
         }
     } else if plan_kind == "model" {
         if let Some(mut p) = de_plan::load_model_plan_by_key(actx, plan_key).await {
@@ -908,9 +917,12 @@ async fn persist_review_batch_to_plan(
                 );
                 push_batch_entry(review_obj, entry);
             }
-            let _ = de_plan::save_model_plan(actx, &p).await;
+            de_plan::save_model_plan(actx, &p)
+                .await
+                .map_err(|e| format!("failed to persist model review batch: {e}"))?;
         }
     }
+    Ok(())
 }
 
 async fn persist_review_final_to_plan(
@@ -921,7 +933,7 @@ async fn persist_review_final_to_plan(
     tier: ReviewTier,
     dataset_ids: Vec<String>,
     text: String,
-) {
+) -> Result<(), String> {
     let ts = utc_ts();
     if plan_kind == "cleanse" {
         if let Some(mut p) = de_plan::load_cleanse_plan_by_key(actx, plan_key).await {
@@ -949,7 +961,9 @@ async fn persist_review_final_to_plan(
                     }),
                 );
             }
-            let _ = de_plan::save_cleanse_plan(actx, &p).await;
+            de_plan::save_cleanse_plan(actx, &p)
+                .await
+                .map_err(|e| format!("failed to persist cleanse review final: {e}"))?;
         }
     } else if plan_kind == "model" {
         if let Some(mut p) = de_plan::load_model_plan_by_key(actx, plan_key).await {
@@ -977,9 +991,12 @@ async fn persist_review_final_to_plan(
                     }),
                 );
             }
-            let _ = de_plan::save_model_plan(actx, &p).await;
+            de_plan::save_model_plan(actx, &p)
+                .await
+                .map_err(|e| format!("failed to persist model review final: {e}"))?;
         }
     }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1583,7 +1600,7 @@ pub async fn run_batched_review(
             "project_risks": project_risks
         }),
     )
-    .await;
+    .await?;
     if let (Some(pk), Some(plan_key)) = (plan_kind.as_deref(), plan_key.as_deref()) {
         persist_review_summary_to_plan(
             &actx,
@@ -1593,7 +1610,7 @@ pub async fn run_batched_review(
             project_notes.clone(),
             project_risks.clone(),
         )
-        .await;
+        .await?;
     }
 
     // 2) Per-batch pass (bounded, complete coverage).
@@ -1705,12 +1722,19 @@ pub async fn run_batched_review(
             PhaseReasonCode::ReviewBatch,
             detail.clone(),
         )
-        .await;
+        .await?;
 
         all_batch_notes.push(detail.clone());
         if let (Some(pk), Some(plan_key)) = (plan_kind.as_deref(), plan_key.as_deref()) {
-            persist_review_batch_to_plan(&actx, pk, plan_key, bidx, batch.clone(), notes.clone())
-                .await;
+            persist_review_batch_to_plan(
+                &actx,
+                pk,
+                plan_key,
+                bidx,
+                batch.clone(),
+                notes.clone(),
+            )
+            .await?;
         }
     }
 
@@ -1769,10 +1793,10 @@ pub async fn run_batched_review(
         let sha8 = review_sha256.chars().take(8).collect::<String>();
         format!("{}/reviews/{}/{}_{}.txt", root, thread_id, ts, sha8)
     };
-    let _ = sctx
-        .storage
+    sctx.storage
         .put_bytes(&review_key, final_review_text.as_bytes(), "text/plain")
-        .await;
+        .await
+        .map_err(|e| format!("failed to persist final review artifact: {e}"))?;
 
     let review_ref = serde_json::json!({
         "key": review_key,
@@ -1796,7 +1820,7 @@ pub async fn run_batched_review(
             "review_phase": phase.as_str()
         }),
     )
-    .await;
+    .await?;
     if let (Some(pk), Some(plan_key)) = (plan_kind.as_deref(), plan_key.as_deref()) {
         persist_review_final_to_plan(
             &actx,
@@ -1807,7 +1831,7 @@ pub async fn run_batched_review(
             dataset_ids.clone(),
             final_review_text.clone(),
         )
-        .await;
+        .await?;
     }
 
     Ok(vec![FlowFrame::Final {

@@ -696,7 +696,9 @@ pub async fn load_cleanse_plan_by_key(ctx: &AgentCtx, key: &str) -> Option<Clean
     let changed = ensure_expected_model_paths_cleanse(Some(ctx), &mut p);
     if changed {
         // Best-effort persist so subsequent loads (and humans) see the canonical path.
-        let _ = save_cleanse_plan(ctx, &p).await;
+        if let Err(e) = save_cleanse_plan(ctx, &p).await {
+            tracing::warn!("failed to persist canonicalized cleanse plan paths: {}", e);
+        }
     }
     Some(p)
 }
