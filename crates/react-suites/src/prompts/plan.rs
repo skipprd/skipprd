@@ -82,6 +82,10 @@ Rules:\n\
 pub fn cleanse_plan_skeleton_system_prompt() -> String {
     "Return CLEANSE plan skeleton JSON only.\n\
 Use strict schema fields only: tasks[].dataset_id and batches.\n\
+Rules:\n\
+- tasks[].dataset_id MUST reference discovered RAW source tables only (catalog/database/table form).\n\
+- Do NOT emit silver/gold dataset identifiers in CLEANSE skeleton tasks.\n\
+- batches entries must be subset of tasks[].dataset_id values.\n\
 No implementation_spec, no checklist, no work_groups, no prose."
         .to_string()
 }
@@ -107,28 +111,30 @@ Do not output JSON."
 
 pub fn cleanse_plan_enrichment_system_prompt() -> String {
     "Return CLEANSE enrichment JSON only for requested task_ids.\n\
-Each item MUST include {task_id, implementation_spec_json}.\n\
+Each item MUST include {task_id, implementation_spec}.\n\
 Do not re-design the plan; this pass only compiles requested specs from provided context.\n\
-implementation_spec_json must decode to a valid CleanseImplementationSpec object.\n\
+implementation_spec must be a valid CleanseImplementationSpec object (JSON object, not a JSON string).\n\
 For every output_fields item, kind MUST be exactly one of: raw, clean, derived, quality_flag.\n\
 Do not use synonyms (e.g. passthrough/source/base/quality).\n\
-The JSON string MUST contain only these top-level keys:\n\
+implementation_spec MUST contain only these top-level keys:\n\
 - spec_version\n\
 - row_preserving\n\
 - output_fields\n\
 - prohibited_ops\n\
-Do not emit batch_id, dependencies, data_quality, wrappers, commentary, or any non-schema keys."
+Do not emit batch_id, dependencies, data_quality, wrappers, commentary, or any non-schema keys.\n\
+Each output_fields item MUST include: name, kind, expression.\n\
+spec_version MUST be an integer number (not a string)."
         .to_string()
 }
 
 pub fn model_plan_enrichment_system_prompt() -> String {
     "Return MODEL enrichment JSON only for requested task_ids.\n\
-Each item MUST include {task_id, implementation_spec_json}.\n\
+Each item MUST include {task_id, implementation_spec}.\n\
 Do not re-design the plan; this pass only compiles requested specs from provided context.\n\
-implementation_spec_json must decode to a valid ModelImplementationSpec object.\n\
+implementation_spec must be a valid ModelImplementationSpec object (JSON object, not a JSON string).\n\
 For every output_fields item, kind MUST be exactly one of: raw, clean, derived, quality_flag.\n\
 Do not use synonyms (e.g. passthrough/source/base/quality).\n\
-The JSON string MUST contain only these top-level keys:\n\
+implementation_spec MUST contain only these top-level keys:\n\
 - spec_version\n\
 - grain\n\
 - inputs\n\
@@ -136,6 +142,8 @@ The JSON string MUST contain only these top-level keys:\n\
 - metrics\n\
 - output_fields\n\
 - assumptions\n\
-Do not emit batch_id, dependencies, data_quality, wrappers, commentary, or any non-schema keys."
+Do not emit batch_id, dependencies, data_quality, wrappers, commentary, or any non-schema keys.\n\
+Each output_fields item MUST include: name, kind, expression.\n\
+spec_version MUST be an integer number (not a string)."
         .to_string()
 }

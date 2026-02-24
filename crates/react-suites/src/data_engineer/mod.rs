@@ -11,7 +11,7 @@ use react_core::control_flow::{GuardBlockKind, PhaseReasonCode, ReviewDecision, 
 use react_core::llm::LlmCallOptions;
 use react_core::session::ThreadStore;
 use react_core::tools::{Tool, ToolRegistry};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 pub struct DataEngineerSuite;
@@ -525,6 +525,149 @@ impl DataEngineerSuite {
                 .unwrap_or(false),
             _ => false,
         }
+    }
+
+    fn enforce_cleanse_plan_raw_only(plan: &mut crate::data_engineer::plan::CleansePlan) -> usize {
+        let before = plan.tasks.len();
+        plan.tasks
+            .retain(|t| Self::is_raw_dataset_id(t.dataset_id.trim()));
+        let keep: HashSet<String> = plan
+            .tasks
+            .iter()
+            .map(|t| t.dataset_id.trim().to_string())
+            .collect();
+        for b in plan.batches.iter_mut() {
+            b.retain(|ds| keep.contains(ds.trim()));
+        }
+        plan.batches.retain(|b| !b.is_empty());
+        before.saturating_sub(plan.tasks.len())
+    }
+
+    fn synthesize_cleanse_plan_from_grounded_raw(
+        plan: &mut crate::data_engineer::plan::CleansePlan,
+        allowed_raw: &BTreeSet<String>,
+    ) -> bool {
+        if allowed_raw.is_empty() {
+            return false;
+        }
+        let ids: Vec<String> = allowed_raw.iter().cloned().collect();
+        let tasks = ids
+            .iter()
+            .map(|dataset_id| crate::data_engineer::plan::CleanseTask {
+                dataset_id: dataset_id.clone(),
+                expected_model_path: None,
+                invariants: vec![],
+                implementation_spec: crate::data_engineer::plan::CleanseImplementationSpec {
+                    spec_version: 1,
+                    row_preserving: true,
+                    output_fields: vec![],
+                    prohibited_ops: vec![],
+                },
+                status: crate::data_engineer::plan::TaskStatus::Pending,
+                checklist: vec![],
+            })
+            .collect::<Vec<_>>();
+        let batches = ids.chunks(5).map(|c| c.to_vec()).collect::<Vec<_>>();
+        plan.tasks = tasks;
+        plan.batches = batches;
+        true
+    }
+
+    fn is_raw_dataset_id(dataset_id: &str) -> bool {
+        let parts: Vec<&str> = dataset_id.trim().split('.').collect();
+        if parts.len() != 3 {
+            return false;
+        }
+        let schema = parts[1].trim().to_ascii_lowercase();
+        let table = parts[2].trim().to_ascii_lowercase();
+        schema.contains("raw") || table.starts_with("raw_")
+    }
+
+    fn discovered_raw_relations_from_phase_log(
+        log: Option<&react_core::session::ThreadLog>,
+        phase: control_flow::Phase,
+    ) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        let Some(l) = log else {
+            return out;
+        };
+        let start = Self::phase_start_idx(l, phase).unwrap_or(0);
+        for s in l.steps.iter().skip(start + 1) {
+            let react_core::session::ThreadStep::ToolEnd {
+                name,
+                args,
+                observation,
+                ..
+            } = s
+            else {
+                continue;
+            };
+            if name != "sql_schema" || !observation.ok {
+                continue;
+            }
+            if args
+                .as_object()
+                .map(|o| !o.is_empty() && o.get("table").is_none())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if let Some(arr) = observation.extra.get("tables").and_then(|v| v.as_array()) {
+                for t in arr.iter().filter_map(|v| v.as_str()) {
+                    let t = t.trim();
+                    if !t.is_empty() && Self::is_raw_dataset_id(t) {
+                        out.insert(t.to_string());
+                    }
+                }
+            }
+            if let Some(t) = args.get("table").and_then(|v| v.as_str()) {
+                let t = t.trim();
+                if !t.is_empty() && Self::is_raw_dataset_id(t) {
+                    out.insert(t.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    fn harden_cleanse_payload_to_raw(
+        payload: &mut serde_json::Value,
+        discovered_raw: &BTreeSet<String>,
+    ) {
+        if discovered_raw.is_empty() {
+            return;
+        }
+        let Some(obj) = payload.as_object_mut() else {
+            return;
+        };
+        let Some(tasks) = obj.get_mut("tasks").and_then(|v| v.as_array_mut()) else {
+            return;
+        };
+
+        tasks.retain(|t| {
+            t.get("dataset_id")
+                .and_then(|v| v.as_str())
+                .map(|ds| discovered_raw.contains(ds.trim()))
+                .unwrap_or(false)
+        });
+
+        if tasks.is_empty() {
+            tasks.extend(
+                discovered_raw
+                    .iter()
+                    .take(5)
+                    .map(|ds| serde_json::json!({ "dataset_id": ds })),
+            );
+        }
+
+        let ids: Vec<String> = tasks
+            .iter()
+            .filter_map(|t| t.get("dataset_id").and_then(|v| v.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let batches: Vec<Vec<String>> = ids.chunks(5).map(|c| c.to_vec()).collect();
+        obj.insert("batches".to_string(), serde_json::json!(batches));
     }
 
     async fn run_deterministic_probe_for_table(
@@ -1108,11 +1251,10 @@ impl DataEngineerSuite {
         (v, stripped)
     }
 
-    fn parse_impl_spec_with_sanitize<T: serde::de::DeserializeOwned>(
-        raw: &str,
+    fn parse_impl_spec_value_with_sanitize<T: serde::de::DeserializeOwned>(
+        v: serde_json::Value,
         is_cleanse: bool,
     ) -> Result<(T, Vec<String>), String> {
-        let v = Self::parse_json_object_lenient(raw)?;
         let (sv, stripped) = Self::sanitize_impl_spec_value(v, is_cleanse);
         Self::validate_output_field_kind_contract(&sv)?;
         let spec = serde_json::from_value::<T>(sv).map_err(|e| e.to_string())?;
@@ -1441,10 +1583,17 @@ Apply these fixes in the output.",
             if !allowed_task_ids.iter().any(|t| t == &it.task_id) {
                 continue;
             }
-            match Self::parse_impl_spec_with_sanitize::<
+            let spec_value = match serde_json::to_value(&it.implementation_spec) {
+                Ok(v) => v,
+                Err(e) => {
+                    failed.push(it.task_id);
+                    failure_errors.push(e.to_string());
+                    continue;
+                }
+            };
+            match Self::parse_impl_spec_value_with_sanitize::<
                 crate::data_engineer::plan::CleanseImplementationSpec,
-            >(&it.implementation_spec_json, true)
-            {
+            >(spec_value, true) {
                 Ok((spec, stripped)) => {
                     if !stripped.is_empty() {
                         Self::push_snapshot_array_event(
@@ -1482,10 +1631,17 @@ Apply these fixes in the output.",
             if !allowed_task_ids.iter().any(|t| t == &it.task_id) {
                 continue;
             }
-            match Self::parse_impl_spec_with_sanitize::<
+            let spec_value = match serde_json::to_value(&it.implementation_spec) {
+                Ok(v) => v,
+                Err(e) => {
+                    failed.push(it.task_id);
+                    failure_errors.push(e.to_string());
+                    continue;
+                }
+            };
+            match Self::parse_impl_spec_value_with_sanitize::<
                 crate::data_engineer::plan::ModelImplementationSpec,
-            >(&it.implementation_spec_json, false)
-            {
+            >(spec_value, false) {
                 Ok((spec, stripped)) => {
                     if !stripped.is_empty() {
                         Self::push_snapshot_array_event(
@@ -1586,7 +1742,7 @@ Apply these fixes in the output.",
                 Self::apply_cleanse_enrichment_items(plan, &chunk_vec, enrich.items);
             if !failed.is_empty() {
                 let retry_hint = format!(
-                    "You previously returned invalid implementation_spec_json.\nErrors:\n{}\nOnly emit keys: spec_version,row_preserving,output_fields,prohibited_ops.\noutput_fields[].kind MUST be exactly one of: raw, clean, derived, quality_flag.\nDo not use synonyms like passthrough/source/base/quality.\nNo wrappers, no extra fields.",
+                    "You previously returned invalid implementation_spec.\nErrors:\n{}\nOnly emit implementation_spec object with keys: spec_version,row_preserving,output_fields,prohibited_ops.\noutput_fields[].kind MUST be exactly one of: raw, clean, derived, quality_flag.\nEach output_fields item MUST include name, kind, expression.\nDo not use synonyms like passthrough/source/base/quality.\nNo wrappers, no extra fields.",
                     failure_errors.join("\n")
                 );
                 let retry_user = format!(
@@ -1707,7 +1863,7 @@ Apply these fixes in the output.",
                 Self::apply_model_enrichment_items(plan, &chunk_vec, enrich.items);
             if !failed.is_empty() {
                 let retry_hint = format!(
-                    "You previously returned invalid implementation_spec_json.\nErrors:\n{}\nOnly emit keys: spec_version,grain,inputs,joins,metrics,output_fields,assumptions.\noutput_fields[].kind MUST be exactly one of: raw, clean, derived, quality_flag.\nDo not use synonyms like passthrough/source/base/quality.\nNo wrappers, no extra fields.",
+                    "You previously returned invalid implementation_spec.\nErrors:\n{}\nOnly emit implementation_spec object with keys: spec_version,grain,inputs,joins,metrics,output_fields,assumptions.\noutput_fields[].kind MUST be exactly one of: raw, clean, derived, quality_flag.\nEach output_fields item MUST include name, kind, expression.\nDo not use synonyms like passthrough/source/base/quality.\nNo wrappers, no extra fields.",
                     failure_errors.join("\n")
                 );
                 let retry_user = format!(
@@ -4286,9 +4442,36 @@ Apply these fixes in the output.",
 
                     // If there is an existing draft plan (oldest active), re-ask approval rather than creating a new plan.
                     if is_cleanse {
-                        if let Some(p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await
+                        if let Some(mut p) =
+                            crate::data_engineer::plan::load_cleanse_plan(&actx).await
                         {
                             if p.status == crate::data_engineer::plan::PlanStatus::Draft {
+                                let removed_non_raw = Self::enforce_cleanse_plan_raw_only(&mut p);
+                                if removed_non_raw > 0 {
+                                    let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
+                                        .await;
+                                }
+                                if p.tasks.is_empty() || p.batches.is_empty() {
+                                    let plan_key = p.plan_key.clone();
+                                    p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+                                    let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
+                                        .await;
+                                    let _ = control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        phase,
+                                        Some(PhaseReasonCode::PlanInvalidEmpty),
+                                        Some(serde_json::json!({
+                                            "plan_key": plan_key,
+                                            "reason": "draft_cleanse_plan_not_raw_grounded",
+                                            "removed_non_raw": removed_non_raw,
+                                        })),
+                                    )
+                                    .await;
+                                    continue;
+                                }
                                 if entered_from_actionable_review {
                                     let mut detail = serde_json::json!({
                                         "plan_key": p.plan_key,
@@ -4863,6 +5046,9 @@ Apply these fixes in the output.",
                                     .await?;
                                 let mut payload = Self::compile_cleanse_skeleton_payload(&skeleton);
                                 Self::normalize_plan_json_payload("cleanse_plan", &mut payload);
+                                let discovered_raw =
+                                    Self::discovered_raw_relations_from_phase_log(log.as_ref(), phase);
+                                Self::harden_cleanse_payload_to_raw(&mut payload, &discovered_raw);
                                 let mut plan = match serde_json::from_value::<
                                     crate::data_engineer::plan::CleansePlan,
                                 >(payload.clone())
@@ -4919,6 +5105,19 @@ Apply these fixes in the output.",
                                     for it in t.checklist.iter_mut() {
                                         it.evidence.clear();
                                     }
+                                }
+                                let removed_non_raw_initial =
+                                    Self::enforce_cleanse_plan_raw_only(&mut plan);
+                                if removed_non_raw_initial > 0 {
+                                    Self::push_snapshot_array_event(
+                                        &mut plan.project_snapshot,
+                                        "deterministic_plan_repairs",
+                                        serde_json::json!({
+                                            "kind": "cleanse_plan_raw_only_enforcement",
+                                            "removed_task_count": removed_non_raw_initial,
+                                        }),
+                                        200,
+                                    );
                                 }
                                 plan.status = crate::data_engineer::plan::PlanStatus::Draft;
                                 plan.plan_key =
@@ -5033,34 +5232,26 @@ Apply these fixes in the output.",
                                     &grounded.allowed,
                                 );
                                 if plan.tasks.is_empty() || plan.batches.is_empty() {
-                                    let reason = "Cleanse plan contained no grounded raw datasets after applying schema() facts.".to_string();
-                                    let _ = control_flow::append_phase_with_reason(
-                                        &thread_store,
-                                        thread_id,
-                                        Some("agent".to_string()),
-                                        Some(phase),
-                                        phase,
-                                        Some(PhaseReasonCode::PhaseBlocked),
-                                        Some(serde_json::json!({
-                                            "kind": "plan_grounding_empty_after_prune",
-                                            "reason": reason,
-                                        })),
-                                    )
-                                    .await;
-                                    let tries = Self::bump_subjective_retry(
-                                        &thread_store,
-                                        thread_id,
-                                        phase,
-                                        "plan_grounding_empty_after_prune",
-                                    )
-                                    .await;
-                                    if tries > Self::subjective_retry_limit() {
+                                    if Self::synthesize_cleanse_plan_from_grounded_raw(
+                                        &mut plan,
+                                        &grounded.allowed,
+                                    ) {
+                                        Self::push_snapshot_array_event(
+                                            &mut plan.project_snapshot,
+                                            "deterministic_plan_repairs",
+                                            serde_json::json!({
+                                                "kind": "cleanse_plan_grounding_empty_after_prune",
+                                                "action": "synthesized_from_grounded_raw",
+                                                "dataset_count": plan.tasks.len(),
+                                            }),
+                                            200,
+                                        );
+                                    } else {
                                         return Ok(vec![FlowFrame::AwaitUser {
-                                            prompt: "Cleanse plan contained no grounded raw datasets after repeated retries. This indicates raw datasets are not queryable via the current warehouse connection or the plan keeps targeting non-raw tables. Fix data/catalog visibility and retry plan generation."
+                                            prompt: "Cleanse plan contained no grounded raw datasets and deterministic synthesis had no grounded raw inputs. Verify warehouse/catalog raw table visibility and retry."
                                                 .to_string(),
                                         }]);
                                     }
-                                    continue;
                                 }
                                 let enrich_ids: Vec<String> = plan
                                     .tasks
@@ -9092,11 +9283,10 @@ mod tests {
             "prohibited_ops": [],
             "batch_id": "x",
             "data_quality": {"checks":[]}
-        })
-        .to_string();
-        let (spec, stripped) = DataEngineerSuite::parse_impl_spec_with_sanitize::<
+        });
+        let (spec, stripped) = DataEngineerSuite::parse_impl_spec_value_with_sanitize::<
             crate::data_engineer::plan::CleanseImplementationSpec,
-        >(&raw, true)
+        >(raw, true)
         .expect("cleanse spec should parse after sanitize");
         assert_eq!(spec.spec_version, 1);
         assert!(stripped.iter().any(|k| k == "batch_id"));
@@ -9115,11 +9305,10 @@ mod tests {
             "assumptions": [],
             "dependencies": ["x"],
             "batch_id": "b1"
-        })
-        .to_string();
-        let (spec, stripped) = DataEngineerSuite::parse_impl_spec_with_sanitize::<
+        });
+        let (spec, stripped) = DataEngineerSuite::parse_impl_spec_value_with_sanitize::<
             crate::data_engineer::plan::ModelImplementationSpec,
-        >(&raw, false)
+        >(raw, false)
         .expect("model spec should parse after sanitize");
         assert_eq!(spec.spec_version, 1);
         assert!(stripped.iter().any(|k| k == "dependencies"));
