@@ -4668,7 +4668,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_run_exits_with_error_on_batch_locked_prompt() {
+    async fn headless_run_exits_with_error_on_ask_user_prompt() {
         let storage = Arc::new(InMemoryStorageAdapter::default());
         let scope = RequestScope {
             tenant: "t".to_string(),
@@ -4692,7 +4692,10 @@ mod tests {
         let msg = json!({"v":1,"type":"new","cid":"headless","suiteId":"data_engineer","agentType":"agent","question":"go"});
         let mut sink = CollectSink::default();
         let err = process_new(&msg, &mut state, &mut sink).await.unwrap_err();
-        assert!(err.to_ascii_lowercase().contains("batch_locked"));
+        assert!(
+            err.to_ascii_lowercase()
+                .contains("ask_user_not_supported_in_headless")
+        );
     }
 
     #[tokio::test]
