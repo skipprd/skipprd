@@ -32,17 +32,31 @@ pub struct LastValidateState {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionTier {
+    Unknown,
     Cleanse,
     Model,
+}
+
+impl Default for ExecutionTier {
+    fn default() -> Self {
+        Self::Unknown
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
+    Discover,
     Mutate,
     Validate,
     Done,
     Failed,
+}
+
+impl Default for ExecutionMode {
+    fn default() -> Self {
+        Self::Discover
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -98,9 +112,9 @@ pub struct ExecutionState {
     #[serde(default)]
     pub last_validate: Option<LastValidateState>,
     #[serde(default)]
-    pub current_tier: Option<ExecutionTier>,
+    pub current_tier: ExecutionTier,
     #[serde(default)]
-    pub mode: Option<ExecutionMode>,
+    pub mode: ExecutionMode,
     #[serde(default)]
     pub last_validate_ok: Option<bool>,
     #[serde(default)]
@@ -131,6 +145,12 @@ pub struct ExecutionState {
     pub last_error_class: Option<String>,
     #[serde(default)]
     pub last_failed_models: Vec<Value>,
+    #[serde(default)]
+    pub subjective_retry_phase: String,
+    #[serde(default)]
+    pub subjective_retry_kind: String,
+    #[serde(default)]
+    pub subjective_retry_count: usize,
 }
 
 impl ExecutionState {
@@ -168,8 +188,8 @@ impl ExecutionState {
     }
 
     pub fn apply_validate_success(&mut self, tier: ExecutionTier) {
-        self.current_tier = Some(tier);
-        self.mode = Some(ExecutionMode::Done);
+        self.current_tier = tier;
+        self.mode = ExecutionMode::Done;
         self.last_validate = Some(LastValidateState {
             ts: Some(chrono::Utc::now().to_rfc3339()),
             ok: Some(true),
@@ -194,6 +214,9 @@ impl ExecutionState {
         self.last_error_class = None;
         self.last_failed_models.clear();
         self.last_error_brief = None;
+        self.subjective_retry_count = 0;
+        self.subjective_retry_kind.clear();
+        self.subjective_retry_phase.clear();
     }
 
     pub fn apply_validate_failure(
@@ -205,8 +228,8 @@ impl ExecutionState {
     ) {
         let prev_count = self.repair_backlog.len() as i64;
         let prev_fp = self.last_validate_error_fingerprint.clone();
-        self.current_tier = Some(tier);
-        self.mode = Some(ExecutionMode::Mutate);
+        self.current_tier = tier;
+        self.mode = ExecutionMode::Mutate;
         self.last_validate = Some(LastValidateState {
             ts: Some(chrono::Utc::now().to_rfc3339()),
             ok: Some(false),
@@ -298,6 +321,26 @@ impl ExecutionState {
             ..ProgressDelta::default()
         });
     }
+
+    pub fn bump_subjective_retry(&mut self, phase: Phase, kind: &str, cap: usize) -> usize {
+        let capped = cap.max(1);
+        let phase_name = phase.as_str().to_string();
+        let kind_name = kind.to_string();
+        if self.subjective_retry_phase == phase_name && self.subjective_retry_kind == kind_name {
+            self.subjective_retry_count = self.subjective_retry_count.saturating_add(1).min(capped);
+        } else {
+            self.subjective_retry_phase = phase_name;
+            self.subjective_retry_kind = kind_name;
+            self.subjective_retry_count = 1.min(capped);
+        }
+        self.subjective_retry_count
+    }
+
+    pub fn reset_subjective_retry(&mut self) {
+        self.subjective_retry_count = 0;
+        self.subjective_retry_phase.clear();
+        self.subjective_retry_kind.clear();
+    }
 }
 
 fn obs_like_bool(
@@ -374,4 +417,41 @@ pub fn gate_authoring_progress(log: Option<&ThreadLog>, phase: Phase) -> Result<
         _ => return Ok(()),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_has_compile_time_defaults() {
+        let st = ExecutionState::new();
+        assert_eq!(st.current_tier, ExecutionTier::Unknown);
+        assert_eq!(st.mode, ExecutionMode::Discover);
+    }
+
+    #[test]
+    fn validate_success_resets_repair_and_retry_state() {
+        let mut st = ExecutionState::new();
+        st.hard_mutation_repair_mode = true;
+        st.subjective_retry_phase = "model_plan".to_string();
+        st.subjective_retry_kind = "plan_json_invalid".to_string();
+        st.subjective_retry_count = 3;
+        st.apply_validate_success(ExecutionTier::Model);
+        assert_eq!(st.current_tier, ExecutionTier::Model);
+        assert_eq!(st.mode, ExecutionMode::Done);
+        assert!(!st.hard_mutation_repair_mode);
+        assert_eq!(st.subjective_retry_count, 0);
+        assert!(st.subjective_retry_phase.is_empty());
+    }
+
+    #[test]
+    fn subjective_retry_is_single_state_and_bounded() {
+        let mut st = ExecutionState::new();
+        assert_eq!(st.bump_subjective_retry(Phase::CleansePlan, "x", 3), 1);
+        assert_eq!(st.bump_subjective_retry(Phase::CleansePlan, "x", 3), 2);
+        assert_eq!(st.bump_subjective_retry(Phase::CleansePlan, "x", 3), 3);
+        assert_eq!(st.bump_subjective_retry(Phase::CleansePlan, "x", 3), 3);
+        assert_eq!(st.bump_subjective_retry(Phase::ModelPlan, "x", 3), 1);
+    }
 }

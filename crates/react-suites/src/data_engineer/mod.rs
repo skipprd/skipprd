@@ -276,19 +276,6 @@ struct CatalogBootstrapOutcome {
     metadata_complete: bool,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SubjectiveRetryState {
-    #[serde(default)]
-    phase: String,
-    #[serde(default)]
-    kind: String,
-    #[serde(default)]
-    retries: usize,
-    #[serde(default)]
-    last_ts: String,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlanningLlmProfile {
     DiscoveryCleanse,
@@ -364,48 +351,29 @@ impl DataEngineerSuite {
         kind: &str,
     ) -> usize {
         let cap = Self::subjective_retry_limit().saturating_add(1);
-        let mut st = thread_store
-            .get_thread_artifact_json(thread_id, "subjective_retry_state")
-            .await
-            .ok()
-            .and_then(|v| serde_json::from_value::<SubjectiveRetryState>(v).ok())
-            .unwrap_or_default();
-        if st.phase == phase.as_str() && st.kind == kind {
-            st.retries = st.retries.saturating_add(1).min(cap);
-        } else {
-            st.phase = phase.as_str().to_string();
-            st.kind = kind.to_string();
-            st.retries = 1.min(cap);
+        let mut st = crate::data_engineer::progress_controller::ExecutionState::load(
+            thread_store,
+            thread_id,
+        )
+        .await
+        .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+        let retries = st.bump_subjective_retry(phase, kind, cap);
+        if let Err(e) = st.save(thread_store, thread_id).await {
+            tracing::warn!("failed to persist execution_state subjective retry: {}", e);
         }
-        st.last_ts = chrono::Utc::now().to_rfc3339();
-        if let Err(e) = thread_store
-            .put_thread_artifact_json(
-                thread_id,
-                "subjective_retry_state",
-                &serde_json::to_value(&st).unwrap_or(serde_json::json!({})),
-            )
-            .await
-        {
-            tracing::warn!("failed to persist subjective_retry_state: {}", e);
-        }
-        st.retries
+        retries
     }
 
     async fn reset_subjective_retry(thread_store: &ThreadStore, thread_id: &str) {
-        if let Err(e) = thread_store
-            .put_thread_artifact_json(
-                thread_id,
-                "subjective_retry_state",
-                &serde_json::json!({
-                    "phase": "",
-                    "kind": "",
-                    "retries": 0,
-                    "last_ts": chrono::Utc::now().to_rfc3339()
-                }),
-            )
-            .await
-        {
-            tracing::warn!("failed to reset subjective_retry_state: {}", e);
+        let mut st = crate::data_engineer::progress_controller::ExecutionState::load(
+            thread_store,
+            thread_id,
+        )
+        .await
+        .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+        st.reset_subjective_retry();
+        if let Err(e) = st.save(thread_store, thread_id).await {
+            tracing::warn!("failed to reset execution_state subjective retry: {}", e);
         }
     }
 
@@ -3381,7 +3349,8 @@ Apply these fixes in the output.",
         reg.register(ArtifactsTool);
 
         let tools_card: String;
-        let allow_user_interrupt_tools = !Self::headless_mode_enabled();
+        // Hard cutover: agent-mode phases are non-interactive by design.
+        let allow_user_interrupt_tools = false;
 
         match phase {
             control_flow::Phase::CleansePlan | control_flow::Phase::ModelPlan => {
@@ -3481,8 +3450,8 @@ Apply these fixes in the output.",
                             ctx: &react_core::agent::AgentCtx,
                         ) -> Result<serde_json::Value, String> {
                             let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                            if self.single_target_path.is_some() && op != "patch" {
-                                return Err("file is in deterministic single-target repair mode; only op='patch' is allowed.".to_string());
+                            if self.single_target_path.is_some() && !matches!(op, "patch" | "rm" | "mv") {
+                                return Err("file is in deterministic single-target repair mode; only op='patch'|'rm'|'mv' is allowed.".to_string());
                             }
                             if self.single_target_path.is_none()
                                 && !matches!(op, "patch" | "rm" | "mv")
@@ -3492,8 +3461,13 @@ Apply these fixes in the output.",
                             if let Some(want) = self.single_target_path.as_ref() {
                                 fn collect_paths(v: &serde_json::Value) -> Vec<String> {
                                     let mut out: Vec<String> = Vec::new();
-                                    // Single-file target (required by the patch contract).
                                     if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
+                                        let p = p.trim();
+                                        if !p.is_empty() {
+                                            out.push(p.to_string());
+                                        }
+                                    }
+                                    if let Some(p) = v.get("from").and_then(|x| x.as_str()) {
                                         let p = p.trim();
                                         if !p.is_empty() {
                                             out.push(p.to_string());
@@ -3506,13 +3480,13 @@ Apply these fixes in the output.",
                                 paths.dedup();
                                 if paths.is_empty() {
                                     return Err(format!(
-                                        "file deterministic repair mode requires explicit path='{}'.",
+                                        "file deterministic repair mode requires explicit path/from='{}'.",
                                         want
                                     ));
                                 }
                                 if paths.len() != 1 || paths[0] != *want {
                                     return Err(format!(
-                                        "file deterministic single-target repair mode violation: only '{}' may be patched right now (got: {}).",
+                                        "file deterministic single-target repair mode violation: only '{}' may be mutated right now (got: {}).",
                                         want,
                                         paths.join(", ")
                                     ));
@@ -3524,7 +3498,7 @@ Apply these fixes in the output.",
                                 ctx.thread_id.as_deref(),
                                 self.single_target_path.as_ref(),
                             ) {
-                                if op == "patch" {
+                                if matches!(op, "patch" | "rm" | "mv") {
                                     let es = crate::data_engineer::progress_controller::ExecutionState::load(
                                         store, thread_id,
                                     )
@@ -3541,25 +3515,26 @@ Apply these fixes in the output.",
                                             ));
                                         }
                                         crate::data_engineer::progress_controller::RepairLadderStep::ReplaceFile => {
-                                            // Hard cutover: Cursor/Aider hunks-only patches only.
-                                            // Require patch_text + single-file path guard.
-                                            let patch_text = args
-                                                .get("patch_text")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("");
-                                            let has_patch_text = !patch_text.trim().is_empty()
-                                                && patch_text.trim_start().starts_with("@@");
-                                            let guard_path_ok = args
-                                                .get("path")
-                                                .and_then(|v| v.as_str())
-                                                .map(|p| p.trim() == want)
-                                                .unwrap_or(false);
-                                            if !has_patch_text || !guard_path_ok {
-                                                return Err(format!(
-                                                    "deterministic repair ladder step requires a guarded single-file patch for '{}': args must include path='{}' + patch_text starting with '@@' (Cursor/Aider hunks-only; no ---/+++ headers).",
-                                                    want,
-                                                    want
-                                                ));
+                                            if op == "patch" {
+                                                // Hard cutover: Cursor/Aider hunks-only patches only.
+                                                let patch_text = args
+                                                    .get("patch_text")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("");
+                                                let has_patch_text = !patch_text.trim().is_empty()
+                                                    && patch_text.trim_start().starts_with("@@");
+                                                let guard_path_ok = args
+                                                    .get("path")
+                                                    .and_then(|v| v.as_str())
+                                                    .map(|p| p.trim() == want)
+                                                    .unwrap_or(false);
+                                                if !has_patch_text || !guard_path_ok {
+                                                    return Err(format!(
+                                                        "deterministic repair ladder step requires a guarded single-file patch for '{}': args must include path='{}' + patch_text starting with '@@' (Cursor/Aider hunks-only; no ---/+++ headers).",
+                                                        want,
+                                                        want
+                                                    ));
+                                                }
                                             }
                                         }
                                         crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget => {}
@@ -3575,7 +3550,7 @@ Apply these fixes in the output.",
                                 ctx.thread_id.as_deref(),
                                 self.single_target_path.as_ref(),
                             ) {
-                                if op == "patch" {
+                                if matches!(op, "patch" | "rm" | "mv") {
                                     let mut es =
                                         crate::data_engineer::progress_controller::ExecutionState::load(
                                             store, thread_id,
@@ -3658,11 +3633,8 @@ Apply these fixes in the output.",
                         "  - op=mv args: {from:string, to:string, expected_sha256?:string}".to_string(),
                         "- run_sql(args:{sql:string}) (targeted probes; required after runtime failures)".to_string(),
                     ]);
-                    if allow_user_interrupt_tools {
-                        tool_lines.push("- ask_user(args:{prompt:string})".to_string());
-                    }
                     if single_target_repair_path.is_some() {
-                        tool_lines.push("Deterministic single-target repair mode is active: only file op=patch for the current failing model file is allowed.".to_string());
+                        tool_lines.push("Deterministic single-target repair mode is active: only file op=patch/rm/mv targeting the current failing model file is allowed.".to_string());
                     }
                     tools_card = Self::build_tools_card(
                         "Allowed tools (authoring phase; HARD constraint: mutation required next):",
@@ -4465,7 +4437,7 @@ Apply these fixes in the output.",
                     },
                 )
                 .await;
-            return Ok(vec![FlowFrame::AwaitUser { prompt: reason }]);
+            return Err(format!("agent_mode_await_user_forbidden: {}", reason));
         }
 
         // Phase-step budget is reset when we make clear forward progress (phase advances).
@@ -4553,6 +4525,17 @@ Apply these fixes in the output.",
             .await
             .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
             let replan_backtracks = execution_state.replan_backtracks;
+            if execution_state.stall_count >= execution_state.max_stall_count
+                && matches!(
+                    execution_state.mode,
+                    crate::data_engineer::progress_controller::ExecutionMode::Mutate
+                )
+            {
+                return Err(format!(
+                    "failed to make progress for this thread: execution_state stall_count={} reached max_stall_count={} in mode=mutate",
+                    execution_state.stall_count, execution_state.max_stall_count
+                ));
+            }
             if replan_backtracks >= max_replan_backtracks {
                 let stop_msg = format!(
                     "failed to make progress for this thread: observed {} validate/review loopback(s) to plan/author in phase track '{}' (limit {}). Stopping this thread. Please inspect the latest validate/review errors and apply a targeted fix before rerunning.",
@@ -4628,24 +4611,18 @@ Apply these fixes in the output.",
                 Phase::Preflight => {
                     // Require core providers.
                     if sctx.query.is_none() {
-                        return Ok(vec![FlowFrame::AwaitUser {
-                            prompt: "Data Engineer agent requires a warehouse provider configured. Configure providers.warehouse and restart.".to_string(),
-                        }]);
+                        return Err("data engineer agent requires a warehouse provider configured. configure providers.warehouse and restart.".to_string());
                     }
                     if sctx.dbt.is_none() {
-                        return Ok(vec![FlowFrame::AwaitUser {
-                            prompt: "Data Engineer agent requires a DBT provider configured. Enable providers.dbt and restart.".to_string(),
-                        }]);
+                        return Err("data engineer agent requires a dbt provider configured. enable providers.dbt and restart.".to_string());
                     }
                     // Ensure minimal dbt project exists.
                     if let Some(dbt) = sctx.dbt.as_ref() {
                         if let Err(e) = dbt.ensure_minimal_project(&sctx.scope).await {
                             let key = sctx.keyspace.dbt_project_key(&sctx.scope);
-                            return Ok(vec![FlowFrame::AwaitUser {
-                                prompt: format!(
-                                    "Failed to create the DBT project in storage.\n\nExpected file:\n- {key}\n\nError:\n{e}\n\nThis is usually an S3 permission/prefix issue. Fix the runtime’s storage configuration/IAM permissions so it can write the project root, then retry."
-                                ),
-                            }]);
+                            return Err(format!(
+                                "failed to create the dbt project in storage. expected file: {key}. error: {e}. this is usually an s3 permission/prefix issue."
+                            ));
                         }
                     }
                     // Hard gate: dbt_project.yml MUST exist before we proceed, otherwise we will loop in authoring.
@@ -4653,18 +4630,14 @@ Apply these fixes in the output.",
                     match sctx.storage.head_etag(&key).await {
                         Ok(Some(_)) => {}
                         Ok(None) => {
-                            return Ok(vec![FlowFrame::AwaitUser {
-                                prompt: format!(
-                                    "DBT project is incomplete: `dbt_project.yml` is missing in storage.\n\nExpected file:\n- {key}\n\nI can see models being written under `models/`, but without `dbt_project.yml` the suite cannot validate/build and will keep re-authoring.\n\nFix the runtime’s storage configuration/IAM permissions so it can write the DBT project root (not just `models/`), then retry."
-                                ),
-                            }]);
+                            return Err(format!(
+                                "dbt project is incomplete: dbt_project.yml is missing in storage. expected file: {key}. without this file the suite cannot validate/build."
+                            ));
                         }
                         Err(e) => {
-                            return Ok(vec![FlowFrame::AwaitUser {
-                                prompt: format!(
-                                    "Unable to verify presence of `dbt_project.yml` in storage.\n\nExpected file:\n- {key}\n\nError:\n{e}\n\nFix the runtime’s storage configuration/IAM permissions, then retry."
-                                ),
-                            }]);
+                            return Err(format!(
+                                "unable to verify presence of dbt_project.yml in storage. expected file: {key}. error: {e}"
+                            ));
                         }
                     }
                     // Persist transition.
@@ -5548,15 +5521,10 @@ Apply these fixes in the output.",
                                     )
                                     .await;
                                     if tries > Self::subjective_retry_limit() {
-                                        return Ok(vec![FlowFrame::AwaitUser {
-                                            prompt: format!(
-                                                "Plan grounding did not converge after {} retries. Missing required discovery steps: file={}, sql_schema={}, evidence={}. Please provide targeted guidance and retry.",
-                                                tries,
-                                                saw_dbt_files,
-                                                saw_sql_schema,
-                                                saw_evidence
-                                            ),
-                                        }]);
+                                        return Err(format!(
+                                            "plan_grounding_not_converged_after_retries: tries={}, file_seen={}, sql_schema_seen={}, evidence_seen={}",
+                                            tries, saw_dbt_files, saw_sql_schema, saw_evidence
+                                        ));
                                     }
                                     continue;
                                 }
@@ -5612,12 +5580,10 @@ Apply these fixes in the output.",
                                         )
                                         .await;
                                         if tries > Self::subjective_retry_limit() {
-                                            return Ok(vec![FlowFrame::AwaitUser {
-                                                prompt: format!(
-                                                    "Plan JSON stayed invalid after {} retries.\n\nLast error:\n{e}\n\nPlease provide targeted guidance and retry.",
-                                                    tries
-                                                ),
-                                            }]);
+                                            return Err(format!(
+                                                "plan_json_invalid_after_retries: tries={}, error={}",
+                                                tries, e
+                                            ));
                                         }
                                         continue;
                                     }
@@ -5775,10 +5741,7 @@ Apply these fixes in the output.",
                                             200,
                                         );
                                     } else {
-                                        return Ok(vec![FlowFrame::AwaitUser {
-                                            prompt: "Cleanse plan contained no grounded raw datasets and deterministic synthesis had no grounded raw inputs. Verify warehouse/catalog raw table visibility and retry."
-                                                .to_string(),
-                                        }]);
+                                        return Err("cleanse plan contained no grounded raw datasets and deterministic synthesis had no grounded raw inputs".to_string());
                                     }
                                 }
                                 let enrich_ids: Vec<String> = plan
@@ -5879,13 +5842,11 @@ Apply these fixes in the output.",
                                     )
                                     .await;
                                     if tries > Self::subjective_retry_limit() {
-                                        return Ok(vec![FlowFrame::AwaitUser {
-                                            prompt: format!(
-                                                "Plan semantic validation did not converge after {} retries.\n\nLatest errors:\n- {}\n\nPlease provide targeted guidance and retry.",
-                                                tries,
-                                                sem.errors.join("\n- ")
-                                            ),
-                                        }]);
+                                        return Err(format!(
+                                            "plan_semantic_validation_not_converged_after_retries: tries={}, errors={}",
+                                            tries,
+                                            sem.errors.join(" | ")
+                                        ));
                                     }
                                     continue;
                                 }
@@ -5995,12 +5956,10 @@ Apply these fixes in the output.",
                                         )
                                         .await;
                                         if tries > Self::subjective_retry_limit() {
-                                            return Ok(vec![FlowFrame::AwaitUser {
-                                                prompt: format!(
-                                                    "Plan JSON stayed invalid after {} retries.\n\nLast error:\n{e}\n\nPlease provide targeted guidance and retry.",
-                                                    tries
-                                                ),
-                                            }]);
+                                            return Err(format!(
+                                                "plan_json_invalid_after_retries: tries={}, error={}",
+                                                tries, e
+                                            ));
                                         }
                                         continue;
                                     }
@@ -6132,10 +6091,7 @@ Apply these fixes in the output.",
                                     )
                                     .await;
                                     if tries > Self::subjective_retry_limit() {
-                                        return Ok(vec![FlowFrame::AwaitUser {
-                                            prompt: "Model plan contained no grounded tasks after repeated retries (gold must reference existing silver models under models/staging/). Ensure silver models exist and retry."
-                                                .to_string(),
-                                        }]);
+                                        return Err("model plan contained no grounded tasks after repeated retries (gold must reference existing silver models under models/staging/)".to_string());
                                     }
                                     continue;
                                 }
@@ -6229,13 +6185,11 @@ Apply these fixes in the output.",
                                     )
                                     .await;
                                     if tries > Self::subjective_retry_limit() {
-                                        return Ok(vec![FlowFrame::AwaitUser {
-                                            prompt: format!(
-                                                "Plan semantic validation did not converge after {} retries.\n\nLatest errors:\n- {}\n\nPlease provide targeted guidance and retry.",
-                                                tries,
-                                                sem.errors.join("\n- ")
-                                            ),
-                                        }]);
+                                        return Err(format!(
+                                            "plan_semantic_validation_not_converged_after_retries: tries={}, errors={}",
+                                            tries,
+                                            sem.errors.join(" | ")
+                                        ));
                                     }
                                     continue;
                                 }
@@ -6310,19 +6264,17 @@ Apply these fixes in the output.",
                             thread_id: _tid,
                             prompt,
                         }) => {
-                            return Ok(vec![FlowFrame::AwaitUser { prompt }]);
+                            return Err(format!("agent_mode_await_user_forbidden: {}", prompt));
                         }
                         Ok(RunOutcome::AwaitApproval {
                             thread_id: _tid,
                             prompt,
                         }) => {
                             // Planning should not directly request approval via tools; the suite does it.
-                            return Ok(vec![FlowFrame::AwaitUser {
-                                prompt: format!(
-                                    "Plan phase requested approval internally, which is not allowed. Please retry.\n\nPrompt:\n{}",
-                                    prompt
-                                ),
-                            }]);
+                            return Err(format!(
+                                "plan phase requested approval internally, which is not allowed: {}",
+                                prompt
+                            ));
                         }
                         Err(e) => return Err(e),
                     }
@@ -6534,7 +6486,7 @@ Apply these fixes in the output.",
                                 .append_step(thread_id, step)
                                 .await
                                 .map_err(|e| format!("failed to append guard step: {e}"))?;
-                            return Ok(vec![FlowFrame::AwaitUser { prompt: reason }]);
+                            return Err(format!("agent_mode_await_user_forbidden: {}", reason));
                         }
                             if plan.status != crate::data_engineer::plan::PlanStatus::Approved
                                 && plan.status != crate::data_engineer::plan::PlanStatus::Completed
@@ -6919,7 +6871,7 @@ Apply these fixes in the output.",
                                 .append_step(thread_id, step)
                                 .await
                                 .map_err(|e| format!("failed to append guard step: {e}"))?;
-                            return Ok(vec![FlowFrame::AwaitUser { prompt: reason }]);
+                            return Err(format!("agent_mode_await_user_forbidden: {}", reason));
                         }
                             if plan.status != crate::data_engineer::plan::PlanStatus::Approved
                                 && plan.status != crate::data_engineer::plan::PlanStatus::Completed
@@ -7458,7 +7410,7 @@ Apply these fixes in the output.",
                     }
                     if let Some(ref target) = single_target_repair_path {
                         q.push_str("\n\nDETERMINISTIC SINGLE-TARGET REPAIR MODE:\n");
-                        q.push_str("- You MUST patch ONLY this file path in your next mutation:\n");
+                        q.push_str("- You MUST mutate ONLY this file path in your next mutation (file op=patch|rm|mv):\n");
                         q.push_str("- ");
                         q.push_str(target);
                         q.push_str("\n- Do NOT patch, move, or remove any other file until this target validates.\n");
@@ -7627,11 +7579,11 @@ Apply these fixes in the output.",
                             crate::data_engineer::prompt_packets::render_envelope(&envelope);
 
                         repair.push_str("\nRules:\n");
-                        repair.push_str("- You MUST call file op=patch next.\n");
-                        repair.push_str("- You MUST patch ONLY the target file above.\n");
+                        repair.push_str("- You MUST call file with a mutating op next (patch|rm|mv).\n");
+                        repair.push_str("- You MUST mutate ONLY the target file above.\n");
                         match ladder {
                             crate::data_engineer::progress_controller::RepairLadderStep::ReplaceFile => {
-                                repair.push_str("- IMPORTANT: You MUST provide a guarded single-file patch: args.path + args.patch_text. patch_text MUST be Cursor/Aider hunks-only (starts with '@@ ... @@'; no diff --git/---/+++ headers). Do NOT patch any other file.\n");
+                                repair.push_str("- IMPORTANT: prefer a guarded single-file patch (args.path + args.patch_text; hunks-only). If patching cannot converge, you may use rm/mv but only against the target path.\n");
                             }
                             crate::data_engineer::progress_controller::RepairLadderStep::Stop => {
                                 repair.push_str("- STOP: prior repair attempts did not converge. Do not continue.\n");
@@ -7827,7 +7779,7 @@ Apply these fixes in the output.",
                             continue;
                         }
                         Ok(RunOutcome::AwaitUser { prompt, .. }) => {
-                            return Ok(vec![FlowFrame::AwaitUser { prompt }])
+                            return Err(format!("agent_mode_await_user_forbidden: {}", prompt))
                         }
                         Ok(RunOutcome::AwaitApproval { prompt, .. }) => {
                             return Ok(vec![FlowFrame::AwaitApproval { prompt }])
@@ -7838,6 +7790,28 @@ Apply these fixes in the output.",
 
                 Phase::CleanseValidate | Phase::ModelValidate => {
                     let actx = Self::agent_tool_ctx(thread_id, sctx);
+                    {
+                        let mut es =
+                            crate::data_engineer::progress_controller::ExecutionState::load(
+                                &thread_store,
+                                thread_id,
+                            )
+                            .await
+                            .unwrap_or_else(
+                                crate::data_engineer::progress_controller::ExecutionState::new,
+                            );
+                        es.mode = crate::data_engineer::progress_controller::ExecutionMode::Validate;
+                        es.current_tier = if phase == Phase::CleanseValidate {
+                            crate::data_engineer::progress_controller::ExecutionTier::Cleanse
+                        } else {
+                            crate::data_engineer::progress_controller::ExecutionTier::Model
+                        };
+                        es.save(&thread_store, thread_id).await.map_err(|e| {
+                            format!(
+                                "failed to persist execution state before validate: {e}"
+                            )
+                        })?;
+                    }
                     let emit_trace = |ctx: &react_core::agent::AgentCtx, line: &str| {
                         if let Some(tx) = ctx.trace_tx.as_ref() {
                             let _ = tx.send(line.to_string());
@@ -8309,12 +8283,10 @@ Apply these fixes in the output.",
                     let class = dbt_error::classify(&errs);
                     if matches!(class, dbt_error::DbtErrorClass::WarehouseConfig) {
                         let brief = dbt_error::compact_brief(&errs, 6, 1400);
-                        return Ok(vec![FlowFrame::AwaitUser {
-                            prompt: format!(
-                                "dbt_validate failed due to a warehouse/AWS configuration issue. Fix the configuration and then click Approve/Continue.\n\nError summary:\n{}",
-                                brief
-                            ),
-                        }]);
+                        return Err(format!(
+                            "dbt_validate failed due to a warehouse/aws configuration issue: {}",
+                            brief
+                        ));
                     }
 
                     // Plan-driven repair: if validation failed, reopen the failing item(s) so authoring
@@ -8843,9 +8815,7 @@ Apply these fixes in the output.",
                                 _ => None,
                             };
                             if decision == Some(UserDecision::Reject) {
-                                return Ok(vec![FlowFrame::AwaitUser {
-                                    prompt: "Publish was rejected. Provide guidance (e.g. restrict dataset_ids, change materializations, or adjust models) and then re-run agent.".to_string(),
-                                }]);
+                                return Err("publish was rejected; provide updated guidance and rerun the agent".to_string());
                             }
                             if decision == Some(UserDecision::Approve) {
                                 control_flow::append_phase_with_reason(
@@ -9013,10 +8983,7 @@ Apply these fixes in the output.",
         let budget_msg = format!(
             "headless_budget_exhausted: Agent reached the phase-step budget without completing.\n\nBudget:\n- max_steps_per_progress={max_phase_steps}\n- total_steps={total_steps}\n\nThis indicates a loop (re-entering phases without durable progress)."
         );
-        if Self::headless_mode_enabled() {
-            return Err(budget_msg);
-        }
-        Ok(vec![FlowFrame::AwaitUser { prompt: budget_msg }])
+        Err(budget_msg)
     }
 
     async fn run_authoring(
@@ -9193,12 +9160,10 @@ Apply these fixes in the output.",
                     let brief = dbt_error::compact_brief(&errs, 2, 900);
 
                     if matches!(class, dbt_error::DbtErrorClass::WarehouseConfig) {
-                        return Ok(vec![FlowFrame::AwaitUser {
-                            prompt: format!(
-                                "dbt_validate failed due to a warehouse/AWS configuration issue. Fix the Athena/workgroup/region/credentials and then reply 'continue'.\n\nError summary:\n{}",
-                                brief
-                            ),
-                        }]);
+                        return Err(format!(
+                            "dbt_validate failed due to a warehouse/aws configuration issue: {}",
+                            brief
+                        ));
                     }
 
                     if compile_ok && !run_ok && !runtime_failures.is_empty() {
@@ -9265,7 +9230,7 @@ Apply these fixes in the output.",
                     thread_id: _tid,
                     prompt: p,
                 }) => {
-                    return Ok(vec![FlowFrame::AwaitUser { prompt: p }]);
+                    return Err(format!("await_user_forbidden: {}", p));
                 }
                 Ok(RunOutcome::AwaitApproval {
                     thread_id: _tid,
@@ -9914,6 +9879,105 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("single-target repair mode violation"));
+    }
+
+    #[tokio::test]
+    async fn hard_mutation_mode_single_target_allows_rm_mv_on_target_only() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+
+        let guard = crate::data_engineer::control_flow::DerivedGuardState {
+            last_validate_failed: true,
+            mutated_since_fail: false,
+            patched_since_fail: false,
+            mutation_failures_since_validate: 0,
+            probe_required: false,
+            probe_satisfied: false,
+        };
+
+        let (reg, _card) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::ModelAuthor,
+            &guard,
+            true,
+            &sctx,
+            None,
+            Some("models/marts/fct_orders.sql".to_string()),
+            false,
+        )
+        .expect("build_tools_for_phase should succeed");
+
+        let err_off_target = reg
+            .call(
+                "file",
+                serde_json::json!({"op":"rm","path":"models/marts/fct_other.sql"}),
+                &actx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err_off_target.contains("single-target repair mode violation"));
+
+        // Targeted rm/mv are allowed by policy (they may still fail on missing file in this test context).
+        let res_target_rm = reg
+            .call(
+                "file",
+                serde_json::json!({"op":"rm","path":"models/marts/fct_orders.sql"}),
+                &actx,
+            )
+            .await;
+        if let Err(e) = res_target_rm {
+            assert!(!e.contains("single-target repair mode violation"));
+        }
+
+        let res_target_mv = reg
+            .call(
+                "file",
+                serde_json::json!({"op":"mv","from":"models/marts/fct_orders.sql","to":"models/marts/fct_orders_renamed.sql"}),
+                &actx,
+            )
+            .await;
+        if let Err(e) = res_target_mv {
+            assert!(!e.contains("single-target repair mode violation"));
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_phase_tool_card_and_registry_never_expose_ask_user() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+        let guard = crate::data_engineer::control_flow::DerivedGuardState::default();
+
+        let (reg, card) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::CleansePlan,
+            &guard,
+            true,
+            &sctx,
+            None,
+            None,
+            false,
+        )
+        .expect("build_tools_for_phase should succeed");
+
+        assert!(!card.contains("ask_user"));
+        let err = reg
+            .call("ask_user", serde_json::json!({"prompt":"x"}), &actx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn run_agent_never_returns_await_user_on_missing_providers() {
+        let sctx = SuiteCtx::default();
+        let err = DataEngineerSuite::run_agent("thread-missing-providers", "go", &sctx)
+            .await
+            .expect_err("agent mode must hard-fail instead of AwaitUser");
+        assert!(
+            err.contains("warehouse provider configured")
+                || err.contains("dbt provider configured")
+                || err.contains("catalog bootstrap metadata gate failed")
+        );
     }
 
     #[tokio::test]
