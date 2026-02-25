@@ -11,6 +11,7 @@ use crate::data_engineer::naming;
 use crate::data_engineer::plan;
 use crate::data_engineer::project_files;
 use crate::data_engineer::project_fs;
+use crate::data_engineer::retry_budget;
 use crate::data_engineer::schema_policy;
 use crate::data_engineer::tools::dbt_files;
 
@@ -118,20 +119,45 @@ fn parse_dataset_id_3(s: &str) -> Option<(String, String, String)> {
     Some((cat.to_string(), schema.to_string(), table.to_string()))
 }
 
+fn rewrite_final_select_wildcard(sql_text: &str, allowed_columns: &[String]) -> Option<String> {
+    if allowed_columns.is_empty() {
+        return None;
+    }
+    let lowered = sql_text.to_ascii_lowercase();
+    let select_idx = lowered.rfind("select")?;
+    let from_search_start = select_idx + "select".len();
+    let from_rel = lowered[from_search_start..].find("from")?;
+    let from_idx = from_search_start + from_rel;
+    let select_expr = sql_text[from_search_start..from_idx].trim();
+    let wildcard = select_expr == "*" || select_expr.ends_with(".*");
+    if !wildcard {
+        return None;
+    }
+
+    let projected = allowed_columns
+        .iter()
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
+        .map(|c| format!("  {c}"))
+        .collect::<Vec<_>>();
+    if projected.is_empty() {
+        return None;
+    }
+
+    let mut out = String::with_capacity(sql_text.len() + projected.len() * 8);
+    out.push_str(&sql_text[..select_idx]);
+    out.push_str("select\n");
+    out.push_str(&projected.join(",\n"));
+    out.push('\n');
+    out.push_str(&sql_text[from_idx..]);
+    Some(out)
+}
+
 fn extract_string_arg(args: &Value, key: &str) -> Option<String> {
     args.get(key)
         .and_then(|x| x.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-fn update_failure_counters(progress: &mut plan::PlanProgress, ok: bool) {
-    if ok {
-        progress.consecutive_batch_failures = 0;
-        return;
-    }
-    progress.consecutive_batch_failures = progress.consecutive_batch_failures.saturating_add(1);
-    progress.total_batch_failures = progress.total_batch_failures.saturating_add(1);
 }
 
 fn schema_yml_sys_prompt_staging() -> String {
@@ -224,6 +250,19 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             }));
         }
 
+        if retry_budget::batch_budget(&plan.progress).exhausted() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "kind": "batch_locked",
+                "message": "too many consecutive schema-batch failures; apply a targeted mutating fix before retrying",
+                "checklist_item_id": checklist_item_id,
+                "attempted_dataset_ids": [],
+                "succeeded_dataset_ids": [],
+                "failed_dataset_ids": [],
+                "errors": ["too many consecutive schema-batch failures; apply a targeted mutating fix before retrying"],
+            }));
+        }
+
         let batch = plan::cleanse_pending_for_checklist(
             &plan,
             plan::CHECKLIST_SQL_MODEL,
@@ -261,6 +300,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
         let mut succeeded: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
+        let mut auto_healed_wildcard_sql_dataset_ids: Vec<String> = Vec::new();
 
         for ds in batch.iter() {
             let Some((_cat, schema, table)) = parse_dataset_id_3(ds) else {
@@ -303,8 +343,32 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                                 .collect::<Vec<String>>()
                         })
                         .unwrap_or_default();
-                    if e.contains("staging SQL uses '*' in final SELECT") && !from_plan.is_empty() {
-                        from_plan
+                    if !from_plan.is_empty() {
+                        if let Some(rewritten_sql) =
+                            rewrite_final_select_wildcard(&sql_text, &from_plan)
+                        {
+                            if rewritten_sql != sql_text {
+                                if let Err(write_err) = ctx
+                                    .storage
+                                    .put_bytes(&sql_key, rewritten_sql.as_bytes(), "text/sql")
+                                    .await
+                                {
+                                    failed.push(ds.clone());
+                                    errors.push(format!(
+                                        "{ds}: failed to auto-heal wildcard SELECT in {sql_rel}: {write_err}"
+                                    ));
+                                    continue;
+                                }
+                                auto_healed_wildcard_sql_dataset_ids.push(ds.clone());
+                            }
+                            from_plan
+                        } else {
+                            failed.push(ds.clone());
+                            errors.push(format!(
+                                "{ds}: cannot parse allowed output columns from {sql_rel}: {e}"
+                            ));
+                            continue;
+                        }
                     } else {
                         failed.push(ds.clone());
                         errors.push(format!(
@@ -412,10 +476,24 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                 plan::ChecklistItemStatus::NeedsUpdate,
             );
         }
-        update_failure_counters(&mut plan.progress, failed.is_empty());
+        let budget = retry_budget::note_batch_result(&mut plan.progress, failed.is_empty());
         plan::save_cleanse_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to persist cleanse schema batch result state: {e}"))?;
+
+        if budget.exhausted() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "kind": "batch_locked",
+                "message": "too many consecutive schema-batch failures; apply a targeted mutating fix before retrying",
+                "checklist_item_id": checklist_item_id,
+                "attempted_dataset_ids": batch,
+                "succeeded_dataset_ids": succeeded,
+                "failed_dataset_ids": failed,
+                "auto_healed_wildcard_sql_dataset_ids": auto_healed_wildcard_sql_dataset_ids,
+                "errors": errors,
+            }));
+        }
 
         Ok(serde_json::json!({
             "ok": failed.is_empty(),
@@ -424,6 +502,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             "attempted_dataset_ids": batch,
             "succeeded_dataset_ids": succeeded,
             "failed_dataset_ids": failed,
+            "auto_healed_wildcard_sql_dataset_ids": auto_healed_wildcard_sql_dataset_ids,
             "errors": errors,
         }))
     }
@@ -598,7 +677,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                     for n in names.iter() {
                         plan::model_schema_contract_mark_needs_update(&mut plan, n);
                     }
-                    update_failure_counters(&mut plan.progress, false);
+                    retry_budget::note_batch_result(&mut plan.progress, false);
                     plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
                         format!(
                             "failed to persist model schema batch failure state after patch error: {save_err}"
@@ -625,7 +704,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 for n in names.iter() {
                     plan::model_schema_contract_mark_needs_update(&mut plan, n);
                 }
-                update_failure_counters(&mut plan.progress, false);
+                retry_budget::note_batch_result(&mut plan.progress, false);
                 plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
                     format!(
                         "failed to persist model schema batch failure state after post-check error: {save_err}"
@@ -650,7 +729,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             for n in names.iter() {
                 plan::model_schema_contract_mark_needs_update(&mut plan, n);
             }
-            update_failure_counters(&mut plan.progress, false);
+            retry_budget::note_batch_result(&mut plan.progress, false);
             plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
                 format!(
                     "failed to persist model schema batch failure state after write error: {save_err}"
@@ -673,7 +752,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 plan::ChecklistItemStatus::Done,
             );
         }
-        update_failure_counters(&mut plan.progress, true);
+        retry_budget::note_batch_result(&mut plan.progress, true);
         plan::save_model_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to persist model schema batch result state: {e}"))?;
@@ -895,6 +974,14 @@ mod tests {
                         data_type: None,
                         nullable: true,
                         description: None,
+                    }, plan::OutputFieldSpec {
+                        name: "email_raw".to_string(),
+                        kind: plan::FieldKind::Raw,
+                        source_columns: vec!["email".to_string()],
+                        expression: "email as email_raw (raw)".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
                     }],
                     prohibited_ops: vec![],
                 },
@@ -908,10 +995,11 @@ mod tests {
         };
         plan::save_cleanse_plan(&ctx, &p).await.unwrap();
 
-        // Seed canonical staging SQL with explicit final SELECT list (no '*').
+        // Seed staging SQL with wildcard final projection so the tool exercises deterministic
+        // wildcard auto-heal before writing schema YAML.
         let sql_rel = "models/staging/stg_test_raw_raw_customers.sql";
         let sql_key = project_fs::join_storage_key(&ctx, sql_rel);
-        let sql = "with source as (\n  select * from {{ source('test_raw','raw_customers') }}\n)\nselect\n  customer_id_raw,\n  email_raw\nfrom source\n";
+        let sql = "with source as (\n  select * from {{ source('test_raw','raw_customers') }}\n)\nselect * from source\n";
         ctx.storage
             .put_bytes(&sql_key, sql.as_bytes(), "text/sql")
             .await
@@ -930,6 +1018,115 @@ mod tests {
         let got = ctx.storage.get_bytes(&yml_key).await.unwrap();
         let got = String::from_utf8_lossy(&got).to_string();
         assert!(got.contains("stg_test_raw_raw_customers"));
+
+        let healed_sql = ctx.storage.get_bytes(&sql_key).await.unwrap();
+        let healed_sql = String::from_utf8_lossy(&healed_sql).to_string();
+        assert!(
+            healed_sql.contains("customer_id_raw") && healed_sql.contains("email_raw"),
+            "expected wildcard auto-heal to expand final SELECT columns, got: {}",
+            healed_sql
+        );
+        let healed_ds = res
+            .get("auto_healed_wildcard_sql_dataset_ids")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            healed_ds
+                .iter()
+                .any(|v| v.as_str() == Some("AwsDataCatalog.test_raw.raw_customers"))
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_next_cleanse_schema_batch_stops_when_local_failure_budget_exhausted() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
+            replies: Mutex::new(vec![]),
+        });
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 2,
+            thread_id: Some("tid_lock".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(react_core::agent::DefaultPolicy),
+            llm,
+            storage: storage.clone(),
+            scope: scope.clone(),
+            keyspace,
+            query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            exec_ctx: None,
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+        };
+
+        let plan_key = plan::new_cleanse_plan_key(&ctx);
+        let mut checklist = plan::canonical_task_checklist(true);
+        if let Some(item) = checklist
+            .iter_mut()
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SQL_MODEL)
+        {
+            item.status = plan::ChecklistItemStatus::Done;
+        }
+        let batches = vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]];
+        let mut progress = plan::PlanProgress::default();
+        progress.consecutive_batch_failures = retry_budget::MAX_CONSECUTIVE_BATCH_FAILURES;
+        let p = plan::CleansePlan {
+            plan_key,
+            status: plan::PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![plan::CleanseTask {
+                dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
+                expected_model_path: Some(
+                    "models/staging/stg_test_raw_raw_customers.sql".to_string(),
+                ),
+                invariants: vec![],
+                implementation_spec: plan::CleanseImplementationSpec {
+                    spec_version: 1,
+                    row_preserving: true,
+                    output_fields: vec![plan::OutputFieldSpec {
+                        name: "customer_id_raw".to_string(),
+                        kind: plan::FieldKind::Raw,
+                        source_columns: vec!["customer_id".to_string()],
+                        expression: "customer_id as customer_id_raw (raw)".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    prohibited_ops: vec![],
+                },
+                status: plan::TaskStatus::InProgress,
+                checklist,
+            }],
+            batches: batches.clone(),
+            work_groups: plan::canonical_work_groups_from_batches(&batches, "cleanse"),
+            mutations: vec![],
+            progress,
+        };
+        plan::save_cleanse_plan(&ctx, &p).await.unwrap();
+
+        let tool = ApplyNextCleanseSchemaBatchTool { datasets: None };
+        let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
+        assert_eq!(res.get("kind").and_then(|v| v.as_str()), Some("batch_locked"));
+        assert_eq!(
+            res.get("attempted_dataset_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(0)
+        );
     }
 
     #[tokio::test]

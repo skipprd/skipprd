@@ -209,6 +209,16 @@ pub enum RunOutcome {
     },
 }
 
+pub enum RunOutcomeNonInteractive {
+    Final {
+        thread_id: String,
+        result: ThreadResult,
+    },
+    StepBoundary {
+        thread_id: String,
+    },
+}
+
 pub enum Interrupt {
     AwaitUser { prompt: String },
     AwaitApproval { prompt: String },
@@ -319,6 +329,69 @@ impl AgentPolicy for DefaultPolicy {
             thread_id: thread_id.to_string(),
             result,
         }))
+    }
+}
+
+/// Adapter policy for strict non-interactive runs.
+///
+/// It preserves all policy behavior except interactive interrupts/fallbacks.
+/// This lets suites reuse existing policies while hard-cutting `AwaitUser`/`AwaitApproval`.
+struct NonInteractivePolicyAdapter {
+    inner: Arc<dyn AgentPolicy>,
+}
+
+#[async_trait]
+impl AgentPolicy for NonInteractivePolicyAdapter {
+    fn prelude_lines(
+        &self,
+        ctx: &AgentCtx,
+        store: Option<&ThreadStore>,
+        thread_id: &str,
+    ) -> Vec<String> {
+        self.inner.prelude_lines(ctx, store, thread_id)
+    }
+
+    fn interrupt_for_action(
+        &self,
+        _action_name: &str,
+        _args: &Value,
+        _obs: &Value,
+    ) -> Option<Interrupt> {
+        // Hard cutover: non-interactive runs never emit interactive interrupts.
+        None
+    }
+
+    fn timeout_for_tool(&self, action_name: &str) -> Option<u64> {
+        self.inner.timeout_for_tool(action_name)
+    }
+
+    async fn handle_final(
+        &self,
+        tools: &ToolRegistry,
+        ctx: &AgentCtx,
+        transcript: &mut Vec<String>,
+        store: Option<&ThreadStore>,
+        thread_id: &str,
+        final_env: &FinalEnvelope,
+    ) -> Result<Option<RunOutcome>, String> {
+        self.inner
+            .handle_final(tools, ctx, transcript, store, thread_id, final_env)
+            .await
+    }
+
+    async fn fallback(
+        &self,
+        tools: &ToolRegistry,
+        ctx: &AgentCtx,
+        transcript: &mut Vec<String>,
+        store: Option<&ThreadStore>,
+        thread_id: &str,
+    ) -> Result<RunOutcome, String> {
+        // Keep underlying fallback semantics; run_until_block_non_interactive maps
+        // step-budget AwaitUser fallbacks to a typed StepBoundary handoff.
+        self.inner
+            .fallback(tools, ctx, transcript, store, thread_id)
+            .await
     }
 }
 
@@ -854,6 +927,51 @@ impl Agent {
                 return format!("{}\n{}", transcript.join("\n"), output_contract_line);
             }
             transcript.pop();
+        }
+    }
+
+    pub async fn run_until_block_non_interactive(
+        tools: &ToolRegistry,
+        ctx: &AgentCtx,
+        system_prompt: &str,
+        tools_card: &str,
+        question: &str,
+        llm_options: LlmCallOptions,
+    ) -> Result<RunOutcomeNonInteractive, String> {
+        let mut non_interactive_ctx = ctx.clone();
+        non_interactive_ctx.policy = Arc::new(NonInteractivePolicyAdapter {
+            inner: ctx.policy.clone(),
+        });
+        match Self::run_until_block(
+            tools,
+            &non_interactive_ctx,
+            system_prompt,
+            tools_card,
+            question,
+            llm_options,
+        )
+        .await?
+        {
+            RunOutcome::Final { thread_id, result } => {
+                Ok(RunOutcomeNonInteractive::Final { thread_id, result })
+            }
+            RunOutcome::AwaitUser { thread_id, prompt } => {
+                // Non-interactive single-step runs can hit policy fallback at step boundaries.
+                // Treat this specific fallback as a deterministic handoff back to the outer controller.
+                if prompt
+                    .starts_with("Agent reached step limit without producing a valid final.")
+                {
+                    return Ok(RunOutcomeNonInteractive::StepBoundary { thread_id });
+                }
+                Err(format!(
+                    "non_interactive_contract_violation: received AwaitUser outcome in non-interactive mode: {}",
+                    prompt
+                ))
+            }
+            RunOutcome::AwaitApproval { prompt, .. } => Err(format!(
+                "non_interactive_contract_violation: received AwaitApproval outcome in non-interactive mode: {}",
+                prompt
+            )),
         }
     }
 
@@ -1788,6 +1906,173 @@ mod tests {
                 assert_eq!(result.kind, "generic");
             }
             _ => panic!("expected final outcome"),
+        }
+    }
+
+    struct InterruptOnNoopPolicy;
+
+    #[async_trait]
+    impl AgentPolicy for InterruptOnNoopPolicy {
+        fn interrupt_for_action(
+            &self,
+            action_name: &str,
+            _args: &Value,
+            _obs: &Value,
+        ) -> Option<Interrupt> {
+            if action_name == "noop" {
+                return Some(Interrupt::AwaitUser {
+                    prompt: "need input".to_string(),
+                });
+            }
+            None
+        }
+
+        async fn handle_final(
+            &self,
+            tools: &ToolRegistry,
+            ctx: &AgentCtx,
+            transcript: &mut Vec<String>,
+            store: Option<&ThreadStore>,
+            thread_id: &str,
+            final_env: &FinalEnvelope,
+        ) -> Result<Option<RunOutcome>, String> {
+            DefaultPolicy
+                .handle_final(tools, ctx, transcript, store, thread_id, final_env)
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn run_until_block_non_interactive_suppresses_policy_interrupts() {
+        let llm = Arc::new(ScriptedModel {
+            replies: Arc::new(Mutex::new(vec![
+                "{\"type\":\"tool\",\"name\":\"noop\",\"args\":\"{}\",\"final\":null}".to_string(),
+                "{\"type\":\"final\",\"name\":null,\"args\":null,\"final\":{\"kind\":\"generic\",\"payload\":\"{\\\"text\\\":\\\"ok\\\"}\",\"display\":null}}".to_string(),
+            ])),
+        });
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let mut reg = ToolRegistry::new();
+        reg.register(NoopTool);
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 3,
+            thread_id: Some("tid".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(InterruptOnNoopPolicy),
+            llm,
+            storage,
+            scope,
+            keyspace,
+            query: None,
+            warehouse: Arc::new(NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            exec_ctx: None,
+            runtime: None,
+        };
+
+        let out = Agent::run_until_block_non_interactive(
+            &reg,
+            &ctx,
+            "sys",
+            "tools",
+            "q",
+            crate::llm::LlmCallOptions {
+                prompt_id: "react_core.agent.tests.non_interactive_interrupt_suppressed",
+                thread_id: None,
+                expected_format: crate::llm::LlmExpectedFormat::JsonObject,
+                max_output_tokens: None,
+                temperature: None,
+                top_p: None,
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .expect("non-interactive run should finish without AwaitUser");
+
+        match out {
+            RunOutcomeNonInteractive::Final { result, .. } => {
+                assert_eq!(result.kind, "generic");
+            }
+            RunOutcomeNonInteractive::StepBoundary { .. } => {
+                panic!("unexpected StepBoundary for interrupt-suppression test");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_until_block_non_interactive_returns_step_boundary_on_step_budget_exhaustion() {
+        let llm = Arc::new(ScriptedModel {
+            replies: Arc::new(Mutex::new(vec![
+                "{\"type\":\"tool\",\"name\":\"noop\",\"args\":\"{}\",\"final\":null}".to_string(),
+            ])),
+        });
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let mut reg = ToolRegistry::new();
+        reg.register(NoopTool);
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 1,
+            thread_id: Some("tid".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(DefaultPolicy),
+            llm,
+            storage,
+            scope,
+            keyspace,
+            query: None,
+            warehouse: Arc::new(NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            exec_ctx: None,
+            runtime: None,
+        };
+
+        let out = Agent::run_until_block_non_interactive(
+            &reg,
+            &ctx,
+            "sys",
+            "tools",
+            "q",
+            crate::llm::LlmCallOptions {
+                prompt_id: "react_core.agent.tests.non_interactive_budget_exhausted",
+                thread_id: None,
+                expected_format: crate::llm::LlmExpectedFormat::JsonObject,
+                max_output_tokens: None,
+                temperature: None,
+                top_p: None,
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .expect("non-interactive runner should return StepBoundary on step cap");
+        match out {
+            RunOutcomeNonInteractive::StepBoundary { thread_id } => {
+                assert_eq!(thread_id, "tid".to_string());
+            }
+            other => panic!("expected StepBoundary, got unexpected outcome: {:?}", std::mem::discriminant(&other)),
         }
     }
 }

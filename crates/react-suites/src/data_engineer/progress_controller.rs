@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use react_core::control_flow::PhaseReasonCode;
 use react_core::session::{ThreadLog, ThreadStore};
 
 use crate::data_engineer::control_flow::{self, Phase};
@@ -26,7 +27,7 @@ pub struct LastValidateState {
     #[serde(default)]
     pub failed_models: Vec<Value>,
     #[serde(default)]
-    pub failure_class: Option<String>,
+    pub failure_class: Option<FailureClass>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -81,7 +82,16 @@ pub struct RepairTarget {
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
-    pub error_class: Option<String>,
+    pub error_class: Option<FailureClass>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureClass {
+    WarehouseConfig,
+    SqlOrRuntime,
+    SchemaOrPrecheck,
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -104,9 +114,9 @@ pub struct ProgressDelta {
 pub struct ExecutionState {
     pub schema_version: u32,
     #[serde(default)]
-    pub current_phase: Option<String>,
+    pub current_phase: Option<Phase>,
     #[serde(default)]
-    pub phase_reason_code: Option<String>,
+    pub phase_reason_code: Option<PhaseReasonCode>,
     #[serde(default)]
     pub replan_backtracks: usize,
     #[serde(default)]
@@ -142,7 +152,7 @@ pub struct ExecutionState {
     #[serde(default)]
     pub last_error_brief: Option<String>,
     #[serde(default)]
-    pub last_error_class: Option<String>,
+    pub last_error_class: Option<FailureClass>,
     #[serde(default)]
     pub last_failed_models: Vec<Value>,
     #[serde(default)]
@@ -222,6 +232,7 @@ impl ExecutionState {
     pub fn apply_validate_failure(
         &mut self,
         tier: ExecutionTier,
+        failure_class: FailureClass,
         error_fingerprint: String,
         backlog: Vec<RepairTarget>,
         brief: Option<String>,
@@ -248,7 +259,7 @@ impl ExecutionState {
                     })
                 })
                 .collect(),
-            failure_class: None,
+            failure_class: Some(failure_class),
             ..LastValidateState::default()
         });
         self.last_validate_ok = Some(false);
@@ -265,7 +276,7 @@ impl ExecutionState {
         self.attempt_count = 0;
         self.consecutive_noop_patches = 0;
         self.last_error_brief = brief;
-        self.last_error_class = Some(error_fingerprint.clone());
+        self.last_error_class = Some(failure_class);
         self.last_failed_models = self
             .repair_backlog
             .iter()
@@ -358,31 +369,6 @@ fn obs_like_bool(
     pick: impl FnOnce(&LastValidateState) -> Option<bool>,
 ) -> Option<bool> {
     from.as_ref().and_then(pick)
-}
-
-pub fn error_fingerprint_from_validate_obs(obs: &Value) -> String {
-    let errs = obs
-        .get("errors")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty())
-                .take(8)
-                .collect::<Vec<_>>()
-                .join(" | ")
-        })
-        .unwrap_or_default();
-    let class = if obs.get("compile_ok").and_then(|v| v.as_bool()).unwrap_or(false)
-        && !obs.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false)
-    {
-        "runtime"
-    } else if !obs.get("compile_ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        "compile"
-    } else {
-        "unknown"
-    };
-    format!("{}::{}", class, errs)
 }
 
 pub fn repair_backlog_from_failed_models(failing_models: &[Value]) -> Vec<RepairTarget> {

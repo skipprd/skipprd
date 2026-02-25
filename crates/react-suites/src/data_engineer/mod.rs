@@ -6,7 +6,9 @@ use crate::data_engineer_shared::types::DatasetCandidate;
 use crate::flow_frame::FlowFrame;
 use crate::preflight::PreflightProvider;
 use crate::suite::{Suite, SuiteCtx};
-use react_core::agent::{Agent, AgentCtx, AgentPolicy, Interrupt, RunOutcome};
+use react_core::agent::{
+    Agent, AgentCtx, AgentPolicy, Interrupt, RunOutcome, RunOutcomeNonInteractive,
+};
 use react_core::control_flow::{
     GuardBlockKind, PhaseReasonCode, ReviewDecision, ReviewDecisionMeta, ReviewTier,
 };
@@ -15,14 +17,17 @@ use react_core::session::ThreadStore;
 use react_core::tools::{Tool, ToolRegistry};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+use crate::data_engineer::failure_classifier::ValidateFailureClass;
 
 pub struct DataEngineerSuite;
 
+pub mod controller_event;
 pub mod control_flow;
 pub mod dataset_truth;
 pub mod dbt_error;
 pub mod dbt_repair;
 pub mod facts;
+pub mod failure_classifier;
 pub mod naming;
 pub mod patch_contract;
 pub mod patch_protocol;
@@ -33,64 +38,10 @@ pub mod project_fs;
 pub mod prompt_packets;
 pub mod prompts;
 mod review_batched;
+pub mod retry_budget;
 pub mod schema_policy;
 pub mod sql_first;
 pub mod tools;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ValidateFailureClass {
-    SqlOrRuntime,
-    SchemaOrPrecheck,
-    Unknown,
-}
-
-fn classify_validate_failure(
-    entered_from_precheck_failed: bool,
-    last_validate_brief: Option<&str>,
-    last_guard_reason: Option<&str>,
-) -> ValidateFailureClass {
-    if entered_from_precheck_failed {
-        return ValidateFailureClass::SchemaOrPrecheck;
-    }
-    let mut hay = String::new();
-    if let Some(b) = last_validate_brief {
-        hay.push_str(b);
-        hay.push('\n');
-    }
-    if let Some(r) = last_guard_reason {
-        hay.push_str(r);
-    }
-    let t = hay.to_ascii_lowercase();
-    // Schema/precheck-style failures.
-    if t.contains("precheck_failed")
-        || t.contains("schema.yml")
-        || t.contains(".yml")
-        || t.contains(".yaml")
-        || t.contains("yaml")
-        || t.contains("schema contract")
-        || t.contains("duplicate definition")
-        || t.contains("duplicate definitions")
-    {
-        return ValidateFailureClass::SchemaOrPrecheck;
-    }
-    // SQL compile/runtime-style failures.
-    if t.contains("compilation error")
-        || t.contains("database error")
-        || t.contains("runtime error")
-        || t.contains("column_not_found")
-        || t.contains("unresolved column")
-        || t.contains("syntax error")
-        || t.contains("parse error")
-    {
-        return ValidateFailureClass::SqlOrRuntime;
-    }
-    if t.trim().is_empty() {
-        ValidateFailureClass::Unknown
-    } else {
-        // Default to SQL/runtime: when dbt fails, prefer fixing the failing SQL targets before new work.
-        ValidateFailureClass::SqlOrRuntime
-    }
-}
 
 fn primary_failed_model_file(last_validate_failed_models: &[serde_json::Value]) -> Option<String> {
     last_validate_failed_models
@@ -116,7 +67,7 @@ Reason:\n\
 - total_batch_failures = {total}\n\n\
 Plan:\n\
 - plan_key: {plan_key}\n",
-        crate::data_engineer::tools::apply_next_batch::MAX_CONSECUTIVE_BATCH_FAILURES
+        crate::data_engineer::retry_budget::MAX_CONSECUTIVE_BATCH_FAILURES
     ));
     if !next_items.is_empty() {
         s.push_str("\nNext batch items:\n");
@@ -358,22 +309,13 @@ impl DataEngineerSuite {
         lines.join("\n")
     }
 
-    fn subjective_retry_limit() -> usize {
-        std::env::var("AGENT_MAX_SUBJECTIVE_RETRIES")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(2)
-            .max(1)
-            .min(6)
-    }
-
     async fn bump_subjective_retry(
         thread_store: &ThreadStore,
         thread_id: &str,
         phase: control_flow::Phase,
         kind: &str,
     ) -> usize {
-        let cap = Self::subjective_retry_limit().saturating_add(1);
+        let cap = crate::data_engineer::retry_budget::subjective_retry_state_cap();
         let mut st = crate::data_engineer::progress_controller::ExecutionState::load(
             thread_store,
             thread_id,
@@ -4527,8 +4469,16 @@ Apply these fixes in the output.",
             total_steps += 1;
             remaining_steps = remaining_steps.saturating_sub(1);
 
+            let execution_state = crate::data_engineer::progress_controller::ExecutionState::load(
+                &thread_store,
+                thread_id,
+            )
+            .await
+            .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+            let phase = execution_state
+                .current_phase
+                .unwrap_or(control_flow::Phase::Preflight);
             let log = thread_store.get(thread_id).await.ok();
-            let phase = control_flow::phase_from_log(log.as_ref());
             let idx = phase_index(phase);
             if idx > max_phase_idx_seen {
                 max_phase_idx_seen = idx;
@@ -4541,12 +4491,6 @@ Apply these fixes in the output.",
                 Phase::CleansePlan | Phase::ModelPlan => true,
                 _ => Self::allow_ask_approval_in_phase(log.as_ref(), phase),
             };
-            let execution_state = crate::data_engineer::progress_controller::ExecutionState::load(
-                &thread_store,
-                thread_id,
-            )
-            .await
-            .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
             let replan_backtracks = execution_state.replan_backtracks;
             if execution_state.stall_count >= execution_state.max_stall_count
                 && matches!(
@@ -4565,7 +4509,7 @@ Apply these fixes in the output.",
             }
             if replan_backtracks >= max_replan_backtracks {
                 let stop_msg = format!(
-                    "failed to make progress for this thread: observed {} validate/review loopback(s) to plan/author in phase track '{}' (limit {}). Stopping this thread. Please inspect the latest validate/review errors and apply a targeted fix before rerunning.",
+                    "failed to make progress for this thread: observed {} validate/review loopback(s) to plan/author in active track '{}' since the last successful dbt_validate (limit {}). Stopping this thread. Please inspect the latest validate/review errors and apply a targeted fix before rerunning.",
                     replan_backtracks,
                     phase.as_str(),
                     max_replan_backtracks
@@ -5389,7 +5333,7 @@ Apply these fixes in the output.",
                             None,
                         )
                     };
-                    match Agent::run_until_block(
+                    match Agent::run_until_block_non_interactive(
                         &registry,
                         &actx,
                         &sys,
@@ -5399,7 +5343,7 @@ Apply these fixes in the output.",
                     )
                     .await
                     {
-                        Ok(RunOutcome::Final {
+                        Ok(RunOutcomeNonInteractive::Final {
                             thread_id: _tid,
                             result: _result,
                         }) => {
@@ -5550,7 +5494,9 @@ Apply these fixes in the output.",
                                         "plan_grounding_missing_discovery",
                                     )
                                     .await;
-                                    if tries > Self::subjective_retry_limit() {
+                                    if tries
+                                        > crate::data_engineer::retry_budget::subjective_retry_limit()
+                                    {
                                         return Err(format!(
                                             "plan_grounding_not_converged_after_retries: tries={}, file_seen={}, sql_schema_seen={}, evidence_seen={}",
                                             tries, saw_dbt_files, saw_sql_schema, saw_evidence
@@ -5609,7 +5555,9 @@ Apply these fixes in the output.",
                                             "plan_json_invalid",
                                         )
                                         .await;
-                                        if tries > Self::subjective_retry_limit() {
+                                        if tries
+                                            > crate::data_engineer::retry_budget::subjective_retry_limit()
+                                        {
                                             return Err(format!(
                                                 "plan_json_invalid_after_retries: tries={}, error={}",
                                                 tries, e
@@ -5871,7 +5819,9 @@ Apply these fixes in the output.",
                                         "plan_semantic_invalid",
                                     )
                                     .await;
-                                    if tries > Self::subjective_retry_limit() {
+                                    if tries
+                                        > crate::data_engineer::retry_budget::subjective_retry_limit()
+                                    {
                                         return Err(format!(
                                             "plan_semantic_validation_not_converged_after_retries: tries={}, errors={}",
                                             tries,
@@ -5985,7 +5935,9 @@ Apply these fixes in the output.",
                                             "plan_json_invalid",
                                         )
                                         .await;
-                                        if tries > Self::subjective_retry_limit() {
+                                        if tries
+                                            > crate::data_engineer::retry_budget::subjective_retry_limit()
+                                        {
                                             return Err(format!(
                                                 "plan_json_invalid_after_retries: tries={}, error={}",
                                                 tries, e
@@ -6120,7 +6072,9 @@ Apply these fixes in the output.",
                                         "plan_grounding_empty_after_prune",
                                     )
                                     .await;
-                                    if tries > Self::subjective_retry_limit() {
+                                    if tries
+                                        > crate::data_engineer::retry_budget::subjective_retry_limit()
+                                    {
                                         return Err("model plan contained no grounded tasks after repeated retries (gold must reference existing silver models under models/staging/)".to_string());
                                     }
                                     continue;
@@ -6214,7 +6168,9 @@ Apply these fixes in the output.",
                                         "plan_semantic_invalid",
                                     )
                                     .await;
-                                    if tries > Self::subjective_retry_limit() {
+                                    if tries
+                                        > crate::data_engineer::retry_budget::subjective_retry_limit()
+                                    {
                                         return Err(format!(
                                             "plan_semantic_validation_not_converged_after_retries: tries={}, errors={}",
                                             tries,
@@ -6290,21 +6246,9 @@ Apply these fixes in the output.",
                                 return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
                             }
                         }
-                        Ok(RunOutcome::AwaitUser {
-                            thread_id: _tid,
-                            prompt,
-                        }) => {
-                            return Err(format!("agent_mode_await_user_forbidden: {}", prompt));
-                        }
-                        Ok(RunOutcome::AwaitApproval {
-                            thread_id: _tid,
-                            prompt,
-                        }) => {
-                            // Planning should not directly request approval via tools; the suite does it.
-                            return Err(format!(
-                                "plan phase requested approval internally, which is not allowed: {}",
-                                prompt
-                            ));
+                        Ok(RunOutcomeNonInteractive::StepBoundary { .. }) => {
+                            // Deterministic single-step handoff: return to outer controller loop.
+                            continue;
                         }
                         Err(e) => return Err(e),
                     }
@@ -6338,7 +6282,7 @@ Apply these fixes in the output.",
                             _ => None,
                         })
                     });
-                    let failure_class = classify_validate_failure(
+                    let failure_class = crate::data_engineer::failure_classifier::classify_validate_failure(
                         entered_from_precheck_failed,
                         last_validate_brief.as_deref(),
                         last_guard_reason,
@@ -6353,7 +6297,7 @@ Apply these fixes in the output.",
                     let mut actx = AgentCtx {
                         top_k: 30,
                         per_step_timeout_secs: 10,
-                        max_steps: 60,
+                        max_steps: 1,
                         thread_id: Some(thread_id.to_string()),
                         progress_tx: None,
                         pre_step_tx: None,
@@ -6478,7 +6422,7 @@ Apply these fixes in the output.",
                             // Hard stop: if plan-batched authoring is locked due to too many consecutive failures,
                             // return control to the user with a single actionable message (do not loop).
                             if plan.progress.consecutive_batch_failures
-                            >= crate::data_engineer::tools::apply_next_batch::MAX_CONSECUTIVE_BATCH_FAILURES
+                            >= crate::data_engineer::retry_budget::MAX_CONSECUTIVE_BATCH_FAILURES
                         {
                             let next =
                                 crate::data_engineer::plan::cleanse_next_authoring_action(&plan)
@@ -6863,7 +6807,7 @@ Apply these fixes in the output.",
                                     .map(|x| x.checklist_item_id.clone()),
                             });
                             if plan.progress.consecutive_batch_failures
-                            >= crate::data_engineer::tools::apply_next_batch::MAX_CONSECUTIVE_BATCH_FAILURES
+                            >= crate::data_engineer::retry_budget::MAX_CONSECUTIVE_BATCH_FAILURES
                         {
                             let next =
                                 crate::data_engineer::plan::model_next_authoring_action(&plan)
@@ -7664,7 +7608,7 @@ Apply these fixes in the output.",
                             reasoning_effort: None,
                         }
                     };
-                    match Agent::run_until_block(
+                    match Agent::run_until_block_non_interactive(
                         &registry,
                         &actx,
                         &sys,
@@ -7674,7 +7618,7 @@ Apply these fixes in the output.",
                     )
                     .await
                     {
-                        Ok(RunOutcome::Final { .. }) => {
+                        Ok(RunOutcomeNonInteractive::Final { .. }) => {
                             // Update plan progress based on newly recorded tool steps.
                             if let Ok(latest) = thread_store.get(thread_id).await {
                                 if is_cleanse {
@@ -7808,11 +7752,9 @@ Apply these fixes in the output.",
                             .await?;
                             continue;
                         }
-                        Ok(RunOutcome::AwaitUser { prompt, .. }) => {
-                            return Err(format!("agent_mode_await_user_forbidden: {}", prompt))
-                        }
-                        Ok(RunOutcome::AwaitApproval { prompt, .. }) => {
-                            return Ok(vec![FlowFrame::AwaitApproval { prompt }])
+                        Ok(RunOutcomeNonInteractive::StepBoundary { .. }) => {
+                            // Deterministic single-step handoff: return to outer controller loop.
+                            continue;
                         }
                         Err(e) => return Err(e),
                     }
@@ -8165,13 +8107,14 @@ Apply these fixes in the output.",
                             .await;
                     }
 
-                    let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let compile_ok = obs
-                        .get("compile_ok")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let run_ok = obs.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                    if ok && compile_ok && run_ok {
+                    let validate_event =
+                        crate::data_engineer::controller_event::validate_event_from_observation(
+                            &obs,
+                        );
+                    if matches!(
+                        validate_event,
+                        crate::data_engineer::controller_event::ControllerEvent::ValidatePassed
+                    ) {
                         // Update canonical execution state (hard-cutover: primary decision source).
                         {
                             let mut es = crate::data_engineer::progress_controller::ExecutionState::load(
@@ -8306,29 +8249,40 @@ Apply these fixes in the output.",
                     }
 
                     // Warehouse config failures require user action.
-                    let errs: Vec<String> = obs
-                        .get("errors")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    let class = dbt_error::classify(&errs);
-                    if matches!(class, dbt_error::DbtErrorClass::WarehouseConfig) {
-                        let brief = dbt_error::compact_brief(&errs, 6, 1400);
+                    let (
+                        failure_class,
+                        fingerprint,
+                        brief,
+                        failing_models,
+                        compile_ok,
+                        run_ok,
+                    ) = match validate_event {
+                        crate::data_engineer::controller_event::ControllerEvent::ValidateFailed {
+                            class,
+                            fingerprint,
+                            brief,
+                            failing_models,
+                            compile_ok,
+                            run_ok,
+                        } => (class, fingerprint, brief, failing_models, compile_ok, run_ok),
+                        crate::data_engineer::controller_event::ControllerEvent::ValidatePassed => {
+                            // Covered by the success branch above.
+                            unreachable!("validate pass should have continued above")
+                        }
+                    };
+                    if matches!(
+                        failure_class,
+                        crate::data_engineer::controller_event::ValidateFailureClass::WarehouseConfig
+                    ) {
                         return Err(format!(
                             "dbt_validate failed due to a warehouse/aws configuration issue: {}",
                             brief
                         ));
                     }
-
-                    // Plan-driven repair: if validation failed, reopen the failing item(s) so authoring
-                    // runs a targeted fix pass instead of bouncing validate<->author with an empty batch.
-                    //
-                    // We infer failing models from dbt stdout lines like:
-                    // `Failure in model <name> (models/.../<name>.sql)`
-                    let failing_models: Vec<serde_json::Value> =
-                        dbt_error::extract_failed_models_from_logs(
-                            &obs.get("logs").cloned().unwrap_or(serde_json::Value::Null),
-                        );
-                    let brief = dbt_error::compact_brief(&errs, 6, 1200);
+                    let errs: Vec<String> = obs
+                        .get("errors")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
 
                     // Update canonical execution state from this validate failure (hard-cutover: primary decision source).
                     {
@@ -8346,11 +8300,24 @@ Apply these fixes in the output.",
                         let backlog = crate::data_engineer::progress_controller::repair_backlog_from_failed_models(
                             &failing_models,
                         );
-                        let fingerprint =
-                            crate::data_engineer::progress_controller::error_fingerprint_from_validate_obs(
-                                &obs,
-                            );
-                        es.apply_validate_failure(tier, fingerprint, backlog, Some(brief.clone()));
+                        let failure_class_state = match failure_class {
+                            crate::data_engineer::controller_event::ValidateFailureClass::WarehouseConfig => {
+                                crate::data_engineer::progress_controller::FailureClass::WarehouseConfig
+                            }
+                            crate::data_engineer::controller_event::ValidateFailureClass::SqlOrRuntime => {
+                                crate::data_engineer::progress_controller::FailureClass::SqlOrRuntime
+                            }
+                            crate::data_engineer::controller_event::ValidateFailureClass::Unknown => {
+                                crate::data_engineer::progress_controller::FailureClass::Unknown
+                            }
+                        };
+                        es.apply_validate_failure(
+                            tier,
+                            failure_class_state,
+                            fingerprint.clone(),
+                            backlog,
+                            Some(brief.clone()),
+                        );
                         if let Some(last) = es.last_validate.as_mut() {
                             last.compile_ok = Some(compile_ok);
                             last.run_ok = Some(run_ok);
@@ -8358,157 +8325,6 @@ Apply these fixes in the output.",
                         es.save(&thread_store, thread_id).await.map_err(|e| {
                             format!("failed to persist execution state after validate failure: {e}")
                         })?;
-                    }
-
-                    // Hard cutover: during deterministic repair, the plan is treated as a frozen reference.
-                    // We do NOT mutate plan task state in response to validate failures; repair is driven by
-                    // (ExecutionState) + single-target file edits instead.
-                    let freeze_plan_during_repair = true;
-                    if !freeze_plan_during_repair && !failing_models.is_empty() {
-                        if phase == Phase::CleanseValidate {
-                            if let Some(mut p) =
-                                crate::data_engineer::plan::load_cleanse_plan(&actx).await
-                            {
-                                let mut reopened: Vec<String> = Vec::new();
-                                let mut want_model_names: Vec<String> = Vec::new();
-                                let mut want_file_stems: Vec<String> = Vec::new();
-                                for fm in failing_models.iter() {
-                                    if let Some(n) = fm.get("name").and_then(|v| v.as_str()) {
-                                        want_model_names.push(n.to_string());
-                                    }
-                                    if let Some(f) = fm.get("file").and_then(|v| v.as_str()) {
-                                        if let Some(stem) = std::path::Path::new(f)
-                                            .file_stem()
-                                            .map(|s| s.to_string_lossy().to_string())
-                                        {
-                                            want_file_stems.push(stem);
-                                        }
-                                    }
-                                }
-                                want_model_names.sort();
-                                want_model_names.dedup();
-                                want_file_stems.sort();
-                                want_file_stems.dedup();
-
-                                for t in p.tasks.iter_mut() {
-                                    let mut expected_name: Option<String> = None;
-                                    if let Some(ref rel) = t.expected_model_path {
-                                        expected_name = std::path::Path::new(rel)
-                                            .file_stem()
-                                            .map(|s| s.to_string_lossy().to_string());
-                                    }
-                                    if expected_name.is_none() {
-                                        let parts: Vec<&str> = t.dataset_id.split('.').collect();
-                                        if parts.len() == 3 {
-                                            expected_name = Some(crate::data_engineer::naming::canonical_staging_model_name(
-                                                parts[1],
-                                                parts[2],
-                                            ));
-                                        }
-                                    }
-                                    let Some(expected) = expected_name else {
-                                        continue;
-                                    };
-                                    if want_model_names.contains(&expected)
-                                        || want_file_stems.contains(&expected)
-                                    {
-                                        // Mark the task as needing attention again. Task status should be derived
-                                        // from checklist items; we only adjust the coarse status here as a hint and
-                                        // store detailed failure context into plan.project_snapshot.
-                                        t.status =
-                                            crate::data_engineer::plan::TaskStatus::InProgress;
-                                        reopened.push(t.dataset_id.clone());
-                                    }
-                                }
-                                reopened.sort();
-                                reopened.dedup();
-                                if !reopened.is_empty() {
-                                    let mut plan_note = format!(
-                                        "validate_fail reopened {} staging task(s): {}",
-                                        reopened.len(),
-                                        reopened.join(", ")
-                                    );
-                                    if !want_model_names.is_empty() {
-                                        plan_note.push_str(&format!(
-                                            "\nFailing model(s): {}",
-                                            want_model_names.join(", ")
-                                        ));
-                                    }
-                                    if p.project_snapshot.is_null() {
-                                        p.project_snapshot = serde_json::json!({});
-                                    }
-                                    if let Some(obj) = p.project_snapshot.as_object_mut() {
-                                        let arr = obj
-                                            .entry("validate_fail_notes")
-                                            .or_insert_with(|| serde_json::Value::Array(vec![]));
-                                        if let Some(a) = arr.as_array_mut() {
-                                            a.push(serde_json::Value::String(plan_note));
-                                            // Keep bounded.
-                                            while a.len() > 10 {
-                                                a.remove(0);
-                                            }
-                                        }
-                                    }
-                                    let _ =
-                                        crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
-                                            .await;
-                                }
-                            }
-                        } else {
-                            // Model (gold) plan: reopen failing model tasks by model name/file stem match.
-                            if let Some(mut p) =
-                                crate::data_engineer::plan::load_model_plan(&actx).await
-                            {
-                                let mut want_names: HashSet<String> = HashSet::new();
-                                for fm in failing_models.iter() {
-                                    if let Some(n) = fm.get("name").and_then(|v| v.as_str()) {
-                                        want_names.insert(n.to_string());
-                                    }
-                                    if let Some(f) = fm.get("file").and_then(|v| v.as_str()) {
-                                        if let Some(stem) = std::path::Path::new(f)
-                                            .file_stem()
-                                            .map(|s| s.to_string_lossy().to_string())
-                                        {
-                                            want_names.insert(stem);
-                                        }
-                                    }
-                                }
-                                let mut reopened: Vec<String> = Vec::new();
-                                for t in p.tasks.iter_mut() {
-                                    let mut expected: Option<String> = None;
-                                    if !t.name.trim().is_empty() {
-                                        expected = Some(t.name.trim().to_string());
-                                    }
-                                    if let Some(ref rel) = t.expected_model_path {
-                                        if let Some(stem) = std::path::Path::new(rel)
-                                            .file_stem()
-                                            .map(|s| s.to_string_lossy().to_string())
-                                        {
-                                            expected = Some(stem);
-                                        }
-                                    }
-                                    let Some(exp) = expected else { continue };
-                                    if want_names.contains(&exp) {
-                                        // Mark the task as needing attention again. Task status should be derived
-                                        // from checklist items; we only adjust the coarse status here as a hint.
-                                        t.status =
-                                            crate::data_engineer::plan::TaskStatus::InProgress;
-                                        reopened.push(t.name.clone());
-                                    }
-                                }
-                                reopened.sort();
-                                reopened.dedup();
-                                if !reopened.is_empty() {
-                                    crate::data_engineer::plan::save_model_plan(&actx, &p)
-                                        .await
-                                        .map_err(|e| {
-                                            format!(
-                                                "failed to persist reopened model tasks after validate failure: {e}"
-                                            )
-                                        })?;
-                                }
-                            }
-                        }
                     }
 
                     // Validation failed -> go back to corresponding author phase.
@@ -8713,7 +8529,8 @@ Apply these fixes in the output.",
                             && patch_impl_streak >= max_review_patch_impl_streak;
                     let forced_by_subjective_retry = Self::review_retry_kind(meta.decision)
                         .is_some()
-                        && review_retry_count > Self::subjective_retry_limit();
+                        && review_retry_count
+                            > crate::data_engineer::retry_budget::subjective_retry_limit();
                     let forced_progress = forced_by_patch_plan_streak
                         || forced_by_patch_impl_streak
                         || forced_by_subjective_retry;
@@ -10594,12 +10411,12 @@ mod tests {
     fn classify_validate_failure_prefers_schema_for_precheck_and_yaml() {
         // Explicit precheck failure should be schema-class.
         assert_eq!(
-            classify_validate_failure(true, None, None),
+            crate::data_engineer::failure_classifier::classify_validate_failure(true, None, None),
             ValidateFailureClass::SchemaOrPrecheck
         );
         // YAML/schema hints should be schema-class.
         assert_eq!(
-            classify_validate_failure(
+            crate::data_engineer::failure_classifier::classify_validate_failure(
                 false,
                 Some("Error in models/schema.yml: duplicate definitions"),
                 None
@@ -10608,7 +10425,7 @@ mod tests {
         );
         // Compilation errors should be SQL/runtime-class.
         assert_eq!(
-            classify_validate_failure(
+            crate::data_engineer::failure_classifier::classify_validate_failure(
                 false,
                 Some("Compilation Error: syntax error near FROM"),
                 None

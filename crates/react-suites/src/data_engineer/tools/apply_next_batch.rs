@@ -10,9 +10,8 @@ use react_core::tools::Tool;
 use crate::data_engineer::dataset_truth;
 use crate::data_engineer::plan;
 use crate::data_engineer::plan::{CleansePlan, ModelPlan};
+use crate::data_engineer::retry_budget;
 use crate::data_engineer::tools;
-
-pub(crate) const MAX_CONSECUTIVE_BATCH_FAILURES: usize = 3;
 
 fn extract_string_arg(args: &Value, key: &str) -> Option<String> {
     args.get(key)
@@ -73,15 +72,6 @@ fn mark_needs_update_model(plan: &mut ModelPlan, names: &[String], note: &str) {
     }
 }
 
-fn update_failure_counters(progress: &mut plan::PlanProgress, ok: bool) {
-    if ok {
-        progress.consecutive_batch_failures = 0;
-        return;
-    }
-    progress.consecutive_batch_failures = progress.consecutive_batch_failures.saturating_add(1);
-    progress.total_batch_failures = progress.total_batch_failures.saturating_add(1);
-}
-
 fn sql_model_checklist_status(items: &[plan::PlanChecklistItem]) -> plan::ChecklistItemStatus {
     items
         .iter()
@@ -126,10 +116,10 @@ impl Tool for ApplyNextCleanseBatchTool {
             }));
         }
 
-        if plan.progress.consecutive_batch_failures >= MAX_CONSECUTIVE_BATCH_FAILURES {
+        if retry_budget::batch_budget(&plan.progress).exhausted() {
             return Ok(serde_json::json!({
                 "ok": false,
-                "errors": ["too many consecutive batch failures; apply a targeted fix (file op=patch) or ask the user for guidance before retrying"],
+                "errors": ["too many consecutive batch failures; apply a targeted mutating fix (file op=patch|rm|mv) before retrying"],
                 "attempted_dataset_ids": [],
                 "succeeded_dataset_ids": [],
                 "failed_dataset_ids": [],
@@ -228,7 +218,7 @@ impl Tool for ApplyNextCleanseBatchTool {
                     &batch,
                     "dataset schema lookup failed; dataset not usable",
                 );
-                update_failure_counters(&mut plan.progress, false);
+                retry_budget::note_batch_result(&mut plan.progress, false);
                 plan::save_cleanse_plan(ctx, &plan)
                     .await
                     .map_err(|e| format!("failed to save cleanse plan after schema gating failure: {e}"))?;
@@ -284,7 +274,7 @@ impl Tool for ApplyNextCleanseBatchTool {
                     &batch,
                     &format!("apply_next_cleanse_batch failed: {}", e.trim()),
                 );
-                update_failure_counters(&mut plan.progress, false);
+                retry_budget::note_batch_result(&mut plan.progress, false);
                 plan::save_cleanse_plan(ctx, &plan)
                     .await
                     .map_err(|e| format!("failed to save cleanse plan after batch tool failure: {e}"))?;
@@ -354,18 +344,18 @@ impl Tool for ApplyNextCleanseBatchTool {
                 }
             }
         }
-        update_failure_counters(&mut plan.progress, ok && failed.is_empty());
+        let budget = retry_budget::note_batch_result(&mut plan.progress, ok && failed.is_empty());
         plan::save_cleanse_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to save cleanse plan after batch reconciliation: {e}"))?;
 
-        if plan.progress.consecutive_batch_failures >= MAX_CONSECUTIVE_BATCH_FAILURES {
+        if budget.exhausted() {
             return Ok(serde_json::json!({
                 "ok": false,
                 "attempted_dataset_ids": attempted,
                 "succeeded_dataset_ids": succeeded,
                 "failed_dataset_ids": failed,
-                "errors": ["too many consecutive batch failures; ask user for guidance or apply targeted file patches before retrying"],
+                "errors": ["too many consecutive batch failures; apply a targeted mutating fix (file op=patch|rm|mv) before retrying"],
             }));
         }
 
@@ -424,10 +414,10 @@ impl Tool for ApplyNextModelBatchTool {
             }));
         }
 
-        if plan.progress.consecutive_batch_failures >= MAX_CONSECUTIVE_BATCH_FAILURES {
+        if retry_budget::batch_budget(&plan.progress).exhausted() {
             return Ok(serde_json::json!({
                 "ok": false,
-                "errors": ["too many consecutive batch failures; apply a targeted fix (file op=patch) or ask the user for guidance before retrying"],
+                "errors": ["too many consecutive batch failures; apply a targeted mutating fix (file op=patch|rm|mv) before retrying"],
                 "attempted_item_names": [],
                 "succeeded_item_names": [],
                 "failed_item_names": [],
@@ -538,7 +528,7 @@ impl Tool for ApplyNextModelBatchTool {
                 &batch_names,
                 "gold inputs are not grounded in existing silver models under models/staging/",
             );
-            update_failure_counters(&mut plan.progress, false);
+            retry_budget::note_batch_result(&mut plan.progress, false);
             plan::save_model_plan(ctx, &plan)
                 .await
                 .map_err(|e| format!("failed to save model plan after input gating failure: {e}"))?;
@@ -602,7 +592,7 @@ impl Tool for ApplyNextModelBatchTool {
                     &batch_names,
                     &format!("apply_next_model_batch failed: {}", e.trim()),
                 );
-                update_failure_counters(&mut plan.progress, false);
+                retry_budget::note_batch_result(&mut plan.progress, false);
                 plan::save_model_plan(ctx, &plan)
                     .await
                     .map_err(|e| format!("failed to save model plan after batch tool failure: {e}"))?;
@@ -667,18 +657,18 @@ impl Tool for ApplyNextModelBatchTool {
             }
         }
 
-        update_failure_counters(&mut plan.progress, ok && failed.is_empty());
+        let budget = retry_budget::note_batch_result(&mut plan.progress, ok && failed.is_empty());
         plan::save_model_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to save model plan after batch reconciliation: {e}"))?;
 
-        if plan.progress.consecutive_batch_failures >= MAX_CONSECUTIVE_BATCH_FAILURES {
+        if budget.exhausted() {
             return Ok(serde_json::json!({
                 "ok": false,
                 "attempted_item_names": batch_names,
                 "succeeded_item_names": succeeded,
                 "failed_item_names": failed,
-                "errors": ["too many consecutive batch failures; ask user for guidance or apply targeted file patches before retrying"],
+                "errors": ["too many consecutive batch failures; apply a targeted mutating fix (file op=patch|rm|mv) before retrying"],
             }));
         }
 

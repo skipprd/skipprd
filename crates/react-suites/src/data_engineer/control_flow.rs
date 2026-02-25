@@ -72,6 +72,65 @@ impl Phase {
     }
 }
 
+fn allowed_next_phases(from: Phase) -> &'static [Phase] {
+    match from {
+        Phase::Preflight => &[Phase::CleansePlan],
+        Phase::CleansePlan => &[Phase::CleansePlan, Phase::CleanseAuthor],
+        Phase::CleanseAuthor => &[Phase::CleanseAuthor, Phase::CleanseValidate, Phase::CleansePlan],
+        Phase::CleanseValidate => &[
+            Phase::CleanseValidate,
+            Phase::CleanseAuthor,
+            Phase::CleanseReview,
+            Phase::CleansePlan,
+        ],
+        Phase::CleanseReview => &[
+            Phase::CleanseReview,
+            Phase::CleansePlan,
+            Phase::CleanseAuthor,
+            Phase::ModelPlan,
+        ],
+        Phase::ModelPlan => &[Phase::ModelPlan, Phase::ModelAuthor],
+        Phase::ModelAuthor => &[Phase::ModelAuthor, Phase::ModelValidate, Phase::ModelPlan],
+        Phase::ModelValidate => &[
+            Phase::ModelValidate,
+            Phase::ModelAuthor,
+            Phase::ModelReview,
+            Phase::ModelPlan,
+        ],
+        Phase::ModelReview => &[
+            Phase::ModelReview,
+            Phase::ModelPlan,
+            Phase::ModelAuthor,
+            Phase::PublishAwaitApproval,
+        ],
+        Phase::PublishAwaitApproval => {
+            &[Phase::PublishAwaitApproval, Phase::Publish, Phase::ModelReview]
+        }
+        Phase::Publish => &[Phase::Publish, Phase::PostPublishReview, Phase::ModelReview],
+        Phase::PostPublishReview => &[
+            Phase::PostPublishReview,
+            Phase::ModelPlan,
+            Phase::ModelAuthor,
+            Phase::PublishAwaitApproval,
+            Phase::Done,
+        ],
+        Phase::Done => &[Phase::Done],
+    }
+}
+
+fn is_annotation_reason(reason_code: Option<PhaseReasonCode>) -> bool {
+    matches!(
+        reason_code,
+        Some(
+            PhaseReasonCode::PhaseSet
+                | PhaseReasonCode::ReviewProjectSummary
+                | PhaseReasonCode::ReviewBatch
+                | PhaseReasonCode::ReviewFinalUnify
+                | PhaseReasonCode::PhaseBlocked
+        )
+    )
+}
+
 pub fn phase_from_log(log: Option<&ThreadLog>) -> Phase {
     let Some(log) = log else {
         return Phase::Preflight;
@@ -149,6 +208,20 @@ pub async fn append_phase_with_reason(
     reason_code: Option<PhaseReasonCode>,
     reason_detail: Option<Value>,
 ) -> Result<(), String> {
+    if let Some(from) = from_phase {
+        let is_same_phase_annotation = from == phase && is_annotation_reason(reason_code);
+        if !is_same_phase_annotation && !allowed_next_phases(from).contains(&phase) {
+            return Err(format!(
+                "invalid_phase_transition: from='{}' to='{}' reason='{}'",
+                from.as_str(),
+                phase.as_str(),
+                reason_code
+                    .map(|c| c.as_str().to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            ));
+        }
+    }
+
     let agent = agent.unwrap_or_else(|| "unknown".to_string());
     store
         .append_step(
@@ -170,22 +243,31 @@ pub async fn append_phase_with_reason(
     let mut st = ExecutionState::load(store, thread_id)
         .await
         .unwrap_or_else(ExecutionState::new);
-    let next = phase.as_str().to_string();
-    let prev = from_phase.map(|p| p.as_str().to_string());
-    if let Some(ref p) = prev {
-        let p_l = p.to_ascii_lowercase();
-        let n_l = next.to_ascii_lowercase();
-        let from_is_reviewish = p_l.contains("validate") || p_l.contains("review");
-        let to_is_plan_or_author = n_l.contains("plan") || n_l.contains("author");
-        if from_is_reviewish && to_is_plan_or_author {
+    if let Some(from) = from_phase {
+        let is_backtrack =
+            is_cleanse_replan_backtrack(from, phase) || is_model_replan_backtrack(from, phase);
+        if is_backtrack {
             st.replan_backtracks = st
                 .replan_backtracks
                 .saturating_add(1)
                 .min(replan_backtrack_counter_cap());
+        } else if phase == Phase::Done
+            || matches!(
+                reason_code,
+                Some(
+                    PhaseReasonCode::ValidatePass
+                        | PhaseReasonCode::PlanTasksDone
+                        | PhaseReasonCode::NoWorkAllDone
+                        | PhaseReasonCode::PublishSuccess
+                        | PhaseReasonCode::PublishConfirmedSuccess
+                )
+            )
+        {
+            st.replan_backtracks = 0;
         }
     }
-    st.current_phase = Some(next);
-    st.phase_reason_code = reason_code.map(|c| format!("{:?}", c));
+    st.current_phase = Some(phase);
+    st.phase_reason_code = reason_code;
     st.save(store, thread_id).await?;
 
     Ok(())
@@ -2013,7 +2095,7 @@ mod tests {
             "tid",
             Some("agent".to_string()),
             Some(Phase::Preflight),
-            Phase::CleanseAuthor,
+            Phase::CleansePlan,
             Some(PhaseReasonCode::PreflightOk),
             Some(serde_json::json!({"x": 1, "nested": {"y": "z"}})),
         )
@@ -2032,7 +2114,7 @@ mod tests {
         else {
             panic!("expected Phase step");
         };
-        assert_eq!(phase.as_str(), "cleanse_author");
+        assert_eq!(phase.as_str(), "cleanse_plan");
         assert_eq!(from_phase.as_deref(), Some("preflight"));
         assert_eq!(reason_code, &Some(PhaseReasonCode::PreflightOk));
         let rd = reason_detail.as_ref().expect("reason_detail should exist");
