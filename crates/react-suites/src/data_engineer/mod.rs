@@ -37,6 +37,7 @@ pub mod project_files;
 pub mod project_fs;
 pub mod prompt_packets;
 pub mod prompts;
+pub mod references;
 mod review_batched;
 pub mod retry_budget;
 pub mod schema_policy;
@@ -249,6 +250,41 @@ enum ManifestLookupPathKind {
     NonCanonical,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum AgentMode {
+    Ask,
+    Model,
+    Cleanse,
+    Review,
+    Agent,
+}
+
+impl AgentMode {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "ask" => Ok(Self::Ask),
+            "model" => Ok(Self::Model),
+            "cleanse" => Ok(Self::Cleanse),
+            "review" => Ok(Self::Review),
+            "agent" => Ok(Self::Agent),
+            _ => Err(format!(
+                "invalid agent_type '{}' for suite 'data_engineer' (expected 'ask' | 'model' | 'cleanse' | 'review' | 'agent')",
+                raw
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Model => "model",
+            Self::Cleanse => "cleanse",
+            Self::Review => "review",
+            Self::Agent => "agent",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct ManifestLookupRetrySignal {
     fallback_mode: bool,
@@ -271,7 +307,7 @@ impl DataEngineerSuite {
     }
 
     fn enforce_non_interactive_contract(
-        agent_type: &str,
+        agent_mode: AgentMode,
         frames: Vec<FlowFrame>,
     ) -> Result<Vec<FlowFrame>, String> {
         let await_user_prompt = frames.iter().find_map(|f| match f {
@@ -279,7 +315,7 @@ impl DataEngineerSuite {
             _ => None,
         });
         if let Some(prompt) = await_user_prompt {
-            if agent_type == "agent" {
+            if agent_mode == AgentMode::Agent {
                 return Err(format!("agent_mode_await_user_forbidden: {}", prompt));
             }
             if Self::headless_mode_enabled() {
@@ -715,12 +751,11 @@ impl DataEngineerSuite {
     }
 
     fn is_raw_dataset_id(dataset_id: &str) -> bool {
-        let parts: Vec<&str> = dataset_id.trim().split('.').collect();
-        if parts.len() != 3 {
+        let Some(ds) = crate::data_engineer::references::DatasetRef::parse(dataset_id) else {
             return false;
-        }
-        let schema = parts[1].trim().to_ascii_lowercase();
-        let table = parts[2].trim().to_ascii_lowercase();
+        };
+        let schema = ds.schema.to_ascii_lowercase();
+        let table = ds.table.to_ascii_lowercase();
         schema.contains("raw") || table.starts_with("raw_")
     }
 
@@ -2778,19 +2813,48 @@ Apply these fixes in the output.",
     }
 
     fn is_mutation_step_for_review(step: &react_core::session::ThreadStep) -> bool {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum ReviewMutationTool {
+            ApproveAndSaveArtifact,
+            ApproveAndSaveArtifactBatch,
+            StagingModel,
+            File,
+            Other,
+        }
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum FileOpKind {
+            Put,
+            Other,
+        }
+        fn parse_review_mutation_tool(name: &str) -> ReviewMutationTool {
+            match name {
+                "approve_and_save_artifact" => ReviewMutationTool::ApproveAndSaveArtifact,
+                "approve_and_save_artifact_batch" => ReviewMutationTool::ApproveAndSaveArtifactBatch,
+                "staging_model" => ReviewMutationTool::StagingModel,
+                "file" => ReviewMutationTool::File,
+                _ => ReviewMutationTool::Other,
+            }
+        }
+        fn parse_file_op_kind(args: &serde_json::Value) -> Option<FileOpKind> {
+            match args.get("op").and_then(|v| v.as_str()) {
+                Some("put") => Some(FileOpKind::Put),
+                Some(_) => Some(FileOpKind::Other),
+                None => None,
+            }
+        }
         match step {
             react_core::session::ThreadStep::ArtifactSaved { .. } => true,
-            react_core::session::ThreadStep::ToolEnd { name, args, .. } => match name.as_str() {
-                "approve_and_save_artifact"
-                | "approve_and_save_artifact_batch"
-                | "staging_model" => true,
-                "file" => args
-                    .get("op")
-                    .and_then(|v| v.as_str())
-                    .map(|op| op == "put")
-                    .unwrap_or(false),
-                _ => false,
-            },
+            react_core::session::ThreadStep::ToolEnd { name, args, .. } => {
+                match parse_review_mutation_tool(name.as_str()) {
+                    ReviewMutationTool::ApproveAndSaveArtifact
+                    | ReviewMutationTool::ApproveAndSaveArtifactBatch
+                    | ReviewMutationTool::StagingModel => true,
+                    ReviewMutationTool::File => {
+                        matches!(parse_file_op_kind(args), Some(FileOpKind::Put))
+                    }
+                    ReviewMutationTool::Other => false,
+                }
+            }
             _ => false,
         }
     }
@@ -2829,6 +2893,11 @@ Apply these fixes in the output.",
                 let args_v = match name.as_str() {
                     "file" => serde_json::json!({
                         "op": args.get("op"),
+                        "op_kind": match args.get("op").and_then(|v| v.as_str()) {
+                            Some("put") => "put",
+                            Some(_) => "other",
+                            None => "missing",
+                        },
                         "path": args.get("path"),
                     }),
                     "approve_and_save_artifact" => serde_json::json!({
@@ -3002,14 +3071,8 @@ Apply these fixes in the output.",
         base
     }
 
-    fn validate_agent_type(agent_type: &str) -> Result<(), String> {
-        match agent_type {
-            "ask" | "model" | "cleanse" | "review" | "agent" => Ok(()),
-            _ => Err(format!(
-                "invalid agent_type '{}' for suite 'data_engineer' (expected 'ask' | 'model' | 'cleanse' | 'review' | 'agent')",
-                agent_type
-            )),
-        }
+    fn validate_agent_type(agent_type: &str) -> Result<AgentMode, String> {
+        AgentMode::parse(agent_type)
     }
 
     fn inject_review_question(question: &str) -> String {
@@ -3024,7 +3087,7 @@ Apply these fixes in the output.",
         crate::prompts::shared::user_goal_line("Cleansing goal:", question)
     }
 
-    fn build_tools(agent_type: &str, sctx: &SuiteCtx) -> Result<ToolRegistry, String> {
+    fn build_tools(agent_mode: AgentMode, sctx: &SuiteCtx) -> Result<ToolRegistry, String> {
         use crate::data_engineer::tools::{
             artifacts::ArtifactsTool, dbt_files::DbtFilesTool, sql_run::SqlRunTool,
             sql_sample::SqlSampleTool, sql_schema::SqlSchemaTool, sql_stats::SqlStatsTool,
@@ -3098,9 +3161,9 @@ Apply these fixes in the output.",
         registry.register(VectQueryTool);
 
         let allow_user_interrupt_tools = !Self::headless_mode_enabled();
-        match agent_type {
+        match agent_mode {
             // review uses read-only tools only
-            "review" => {
+            AgentMode::Review => {
                 // Allow review to read the current dbt project state (manifest/schema/models)
                 // without permitting writes.
                 struct ReadOnlyDbtFilesTool {
@@ -3133,7 +3196,7 @@ Apply these fixes in the output.",
                 registry.register(ArtifactsTool);
             }
             // cleanse uses shared tools + authoring/validation/publish loop
-            "cleanse" => {
+            AgentMode::Cleanse => {
                 registry.register(SqlRunTool {
                     query: query.clone(),
                 });
@@ -3163,7 +3226,7 @@ Apply these fixes in the output.",
                 registry.register(ArtifactsTool);
             }
             // ask uses shared tools + user/approval interrupts + artifacts
-            "ask" => {
+            AgentMode::Ask => {
                 registry.register(SqlRunTool {
                     query: query.clone(),
                 });
@@ -3177,7 +3240,7 @@ Apply these fixes in the output.",
                 registry.register(ArtifactsTool);
             }
             // model uses ask tools + artifact authoring + dbt helpers + artifacts
-            _ => {
+            AgentMode::Model | AgentMode::Agent => {
                 registry.register(SqlRunTool {
                     query: query.clone(),
                 });
@@ -3212,10 +3275,10 @@ Apply these fixes in the output.",
         Ok(registry)
     }
 
-    fn build_tools_card_for_agent_type(agent_type: &str) -> String {
+    fn build_tools_card_for_agent_type(agent_mode: AgentMode) -> String {
         let allow_user_interrupt_tools = !Self::headless_mode_enabled();
-        match agent_type {
-            "review" => Self::build_tools_card(
+        match agent_mode {
+            AgentMode::Review => Self::build_tools_card(
                 "Allowed tools (review mode, read-only):",
                 vec![
                     "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int})".to_string(),
@@ -3228,7 +3291,7 @@ Apply these fixes in the output.",
                         .to_string(),
                 ),
             ),
-            "ask" => {
+            AgentMode::Ask => {
                 let mut lines = vec![
                     "- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
                     "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string(),
@@ -3241,7 +3304,7 @@ Apply these fixes in the output.",
                 }
                 Self::build_tools_card("Allowed tools (ask mode):", lines, Vec::new(), None)
             }
-            "cleanse" => {
+            AgentMode::Cleanse => {
                 let mut lines = vec![
                     "- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
                     "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string(),
@@ -3256,7 +3319,7 @@ Apply these fixes in the output.",
                 }
                 Self::build_tools_card("Allowed tools (cleanse mode):", lines, Vec::new(), None)
             }
-            _ => {
+            AgentMode::Model | AgentMode::Agent => {
                 let mut lines = vec![
                     "- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
                     "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string(),
@@ -4130,7 +4193,7 @@ Apply these fixes in the output.",
         sctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
         let sys = crate::util::time_context::with_time_context(prompts::ask_system_prompt());
-        let tools_card = Self::build_tools_card_for_agent_type("ask");
+        let tools_card = Self::build_tools_card_for_agent_type(AgentMode::Ask);
 
         let pf = crate::preflight::CatalogPreflightProvider {
             discovery_limits: crate::preflight::discovery::DiscoveryLimits::default(),
@@ -4138,7 +4201,7 @@ Apply these fixes in the output.",
         };
         let bundle = pf.run(thread_id, question, "ask", sctx).await.discovery;
 
-        let registry = Self::build_tools("ask", sctx)?;
+        let registry = Self::build_tools(AgentMode::Ask, sctx)?;
         let thread_store = ThreadStore::new(
             sctx.storage.clone(),
             sctx.scope.clone(),
@@ -4227,9 +4290,9 @@ Apply these fixes in the output.",
     ) -> Result<Vec<FlowFrame>, String> {
         Self::ensure_catalog_bootstrap_semaphored(thread_id, sctx).await?;
         let sys = crate::util::time_context::with_time_context(prompts::review_system_prompt());
-        let tools_card = Self::build_tools_card_for_agent_type("review");
+        let tools_card = Self::build_tools_card_for_agent_type(AgentMode::Review);
 
-        let registry = Self::build_tools("review", sctx)?;
+        let registry = Self::build_tools(AgentMode::Review, sctx)?;
         let thread_store = ThreadStore::new(
             sctx.storage.clone(),
             sctx.scope.clone(),
@@ -6411,7 +6474,7 @@ Apply these fixes in the output.",
                             let next_item =
                                 crate::data_engineer::plan::cleanse_next_work_item_ctx(&plan);
                             actx.exec_ctx = Some(react_core::session::ExecutionContext {
-                                plan_kind: Some("cleanse".to_string()),
+                                plan_kind: Some(react_core::session::PlanKind::Cleanse),
                                 plan_key: Some(plan.plan_key.clone()),
                                 workgroup_id: next_item.as_ref().map(|x| x.workgroup_id.clone()),
                                 task_id: next_item.as_ref().map(|x| x.task_id.clone()),
@@ -6798,7 +6861,7 @@ Apply these fixes in the output.",
                             let next_item =
                                 crate::data_engineer::plan::model_next_work_item_ctx(&plan);
                             actx.exec_ctx = Some(react_core::session::ExecutionContext {
-                                plan_kind: Some("model".to_string()),
+                                plan_kind: Some(react_core::session::PlanKind::Model),
                                 plan_key: Some(plan.plan_key.clone()),
                                 workgroup_id: next_item.as_ref().map(|x| x.workgroup_id.clone()),
                                 task_id: next_item.as_ref().map(|x| x.task_id.clone()),
@@ -8852,13 +8915,13 @@ Apply these fixes in the output.",
             AuthoringKind::Cleanse => (
                 "cleanse",
                 crate::util::time_context::with_time_context(prompts::cleanse_system_prompt()),
-                Self::build_tools_card_for_agent_type("cleanse"),
+                Self::build_tools_card_for_agent_type(AgentMode::Cleanse),
                 false,
             ),
             AuthoringKind::Model => (
                 "model",
                 crate::util::time_context::with_time_context(prompts::model_system_prompt()),
-                Self::build_tools_card_for_agent_type("model"),
+                Self::build_tools_card_for_agent_type(AgentMode::Model),
                 true,
             ),
         };
@@ -8872,7 +8935,8 @@ Apply these fixes in the output.",
             .await
             .discovery;
 
-        let registry = Self::build_tools(agent_name, sctx)?;
+        let agent_mode = AgentMode::parse(agent_name)?;
+        let registry = Self::build_tools(agent_mode, sctx)?;
         let thread_store = ThreadStore::new(
             sctx.storage.clone(),
             sctx.scope.clone(),
@@ -9131,7 +9195,7 @@ impl Suite for DataEngineerSuite {
 
     fn phase_order(&self, agent_type: &str) -> Vec<String> {
         // Only expose phases for agent-mode; other modes are single-pass.
-        if agent_type != "agent" {
+        if AgentMode::parse(agent_type).ok() != Some(AgentMode::Agent) {
             return Vec::new();
         }
         use crate::data_engineer::control_flow::Phase;
@@ -9162,15 +9226,15 @@ impl Suite for DataEngineerSuite {
         agent_type: &str,
         ctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
-        Self::validate_agent_type(agent_type)?;
-        let frames = match agent_type {
-            "agent" => Self::run_agent(thread_id, question, ctx).await,
-            "model" => Self::run_model(thread_id, question, ctx).await,
-            "cleanse" => Self::run_cleanse(thread_id, question, ctx).await,
-            "review" => Self::run_review(thread_id, question, ctx).await,
-            _ => Self::run_ask(thread_id, question, ctx).await,
+        let agent_mode = Self::validate_agent_type(agent_type)?;
+        let frames = match agent_mode {
+            AgentMode::Agent => Self::run_agent(thread_id, question, ctx).await,
+            AgentMode::Model => Self::run_model(thread_id, question, ctx).await,
+            AgentMode::Cleanse => Self::run_cleanse(thread_id, question, ctx).await,
+            AgentMode::Review => Self::run_review(thread_id, question, ctx).await,
+            AgentMode::Ask => Self::run_ask(thread_id, question, ctx).await,
         }?;
-        Self::enforce_non_interactive_contract(agent_type, frames)
+        Self::enforce_non_interactive_contract(agent_mode, frames)
     }
 
     async fn handle_open(
@@ -9180,15 +9244,15 @@ impl Suite for DataEngineerSuite {
         agent_type: &str,
         ctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
-        Self::validate_agent_type(agent_type)?;
-        let frames = match agent_type {
-            "agent" => Self::run_agent(thread_id, question, ctx).await,
-            "model" => Self::run_model(thread_id, question, ctx).await,
-            "cleanse" => Self::run_cleanse(thread_id, question, ctx).await,
-            "review" => Self::run_review(thread_id, question, ctx).await,
-            _ => Self::run_ask(thread_id, question, ctx).await,
+        let agent_mode = Self::validate_agent_type(agent_type)?;
+        let frames = match agent_mode {
+            AgentMode::Agent => Self::run_agent(thread_id, question, ctx).await,
+            AgentMode::Model => Self::run_model(thread_id, question, ctx).await,
+            AgentMode::Cleanse => Self::run_cleanse(thread_id, question, ctx).await,
+            AgentMode::Review => Self::run_review(thread_id, question, ctx).await,
+            AgentMode::Ask => Self::run_ask(thread_id, question, ctx).await,
         }?;
-        Self::enforce_non_interactive_contract(agent_type, frames)
+        Self::enforce_non_interactive_contract(agent_mode, frames)
     }
 
     async fn handle_user(
@@ -9198,15 +9262,15 @@ impl Suite for DataEngineerSuite {
         agent_type: &str,
         ctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
-        Self::validate_agent_type(agent_type)?;
-        let frames = match agent_type {
-            "agent" => Self::run_agent(thread_id, text, ctx).await,
-            "model" => Self::run_model(thread_id, text, ctx).await,
-            "cleanse" => Self::run_cleanse(thread_id, text, ctx).await,
-            "review" => Self::run_review(thread_id, text, ctx).await,
-            _ => Self::run_ask(thread_id, text, ctx).await,
+        let agent_mode = Self::validate_agent_type(agent_type)?;
+        let frames = match agent_mode {
+            AgentMode::Agent => Self::run_agent(thread_id, text, ctx).await,
+            AgentMode::Model => Self::run_model(thread_id, text, ctx).await,
+            AgentMode::Cleanse => Self::run_cleanse(thread_id, text, ctx).await,
+            AgentMode::Review => Self::run_review(thread_id, text, ctx).await,
+            AgentMode::Ask => Self::run_ask(thread_id, text, ctx).await,
         }?;
-        Self::enforce_non_interactive_contract(agent_type, frames)
+        Self::enforce_non_interactive_contract(agent_mode, frames)
     }
 }
 
@@ -9545,7 +9609,7 @@ mod tests {
         let mut sctx = SuiteCtx::default();
         sctx.query = Some(Arc::new(MockQuery));
 
-        let reg = DataEngineerSuite::build_tools("review", &sctx)
+        let reg = DataEngineerSuite::build_tools(AgentMode::Review, &sctx)
             .expect("build_tools(review) should succeed");
         let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
 
@@ -9842,7 +9906,7 @@ mod tests {
         let frames = vec![FlowFrame::AwaitUser {
             prompt: "x".to_string(),
         }];
-        let err = DataEngineerSuite::enforce_non_interactive_contract("agent", frames)
+        let err = DataEngineerSuite::enforce_non_interactive_contract(AgentMode::Agent, frames)
             .expect_err("agent type must reject AwaitUser");
         assert!(err.contains("agent_mode_await_user_forbidden"));
     }
@@ -9852,7 +9916,7 @@ mod tests {
         let frames = vec![FlowFrame::AwaitUser {
             prompt: "x".to_string(),
         }];
-        let out = DataEngineerSuite::enforce_non_interactive_contract("review", frames)
+        let out = DataEngineerSuite::enforce_non_interactive_contract(AgentMode::Review, frames)
             .expect("non-agent should allow AwaitUser when not headless");
         assert!(matches!(out.first(), Some(FlowFrame::AwaitUser { .. })));
     }

@@ -80,11 +80,18 @@ pub struct ThreadEvent {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionContext {
-    pub plan_kind: Option<String>, // cleanse|model
+    pub plan_kind: Option<PlanKind>,
     pub plan_key: Option<String>,
     pub workgroup_id: Option<String>,
     pub task_id: Option<String>,
     pub checklist_item_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanKind {
+    Cleanse,
+    Model,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -1401,7 +1408,7 @@ mod tests {
     #[test]
     fn tool_timeline_events_embed_execution_ctx() {
         let ctx = ExecutionContext {
-            plan_kind: Some("cleanse".to_string()),
+            plan_kind: Some(PlanKind::Cleanse),
             plan_key: Some("plan_k".to_string()),
             workgroup_id: Some("wg1".to_string()),
             task_id: Some("task1".to_string()),
@@ -1448,8 +1455,8 @@ mod tests {
             .iter()
             .find(|e| e.event_kind == "tool_start")
             .and_then(|e| e.ctx.as_ref())
-            .and_then(|c| c.plan_kind.as_deref());
-        assert_eq!(ev, Some("cleanse"));
+            .and_then(|c| c.plan_kind);
+        assert_eq!(ev, Some(PlanKind::Cleanse));
     }
 
     #[test]

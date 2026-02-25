@@ -216,7 +216,13 @@ pub enum RunOutcomeNonInteractive {
     },
     StepBoundary {
         thread_id: String,
+        reason: StepBoundaryReason,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepBoundaryReason {
+    StepBudgetExhausted,
 }
 
 pub enum Interrupt {
@@ -955,19 +961,15 @@ impl Agent {
             RunOutcome::Final { thread_id, result } => {
                 Ok(RunOutcomeNonInteractive::Final { thread_id, result })
             }
-            RunOutcome::AwaitUser { thread_id, prompt } => {
-                // Non-interactive single-step runs can hit policy fallback at step boundaries.
-                // Treat this specific fallback as a deterministic handoff back to the outer controller.
-                if prompt
-                    .starts_with("Agent reached step limit without producing a valid final.")
-                {
-                    return Ok(RunOutcomeNonInteractive::StepBoundary { thread_id });
-                }
-                Err(format!(
-                    "non_interactive_contract_violation: received AwaitUser outcome in non-interactive mode: {}",
-                    prompt
-                ))
-            }
+            // Non-interactive single-step runs suppress tool interrupts; remaining AwaitUser
+            // outcomes represent deterministic step boundaries (budget exhaustion).
+            RunOutcome::AwaitUser {
+                thread_id,
+                prompt: _,
+            } => Ok(RunOutcomeNonInteractive::StepBoundary {
+                thread_id,
+                reason: StepBoundaryReason::StepBudgetExhausted,
+            }),
             RunOutcome::AwaitApproval { prompt, .. } => Err(format!(
                 "non_interactive_contract_violation: received AwaitApproval outcome in non-interactive mode: {}",
                 prompt
@@ -1867,7 +1869,7 @@ mod tests {
             thread_store: None,
             // Critical: only wrap patch-protocol objects when exec_ctx exists.
             exec_ctx: Some(ExecutionContext {
-                plan_kind: Some("cleanse".to_string()),
+                plan_kind: Some(crate::session::PlanKind::Cleanse),
                 plan_key: Some("k".to_string()),
                 workgroup_id: Some("wg".to_string()),
                 task_id: Some("t".to_string()),
@@ -2069,8 +2071,9 @@ mod tests {
         .await
         .expect("non-interactive runner should return StepBoundary on step cap");
         match out {
-            RunOutcomeNonInteractive::StepBoundary { thread_id } => {
+            RunOutcomeNonInteractive::StepBoundary { thread_id, reason } => {
                 assert_eq!(thread_id, "tid".to_string());
+                assert_eq!(reason, StepBoundaryReason::StepBudgetExhausted);
             }
             other => panic!("expected StepBoundary, got unexpected outcome: {:?}", std::mem::discriminant(&other)),
         }

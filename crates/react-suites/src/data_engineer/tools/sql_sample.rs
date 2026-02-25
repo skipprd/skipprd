@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 
+use crate::data_engineer::references::{ColumnRef, DatasetRef};
 use react_core::agent::AgentCtx;
 use react_core::providers::QueryProvider;
 use react_core::tools::Tool;
@@ -27,6 +28,15 @@ impl Tool for SqlSampleTool {
                 "hint": "Provide args.table as fully-qualified <catalog>.<database>.<table>."
             }));
         }
+        let Some(ds_ref) = DatasetRef::parse(table) else {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error": "probe_policy_invalid_target",
+                "code": "invalid_table_format",
+                "table": table,
+                "hint": "Provide args.table as fully-qualified <catalog>.<database>.<table>."
+            }));
+        };
         if field.trim().is_empty() {
             return Ok(serde_json::json!({
                 "ok": false,
@@ -34,6 +44,15 @@ impl Tool for SqlSampleTool {
                 "code": "missing_field",
                 "table": table,
                 "hint": "sql_sample requires args.field. Call sql_schema(args:{table}) first and pick a field. For row samples use run_sql LIMIT."
+            }));
+        }
+        if ColumnRef::new(ds_ref, field).is_none() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error": "probe_policy_invalid_target",
+                "code": "invalid_field",
+                "table": table,
+                "field": field,
             }));
         }
         match self.query.schema(table).await {

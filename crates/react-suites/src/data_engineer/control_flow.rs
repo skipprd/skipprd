@@ -288,6 +288,22 @@ pub struct DerivedGuardState {
     pub probe_satisfied: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileMutationOp {
+    Patch,
+    Rm,
+    Mv,
+}
+
+fn parse_file_mutation_op(args: &serde_json::Value) -> Option<FileMutationOp> {
+    match args.get("op").and_then(|v| v.as_str()) {
+        Some("patch") => Some(FileMutationOp::Patch),
+        Some("rm") => Some(FileMutationOp::Rm),
+        Some("mv") => Some(FileMutationOp::Mv),
+        _ => None,
+    }
+}
+
 fn is_mutation_step(step: &ThreadStep) -> bool {
     match step {
         ThreadStep::ToolEnd { name, args, .. } => match name.as_str() {
@@ -301,10 +317,7 @@ fn is_mutation_step(step: &ThreadStep) -> bool {
             | "apply_next_model_batch"
             | "apply_next_model_schema_batch" => true,
             "file" => {
-                args.get("op")
-                    .and_then(|v| v.as_str())
-                    .map(|s| matches!(s, "patch" | "rm" | "mv"))
-                    .unwrap_or(false)
+                parse_file_mutation_op(args).is_some()
             }
             _ => false,
         },
@@ -317,7 +330,7 @@ fn is_effective_mutation_step(step: &ThreadStep) -> bool {
         return false;
     }
 
-    let (name, args, observation) = match step {
+    let (name, _args, observation) = match step {
         ThreadStep::ToolEnd {
             name,
             args,
@@ -525,12 +538,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
                 } = step
                 {
                     if name == "file" && observation.ok {
-                        let is_file_mut = args
-                            .get("op")
-                            .and_then(|v| v.as_str())
-                            .map(|s| matches!(s, "patch" | "rm" | "mv"))
-                            .unwrap_or(false);
-                        if is_file_mut {
+                        if parse_file_mutation_op(args).is_some() {
                             out.patched_since_fail = true;
                         }
                     }
@@ -594,10 +602,10 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
         if name != "file" || !observation.ok {
             continue;
         }
-        let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        let op = parse_file_mutation_op(args);
         // Consider patch and mv as sources of new/updated model paths.
         // (rm removes paths; targeting removed paths is usually unhelpful.)
-        if op != "patch" && op != "mv" {
+        if !matches!(op, Some(FileMutationOp::Patch | FileMutationOp::Mv)) {
             continue;
         }
 
@@ -614,20 +622,24 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
 
         // If tool didn't return results[] for some reason, fall back to args.path (single-file).
         if patched_paths.is_empty() {
-            if op == "patch" {
-                if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-                    let p = p.trim();
-                    if !p.is_empty() {
-                        patched_paths.push(p.to_string());
+            match op {
+                Some(FileMutationOp::Patch) => {
+                    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                        let p = p.trim();
+                        if !p.is_empty() {
+                            patched_paths.push(p.to_string());
+                        }
                     }
                 }
-            } else if op == "mv" {
-                if let Some(p) = args.get("to").and_then(|v| v.as_str()) {
-                    let p = p.trim();
-                    if !p.is_empty() {
-                        patched_paths.push(p.to_string());
+                Some(FileMutationOp::Mv) => {
+                    if let Some(p) = args.get("to").and_then(|v| v.as_str()) {
+                        let p = p.trim();
+                        if !p.is_empty() {
+                            patched_paths.push(p.to_string());
+                        }
                     }
                 }
+                _ => {}
             }
         }
         break;

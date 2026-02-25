@@ -3,37 +3,12 @@ use react_core::providers::WarehouseProvider;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use crate::data_engineer::references::DatasetRef;
 
-/// Parsed dataset id in canonical `<catalog>.<schema>.<table>` form.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DatasetFqnParts {
-    pub catalog: String,
-    pub schema: String,
-    pub table: String,
-}
-
-impl DatasetFqnParts {
-    pub fn fqn(&self) -> String {
-        format!("{}.{}.{}", self.catalog, self.schema, self.table)
-    }
-}
+pub type DatasetFqnParts = DatasetRef;
 
 pub fn parse_dataset_fqn_3(s: &str) -> Option<DatasetFqnParts> {
-    let parts: Vec<&str> = s.trim().split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let catalog = parts[0].trim();
-    let schema = parts[1].trim();
-    let table = parts[2].trim();
-    if catalog.is_empty() || schema.is_empty() || table.is_empty() {
-        return None;
-    }
-    Some(DatasetFqnParts {
-        catalog: catalog.to_string(),
-        schema: schema.to_string(),
-        table: table.to_string(),
-    })
+    DatasetRef::parse(s)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

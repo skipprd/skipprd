@@ -11,6 +11,7 @@ use crate::data_engineer::naming::{canonical_staging_model_name, contains_expect
 use crate::data_engineer::plan;
 use crate::data_engineer::project_files;
 use crate::data_engineer::project_fs;
+use crate::data_engineer::references::DatasetRef;
 use crate::data_engineer::sql_first;
 use react_core::agent::AgentCtx;
 use react_core::providers::DatasetCatalogProvider;
@@ -53,7 +54,7 @@ fn resolve_dataset_ids(args: &Value) -> Result<Vec<String>, String> {
     }
     // Validate format early to avoid silent no-ops.
     for ds in out.iter() {
-        if parse_dataset_id(ds).is_none() {
+        if DatasetRef::parse(ds).is_none() {
             return Err(format!(
                 "invalid dataset_id '{ds}'. Expected <catalog>.<schema>.<table> (e.g. AwsDataCatalog.test_raw.raw_customers)."
             ));
@@ -97,18 +98,6 @@ fn athena_alias_reuse_hint(msg: &str, model_rel_path: &str, dataset_id: &str) ->
 #[derive(Clone)]
 pub struct StagingModelTool {
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
-}
-
-fn parse_dataset_id(dataset_id: &str) -> Option<(String, String, String)> {
-    let parts: Vec<&str> = dataset_id.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    Some((
-        parts[0].to_string(),
-        parts[1].to_string(),
-        parts[2].to_string(),
-    ))
 }
 
 fn staging_model_rel_path_for_name(model_name: &str) -> String {
@@ -322,13 +311,15 @@ impl Tool for StagingModelTool {
             std::collections::HashMap::new();
         let mut gating_errors: Vec<String> = Vec::new();
         for ds in dataset_ids.iter() {
-            let Some((cat, db, _tbl)) = parse_dataset_id(ds) else {
+            let Some(ds_ref) = DatasetRef::parse(ds) else {
                 gating_errors.push(format!(
                     "{}: invalid dataset_id (expected <catalog>.<schema>.<table>)",
                     ds
                 ));
                 continue;
             };
+            let cat = ds_ref.catalog;
+            let db = ds_ref.schema;
             if cat != want_catalog {
                 gating_errors.push(format!(
                     "{}: dataset is not in configured target catalog (expected {})",
@@ -548,9 +539,11 @@ impl Tool for StagingModelTool {
                 return Err("staging_model direct-write requires exactly one dataset (use a single-item args.dataset_ids).".to_string());
             }
             let ds = &dataset_ids[0];
-            let (_cat, expected_db, expected_table) = parse_dataset_id(ds).ok_or_else(|| {
+            let ds_ref = DatasetRef::parse(ds).ok_or_else(|| {
                 format!("invalid dataset_id '{ds}' (expected <catalog>.<schema>.<table>)")
             })?;
+            let expected_db = ds_ref.schema;
+            let expected_table = ds_ref.table;
             let canonical_name = canonical_staging_model_name(&expected_db, &expected_table);
 
             let matches =
@@ -665,9 +658,11 @@ impl Tool for StagingModelTool {
         }
 
         for ds in dataset_ids.iter() {
-            let (_cat, expected_db, expected_table) = parse_dataset_id(ds).ok_or_else(|| {
+            let ds_ref = DatasetRef::parse(ds).ok_or_else(|| {
                 format!("invalid dataset_id '{ds}' (expected <catalog>.<schema>.<table>)")
             })?;
+            let expected_db = ds_ref.schema;
+            let expected_table = ds_ref.table;
             let canonical_name = canonical_staging_model_name(&expected_db, &expected_table);
 
             let matches =

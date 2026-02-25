@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::data_engineer::naming;
+use crate::data_engineer::references::DatasetRef;
 use react_core::agent::AgentCtx;
 use react_core::session::{ThreadLog, ThreadStep};
 
@@ -418,27 +419,13 @@ pub struct ModelPlan {
     pub progress: PlanProgress,
 }
 
-fn parse_dataset_id_3(s: &str) -> Option<(String, String, String)> {
-    let parts: Vec<&str> = s.trim().split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let cat = parts[0].trim();
-    let schema = parts[1].trim();
-    let table = parts[2].trim();
-    if cat.is_empty() || schema.is_empty() || table.is_empty() {
-        return None;
-    }
-    Some((cat.to_string(), schema.to_string(), table.to_string()))
-}
-
 fn ensure_expected_model_paths_cleanse(ctx: Option<&AgentCtx>, plan: &mut CleansePlan) -> bool {
     let mut changed = false;
     for t in plan.tasks.iter_mut() {
-        let Some((_cat, schema, table)) = parse_dataset_id_3(&t.dataset_id) else {
+        let Some(ds) = DatasetRef::parse(&t.dataset_id) else {
             continue;
         };
-        let canonical = naming::canonical_staging_rel_path(&schema, &table);
+        let canonical = naming::canonical_staging_rel_path(&ds.schema, &ds.table);
         let cur = t
             .expected_model_path
             .as_deref()
@@ -989,11 +976,10 @@ fn normalize_cleanse_plan_defaults(plan: &mut CleansePlan) {
                 .map(|s| s.trim().is_empty())
                 .unwrap_or(true);
             if missing_path {
-                let parts: Vec<&str> = t.dataset_id.split('.').collect();
-                if parts.len() == 3 {
+                if let Some(ds) = DatasetRef::parse(&t.dataset_id) {
                     t.expected_model_path =
                         Some(crate::data_engineer::naming::canonical_staging_rel_path(
-                            parts[1], parts[2],
+                            &ds.schema, &ds.table,
                         ));
                 } else {
                     let safe = t
@@ -3854,7 +3840,7 @@ mod tests {
                     "succeeded_dataset_ids":["a.b.c"]
                 }),
                 Some(ExecutionContext {
-                    plan_kind: Some("cleanse".to_string()),
+                    plan_kind: Some(react_core::session::PlanKind::Cleanse),
                     plan_key: Some("k".to_string()),
                     workgroup_id: Some("wg".to_string()),
                     task_id: Some("a.b.c".to_string()),
@@ -3922,7 +3908,7 @@ mod tests {
                     "succeeded_dataset_ids":["a.b.c"]
                 }),
                 Some(ExecutionContext {
-                    plan_kind: Some("cleanse".to_string()),
+                    plan_kind: Some(react_core::session::PlanKind::Cleanse),
                     plan_key: Some("k".to_string()),
                     workgroup_id: Some("wg".to_string()),
                     task_id: Some("a.b.c".to_string()),
@@ -3984,7 +3970,7 @@ mod tests {
                 }),
                 serde_json::json!({"ok": true}),
                 Some(ExecutionContext {
-                    plan_kind: Some("model".to_string()),
+                    plan_kind: Some(react_core::session::PlanKind::Model),
                     plan_key: Some("k".to_string()),
                     workgroup_id: Some("wg".to_string()),
                     task_id: Some("dim_customers".to_string()),

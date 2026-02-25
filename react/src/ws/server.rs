@@ -103,6 +103,14 @@ fn ws_final_result_from_typed_final(
     }
 }
 
+fn map_plan_kind(plan_kind: Option<react_core::session::PlanKind>) -> Option<String> {
+    match plan_kind {
+        Some(react_core::session::PlanKind::Cleanse) => Some("cleanse".to_string()),
+        Some(react_core::session::PlanKind::Model) => Some("model".to_string()),
+        None => None,
+    }
+}
+
 fn ws_thread_state_snapshot_from_core(
     st: &CoreThreadState,
     reg: &SuiteRegistry,
@@ -174,7 +182,7 @@ fn ws_thread_state_snapshot_from_core(
     // Durable, bounded timeline events (post reconnect tool timeline).
     fn map_ctx(c: &react_core::session::ExecutionContext) -> api::ExecutionContext {
         let mut out = api::ExecutionContext::new();
-        out.plan_kind = c.plan_kind.clone();
+        out.plan_kind = map_plan_kind(c.plan_kind);
         out.plan_key = c.plan_key.clone();
         out.workgroup_id = c.workgroup_id.clone();
         out.task_id = c.task_id.clone();
@@ -3510,7 +3518,7 @@ async fn run_agent_with_processing_suite(
                             ev.payload = payload_map(payload);
                             ev.ctx = ctx.as_ref().map(|c| {
                                 let mut out = api::ExecutionContext::new();
-                                out.plan_kind = c.plan_kind.clone();
+                                out.plan_kind = map_plan_kind(c.plan_kind);
                                 out.plan_key = c.plan_key.clone();
                                 out.workgroup_id = c.workgroup_id.clone();
                                 out.task_id = c.task_id.clone();
@@ -3580,7 +3588,7 @@ async fn run_agent_with_processing_suite(
                             }
                             ev.ctx = ctx.as_ref().map(|c| {
                                 let mut out = api::ExecutionContext::new();
-                                out.plan_kind = c.plan_kind.clone();
+                                out.plan_kind = map_plan_kind(c.plan_kind);
                                 out.plan_key = c.plan_key.clone();
                                 out.workgroup_id = c.workgroup_id.clone();
                                 out.task_id = c.task_id.clone();
@@ -3606,7 +3614,7 @@ async fn run_agent_with_processing_suite(
                             ev.model = model.clone();
                             ev.ctx = ctx.as_ref().map(|c| {
                                 let mut out = api::ExecutionContext::new();
-                                out.plan_kind = c.plan_kind.clone();
+                                out.plan_kind = map_plan_kind(c.plan_kind);
                                 out.plan_key = c.plan_key.clone();
                                 out.workgroup_id = c.workgroup_id.clone();
                                 out.task_id = c.task_id.clone();
@@ -3634,7 +3642,7 @@ async fn run_agent_with_processing_suite(
                             ev.error = error.clone();
                             ev.ctx = ctx.as_ref().map(|c| {
                                 let mut out = api::ExecutionContext::new();
-                                out.plan_kind = c.plan_kind.clone();
+                                out.plan_kind = map_plan_kind(c.plan_kind);
                                 out.plan_key = c.plan_key.clone();
                                 out.workgroup_id = c.workgroup_id.clone();
                                 out.task_id = c.task_id.clone();
@@ -4201,7 +4209,7 @@ mod tests {
             event_kind: "tool_start".to_string(),
             ts: "t".to_string(),
             ctx: Some(react_core::session::ExecutionContext {
-                plan_kind: Some("cleanse".to_string()),
+                plan_kind: Some(react_core::session::PlanKind::Cleanse),
                 plan_key: Some("p1".to_string()),
                 workgroup_id: Some("wg1".to_string()),
                 task_id: Some("task1".to_string()),

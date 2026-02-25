@@ -5,7 +5,7 @@ use std::sync::Arc;
 use react_core::agent::AgentCtx;
 use react_core::control_flow::{PhaseReasonCode, ReviewDecision, ReviewTier};
 use react_core::llm::{ChatMessage, LlmCallOptions, LlmExpectedFormat, ReasoningEffort};
-use react_core::session::{Observation, ThreadStep, ThreadStore};
+use react_core::session::{Observation, PlanKind, ThreadStep, ThreadStore};
 use react_core::tools::Tool;
 
 use crate::flow_frame::FlowFrame;
@@ -35,12 +35,11 @@ fn utc_ts() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-fn phase_plan_kind(phase: Phase) -> &'static str {
+fn phase_plan_kind(phase: Phase) -> Option<PlanKind> {
     match phase {
-        Phase::CleanseReview => "cleanse",
-        Phase::ModelReview => "model",
-        Phase::PostPublishReview => "unknown",
-        _ => "unknown",
+        Phase::CleanseReview => Some(PlanKind::Cleanse),
+        Phase::ModelReview => Some(PlanKind::Model),
+        _ => None,
     }
 }
 
@@ -235,8 +234,8 @@ async fn append_review_step(
     Ok(())
 }
 
-fn system_prompt_for_summary(plan_kind: &str) -> String {
-    if plan_kind == "cleanse" {
+fn system_prompt_for_summary(plan_kind: Option<PlanKind>) -> String {
+    if plan_kind == Some(PlanKind::Cleanse) {
         return r#"You are a read-only reviewer for a DBT analytics project.
 
 You will be given:
@@ -281,8 +280,8 @@ Rules:
         .to_string()
 }
 
-fn system_prompt_for_batch(plan_kind: &str) -> String {
-    if plan_kind == "cleanse" {
+fn system_prompt_for_batch(plan_kind: Option<PlanKind>) -> String {
+    if plan_kind == Some(PlanKind::Cleanse) {
         return r#"You are a read-only reviewer for a DBT analytics project.
 
 You will be given:
@@ -367,8 +366,8 @@ Rules:
         .to_string()
 }
 
-fn system_prompt_for_unify(plan_kind: &str) -> String {
-    if plan_kind == "cleanse" {
+fn system_prompt_for_unify(plan_kind: Option<PlanKind>) -> String {
+    if plan_kind == Some(PlanKind::Cleanse) {
         return r#"You are a read-only reviewer for a DBT analytics project.
 
 You will be given:
@@ -554,9 +553,9 @@ async fn llm_json(
     };
 
     let system_prompt = match name {
-        "summary" => system_prompt_for_summary(&phase_plan_kind(phase)),
-        "batch" => system_prompt_for_batch(&phase_plan_kind(phase)),
-        _ => system_prompt_for_unify(&phase_plan_kind(phase)),
+        "summary" => system_prompt_for_summary(phase_plan_kind(phase)),
+        "batch" => system_prompt_for_batch(phase_plan_kind(phase)),
+        _ => system_prompt_for_unify(phase_plan_kind(phase)),
     };
 
     // Dynamic sizing: bigger review contexts need bigger output budgets, otherwise Responses truncates
@@ -814,13 +813,13 @@ fn push_batch_entry(review_obj: &mut serde_json::Map<String, Value>, entry: Valu
 async fn persist_review_summary_to_plan(
     actx: &AgentCtx,
     phase: Phase,
-    plan_kind: &str,
+    plan_kind: PlanKind,
     plan_key: &str,
     project_notes: Vec<String>,
     project_risks: Vec<String>,
 ) -> Result<(), String> {
     let ts = utc_ts();
-    if plan_kind == "cleanse" {
+    if plan_kind == PlanKind::Cleanse {
         if let Some(mut p) = de_plan::load_cleanse_plan_by_key(actx, plan_key).await {
             if p.project_snapshot.is_null() {
                 p.project_snapshot = serde_json::json!({});
@@ -840,7 +839,7 @@ async fn persist_review_summary_to_plan(
                 .await
                 .map_err(|e| format!("failed to persist cleanse review summary: {e}"))?;
         }
-    } else if plan_kind == "model" {
+    } else if plan_kind == PlanKind::Model {
         if let Some(mut p) = de_plan::load_model_plan_by_key(actx, plan_key).await {
             if p.project_snapshot.is_null() {
                 p.project_snapshot = serde_json::json!({});
@@ -866,7 +865,7 @@ async fn persist_review_summary_to_plan(
 
 async fn persist_review_batch_to_plan(
     actx: &AgentCtx,
-    plan_kind: &str,
+    plan_kind: PlanKind,
     plan_key: &str,
     batch_idx: usize,
     batch_items: Vec<String>,
@@ -879,7 +878,7 @@ async fn persist_review_batch_to_plan(
         "notes": notes,
         "ts": ts,
     });
-    if plan_kind == "cleanse" {
+    if plan_kind == PlanKind::Cleanse {
         if let Some(mut p) = de_plan::load_cleanse_plan_by_key(actx, plan_key).await {
             if p.project_snapshot.is_null() {
                 p.project_snapshot = serde_json::json!({});
@@ -900,7 +899,7 @@ async fn persist_review_batch_to_plan(
                 .await
                 .map_err(|e| format!("failed to persist cleanse review batch: {e}"))?;
         }
-    } else if plan_kind == "model" {
+    } else if plan_kind == PlanKind::Model {
         if let Some(mut p) = de_plan::load_model_plan_by_key(actx, plan_key).await {
             if p.project_snapshot.is_null() {
                 p.project_snapshot = serde_json::json!({});
@@ -927,7 +926,7 @@ async fn persist_review_batch_to_plan(
 
 async fn persist_review_final_to_plan(
     actx: &AgentCtx,
-    plan_kind: &str,
+    plan_kind: PlanKind,
     plan_key: &str,
     decision: ReviewDecision,
     tier: ReviewTier,
@@ -935,7 +934,7 @@ async fn persist_review_final_to_plan(
     text: String,
 ) -> Result<(), String> {
     let ts = utc_ts();
-    if plan_kind == "cleanse" {
+    if plan_kind == PlanKind::Cleanse {
         if let Some(mut p) = de_plan::load_cleanse_plan_by_key(actx, plan_key).await {
             if p.project_snapshot.is_null() {
                 p.project_snapshot = serde_json::json!({});
@@ -965,7 +964,7 @@ async fn persist_review_final_to_plan(
                 .await
                 .map_err(|e| format!("failed to persist cleanse review final: {e}"))?;
         }
-    } else if plan_kind == "model" {
+    } else if plan_kind == PlanKind::Model {
         if let Some(mut p) = de_plan::load_model_plan_by_key(actx, plan_key).await {
             if p.project_snapshot.is_null() {
                 p.project_snapshot = serde_json::json!({});
@@ -1346,7 +1345,7 @@ pub async fn run_batched_review(
 
     // Determine which plan (if any) to use for batching + persistence target.
     let (plan_kind, plan_key, batches, item_to_path_inv_notes): (
-        Option<String>,
+        Option<PlanKind>,
         Option<String>,
         Vec<Vec<String>>,
         Option<Value>,
@@ -1374,7 +1373,7 @@ pub async fn run_batched_review(
                         }
                     }
                     (
-                        Some("cleanse".to_string()),
+                        Some(PlanKind::Cleanse),
                         Some(k),
                         batches,
                         Some(Value::Array(map)),
@@ -1409,7 +1408,7 @@ pub async fn run_batched_review(
                         }
                     }
                     (
-                        Some("model".to_string()),
+                        Some(PlanKind::Model),
                         Some(k),
                         batches,
                         Some(Value::Array(map)),
@@ -1425,20 +1424,20 @@ pub async fn run_batched_review(
             // Prefer newest plan of either kind (same as WS snapshot fallback).
             let kc = de_plan::newest_plan_key_any(&actx, "_cleanse.json").await;
             let km = de_plan::newest_plan_key_any(&actx, "_model.json").await;
-            let choose = match (&kc, &km) {
+            let choose: Option<PlanKind> = match (&kc, &km) {
                 (Some(c), Some(m)) => {
                     if c >= m {
-                        "cleanse"
+                        Some(PlanKind::Cleanse)
                     } else {
-                        "model"
+                        Some(PlanKind::Model)
                     }
                 }
-                (Some(_), None) => "cleanse",
-                (None, Some(_)) => "model",
-                (None, None) => "none",
+                (Some(_), None) => Some(PlanKind::Cleanse),
+                (None, Some(_)) => Some(PlanKind::Model),
+                (None, None) => None,
             };
             match choose {
-                "cleanse" => {
+                Some(PlanKind::Cleanse) => {
                     let k = kc.clone().unwrap();
                     if let Some(p) = de_plan::load_cleanse_plan_by_key(&actx, &k).await {
                         let batches = if !p.batches.is_empty() {
@@ -1460,7 +1459,7 @@ pub async fn run_batched_review(
                             }
                         }
                         (
-                            Some("cleanse".to_string()),
+                            Some(PlanKind::Cleanse),
                             Some(k),
                             batches,
                             Some(Value::Array(map)),
@@ -1469,7 +1468,7 @@ pub async fn run_batched_review(
                         (None, None, vec![], None)
                     }
                 }
-                "model" => {
+                Some(PlanKind::Model) => {
                     let k = km.clone().unwrap();
                     if let Some(p) = de_plan::load_model_plan_by_key(&actx, &k).await {
                         let batches = if !p.batches.is_empty() {
@@ -1491,7 +1490,7 @@ pub async fn run_batched_review(
                             }
                         }
                         (
-                            Some("model".to_string()),
+                            Some(PlanKind::Model),
                             Some(k),
                             batches,
                             Some(Value::Array(map)),
@@ -1500,7 +1499,7 @@ pub async fn run_batched_review(
                         (None, None, vec![], None)
                     }
                 }
-                _ => (None, None, vec![], None),
+                None => (None, None, vec![], None),
             }
         }
         _ => (None, None, vec![], None),
@@ -1601,7 +1600,7 @@ pub async fn run_batched_review(
         }),
     )
     .await?;
-    if let (Some(pk), Some(plan_key)) = (plan_kind.as_deref(), plan_key.as_deref()) {
+    if let (Some(pk), Some(plan_key)) = (plan_kind, plan_key.as_deref()) {
         persist_review_summary_to_plan(
             &actx,
             phase,
@@ -1725,7 +1724,7 @@ pub async fn run_batched_review(
         .await?;
 
         all_batch_notes.push(detail.clone());
-        if let (Some(pk), Some(plan_key)) = (plan_kind.as_deref(), plan_key.as_deref()) {
+        if let (Some(pk), Some(plan_key)) = (plan_kind, plan_key.as_deref()) {
             persist_review_batch_to_plan(
                 &actx,
                 pk,
@@ -1821,7 +1820,7 @@ pub async fn run_batched_review(
         }),
     )
     .await?;
-    if let (Some(pk), Some(plan_key)) = (plan_kind.as_deref(), plan_key.as_deref()) {
+    if let (Some(pk), Some(plan_key)) = (plan_kind, plan_key.as_deref()) {
         persist_review_final_to_plan(
             &actx,
             pk,

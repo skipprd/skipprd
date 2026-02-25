@@ -5,6 +5,7 @@ use tracing::info;
 
 use react_core::agent::AgentCtx;
 use react_core::tools::Tool;
+use crate::data_engineer::references::DatasetRef;
 
 // NOTE: Engine-agnostic ReAct: no DataFusion/SessionContext usage here.
 pub struct ApproveAndSaveArtifactTool;
@@ -22,18 +23,6 @@ fn encode_key_component(s: &str) -> String {
         }
     }
     out
-}
-
-fn parse_dataset_id(dataset_id: &str) -> Option<(String, String, String)> {
-    let parts: Vec<&str> = dataset_id.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    Some((
-        parts[0].to_string(),
-        parts[1].to_string(),
-        parts[2].to_string(),
-    ))
 }
 
 fn resolve_single_dataset_id_from_args(args: &Value) -> Result<Option<String>, String> {
@@ -109,8 +98,11 @@ impl Tool for ApproveAndSaveArtifactTool {
                     let ds_lc = ds.to_lowercase();
                     let mut ok = lc.contains(&ds_lc);
                     if !ok {
-                        if let Some((_cat, db, table)) = parse_dataset_id(ds) {
-                            let db_table = format!("{}.{}", db, table).to_lowercase();
+                        if let Some(ds_ref) = DatasetRef::parse(ds) {
+                            let db_table =
+                                format!("{}.{}", ds_ref.schema, ds_ref.table).to_lowercase();
+                            let db = ds_ref.schema;
+                            let table = ds_ref.table;
                             let src1 = format!("source('{}','{}')", db, table);
                             let src2 = format!("source(\"{}\",\"{}\")", db, table);
                             let src3 = format!("source('{}', '{}')", db, table);

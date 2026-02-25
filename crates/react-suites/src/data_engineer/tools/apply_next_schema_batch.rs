@@ -11,6 +11,7 @@ use crate::data_engineer::naming;
 use crate::data_engineer::plan;
 use crate::data_engineer::project_files;
 use crate::data_engineer::project_fs;
+use crate::data_engineer::references::DatasetRef;
 use crate::data_engineer::retry_budget;
 use crate::data_engineer::schema_policy;
 use crate::data_engineer::tools::dbt_files;
@@ -103,20 +104,6 @@ fn sanitize_staging_schema_yml_to_allowed_columns(
     serde_yaml::to_string(&root)
         .map(escape_yaml_doc_preamble)
         .map_err(|e| format!("failed to re-serialize YAML: {}", e))
-}
-
-fn parse_dataset_id_3(s: &str) -> Option<(String, String, String)> {
-    let parts: Vec<&str> = s.trim().split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let cat = parts[0].trim();
-    let schema = parts[1].trim();
-    let table = parts[2].trim();
-    if cat.is_empty() || schema.is_empty() || table.is_empty() {
-        return None;
-    }
-    Some((cat.to_string(), schema.to_string(), table.to_string()))
 }
 
 fn rewrite_final_select_wildcard(sql_text: &str, allowed_columns: &[String]) -> Option<String> {
@@ -303,13 +290,15 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
         let mut auto_healed_wildcard_sql_dataset_ids: Vec<String> = Vec::new();
 
         for ds in batch.iter() {
-            let Some((_cat, schema, table)) = parse_dataset_id_3(ds) else {
+            let Some(ds_ref) = DatasetRef::parse(ds) else {
                 failed.push(ds.clone());
                 errors.push(format!(
                     "{ds}: invalid dataset_id (expected <catalog>.<schema>.<table>)"
                 ));
                 continue;
             };
+            let schema = ds_ref.schema;
+            let table = ds_ref.table;
 
             let model_name = naming::canonical_staging_model_name(&schema, &table);
             let sql_rel = naming::canonical_staging_rel_path(&schema, &table);
@@ -1170,7 +1159,7 @@ mod tests {
 
         let plan_key = plan::new_cleanse_plan_key(&ctx);
         ctx.exec_ctx = Some(ExecutionContext {
-            plan_kind: Some("cleanse".to_string()),
+            plan_kind: Some(react_core::session::PlanKind::Cleanse),
             plan_key: Some(plan_key.clone()),
             workgroup_id: Some("wg".to_string()),
             task_id: Some("AwsDataCatalog.test_raw.raw_customers".to_string()),
@@ -1394,7 +1383,7 @@ mod tests {
 
         let plan_key = plan::new_model_plan_key(&ctx);
         ctx.exec_ctx = Some(ExecutionContext {
-            plan_kind: Some("model".to_string()),
+            plan_kind: Some(react_core::session::PlanKind::Model),
             plan_key: Some(plan_key.clone()),
             workgroup_id: Some("wg".to_string()),
             task_id: Some("dim_customers".to_string()),

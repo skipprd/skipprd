@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 
+use crate::data_engineer::references::DatasetRef;
 use react_core::agent::AgentCtx;
 use react_core::providers::{CatalogProvider, DatasetCatalogProvider, DatasetId};
 use react_core::tools::Tool;
@@ -154,13 +155,13 @@ impl Tool for SqlStatsTool {
 }
 
 fn parse_dataset_id_strict(s: &str) -> Result<DatasetId, String> {
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 3 {
-        return Err("table must be fully-qualified <catalog>.<database>.<table> for provider stats fallback".to_string());
-    }
+    let ds = DatasetRef::parse(s).ok_or_else(|| {
+        "table must be fully-qualified <catalog>.<database>.<table> for provider stats fallback"
+            .to_string()
+    })?;
     Ok(DatasetId {
-        catalog: parts[0].to_string(),
-        database: parts[1].to_string(),
-        table: parts[2].to_string(),
+        catalog: ds.catalog,
+        database: ds.schema,
+        table: ds.table,
     })
 }
