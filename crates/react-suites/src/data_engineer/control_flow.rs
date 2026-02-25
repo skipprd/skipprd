@@ -1827,7 +1827,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_awaits_user_after_three_failed_mutations() {
+    fn gate_blocks_after_three_failed_mutations() {
         let log = ThreadLog {
             steps: vec![
                 step(

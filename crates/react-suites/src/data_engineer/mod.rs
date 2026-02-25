@@ -10008,11 +10008,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_agent_never_returns_await_user_on_missing_providers() {
+    async fn run_agent_is_non_interactive_on_missing_providers() {
         let sctx = SuiteCtx::default();
         let err = DataEngineerSuite::run_agent("thread-missing-providers", "go", &sctx)
             .await
-            .expect_err("agent mode must hard-fail instead of AwaitUser");
+            .expect_err("agent mode must hard-fail instead of returning an interactive prompt");
         assert!(
             err.contains("warehouse provider configured")
                 || err.contains("dbt provider configured")
