@@ -231,7 +231,9 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
         );
         if batch.is_empty() {
             return Ok(serde_json::json!({
-                "ok": true,
+                "ok": false,
+                "kind": "no_progress",
+                "progress_made": false,
                 "message": "no pending schema checklist work (all done)",
                 "checklist_item_id": checklist_item_id,
                 "attempted_dataset_ids": [],
@@ -417,6 +419,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
 
         Ok(serde_json::json!({
             "ok": failed.is_empty(),
+            "progress_made": !succeeded.is_empty(),
             "checklist_item_id": checklist_item_id,
             "attempted_dataset_ids": batch,
             "succeeded_dataset_ids": succeeded,
@@ -481,7 +484,9 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             plan::model_pending_for_checklist(&plan, plan::CHECKLIST_SQL_MODEL, &checklist_item_id);
         if names.is_empty() {
             return Ok(serde_json::json!({
-                "ok": true,
+                "ok": false,
+                "kind": "no_progress",
+                "progress_made": false,
                 "message": "no pending schema checklist work (all done)",
                 "checklist_item_id": checklist_item_id,
                 "attempted_item_names": [],
@@ -675,6 +680,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
 
         Ok(serde_json::json!({
             "ok": true,
+            "progress_made": true,
             "checklist_item_id": checklist_item_id,
             "attempted_item_names": attempted_names.clone(),
             "succeeded_item_names": attempted_names,

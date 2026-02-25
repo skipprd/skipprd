@@ -19,7 +19,6 @@ use std::sync::Arc;
 pub struct DataEngineerSuite;
 
 pub mod control_flow;
-pub mod control_state;
 pub mod dataset_truth;
 pub mod dbt_error;
 pub mod dbt_repair;
@@ -28,11 +27,11 @@ pub mod naming;
 pub mod patch_contract;
 pub mod patch_protocol;
 pub mod plan;
+pub mod progress_controller;
 pub mod project_files;
 pub mod project_fs;
 pub mod prompt_packets;
 pub mod prompts;
-pub mod repair_state;
 mod review_batched;
 pub mod schema_policy;
 pub mod sql_first;
@@ -3526,22 +3525,22 @@ Apply these fixes in the output.",
                                 self.single_target_path.as_ref(),
                             ) {
                                 if op == "patch" {
-                                    let rs = crate::data_engineer::repair_state::RepairState::load(
+                                    let es = crate::data_engineer::progress_controller::ExecutionState::load(
                                         store, thread_id,
                                     )
                                     .await
                                     .unwrap_or_else(
-                                        crate::data_engineer::repair_state::RepairState::new,
+                                        crate::data_engineer::progress_controller::ExecutionState::new,
                                     );
 
-                                    match rs.ladder_step {
-                                        crate::data_engineer::repair_state::RepairLadderStep::Stop => {
+                                    match es.ladder_step {
+                                        crate::data_engineer::progress_controller::RepairLadderStep::Stop => {
                                             return Err(format!(
                                                 "deterministic repair ladder stop: '{}' did not converge after prior repair attempts. Stop and apply a manual fix for '{}' before re-running.",
                                                 want, want
                                             ));
                                         }
-                                        crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile => {
+                                        crate::data_engineer::progress_controller::RepairLadderStep::ReplaceFile => {
                                             // Hard cutover: Cursor/Aider hunks-only patches only.
                                             // Require patch_text + single-file path guard.
                                             let patch_text = args
@@ -3563,7 +3562,7 @@ Apply these fixes in the output.",
                                                 ));
                                             }
                                         }
-                                        crate::data_engineer::repair_state::RepairLadderStep::PatchTarget => {}
+                                        crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget => {}
                                     }
                                 }
                             }
@@ -3577,16 +3576,17 @@ Apply these fixes in the output.",
                                 self.single_target_path.as_ref(),
                             ) {
                                 if op == "patch" {
-                                    let mut rs =
-                                        crate::data_engineer::repair_state::RepairState::load(
+                                    let mut es =
+                                        crate::data_engineer::progress_controller::ExecutionState::load(
                                             store, thread_id,
                                         )
                                         .await
                                         .unwrap_or_else(
-                                            crate::data_engineer::repair_state::RepairState::new,
+                                            crate::data_engineer::progress_controller::ExecutionState::new,
                                         );
-                                    rs.target_path = Some(want.clone());
-                                    rs.attempt_count = rs.attempt_count.saturating_add(1);
+                                    if es.target_path.as_deref().unwrap_or("").trim().is_empty() {
+                                        es.target_path = Some(want.clone());
+                                    }
 
                                     match &res {
                                         Ok(v) => {
@@ -3598,37 +3598,14 @@ Apply these fixes in the output.",
                                                 .get("mutated")
                                                 .and_then(|x| x.as_bool())
                                                 .unwrap_or(false);
-                                            if ok && mutated {
-                                                // Progress made; reset ladder counters so we don't prematurely stop.
-                                                rs.attempt_count = 0;
-                                                rs.consecutive_noop_patches = 0;
-                                                rs.ladder_step = crate::data_engineer::repair_state::RepairLadderStep::PatchTarget;
-                                            } else if ok && !mutated {
-                                                rs.consecutive_noop_patches =
-                                                    rs.consecutive_noop_patches.saturating_add(1);
-                                                rs.ladder_step = if rs.attempt_count >= 2 {
-                                                    crate::data_engineer::repair_state::RepairLadderStep::Stop
-                                                } else {
-                                                    crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile
-                                                };
-                                            } else {
-                                                rs.ladder_step = if rs.attempt_count >= 2 {
-                                                    crate::data_engineer::repair_state::RepairLadderStep::Stop
-                                                } else {
-                                                    crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile
-                                                };
-                                            }
+                                            es.note_patch_attempt(ok, mutated);
                                         }
                                         Err(_) => {
-                                            rs.ladder_step = if rs.attempt_count >= 2 {
-                                                crate::data_engineer::repair_state::RepairLadderStep::Stop
-                                            } else {
-                                                crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile
-                                            };
+                                            es.note_patch_attempt(false, false);
                                         }
                                     }
                                     // Persist state; hard fail if we cannot persist during repair mode.
-                                    rs.save(store, thread_id).await?;
+                                    es.save(store, thread_id).await?;
                                 }
                             }
 
@@ -4569,8 +4546,13 @@ Apply these fixes in the output.",
                 Phase::CleansePlan | Phase::ModelPlan => true,
                 _ => Self::allow_ask_approval_in_phase(log.as_ref(), phase),
             };
-            let replan_backtracks =
-                control_flow::replan_backtrack_count_for_phase(log.as_ref(), phase);
+            let execution_state = crate::data_engineer::progress_controller::ExecutionState::load(
+                &thread_store,
+                thread_id,
+            )
+            .await
+            .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+            let replan_backtracks = execution_state.replan_backtracks;
             if replan_backtracks >= max_replan_backtracks {
                 let stop_msg = format!(
                     "failed to make progress for this thread: observed {} validate/review loopback(s) to plan/author in phase track '{}' (limit {}). Stopping this thread. Please inspect the latest validate/review errors and apply a targeted fix before rerunning.",
@@ -4631,6 +4613,14 @@ Apply these fixes in the output.",
                     last_validate_failed_models =
                         dbt_error::extract_failed_models_from_logs(&logs_v);
                     break;
+                }
+            }
+            if let Some(last) = execution_state.last_validate.as_ref() {
+                if let Some(brief) = last.brief.as_ref().filter(|s| !s.trim().is_empty()) {
+                    last_validate_brief = Some(brief.clone());
+                }
+                if !last.failed_models.is_empty() {
+                    last_validate_failed_models = last.failed_models.clone();
                 }
             }
 
@@ -6357,8 +6347,7 @@ Apply these fixes in the output.",
                         phase_guard.last_validate_failed = true;
                         phase_guard.mutated_since_fail = false;
                     }
-                    let hard_mutation_repair_mode =
-                        phase_guard.last_validate_failed && !phase_guard.mutated_since_fail;
+                    let hard_mutation_repair_mode = execution_state.hard_mutation_repair_mode;
                     let last_guard_reason = log.as_ref().and_then(|l| {
                         l.steps.iter().rev().find_map(|s| match s {
                             react_core::session::ThreadStep::GuardBlock { reason, .. } => {
@@ -7272,12 +7261,17 @@ Apply these fixes in the output.",
                             }
                         };
 
-                    let single_target_repair_path =
-                        if hard_mutation_repair_mode && !prefer_schema_repairs {
-                            primary_failed_model_file(&last_validate_failed_models)
-                        } else {
-                            None
-                        };
+                    let single_target_repair_path = if hard_mutation_repair_mode
+                        && !prefer_schema_repairs
+                    {
+                        execution_state
+                            .single_target_repair_path
+                            .clone()
+                            .filter(|s| !s.trim().is_empty())
+                            .or_else(|| primary_failed_model_file(&last_validate_failed_models))
+                    } else {
+                        None
+                    };
 
                     let (registry, tools_card) = Self::build_tools_for_phase(
                         phase,
@@ -7581,23 +7575,25 @@ Apply these fixes in the output.",
                             .as_ref()
                             .map(|s| s.trim().to_string())
                             .unwrap_or_default();
-                        let mut rs = crate::data_engineer::repair_state::RepairState::load(
+                        let mut es = crate::data_engineer::progress_controller::ExecutionState::load(
                             &thread_store,
                             thread_id,
                         )
                         .await
-                        .unwrap_or_else(crate::data_engineer::repair_state::RepairState::new);
-                        if rs.target_path.as_deref().unwrap_or("").trim().is_empty()
+                        .unwrap_or_else(
+                            crate::data_engineer::progress_controller::ExecutionState::new,
+                        );
+                        if es.target_path.as_deref().unwrap_or("").trim().is_empty()
                             && !target.is_empty()
                         {
-                            rs.target_path = Some(target.clone());
-                            rs.save(&thread_store, thread_id).await.map_err(|e| {
+                            es.target_path = Some(target.clone());
+                            es.save(&thread_store, thread_id).await.map_err(|e| {
                                 format!(
-                                    "failed to persist repair-state target path in deterministic repair mode: {e}"
+                                    "failed to persist execution-state target path in deterministic repair mode: {e}"
                                 )
                             })?;
                         }
-                        let ladder = rs.ladder_step.clone();
+                        let ladder = es.ladder_step.clone();
 
                         let mut content = String::new();
                         if !target.is_empty() {
@@ -7634,13 +7630,13 @@ Apply these fixes in the output.",
                         repair.push_str("- You MUST call file op=patch next.\n");
                         repair.push_str("- You MUST patch ONLY the target file above.\n");
                         match ladder {
-                            crate::data_engineer::repair_state::RepairLadderStep::ReplaceFile => {
+                            crate::data_engineer::progress_controller::RepairLadderStep::ReplaceFile => {
                                 repair.push_str("- IMPORTANT: You MUST provide a guarded single-file patch: args.path + args.patch_text. patch_text MUST be Cursor/Aider hunks-only (starts with '@@ ... @@'; no diff --git/---/+++ headers). Do NOT patch any other file.\n");
                             }
-                            crate::data_engineer::repair_state::RepairLadderStep::Stop => {
+                            crate::data_engineer::progress_controller::RepairLadderStep::Stop => {
                                 repair.push_str("- STOP: prior repair attempts did not converge. Do not continue.\n");
                             }
-                            crate::data_engineer::repair_state::RepairLadderStep::PatchTarget => {}
+                            crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget => {}
                         }
 
                         repair.push_str("\nCurrent target file content:\n```sql\n");
@@ -7737,64 +7733,28 @@ Apply these fixes in the output.",
                                 // Stay in the same authoring phase; the next pass will be prompted with invariant context.
                                 continue;
                             }
-                            // New guard: do not advance if this authoring phase has unresolved mutation/tool failures.
-                            // Auto-loop in authoring so the agent can fix deterministically.
+                            // Hard cutover: single progress gate controls authoring->validate advancement.
                             let latest_log = thread_store.get(thread_id).await.ok();
-                            match control_flow::gate_authoring_completion(
+                            if let Err(reason) = crate::data_engineer::progress_controller::gate_authoring_progress(
                                 latest_log.as_ref(),
                                 phase,
                             ) {
-                                control_flow::AuthoringGate::Allow => {}
-                                control_flow::AuthoringGate::AwaitUser { prompt } => {
-                                    return Ok(vec![FlowFrame::AwaitUser { prompt }]);
-                                }
-                                control_flow::AuthoringGate::Block { reason } => {
-                                    let ts = chrono::Utc::now().to_rfc3339();
-                                    let step = react_core::session::ThreadStep::GuardBlock {
-                                        phase: phase.as_str().to_string(),
-                                        kind: GuardBlockKind::AuthoringCompletion,
-                                        reason: reason.clone(),
-                                        observation: react_core::session::Observation::fail(vec![
-                                            reason.clone(),
-                                        ]),
-                                        ts,
-                                        agent: "agent".to_string(),
-                                    };
-                                    thread_store
-                                        .append_step(thread_id, step.clone())
-                                        .await
-                                        .map_err(|e| format!("failed to append guard step: {e}"))?;
-                                    // Hard cutover: same-phase blocks are represented as GuardBlock only.
-                                    continue;
-                                }
-                            }
-                            // Hard gate: if validate previously failed, do not advance unless a successful mutation
-                            // (and any required probes) have been recorded since that failure.
-                            let latest_log = thread_store.get(thread_id).await.ok();
-                            match control_flow::gate_authoring_to_validate(latest_log.as_ref()) {
-                                control_flow::AuthoringGate::Allow => {}
-                                control_flow::AuthoringGate::AwaitUser { prompt } => {
-                                    return Ok(vec![FlowFrame::AwaitUser { prompt }]);
-                                }
-                                control_flow::AuthoringGate::Block { reason } => {
-                                    let ts = chrono::Utc::now().to_rfc3339();
-                                    let step = react_core::session::ThreadStep::GuardBlock {
-                                        phase: phase.as_str().to_string(),
-                                        kind: GuardBlockKind::AuthoringToValidate,
-                                        reason: reason.clone(),
-                                        observation: react_core::session::Observation::fail(vec![
-                                            reason.clone(),
-                                        ]),
-                                        ts,
-                                        agent: "agent".to_string(),
-                                    };
-                                    thread_store
-                                        .append_step(thread_id, step.clone())
-                                        .await
-                                        .map_err(|e| format!("failed to append guard step: {e}"))?;
-                                    // Hard cutover: same-phase blocks are represented as GuardBlock only.
-                                    continue;
-                                }
+                                let ts = chrono::Utc::now().to_rfc3339();
+                                let step = react_core::session::ThreadStep::GuardBlock {
+                                    phase: phase.as_str().to_string(),
+                                    kind: GuardBlockKind::AuthoringToValidate,
+                                    reason: reason.clone(),
+                                    observation: react_core::session::Observation::fail(vec![
+                                        reason.clone(),
+                                    ]),
+                                    ts,
+                                    agent: "agent".to_string(),
+                                };
+                                thread_store
+                                    .append_step(thread_id, step.clone())
+                                    .await
+                                    .map_err(|e| format!("failed to append guard step: {e}"))?;
+                                continue;
                             }
 
                             // Model authoring must actually produce at least one gold model SQL file.
@@ -8208,35 +8168,23 @@ Apply these fixes in the output.",
                         .unwrap_or(false);
                     let run_ok = obs.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     if ok && compile_ok && run_ok {
-                        // Update compact control state (hard-cutover: primary decision source).
+                        // Update canonical execution state (hard-cutover: primary decision source).
                         {
-                            let mut cs = crate::data_engineer::control_state::ControlState::load(
+                            let mut es = crate::data_engineer::progress_controller::ExecutionState::load(
                                 &thread_store,
                                 thread_id,
                             )
                             .await
-                            .unwrap_or_else(crate::data_engineer::control_state::ControlState::new);
-                            cs.last_validate =
-                                Some(crate::data_engineer::control_state::LastValidateState {
-                                    step_idx: None,
-                                    ts: Some(chrono::Utc::now().to_rfc3339()),
-                                    ok: Some(true),
-                                    compile_ok: Some(true),
-                                    run_ok: Some(true),
-                                    brief: None,
-                                    failed_models: Vec::new(),
-                                    failure_class: None,
-                                });
-                            cs.hard_mutation_repair_mode = false;
-                            cs.single_target_repair_path = None;
-                            cs.save(&thread_store, thread_id).await.map_err(|e| {
-                                format!("failed to persist control state after validate pass: {e}")
+                            .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+                            let tier = if phase == Phase::CleanseValidate {
+                                crate::data_engineer::progress_controller::ExecutionTier::Cleanse
+                            } else {
+                                crate::data_engineer::progress_controller::ExecutionTier::Model
+                            };
+                            es.apply_validate_success(tier);
+                            es.save(&thread_store, thread_id).await.map_err(|e| {
+                                format!("failed to persist execution state after validate pass: {e}")
                             })?;
-
-                            // Clear repair state on success (best-effort).
-                            let _ = crate::data_engineer::repair_state::RepairState::new()
-                                .save(&thread_store, thread_id)
-                                .await;
                         }
 
                         // Mark the active plan completed only when validate passes AND checklist execution is complete.
@@ -8380,72 +8328,39 @@ Apply these fixes in the output.",
                         );
                     let brief = dbt_error::compact_brief(&errs, 6, 1200);
 
-                    // Update compact control+repair state from this validate failure (hard-cutover: primary decision source).
+                    // Update canonical execution state from this validate failure (hard-cutover: primary decision source).
                     {
-                        let entered_from_precheck_failed = false;
-                        let failure_class = classify_validate_failure(
-                            entered_from_precheck_failed,
-                            Some(&brief),
-                            None,
-                        );
-                        let failure_class_str = match failure_class {
-                            ValidateFailureClass::SqlOrRuntime => "sql_or_runtime",
-                            ValidateFailureClass::SchemaOrPrecheck => "schema_or_precheck",
-                            ValidateFailureClass::Unknown => "unknown",
-                        }
-                        .to_string();
-                        let primary_file =
-                            primary_failed_model_file(&failing_models).unwrap_or_default();
-
-                        let mut cs = crate::data_engineer::control_state::ControlState::load(
+                        let mut es = crate::data_engineer::progress_controller::ExecutionState::load(
                             &thread_store,
                             thread_id,
                         )
                         .await
-                        .unwrap_or_else(crate::data_engineer::control_state::ControlState::new);
-                        cs.last_validate =
-                            Some(crate::data_engineer::control_state::LastValidateState {
-                                step_idx: None,
-                                ts: Some(chrono::Utc::now().to_rfc3339()),
-                                ok: Some(false),
-                                compile_ok: Some(compile_ok),
-                                run_ok: Some(run_ok),
-                                brief: Some(brief.clone()),
-                                failed_models: failing_models.clone(),
-                                failure_class: Some(failure_class_str.clone()),
-                            });
-                        cs.hard_mutation_repair_mode = true;
-                        cs.single_target_repair_path = if primary_file.trim().is_empty() {
-                            None
+                        .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+                        let tier = if phase == Phase::CleanseValidate {
+                            crate::data_engineer::progress_controller::ExecutionTier::Cleanse
                         } else {
-                            Some(primary_file.trim().to_string())
+                            crate::data_engineer::progress_controller::ExecutionTier::Model
                         };
-                        cs.save(&thread_store, thread_id).await.map_err(|e| {
-                            format!("failed to persist control state after validate failure: {e}")
-                        })?;
-
-                        let mut rs = crate::data_engineer::repair_state::RepairState::load(
-                            &thread_store,
-                            thread_id,
-                        )
-                        .await
-                        .unwrap_or_else(crate::data_engineer::repair_state::RepairState::new);
-                        rs.target_path = cs.single_target_repair_path.clone();
-                        rs.last_failed_models = failing_models.clone();
-                        rs.last_error_class = Some(failure_class_str);
-                        rs.last_error_brief = Some(brief.clone());
-                        rs.ladder_step =
-                            crate::data_engineer::repair_state::RepairLadderStep::PatchTarget;
-                        rs.attempt_count = 0;
-                        rs.consecutive_noop_patches = 0;
-                        rs.save(&thread_store, thread_id).await.map_err(|e| {
-                            format!("failed to persist repair state after validate failure: {e}")
+                        let backlog = crate::data_engineer::progress_controller::repair_backlog_from_failed_models(
+                            &failing_models,
+                        );
+                        let fingerprint =
+                            crate::data_engineer::progress_controller::error_fingerprint_from_validate_obs(
+                                &obs,
+                            );
+                        es.apply_validate_failure(tier, fingerprint, backlog, Some(brief.clone()));
+                        if let Some(last) = es.last_validate.as_mut() {
+                            last.compile_ok = Some(compile_ok);
+                            last.run_ok = Some(run_ok);
+                        }
+                        es.save(&thread_store, thread_id).await.map_err(|e| {
+                            format!("failed to persist execution state after validate failure: {e}")
                         })?;
                     }
 
                     // Hard cutover: during deterministic repair, the plan is treated as a frozen reference.
                     // We do NOT mutate plan task state in response to validate failures; repair is driven by
-                    // (ControlState, RepairState) + single-target file edits instead.
+                    // (ExecutionState) + single-target file edits instead.
                     let freeze_plan_during_repair = true;
                     if !freeze_plan_during_repair && !failing_models.is_empty() {
                         if phase == Phase::CleanseValidate {
@@ -9095,11 +9010,13 @@ Apply these fixes in the output.",
             }
         }
 
-        Ok(vec![FlowFrame::AwaitUser {
-            prompt: format!(
-                "Agent reached the phase-step budget without completing.\n\nBudget:\n- max_steps_per_progress={max_phase_steps}\n- total_steps={total_steps}\n\nThis usually indicates a loop (repeatedly re-entering the same phase without durable progress). Review thread history and retry with more specific instructions, or increase AGENT_MAX_PHASE_STEPS."
-            ),
-        }])
+        let budget_msg = format!(
+            "headless_budget_exhausted: Agent reached the phase-step budget without completing.\n\nBudget:\n- max_steps_per_progress={max_phase_steps}\n- total_steps={total_steps}\n\nThis indicates a loop (re-entering phases without durable progress)."
+        );
+        if Self::headless_mode_enabled() {
+            return Err(budget_msg);
+        }
+        Ok(vec![FlowFrame::AwaitUser { prompt: budget_msg }])
     }
 
     async fn run_authoring(

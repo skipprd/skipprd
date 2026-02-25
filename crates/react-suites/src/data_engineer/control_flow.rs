@@ -11,7 +11,7 @@ use react_core::session::{Observation, ThreadLog, ThreadStep, ThreadStore, ToolO
 use react_core::tools::Tool;
 
 use crate::config;
-use crate::data_engineer::control_state::ControlState;
+use crate::data_engineer::progress_controller::ExecutionState;
 use crate::data_engineer::tools::dbt_files::DbtFilesTool;
 use crate::dbt;
 
@@ -165,11 +165,11 @@ pub async fn append_phase_with_reason(
         )
         .await?;
 
-    // Hard-cutover state control: update compact control_state artifact on every phase transition.
-    // Thread log remains audit-only; decisioning uses control_state.
-    let mut st = ControlState::load(store, thread_id)
+    // Hard-cutover state control: update compact execution_state artifact on every phase transition.
+    // Thread log remains audit-only; decisioning uses execution_state.
+    let mut st = ExecutionState::load(store, thread_id)
         .await
-        .unwrap_or_else(ControlState::new);
+        .unwrap_or_else(ExecutionState::new);
     let next = phase.as_str().to_string();
     let prev = from_phase.map(|p| p.as_str().to_string());
     if let Some(ref p) = prev {

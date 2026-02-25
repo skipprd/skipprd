@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::data_engineer::repair_state::RepairLadderStep;
+use crate::data_engineer::progress_controller::RepairLadderStep;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
