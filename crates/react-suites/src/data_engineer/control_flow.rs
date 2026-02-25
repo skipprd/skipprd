@@ -7,11 +7,12 @@ use tracing::warn;
 use react_core::agent::AgentCtx;
 use react_core::control_flow::PhaseReasonCode;
 use react_core::providers::DbtValidateArgs;
-use react_core::session::{Observation, ThreadLog, ThreadStep, ThreadStore, ToolObservation};
+use react_core::session::{ThreadLog, ThreadStep, ThreadStore, ToolObservation};
 use react_core::tools::Tool;
+#[cfg(test)]
+use react_core::session::Observation;
 
 use crate::config;
-use crate::data_engineer::progress_controller::ExecutionState;
 use crate::data_engineer::tools::dbt_files::DbtFilesTool;
 use crate::dbt;
 
@@ -72,7 +73,7 @@ impl Phase {
     }
 }
 
-fn allowed_next_phases(from: Phase) -> &'static [Phase] {
+pub(crate) fn allowed_next_phases(from: Phase) -> &'static [Phase] {
     match from {
         Phase::Preflight => &[Phase::CleansePlan],
         Phase::CleansePlan => &[Phase::CleansePlan, Phase::CleanseAuthor],
@@ -118,7 +119,7 @@ fn allowed_next_phases(from: Phase) -> &'static [Phase] {
     }
 }
 
-fn is_annotation_reason(reason_code: Option<PhaseReasonCode>) -> bool {
+pub(crate) fn is_annotation_reason(reason_code: Option<PhaseReasonCode>) -> bool {
     matches!(
         reason_code,
         Some(
@@ -145,7 +146,7 @@ pub fn phase_from_log(log: Option<&ThreadLog>) -> Phase {
     Phase::Preflight
 }
 
-fn replan_backtrack_counter_cap() -> usize {
+pub(crate) fn replan_backtrack_counter_cap() -> usize {
     std::env::var("AGENT_MAX_REPLAN_BACKTRACKS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -208,69 +209,16 @@ pub async fn append_phase_with_reason(
     reason_code: Option<PhaseReasonCode>,
     reason_detail: Option<Value>,
 ) -> Result<(), String> {
-    if let Some(from) = from_phase {
-        let is_same_phase_annotation = from == phase && is_annotation_reason(reason_code);
-        if !is_same_phase_annotation && !allowed_next_phases(from).contains(&phase) {
-            return Err(format!(
-                "invalid_phase_transition: from='{}' to='{}' reason='{}'",
-                from.as_str(),
-                phase.as_str(),
-                reason_code
-                    .map(|c| c.as_str().to_string())
-                    .unwrap_or_else(|| "none".to_string())
-            ));
-        }
-    }
-
-    let agent = agent.unwrap_or_else(|| "unknown".to_string());
-    store
-        .append_step(
-            thread_id,
-            ThreadStep::Phase {
-                phase: phase.as_str().to_string(),
-                from_phase: from_phase.map(|p| p.as_str().to_string()),
-                reason_code,
-                reason_detail,
-                observation: Observation::ok(),
-                ts: chrono::Utc::now().to_rfc3339(),
-                agent,
-            },
-        )
-        .await?;
-
-    // Hard-cutover state control: update compact execution_state artifact on every phase transition.
-    // Thread log remains audit-only; decisioning uses execution_state.
-    let mut st = ExecutionState::load(store, thread_id)
-        .await
-        .unwrap_or_else(ExecutionState::new);
-    if let Some(from) = from_phase {
-        let is_backtrack =
-            is_cleanse_replan_backtrack(from, phase) || is_model_replan_backtrack(from, phase);
-        if is_backtrack {
-            st.replan_backtracks = st
-                .replan_backtracks
-                .saturating_add(1)
-                .min(replan_backtrack_counter_cap());
-        } else if phase == Phase::Done
-            || matches!(
-                reason_code,
-                Some(
-                    PhaseReasonCode::ValidatePass
-                        | PhaseReasonCode::PlanTasksDone
-                        | PhaseReasonCode::NoWorkAllDone
-                        | PhaseReasonCode::PublishSuccess
-                        | PhaseReasonCode::PublishConfirmedSuccess
-                )
-            )
-        {
-            st.replan_backtracks = 0;
-        }
-    }
-    st.current_phase = Some(phase);
-    st.phase_reason_code = reason_code;
-    st.save(store, thread_id).await?;
-
-    Ok(())
+    crate::data_engineer::transition_dispatcher::dispatch_phase_transition(
+        store,
+        thread_id,
+        agent,
+        from_phase,
+        phase,
+        reason_code,
+        reason_detail,
+    )
+    .await
 }
 
 #[derive(Clone, Debug, Default)]
@@ -734,12 +682,12 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
     out
 }
 
-fn is_cleanse_replan_backtrack(from: Phase, to: Phase) -> bool {
+pub(crate) fn is_cleanse_replan_backtrack(from: Phase, to: Phase) -> bool {
     matches!(from, Phase::CleanseValidate | Phase::CleanseReview)
         && matches!(to, Phase::CleansePlan | Phase::CleanseAuthor)
 }
 
-fn is_model_replan_backtrack(from: Phase, to: Phase) -> bool {
+pub(crate) fn is_model_replan_backtrack(from: Phase, to: Phase) -> bool {
     matches!(
         from,
         Phase::ModelValidate | Phase::ModelReview | Phase::PostPublishReview

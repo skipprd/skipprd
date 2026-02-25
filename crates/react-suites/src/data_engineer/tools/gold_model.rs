@@ -624,9 +624,17 @@ impl Tool for GoldModelTool {
                 continue;
             }
             let draft = draft.expect("ok implies draft");
+            let intent =
+                match crate::data_engineer::authoring_ir::compile_sql_first_draft(&draft.sql, &draft.notes) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        errors.push(format!("{name}: authoring_ir compile failed: {e}"));
+                        continue;
+                    }
+                };
 
             // Materialize: replace placeholders with ref().
-            let dbt_sql = sql_first::apply_placeholders(&draft.sql, &repl_materialize);
+            let dbt_sql = sql_first::apply_placeholders(&intent.sql, &repl_materialize);
             if naming::contains_source_call(&dbt_sql) {
                 errors.push(format!(
                     "{name}: invalid gold SQL: contains source(). Gold must only read from silver via ref('stg_*')."
@@ -692,7 +700,7 @@ impl Tool for GoldModelTool {
             written.push(outcome.key);
             succeeded_item_names.push(name.to_string());
 
-            for n in draft.notes {
+            for n in intent.notes {
                 let nt = n.trim();
                 if !nt.is_empty() {
                     notes.push(format!("{name}: {nt}"));

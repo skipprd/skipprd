@@ -863,9 +863,17 @@ impl Tool for StagingModelTool {
                 continue;
             }
             let draft = draft.expect("ok implies draft");
+            let intent =
+                match crate::data_engineer::authoring_ir::compile_sql_first_draft(&draft.sql, &draft.notes) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        errors.push(format!("{ds}: authoring_ir compile failed: {e}"));
+                        continue;
+                    }
+                };
 
             // Materialize: replace __SOURCE__ with dbt source().
-            let dbt_sql = draft.sql.replace(
+            let dbt_sql = intent.sql.replace(
                 "__SOURCE__",
                 &format!(
                     "{{{{ source(\"{}\", \"{}\") }}}}",
@@ -913,7 +921,7 @@ impl Tool for StagingModelTool {
             emit_trace(ctx, format!("saved {}", rel_path));
             written.push(key);
             succeeded_dataset_ids.push(ds.clone());
-            for n in draft.notes {
+            for n in intent.notes {
                 if !n.trim().is_empty() {
                     notes.push(format!("{}: {}", ds, n));
                 }

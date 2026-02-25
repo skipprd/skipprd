@@ -7,12 +7,13 @@ use react_core::llm::LlmCallOptions;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
+use crate::data_engineer::chunk_progress_contract;
 use crate::data_engineer::naming;
 use crate::data_engineer::plan;
+use crate::data_engineer::controller_kernel;
 use crate::data_engineer::project_files;
 use crate::data_engineer::project_fs;
 use crate::data_engineer::references::DatasetRef;
-use crate::data_engineer::retry_budget;
 use crate::data_engineer::schema_policy;
 use crate::data_engineer::tools::dbt_files;
 
@@ -237,7 +238,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             }));
         }
 
-        if retry_budget::batch_budget(&plan.progress).exhausted() {
+        if controller_kernel::batch_budget(&plan.progress).exhausted() {
             return Ok(serde_json::json!({
                 "ok": false,
                 "kind": "batch_locked",
@@ -265,6 +266,19 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                 "attempted_dataset_ids": [],
                 "succeeded_dataset_ids": [],
                 "failed_dataset_ids": [],
+            }));
+        }
+        if let Err(e) =
+            chunk_progress_contract::enforce_chunk_contract(&batch, 5, "cleanse_schema")
+        {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "kind": "chunk_contract_violation",
+                "checklist_item_id": checklist_item_id,
+                "attempted_dataset_ids": [],
+                "succeeded_dataset_ids": [],
+                "failed_dataset_ids": [],
+                "errors": [e],
             }));
         }
 
@@ -465,7 +479,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                 plan::ChecklistItemStatus::NeedsUpdate,
             );
         }
-        let budget = retry_budget::note_batch_result(&mut plan.progress, failed.is_empty());
+        let budget = controller_kernel::note_batch_result(&mut plan.progress, failed.is_empty());
         plan::save_cleanse_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to persist cleanse schema batch result state: {e}"))?;
@@ -560,6 +574,17 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 "attempted_item_names": [],
                 "succeeded_item_names": [],
                 "failed_item_names": [],
+            }));
+        }
+        if let Err(e) = chunk_progress_contract::enforce_chunk_contract(&names, 5, "model_schema") {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "kind": "chunk_contract_violation",
+                "checklist_item_id": checklist_item_id,
+                "attempted_item_names": [],
+                "succeeded_item_names": [],
+                "failed_item_names": [],
+                "errors": [e],
             }));
         }
 
@@ -666,7 +691,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                     for n in names.iter() {
                         plan::model_schema_contract_mark_needs_update(&mut plan, n);
                     }
-                    retry_budget::note_batch_result(&mut plan.progress, false);
+                    controller_kernel::note_batch_result(&mut plan.progress, false);
                     plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
                         format!(
                             "failed to persist model schema batch failure state after patch error: {save_err}"
@@ -693,7 +718,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 for n in names.iter() {
                     plan::model_schema_contract_mark_needs_update(&mut plan, n);
                 }
-                retry_budget::note_batch_result(&mut plan.progress, false);
+                controller_kernel::note_batch_result(&mut plan.progress, false);
                 plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
                     format!(
                         "failed to persist model schema batch failure state after post-check error: {save_err}"
@@ -718,7 +743,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             for n in names.iter() {
                 plan::model_schema_contract_mark_needs_update(&mut plan, n);
             }
-            retry_budget::note_batch_result(&mut plan.progress, false);
+            controller_kernel::note_batch_result(&mut plan.progress, false);
             plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
                 format!(
                     "failed to persist model schema batch failure state after write error: {save_err}"
@@ -741,7 +766,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 plan::ChecklistItemStatus::Done,
             );
         }
-        retry_budget::note_batch_result(&mut plan.progress, true);
+        controller_kernel::note_batch_result(&mut plan.progress, true);
         plan::save_model_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to persist model schema batch result state: {e}"))?;
@@ -1072,7 +1097,7 @@ mod tests {
         }
         let batches = vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]];
         let mut progress = plan::PlanProgress::default();
-        progress.consecutive_batch_failures = retry_budget::MAX_CONSECUTIVE_BATCH_FAILURES;
+        progress.consecutive_batch_failures = controller_kernel::max_consecutive_batch_failures();
         let p = plan::CleansePlan {
             plan_key,
             status: plan::PlanStatus::Approved,

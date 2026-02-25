@@ -22,6 +22,7 @@ use crate::data_engineer::failure_classifier::ValidateFailureClass;
 pub struct DataEngineerSuite;
 
 pub mod controller_event;
+pub mod controller_kernel;
 pub mod control_flow;
 pub mod dataset_truth;
 pub mod dbt_error;
@@ -37,11 +38,14 @@ pub mod project_files;
 pub mod project_fs;
 pub mod prompt_packets;
 pub mod prompts;
+pub mod authoring_ir;
+pub mod chunk_progress_contract;
 pub mod references;
 mod review_batched;
 pub mod retry_budget;
 pub mod schema_policy;
 pub mod sql_first;
+pub mod transition_dispatcher;
 pub mod tools;
 
 fn primary_failed_model_file(last_validate_failed_models: &[serde_json::Value]) -> Option<String> {
@@ -60,43 +64,19 @@ fn lock_prompt_for_plan(
     next_items: &[String],
     expected_paths: &[String],
 ) -> String {
-    let mut s = String::new();
-    s.push_str(&format!(
-        "Plan-batched authoring is locked ({kind}).\n\n\
-Reason:\n\
-- consecutive_batch_failures = {consecutive} (limit {})\n\
-- total_batch_failures = {total}\n\n\
-Plan:\n\
-- plan_key: {plan_key}\n",
-        crate::data_engineer::retry_budget::MAX_CONSECUTIVE_BATCH_FAILURES
-    ));
-    if !next_items.is_empty() {
-        s.push_str("\nNext batch items:\n");
-        for it in next_items.iter().take(6) {
-            s.push_str("- ");
-            s.push_str(it);
-            s.push('\n');
-        }
-    }
-    if !expected_paths.is_empty() {
-        s.push_str("\nRecommended next step:\n");
-        s.push_str(
-            "- Apply a targeted mutating fix (`file op=patch|rm|mv`) to the failing artifact(s):\n",
-        );
-        for p in expected_paths.iter().take(6) {
-            s.push_str("  - ");
-            s.push_str(p);
-            s.push('\n');
-        }
-        s.push_str(
-            "\nThen retry. This lock exists to prevent infinite loops when batch application repeatedly fails.\n",
-        );
+    let track = if kind.eq_ignore_ascii_case("cleanse") {
+        crate::data_engineer::controller_kernel::PlanTrack::Cleanse
     } else {
-        s.push_str(
-            "\nRecommended next step:\n- Apply a targeted mutating fix (`file op=patch|rm|mv`) to the failing DBT artifact(s), then retry.\n",
-        );
-    }
-    s
+        crate::data_engineer::controller_kernel::PlanTrack::Model
+    };
+    crate::data_engineer::controller_kernel::build_batch_lock_prompt(
+        track,
+        plan_key,
+        consecutive,
+        total,
+        next_items,
+        expected_paths,
+    )
 }
 
 /// Interrupt policy used by non-deterministic single-pass modes.
@@ -351,7 +331,7 @@ impl DataEngineerSuite {
         phase: control_flow::Phase,
         kind: &str,
     ) -> usize {
-        let cap = crate::data_engineer::retry_budget::subjective_retry_state_cap();
+        let cap = crate::data_engineer::controller_kernel::subjective_retry_state_cap();
         let mut st = crate::data_engineer::progress_controller::ExecutionState::load(
             thread_store,
             thread_id,
@@ -5558,7 +5538,7 @@ Apply these fixes in the output.",
                                     )
                                     .await;
                                     if tries
-                                        > crate::data_engineer::retry_budget::subjective_retry_limit()
+                                        > crate::data_engineer::controller_kernel::subjective_retry_limit()
                                     {
                                         return Err(format!(
                                             "plan_grounding_not_converged_after_retries: tries={}, file_seen={}, sql_schema_seen={}, evidence_seen={}",
@@ -5619,7 +5599,7 @@ Apply these fixes in the output.",
                                         )
                                         .await;
                                         if tries
-                                            > crate::data_engineer::retry_budget::subjective_retry_limit()
+                                            > crate::data_engineer::controller_kernel::subjective_retry_limit()
                                         {
                                             return Err(format!(
                                                 "plan_json_invalid_after_retries: tries={}, error={}",
@@ -5883,7 +5863,7 @@ Apply these fixes in the output.",
                                     )
                                     .await;
                                     if tries
-                                        > crate::data_engineer::retry_budget::subjective_retry_limit()
+                                        > crate::data_engineer::controller_kernel::subjective_retry_limit()
                                     {
                                         return Err(format!(
                                             "plan_semantic_validation_not_converged_after_retries: tries={}, errors={}",
@@ -5999,7 +5979,7 @@ Apply these fixes in the output.",
                                         )
                                         .await;
                                         if tries
-                                            > crate::data_engineer::retry_budget::subjective_retry_limit()
+                                            > crate::data_engineer::controller_kernel::subjective_retry_limit()
                                         {
                                             return Err(format!(
                                                 "plan_json_invalid_after_retries: tries={}, error={}",
@@ -6136,7 +6116,7 @@ Apply these fixes in the output.",
                                     )
                                     .await;
                                     if tries
-                                        > crate::data_engineer::retry_budget::subjective_retry_limit()
+                                        > crate::data_engineer::controller_kernel::subjective_retry_limit()
                                     {
                                         return Err("model plan contained no grounded tasks after repeated retries (gold must reference existing silver models under models/staging/)".to_string());
                                     }
@@ -6232,7 +6212,7 @@ Apply these fixes in the output.",
                                     )
                                     .await;
                                     if tries
-                                        > crate::data_engineer::retry_budget::subjective_retry_limit()
+                                        > crate::data_engineer::controller_kernel::subjective_retry_limit()
                                     {
                                         return Err(format!(
                                             "plan_semantic_validation_not_converged_after_retries: tries={}, errors={}",
@@ -6485,7 +6465,7 @@ Apply these fixes in the output.",
                             // Hard stop: if plan-batched authoring is locked due to too many consecutive failures,
                             // return control to the user with a single actionable message (do not loop).
                             if plan.progress.consecutive_batch_failures
-                            >= crate::data_engineer::retry_budget::MAX_CONSECUTIVE_BATCH_FAILURES
+                            >= crate::data_engineer::controller_kernel::max_consecutive_batch_failures()
                         {
                             let next =
                                 crate::data_engineer::plan::cleanse_next_authoring_action(&plan)
@@ -6870,7 +6850,7 @@ Apply these fixes in the output.",
                                     .map(|x| x.checklist_item_id.clone()),
                             });
                             if plan.progress.consecutive_batch_failures
-                            >= crate::data_engineer::retry_budget::MAX_CONSECUTIVE_BATCH_FAILURES
+                            >= crate::data_engineer::controller_kernel::max_consecutive_batch_failures()
                         {
                             let next =
                                 crate::data_engineer::plan::model_next_authoring_action(&plan)
@@ -8593,7 +8573,7 @@ Apply these fixes in the output.",
                     let forced_by_subjective_retry = Self::review_retry_kind(meta.decision)
                         .is_some()
                         && review_retry_count
-                            > crate::data_engineer::retry_budget::subjective_retry_limit();
+                            > crate::data_engineer::controller_kernel::subjective_retry_limit();
                     let forced_progress = forced_by_patch_plan_streak
                         || forced_by_patch_impl_streak
                         || forced_by_subjective_retry;

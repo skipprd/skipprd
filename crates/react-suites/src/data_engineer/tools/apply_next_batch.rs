@@ -8,9 +8,10 @@ use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
 use crate::data_engineer::dataset_truth;
+use crate::data_engineer::chunk_progress_contract;
+use crate::data_engineer::controller_kernel;
 use crate::data_engineer::plan;
 use crate::data_engineer::plan::{CleansePlan, ModelPlan};
-use crate::data_engineer::retry_budget;
 use crate::data_engineer::tools;
 
 fn extract_string_arg(args: &Value, key: &str) -> Option<String> {
@@ -116,7 +117,7 @@ impl Tool for ApplyNextCleanseBatchTool {
             }));
         }
 
-        if retry_budget::batch_budget(&plan.progress).exhausted() {
+        if controller_kernel::batch_budget(&plan.progress).exhausted() {
             return Ok(serde_json::json!({
                 "ok": false,
                 "errors": ["too many consecutive batch failures; apply a targeted mutating fix (file op=patch|rm|mv) before retrying"],
@@ -200,6 +201,16 @@ impl Tool for ApplyNextCleanseBatchTool {
                 "failed_dataset_ids": [],
             }));
         }
+        if let Err(e) = chunk_progress_contract::enforce_chunk_contract(&batch, 5, "cleanse_sql") {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "kind": "chunk_contract_violation",
+                "errors": [e],
+                "attempted_dataset_ids": [],
+                "succeeded_dataset_ids": [],
+                "failed_dataset_ids": [],
+            }));
+        }
 
         // Truth gating (fail-fast): only proceed if schema() proves each dataset exists.
         if let Some(q) = ctx.query.as_ref() {
@@ -218,7 +229,7 @@ impl Tool for ApplyNextCleanseBatchTool {
                     &batch,
                     "dataset schema lookup failed; dataset not usable",
                 );
-                retry_budget::note_batch_result(&mut plan.progress, false);
+                controller_kernel::note_batch_result(&mut plan.progress, false);
                 plan::save_cleanse_plan(ctx, &plan)
                     .await
                     .map_err(|e| format!("failed to save cleanse plan after schema gating failure: {e}"))?;
@@ -274,7 +285,7 @@ impl Tool for ApplyNextCleanseBatchTool {
                     &batch,
                     &format!("apply_next_cleanse_batch failed: {}", e.trim()),
                 );
-                retry_budget::note_batch_result(&mut plan.progress, false);
+                controller_kernel::note_batch_result(&mut plan.progress, false);
                 plan::save_cleanse_plan(ctx, &plan)
                     .await
                     .map_err(|e| format!("failed to save cleanse plan after batch tool failure: {e}"))?;
@@ -344,7 +355,7 @@ impl Tool for ApplyNextCleanseBatchTool {
                 }
             }
         }
-        let budget = retry_budget::note_batch_result(&mut plan.progress, ok && failed.is_empty());
+        let budget = controller_kernel::note_batch_result(&mut plan.progress, ok && failed.is_empty());
         plan::save_cleanse_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to save cleanse plan after batch reconciliation: {e}"))?;
@@ -414,7 +425,7 @@ impl Tool for ApplyNextModelBatchTool {
             }));
         }
 
-        if retry_budget::batch_budget(&plan.progress).exhausted() {
+        if controller_kernel::batch_budget(&plan.progress).exhausted() {
             return Ok(serde_json::json!({
                 "ok": false,
                 "errors": ["too many consecutive batch failures; apply a targeted mutating fix (file op=patch|rm|mv) before retrying"],
@@ -498,6 +509,18 @@ impl Tool for ApplyNextModelBatchTool {
                 "failed_item_names": [],
             }));
         }
+        if let Err(e) =
+            chunk_progress_contract::enforce_chunk_contract(&batch_names, 5, "model_sql")
+        {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "kind": "chunk_contract_violation",
+                "errors": [e],
+                "attempted_item_names": [],
+                "succeeded_item_names": [],
+                "failed_item_names": [],
+            }));
+        }
 
         // Truth gating: gold/model must only rely on existing silver models under models/staging/.
         let mut gating_errors: Vec<String> = Vec::new();
@@ -528,7 +551,7 @@ impl Tool for ApplyNextModelBatchTool {
                 &batch_names,
                 "gold inputs are not grounded in existing silver models under models/staging/",
             );
-            retry_budget::note_batch_result(&mut plan.progress, false);
+            controller_kernel::note_batch_result(&mut plan.progress, false);
             plan::save_model_plan(ctx, &plan)
                 .await
                 .map_err(|e| format!("failed to save model plan after input gating failure: {e}"))?;
@@ -592,7 +615,7 @@ impl Tool for ApplyNextModelBatchTool {
                     &batch_names,
                     &format!("apply_next_model_batch failed: {}", e.trim()),
                 );
-                retry_budget::note_batch_result(&mut plan.progress, false);
+                controller_kernel::note_batch_result(&mut plan.progress, false);
                 plan::save_model_plan(ctx, &plan)
                     .await
                     .map_err(|e| format!("failed to save model plan after batch tool failure: {e}"))?;
@@ -657,7 +680,7 @@ impl Tool for ApplyNextModelBatchTool {
             }
         }
 
-        let budget = retry_budget::note_batch_result(&mut plan.progress, ok && failed.is_empty());
+        let budget = controller_kernel::note_batch_result(&mut plan.progress, ok && failed.is_empty());
         plan::save_model_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to save model plan after batch reconciliation: {e}"))?;
