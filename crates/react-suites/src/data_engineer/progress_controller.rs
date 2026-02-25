@@ -341,6 +341,16 @@ impl ExecutionState {
         self.subjective_retry_phase.clear();
         self.subjective_retry_kind.clear();
     }
+
+    pub fn enter_validate_mode(&mut self, tier: ExecutionTier) {
+        self.current_tier = tier;
+        self.mode = ExecutionMode::Validate;
+    }
+
+    pub fn mark_failed(&mut self, brief: impl Into<String>) {
+        self.mode = ExecutionMode::Failed;
+        self.last_error_brief = Some(brief.into());
+    }
 }
 
 fn obs_like_bool(
@@ -453,5 +463,16 @@ mod tests {
         assert_eq!(st.bump_subjective_retry(Phase::CleansePlan, "x", 3), 3);
         assert_eq!(st.bump_subjective_retry(Phase::CleansePlan, "x", 3), 3);
         assert_eq!(st.bump_subjective_retry(Phase::ModelPlan, "x", 3), 1);
+    }
+
+    #[test]
+    fn validate_and_failed_modes_are_set_via_controller_helpers() {
+        let mut st = ExecutionState::new();
+        st.enter_validate_mode(ExecutionTier::Cleanse);
+        assert_eq!(st.mode, ExecutionMode::Validate);
+        assert_eq!(st.current_tier, ExecutionTier::Cleanse);
+        st.mark_failed("x");
+        assert_eq!(st.mode, ExecutionMode::Failed);
+        assert_eq!(st.last_error_brief.as_deref(), Some("x"));
     }
 }

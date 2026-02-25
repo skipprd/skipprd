@@ -809,7 +809,6 @@ pub fn review_patch_impl_streak(log: Option<&ThreadLog>, review_phase: Phase) ->
 pub enum AuthoringGate {
     Allow,
     Block { reason: String },
-    AwaitUser { prompt: String },
 }
 
 fn phase_start_idx(log: &ThreadLog, phase: Phase) -> Option<usize> {
@@ -869,8 +868,8 @@ pub fn gate_authoring_to_validate(log: Option<&ThreadLog>) -> AuthoringGate {
     let g = derive_guard_state(log);
     if g.last_validate_failed && !(g.mutated_since_fail || g.patched_since_fail) {
         if g.mutation_failures_since_validate >= 3 {
-            return AuthoringGate::AwaitUser {
-                prompt: format!(
+            return AuthoringGate::Block {
+                reason: format!(
                     "I tried to apply a mutating fix after a failed dbt_validate, but the mutation step failed {} times in a row (often due to tool timeouts or storage write failures).\n\nPlease check:\n- The runtime can write DBT files to storage (S3 prefix/permissions)\n- The agent tool timeout is sufficient for your environment\n\nThen retry. If you want a quick deterministic fix path, use `file op=patch` to edit the failing model SQL directly.",
                     g.mutation_failures_since_validate
                 ),
@@ -1855,10 +1854,10 @@ mod tests {
             ..Default::default()
         };
         match gate_authoring_to_validate(Some(&log)) {
-            AuthoringGate::AwaitUser { prompt } => {
-                assert!(prompt.contains("failed 3 times"));
+            AuthoringGate::Block { reason } => {
+                assert!(reason.contains("failed 3 times"));
             }
-            other => panic!("expected AwaitUser, got {:?}", other),
+            other => panic!("expected Block, got {:?}", other),
         }
     }
 

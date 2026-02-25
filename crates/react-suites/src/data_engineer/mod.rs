@@ -128,7 +128,9 @@ Plan:\n\
     }
     if !expected_paths.is_empty() {
         s.push_str("\nRecommended next step:\n");
-        s.push_str("- Apply a targeted `file op=patch` to fix the failing artifact(s):\n");
+        s.push_str(
+            "- Apply a targeted mutating fix (`file op=patch|rm|mv`) to the failing artifact(s):\n",
+        );
         for p in expected_paths.iter().take(6) {
             s.push_str("  - ");
             s.push_str(p);
@@ -139,13 +141,15 @@ Plan:\n\
         );
     } else {
         s.push_str(
-            "\nRecommended next step:\n- Apply a targeted `file op=patch` to the failing DBT artifact(s), then retry.\n",
+            "\nRecommended next step:\n- Apply a targeted mutating fix (`file op=patch|rm|mv`) to the failing DBT artifact(s), then retry.\n",
         );
     }
     s
 }
 
-/// Agent-mode policy: preserve strict interrupts (ask_user/ask_approval), but otherwise accept finals.
+/// Interrupt policy used by non-deterministic single-pass modes.
+///
+/// Deterministic agent-mode orchestration enforces its own non-interactive contract.
 struct InterruptOnlyPolicy;
 
 #[async_trait::async_trait]
@@ -313,6 +317,25 @@ impl DataEngineerSuite {
                 !(t.is_empty() || t == "0" || t == "false" || t == "no")
             })
             .unwrap_or(false)
+    }
+
+    fn enforce_non_interactive_contract(
+        agent_type: &str,
+        frames: Vec<FlowFrame>,
+    ) -> Result<Vec<FlowFrame>, String> {
+        let await_user_prompt = frames.iter().find_map(|f| match f {
+            FlowFrame::AwaitUser { prompt } => Some(prompt.clone()),
+            _ => None,
+        });
+        if let Some(prompt) = await_user_prompt {
+            if agent_type == "agent" {
+                return Err(format!("agent_mode_await_user_forbidden: {}", prompt));
+            }
+            if Self::headless_mode_enabled() {
+                return Err(format!("await_user_forbidden_in_headless: {}", prompt));
+            }
+        }
+        Ok(frames)
     }
 
     fn build_tools_card(
@@ -3093,7 +3116,7 @@ Apply these fixes in the output.",
                     if guard.last_validate_failed && !guard.mutated_since_fail {
                         return Err(
                             "dbt_validate is blocked after a failed validation until you APPLY A FIX to the dbt project.\n\
-                             Next step must be a mutating fix action (e.g. `staging_model` or `file op=patch` to update schema/tests)."
+                             Next step must be a mutating fix action (e.g. `staging_model` or `file op=patch|rm|mv` to update schema/tests)."
                                 .to_string(),
                         );
                     }
@@ -4389,7 +4412,7 @@ Apply these fixes in the output.",
             trace_tx: sctx.trace_tx.clone(),
             // Keep a single agent label for agent-mode runs; phase selection is handled by the outer loop.
             agent_name: Some("agent".to_string()),
-            // Preserve strict interrupts (ask_user/ask_approval), but otherwise accept finals.
+            // Non-deterministic single-pass modes may interrupt via ask_user/ask_approval.
             policy: std::sync::Arc::new(InterruptOnlyPolicy),
             llm: sctx.llm.clone(),
             storage: sctx.storage.clone(),
@@ -4531,10 +4554,14 @@ Apply these fixes in the output.",
                     crate::data_engineer::progress_controller::ExecutionMode::Mutate
                 )
             {
-                return Err(format!(
+                let reason = format!(
                     "failed to make progress for this thread: execution_state stall_count={} reached max_stall_count={} in mode=mutate",
                     execution_state.stall_count, execution_state.max_stall_count
-                ));
+                );
+                let mut es = execution_state.clone();
+                es.mark_failed(reason.clone());
+                let _ = es.save(&thread_store, thread_id).await;
+                return Err(reason);
             }
             if replan_backtracks >= max_replan_backtracks {
                 let stop_msg = format!(
@@ -4557,6 +4584,9 @@ Apply these fixes in the output.",
                     .append_step(thread_id, step)
                     .await
                     .map_err(|e| format!("failed to append guard step: {e}"))?;
+                let mut es = execution_state.clone();
+                es.mark_failed(stop_msg.clone());
+                let _ = es.save(&thread_store, thread_id).await;
                 return Err(stop_msg);
             }
 
@@ -6332,7 +6362,7 @@ Apply these fixes in the output.",
                         // Phase selection (cleanse vs model) is handled by the deterministic outer loop and prompts.
                         agent_name: Some("agent".to_string()),
                         // IMPORTANT: in agent-mode, the deterministic outer loop enforces validation/invariants.
-                        // We still keep strict ask_user/ask_approval interrupts.
+                        // Non-interactive behavior is enforced at the suite boundary contract.
                         policy: std::sync::Arc::new(InterruptOnlyPolicy),
                         llm: sctx.llm.clone(),
                         storage: sctx.storage.clone(),
@@ -6514,7 +6544,7 @@ Apply these fixes in the output.",
                                 // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
                                 // Even if schema checklist work remains, fix failing SQL targets first.
                                 let mut ctx = format!(
-                                    "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call file op=patch with path + patch_text. patch_text MUST be Cursor/Aider hunks-only ('@@ ... @@', no line-number headers, no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
+                                    "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call file with a mutating op (patch|rm|mv) scoped to a repair target path.\n- If using patch: args.path + args.patch_text (Cursor/Aider hunks-only: '@@ ... @@'; no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
                                     plan.plan_key,
                                     crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                 );
@@ -6579,7 +6609,7 @@ Apply these fixes in the output.",
                                     (ctx, None)
                                 } else {
                                     let mut ctx = format!(
-                                        "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                        "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with file op=patch|rm|mv; if patching, use Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
                                         plan.plan_key,
                                         crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                     );
@@ -6666,7 +6696,7 @@ Apply these fixes in the output.",
                                     // Run a repair authoring pass grounded in the failing model/file evidence.
                                     if guard.last_validate_failed {
                                         let mut ctx = format!(
-                                        "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                    "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with file op=patch|rm|mv; if patching, use Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
                                         plan.plan_key,
                                         crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                     );
@@ -6899,7 +6929,7 @@ Apply these fixes in the output.",
                                 // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
                                 // Even if schema checklist work remains, fix failing SQL targets first.
                                 let mut ctx = format!(
-                                    "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call file op=patch with path + patch_text. patch_text MUST be Cursor/Aider hunks-only ('@@ ... @@', no line-number headers, no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
+                                    "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call file with a mutating op (patch|rm|mv) scoped to a repair target path.\n- If using patch: args.path + args.patch_text (Cursor/Aider hunks-only: '@@ ... @@'; no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
                                     plan.plan_key,
                                     crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                 );
@@ -6961,7 +6991,7 @@ Apply these fixes in the output.",
                                     (ctx, None)
                                 } else {
                                     let mut ctx = format!(
-                                        "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                        "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with file op=patch|rm|mv; if patching, use Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
                                         plan.plan_key,
                                         crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                     );
@@ -7121,7 +7151,7 @@ Apply these fixes in the output.",
                                     if guard.last_validate_failed {
                                         // Same repair-mode behavior as cleanse: run authoring to patch failing files.
                                         let mut ctx = format!(
-                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with file op=patch using Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with file op=patch|rm|mv; if patching, use Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
                                     plan.plan_key,
                                     crate::data_engineer::patch_contract::single_file_patch_good_example_json()
                                 );
@@ -7800,12 +7830,12 @@ Apply these fixes in the output.",
                             .unwrap_or_else(
                                 crate::data_engineer::progress_controller::ExecutionState::new,
                             );
-                        es.mode = crate::data_engineer::progress_controller::ExecutionMode::Validate;
-                        es.current_tier = if phase == Phase::CleanseValidate {
+                        let tier = if phase == Phase::CleanseValidate {
                             crate::data_engineer::progress_controller::ExecutionTier::Cleanse
                         } else {
                             crate::data_engineer::progress_controller::ExecutionTier::Model
                         };
+                        es.enter_validate_mode(tier);
                         es.save(&thread_store, thread_id).await.map_err(|e| {
                             format!(
                                 "failed to persist execution state before validate: {e}"
@@ -8983,6 +9013,13 @@ Apply these fixes in the output.",
         let budget_msg = format!(
             "headless_budget_exhausted: Agent reached the phase-step budget without completing.\n\nBudget:\n- max_steps_per_progress={max_phase_steps}\n- total_steps={total_steps}\n\nThis indicates a loop (re-entering phases without durable progress)."
         );
+        if let Some(mut es) =
+            crate::data_engineer::progress_controller::ExecutionState::load(&thread_store, thread_id)
+                .await
+        {
+            es.mark_failed(budget_msg.clone());
+            let _ = es.save(&thread_store, thread_id).await;
+        }
         Err(budget_msg)
     }
 
@@ -9210,7 +9247,7 @@ Apply these fixes in the output.",
                                - If string-ish: SELECT count_if(trim(cast({{col}} AS varchar)) = '') AS empty FROM {{relation}}\n\
                                - If time-like by type: SELECT count_if(try_cast(nullif(trim(cast({{col}} AS varchar)), '') AS timestamp) IS NULL) AS unparseable FROM {{relation}}\n\
                                - Sample failing: SELECT {{col}} FROM {{relation}} WHERE {{col}} IS NULL LIMIT 50\n\
-                             - Apply a fix using `staging_model` or `file op=patch`.\n\
+                             - Apply a fix using `staging_model` or `file op=patch|rm|mv`.\n\
                              - You MUST NOT claim fixed unless a probe query shows the failure condition is now 0 rows.\n\
                              Only AFTER applying a fix should you re-run `dbt_validate` with build=true.",
                             attempt + 1,
@@ -9309,13 +9346,14 @@ impl Suite for DataEngineerSuite {
         ctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
         Self::validate_agent_type(agent_type)?;
-        match agent_type {
+        let frames = match agent_type {
             "agent" => Self::run_agent(thread_id, question, ctx).await,
             "model" => Self::run_model(thread_id, question, ctx).await,
             "cleanse" => Self::run_cleanse(thread_id, question, ctx).await,
             "review" => Self::run_review(thread_id, question, ctx).await,
             _ => Self::run_ask(thread_id, question, ctx).await,
-        }
+        }?;
+        Self::enforce_non_interactive_contract(agent_type, frames)
     }
 
     async fn handle_open(
@@ -9326,13 +9364,14 @@ impl Suite for DataEngineerSuite {
         ctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
         Self::validate_agent_type(agent_type)?;
-        match agent_type {
+        let frames = match agent_type {
             "agent" => Self::run_agent(thread_id, question, ctx).await,
             "model" => Self::run_model(thread_id, question, ctx).await,
             "cleanse" => Self::run_cleanse(thread_id, question, ctx).await,
             "review" => Self::run_review(thread_id, question, ctx).await,
             _ => Self::run_ask(thread_id, question, ctx).await,
-        }
+        }?;
+        Self::enforce_non_interactive_contract(agent_type, frames)
     }
 
     async fn handle_user(
@@ -9343,13 +9382,14 @@ impl Suite for DataEngineerSuite {
         ctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
         Self::validate_agent_type(agent_type)?;
-        match agent_type {
+        let frames = match agent_type {
             "agent" => Self::run_agent(thread_id, text, ctx).await,
             "model" => Self::run_model(thread_id, text, ctx).await,
             "cleanse" => Self::run_cleanse(thread_id, text, ctx).await,
             "review" => Self::run_review(thread_id, text, ctx).await,
             _ => Self::run_ask(thread_id, text, ctx).await,
-        }
+        }?;
+        Self::enforce_non_interactive_contract(agent_type, frames)
     }
 }
 
@@ -9978,6 +10018,26 @@ mod tests {
                 || err.contains("dbt provider configured")
                 || err.contains("catalog bootstrap metadata gate failed")
         );
+    }
+
+    #[test]
+    fn non_interactive_contract_rejects_await_user_for_agent_type() {
+        let frames = vec![FlowFrame::AwaitUser {
+            prompt: "x".to_string(),
+        }];
+        let err = DataEngineerSuite::enforce_non_interactive_contract("agent", frames)
+            .expect_err("agent type must reject AwaitUser");
+        assert!(err.contains("agent_mode_await_user_forbidden"));
+    }
+
+    #[test]
+    fn non_interactive_contract_allows_await_user_for_non_agent_when_not_headless() {
+        let frames = vec![FlowFrame::AwaitUser {
+            prompt: "x".to_string(),
+        }];
+        let out = DataEngineerSuite::enforce_non_interactive_contract("review", frames)
+            .expect("non-agent should allow AwaitUser when not headless");
+        assert!(matches!(out.first(), Some(FlowFrame::AwaitUser { .. })));
     }
 
     #[tokio::test]
