@@ -17,6 +17,7 @@ use react_core::session::ThreadStore;
 use react_core::tools::{Tool, ToolRegistry};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+#[cfg(test)]
 use crate::data_engineer::failure_classifier::ValidateFailureClass;
 
 pub struct DataEngineerSuite;
@@ -198,8 +199,10 @@ enum AuthoringKind {
 
 #[derive(Clone, Debug)]
 enum AllowedBatch {
-    CleanseDatasetIds(Vec<String>),
-    ModelItemNames(Vec<String>),
+    CleanseSqlDatasetIds(Vec<String>),
+    CleanseSchemaDatasetIds(Vec<String>),
+    ModelSqlItemNames(Vec<String>),
+    ModelSchemaItemNames(Vec<String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1033,382 +1036,6 @@ impl DataEngineerSuite {
         Ok(())
     }
 
-    fn normalize_plan_json_payload(expected_kind: &str, payload: &mut serde_json::Value) {
-        fn normalized_string_vec(v: Option<&serde_json::Value>) -> Vec<String> {
-            let mut out = Vec::new();
-            if let Some(arr) = v.and_then(|x| x.as_array()) {
-                for it in arr {
-                    let s = if let Some(s) = it.as_str() {
-                        s.trim().to_string()
-                    } else if let Some(obj) = it.as_object() {
-                        obj.get("task_id")
-                            .and_then(|v| v.as_str())
-                            .or_else(|| obj.get("name").and_then(|v| v.as_str()))
-                            .or_else(|| obj.get("dataset_id").and_then(|v| v.as_str()))
-                            .unwrap_or("")
-                            .trim()
-                            .to_string()
-                    } else {
-                        String::new()
-                    };
-                    if !s.is_empty() {
-                        out.push(s);
-                    }
-                }
-            }
-            out.sort();
-            out.dedup();
-            out
-        }
-
-        // Deterministic normalizer for common plan-shape drift from LLMs.
-        // Goal: avoid expensive/truncation-prone "plan_json_repair" loops.
-        // 0) Unwrap common wrapper shapes:
-        // - { "<kind>": { ...plan... } }
-        // - { "plan": { ...plan... } } / { "payload": { ...plan... } }
-        // - { "work_groups": { ...plan... } } (LLM mistakenly nests the whole plan here)
-        //
-        // We only unwrap when the inner object looks like a plan root (has `tasks`).
-        if payload.as_object().is_some() && payload.get("tasks").is_none() {
-            for k in [expected_kind, "plan", "payload", "final"] {
-                if let Some(inner) = payload.get(k).cloned() {
-                    if inner.get("tasks").is_some() && inner.is_object() {
-                        *payload = inner;
-                        Self::normalize_plan_json_payload(expected_kind, payload);
-                        return;
-                    }
-                }
-            }
-            if let Some(inner) = payload.get("work_groups").cloned() {
-                if inner.get("tasks").is_some() && inner.is_object() {
-                    *payload = inner;
-                    Self::normalize_plan_json_payload(expected_kind, payload);
-                    return;
-                }
-                // Another common drift: work_groups: [ { ...plan... } ]
-                if let Some(arr) = inner.as_array() {
-                    if arr.len() == 1 {
-                        if let Some(one) = arr.get(0).cloned() {
-                            if one.get("tasks").is_some() && one.is_object() {
-                                *payload = one;
-                                Self::normalize_plan_json_payload(expected_kind, payload);
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let Some(obj) = payload.as_object_mut() else {
-            return;
-        };
-
-        // Normalize root task aliases first (skeleton-compile pass).
-        if obj.get("tasks").and_then(|v| v.as_array()).is_none() {
-            let mut task_ids = normalized_string_vec(obj.get("task_names"));
-            if task_ids.is_empty() {
-                task_ids = normalized_string_vec(obj.get("items"));
-            }
-            if !task_ids.is_empty() {
-                let mut tasks: Vec<serde_json::Value> = Vec::new();
-                for id in task_ids {
-                    if expected_kind == "cleanse_plan" {
-                        tasks.push(serde_json::json!({"dataset_id": id}));
-                    } else {
-                        tasks.push(serde_json::json!({"name": id}));
-                    }
-                }
-                obj.insert("tasks".to_string(), serde_json::Value::Array(tasks));
-            }
-        }
-        obj.remove("task_names");
-
-        // Normalize work_groups with deterministic alias handling and key-pruning.
-        if let Some(wgs) = obj.get_mut("work_groups").and_then(|v| v.as_array_mut()) {
-            for wg in wgs.iter_mut() {
-                let Some(wg_obj) = wg.as_object_mut() else {
-                    continue;
-                };
-                // Common drift: task_names/tasks under work_group instead of items.
-                let mut item_ids = normalized_string_vec(wg_obj.get("task_names"));
-                if item_ids.is_empty() {
-                    item_ids = normalized_string_vec(wg_obj.get("tasks"));
-                }
-                if wg_obj.get("items").and_then(|v| v.as_array()).is_none() && !item_ids.is_empty()
-                {
-                    wg_obj.insert(
-                        "items".to_string(),
-                        serde_json::Value::Array(
-                            item_ids
-                                .iter()
-                                .map(|task_id| {
-                                    serde_json::json!({
-                                        "task_id": task_id,
-                                        "checklist_item_id": crate::data_engineer::plan::CHECKLIST_SQL_MODEL
-                                    })
-                                })
-                                .collect(),
-                        ),
-                    );
-                }
-                let Some(items) = wg_obj.get_mut("items").and_then(|v| v.as_array_mut()) else {
-                    continue;
-                };
-                for it in items.iter_mut() {
-                    let Some(it_obj) = it.as_object_mut() else {
-                        continue;
-                    };
-                    // Alias normalization for item task id.
-                    if it_obj.get("task_id").and_then(|v| v.as_str()).is_none() {
-                        let alias = it_obj
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .or_else(|| it_obj.get("dataset_id").and_then(|v| v.as_str()))
-                            .or_else(|| it_obj.get("model").and_then(|v| v.as_str()))
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
-                        if !alias.is_empty() {
-                            it_obj.insert("task_id".to_string(), serde_json::Value::String(alias));
-                        }
-                    }
-                    if it_obj
-                        .get("checklist_item_id")
-                        .and_then(|v| v.as_str())
-                        .is_none()
-                    {
-                        // Legacy: checklist_item_ids: ["sql_model", ...]
-                        if let Some(arr) =
-                            it_obj.get("checklist_item_ids").and_then(|v| v.as_array())
-                        {
-                            if let Some(first) = arr.first().and_then(|v| v.as_str()) {
-                                it_obj.insert(
-                                    "checklist_item_id".to_string(),
-                                    serde_json::Value::String(first.to_string()),
-                                );
-                            }
-                        }
-                    }
-                    // Default: prefer sql_model so execution can proceed.
-                    let cid = it_obj
-                        .get("checklist_item_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .trim();
-                    if cid.is_empty() {
-                        it_obj.insert(
-                            "checklist_item_id".to_string(),
-                            serde_json::Value::String(
-                                crate::data_engineer::plan::CHECKLIST_SQL_MODEL.to_string(),
-                            ),
-                        );
-                    }
-                    it_obj.remove("checklist_item_ids");
-                    // Strict parse safety: remove common unknown aliases in item objects.
-                    it_obj.remove("task_names");
-                    it_obj.remove("tasks");
-                    it_obj.remove("status");
-                }
-                // Strict parse safety: keep only canonical work-group keys.
-                let allowed = ["group_id", "label", "kind", "items", "depends_on_group_ids"];
-                let keys: Vec<String> = wg_obj.keys().cloned().collect();
-                for k in keys {
-                    if !allowed.contains(&k.as_str()) {
-                        wg_obj.remove(&k);
-                    }
-                }
-            }
-        }
-
-        // If the LLM accidentally put plan-like objects inside `work_groups`, drop them so we
-        // can still parse the rest of the plan deterministically.
-        if let Some(wgs) = obj.get_mut("work_groups").and_then(|v| v.as_array_mut()) {
-            wgs.retain(|wg| {
-                wg.get("group_id").and_then(|v| v.as_str()).is_some()
-                    && wg.get("label").and_then(|v| v.as_str()).is_some()
-                    && wg.get("kind").and_then(|v| v.as_str()).is_some()
-                    && wg.get("items").and_then(|v| v.as_array()).is_some()
-            });
-        } else if obj.get("work_groups").is_some() {
-            // Wrong type: prefer an empty default over a hard parse failure.
-            obj.insert("work_groups".to_string(), serde_json::Value::Array(vec![]));
-        }
-
-        // Plan root defaults / normalization (required by serde without #[serde(default)]).
-        let status_norm = obj
-            .get("status")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| matches!(s.as_str(), "draft" | "approved" | "completed" | "cancelled"))
-            .unwrap_or_else(|| "draft".to_string());
-        obj.insert("status".to_string(), serde_json::Value::String(status_norm));
-        if obj.get("plan_key").and_then(|v| v.as_str()).is_none() {
-            obj.insert(
-                "plan_key".to_string(),
-                serde_json::Value::String(String::new()),
-            );
-        }
-        if obj.get("project_snapshot").is_none() {
-            obj.insert(
-                "project_snapshot".to_string(),
-                serde_json::Value::Object(Default::default()),
-            );
-        }
-        if obj.get("mutations").and_then(|v| v.as_array()).is_none() {
-            obj.insert("mutations".to_string(), serde_json::Value::Array(vec![]));
-        }
-        if obj.get("progress").and_then(|v| v.as_object()).is_none() {
-            obj.insert(
-                "progress".to_string(),
-                serde_json::json!({
-                    "last_applied_step_idx": 0,
-                    "consecutive_batch_failures": 0,
-                    "total_batch_failures": 0
-                }),
-            );
-        }
-
-        // Normalize tasks[] to canonical skeletons.
-        let tasks_key = match expected_kind {
-            "cleanse_plan" => "tasks",
-            "model_plan" => "tasks",
-            _ => "tasks",
-        };
-        if let Some(tasks) = obj.get_mut(tasks_key).and_then(|v| v.as_array_mut()) {
-            for t in tasks.iter_mut() {
-                let Some(t_obj) = t.as_object_mut() else {
-                    continue;
-                };
-                if expected_kind == "cleanse_plan" {
-                    if t_obj.get("dataset_id").and_then(|v| v.as_str()).is_none() {
-                        let alias = t_obj
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .or_else(|| t_obj.get("task_id").and_then(|v| v.as_str()))
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
-                        if !alias.is_empty() {
-                            t_obj
-                                .insert("dataset_id".to_string(), serde_json::Value::String(alias));
-                        }
-                    }
-                    if t_obj.get("implementation_spec").is_none() {
-                        t_obj.insert(
-                            "implementation_spec".to_string(),
-                            serde_json::json!({
-                                "spec_version": 1,
-                                "row_preserving": true,
-                                "output_fields": [],
-                                "prohibited_ops": []
-                            }),
-                        );
-                    }
-                } else {
-                    if t_obj.get("name").and_then(|v| v.as_str()).is_none() {
-                        let alias = t_obj
-                            .get("task_id")
-                            .and_then(|v| v.as_str())
-                            .or_else(|| t_obj.get("dataset_id").and_then(|v| v.as_str()))
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
-                        if !alias.is_empty() {
-                            t_obj.insert("name".to_string(), serde_json::Value::String(alias));
-                        }
-                    }
-                    if t_obj.get("implementation_spec").is_none() {
-                        t_obj.insert(
-                            "implementation_spec".to_string(),
-                            serde_json::json!({
-                                "spec_version": 1,
-                                "grain": "TBD",
-                                "inputs": [],
-                                "joins": [],
-                                "metrics": [],
-                                "output_fields": [],
-                                "assumptions": []
-                            }),
-                        );
-                    }
-                }
-                // Strip unknown top-level keys in implementation_spec before typed validation.
-                if let Some(spec) = t_obj.get_mut("implementation_spec") {
-                    let is_cleanse = expected_kind == "cleanse_plan";
-                    let (new_spec, _stripped) =
-                        Self::sanitize_impl_spec_value(spec.clone(), is_cleanse);
-                    *spec = new_spec;
-                }
-                // Normalize common drift inside implementation_spec.output_fields.
-                if let Some(out_fields) = t_obj
-                    .get_mut("implementation_spec")
-                    .and_then(|v| v.as_object_mut())
-                    .and_then(|spec| spec.get_mut("output_fields"))
-                    .and_then(|v| v.as_array_mut())
-                {
-                    for f in out_fields.iter_mut() {
-                        let Some(f_obj) = f.as_object_mut() else {
-                            continue;
-                        };
-                        if f_obj.get("description").and_then(|v| v.as_str()).is_none() {
-                            if let Some(note) = f_obj
-                                .get("assumption_note")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.trim())
-                                .filter(|s| !s.is_empty())
-                            {
-                                f_obj.insert(
-                                    "description".to_string(),
-                                    serde_json::Value::String(note.to_string()),
-                                );
-                            }
-                        }
-                        f_obj.remove("assumption_note");
-                        f_obj.remove("quality_flags");
-                    }
-                }
-                // Normalize tasks[].checklist[].evidence to [] (planning/repair must not include evidence).
-                if let Some(ck) = t_obj.get_mut("checklist").and_then(|v| v.as_array_mut()) {
-                    for it in ck.iter_mut() {
-                        if let Some(it_obj) = it.as_object_mut() {
-                            it_obj.insert("evidence".to_string(), serde_json::Value::Array(vec![]));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Ensure batches exist (required field). If absent, derive deterministically from tasks.
-        if obj.get("batches").and_then(|v| v.as_array()).is_none() {
-            let mut batch_items: Vec<String> = Vec::new();
-            if let Some(tasks) = obj.get("tasks").and_then(|v| v.as_array()) {
-                for t in tasks.iter() {
-                    if expected_kind == "cleanse_plan" {
-                        if let Some(id) = t.get("dataset_id").and_then(|v| v.as_str()) {
-                            let id = id.trim();
-                            if !id.is_empty() {
-                                batch_items.push(id.to_string());
-                            }
-                        }
-                    } else {
-                        if let Some(name) = t.get("name").and_then(|v| v.as_str()) {
-                            let name = name.trim();
-                            if !name.is_empty() {
-                                batch_items.push(name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            let mut batches: Vec<Vec<String>> = Vec::new();
-            for chunk in batch_items.chunks(5) {
-                batches.push(chunk.to_vec());
-            }
-            obj.insert("batches".to_string(), serde_json::json!(batches));
-        }
-    }
-
     fn parse_reasoning_effort_env(var: &str) -> Option<react_core::llm::ReasoningEffort> {
         match std::env::var(var)
             .ok()
@@ -1433,19 +1060,8 @@ impl DataEngineerSuite {
     }
 
     fn parse_json_object_lenient(raw: &str) -> Result<serde_json::Value, String> {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
-            return Ok(v);
-        }
-        let start = raw
-            .find('{')
-            .ok_or_else(|| "no JSON object start found".to_string())?;
-        let end = raw
-            .rfind('}')
-            .ok_or_else(|| "no JSON object end found".to_string())?;
-        if end <= start {
-            return Err("invalid JSON object bounds".to_string());
-        }
-        serde_json::from_str::<serde_json::Value>(&raw[start..=end]).map_err(|e| e.to_string())
+        // Hard cutover: strict JSON object parsing only.
+        serde_json::from_str::<serde_json::Value>(raw).map_err(|e| e.to_string())
     }
 
     fn parse_json_typed_lenient<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, String> {
@@ -3776,20 +3392,22 @@ Apply these fixes in the output.",
                 } else {
                     // Normal authoring: allow read/explore + probes.
                     if phase == control_flow::Phase::CleanseAuthor {
-                        if let Some(AllowedBatch::CleanseDatasetIds(allowed)) =
-                            allowed_batch.clone()
-                        {
-                            // Deterministic plan-batched execution: LLM MUST NOT supply dataset_ids.
-                            // The tool derives the exact next approved batch from the persisted plan.
-                            let _ = allowed; // used only as an enablement signal
-                            reg.register(tools::apply_next_batch::ApplyNextCleanseBatchTool {
-                                datasets: sctx.datasets.clone(),
-                            });
-                            reg.register(
-                                tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
-                                    datasets: sctx.datasets.clone(),
-                                },
-                            );
+                        if let Some(ab) = allowed_batch.clone() {
+                            match ab {
+                                AllowedBatch::CleanseSqlDatasetIds(_) => {
+                                    reg.register(tools::apply_next_batch::ApplyNextCleanseBatchTool {
+                                        datasets: sctx.datasets.clone(),
+                                    });
+                                }
+                                AllowedBatch::CleanseSchemaDatasetIds(_) => {
+                                    reg.register(
+                                        tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
+                                            datasets: sctx.datasets.clone(),
+                                        },
+                                    );
+                                }
+                                _ => {}
+                            }
                         } else {
                             reg.register(tools::staging_model::StagingModelTool {
                                 datasets: sctx.datasets.clone(),
@@ -3802,16 +3420,20 @@ Apply these fixes in the output.",
                         }
                     }
                     if phase == control_flow::Phase::ModelAuthor {
-                        if let Some(AllowedBatch::ModelItemNames(allowed)) = allowed_batch.clone() {
-                            // Deterministic plan-batched execution: LLM MUST NOT supply items.
-                            // The tool derives the exact next approved batch from the persisted plan.
-                            let _ = allowed; // used only as an enablement signal
-                            reg.register(tools::apply_next_batch::ApplyNextModelBatchTool);
-                            reg.register(
-                                tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
-                                    datasets: sctx.datasets.clone(),
-                                },
-                            );
+                        if let Some(ab) = allowed_batch.clone() {
+                            match ab {
+                                AllowedBatch::ModelSqlItemNames(_) => {
+                                    reg.register(tools::apply_next_batch::ApplyNextModelBatchTool);
+                                }
+                                AllowedBatch::ModelSchemaItemNames(_) => {
+                                    reg.register(
+                                        tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
+                                            datasets: sctx.datasets.clone(),
+                                        },
+                                    );
+                                }
+                                _ => {}
+                            }
                         } else {
                             reg.register(tools::gold_model::GoldModelTool);
                             reg.register(
@@ -3830,15 +3452,17 @@ Apply these fixes in the output.",
                     });
                     reg.register(JsonFileTool);
 
-                    let plan_batched_cleanse = phase == control_flow::Phase::CleanseAuthor
-                        && matches!(allowed_batch, Some(AllowedBatch::CleanseDatasetIds(_)));
-                    let plan_batched_model = phase == control_flow::Phase::ModelAuthor
-                        && matches!(allowed_batch, Some(AllowedBatch::ModelItemNames(_)));
-                    if plan_batched_cleanse {
+                    let plan_batched_cleanse_sql = phase == control_flow::Phase::CleanseAuthor
+                        && matches!(allowed_batch, Some(AllowedBatch::CleanseSqlDatasetIds(_)));
+                    let plan_batched_cleanse_schema = phase == control_flow::Phase::CleanseAuthor
+                        && matches!(allowed_batch, Some(AllowedBatch::CleanseSchemaDatasetIds(_)));
+                    let plan_batched_model_sql = phase == control_flow::Phase::ModelAuthor
+                        && matches!(allowed_batch, Some(AllowedBatch::ModelSqlItemNames(_)));
+                    let plan_batched_model_schema = phase == control_flow::Phase::ModelAuthor
+                        && matches!(allowed_batch, Some(AllowedBatch::ModelSchemaItemNames(_)));
+                    if plan_batched_cleanse_sql {
                         let lines = vec![
                             "- apply_next_cleanse_batch(args:{instructions?:string})".to_string(),
-                            "- apply_next_cleanse_schema_batch(args:{instructions?:string})"
-                                .to_string(),
                             "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})".to_string(),
                             "- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})".to_string(),
                             "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)"
@@ -3852,9 +3476,41 @@ Apply these fixes in the output.",
                             Vec::new(),
                             Some("Not available in this phase: staging_model (batch tool calls it deterministically), dbt_validate, publish_dbt_to_provider.".to_string()),
                         );
-                    } else if plan_batched_model {
+                    } else if plan_batched_cleanse_schema {
+                        let lines = vec![
+                            "- apply_next_cleanse_schema_batch(args:{instructions?:string})"
+                                .to_string(),
+                            "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})".to_string(),
+                            "- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})".to_string(),
+                            "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)"
+                                .to_string(),
+                            "- run_sql (targeted probes)".to_string(),
+                            "- artifacts".to_string(),
+                        ];
+                        tools_card = Self::build_tools_card(
+                            "Allowed tools (authoring phase; plan-batched, deterministic):",
+                            lines,
+                            Vec::new(),
+                            Some("Not available in this phase: staging_model, apply_next_cleanse_batch, dbt_validate, publish_dbt_to_provider.".to_string()),
+                        );
+                    } else if plan_batched_model_sql {
                         let lines = vec![
                             "- apply_next_model_batch(args:{instructions?:string})".to_string(),
+                            "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})".to_string(),
+                            "- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})".to_string(),
+                            "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)"
+                                .to_string(),
+                            "- run_sql (targeted probes)".to_string(),
+                            "- artifacts".to_string(),
+                        ];
+                        tools_card = Self::build_tools_card(
+                            "Allowed tools (authoring phase; plan-batched, deterministic):",
+                            lines,
+                            Vec::new(),
+                            Some("Not available in this phase: gold_model (batch tool calls it deterministically), dbt_validate, publish_dbt_to_provider.".to_string()),
+                        );
+                    } else if plan_batched_model_schema {
+                        let lines = vec![
                             "- apply_next_model_schema_batch(args:{instructions?:string})"
                                 .to_string(),
                             "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})".to_string(),
@@ -3868,7 +3524,7 @@ Apply these fixes in the output.",
                             "Allowed tools (authoring phase; plan-batched, deterministic):",
                             lines,
                             Vec::new(),
-                            Some("Not available in this phase: gold_model (batch tool calls it deterministically), dbt_validate, publish_dbt_to_provider.".to_string()),
+                            Some("Not available in this phase: gold_model, apply_next_model_batch, dbt_validate, publish_dbt_to_provider.".to_string()),
                         );
                     } else {
                         let mut lines = vec![
@@ -5671,7 +5327,6 @@ Apply these fixes in the output.",
                                 )
                                 .await?;
                                 let mut payload = Self::compile_cleanse_skeleton_payload(&skeleton);
-                                Self::normalize_plan_json_payload("cleanse_plan", &mut payload);
                                 let discovered_raw = Self::discovered_raw_relations_from_phase_log(
                                     log.as_ref(),
                                     phase,
@@ -6060,9 +5715,8 @@ Apply these fixes in the output.",
                                     &design_critique,
                                 )
                                 .await?;
-                                let mut payload =
+                                let payload =
                                     Self::compile_model_candidates_payload(&candidates);
-                                Self::normalize_plan_json_payload("model_plan", &mut payload);
                                 let mut plan = match serde_json::from_value::<
                                     crate::data_engineer::plan::ModelPlan,
                                 >(
@@ -6452,21 +6106,13 @@ Apply these fixes in the output.",
                         phase_guard.mutated_since_fail = false;
                     }
                     let hard_mutation_repair_mode = execution_state.hard_mutation_repair_mode;
-                    let last_guard_reason = log.as_ref().and_then(|l| {
-                        l.steps.iter().rev().find_map(|s| match s {
-                            react_core::session::ThreadStep::GuardBlock { reason, .. } => {
-                                Some(reason.as_str())
-                            }
-                            _ => None,
-                        })
-                    });
-                    let failure_class = crate::data_engineer::failure_classifier::classify_validate_failure(
-                        entered_from_precheck_failed,
-                        last_validate_brief.as_deref(),
-                        last_guard_reason,
-                    );
-                    let prefer_schema_repairs =
-                        matches!(failure_class, ValidateFailureClass::SchemaOrPrecheck);
+                    let prefer_schema_repairs = entered_from_precheck_failed
+                        || matches!(
+                            execution_state.last_error_class,
+                            Some(
+                                crate::data_engineer::progress_controller::FailureClass::SchemaOrPrecheck
+                            )
+                        );
                     let sys = crate::util::time_context::with_time_context(if is_cleanse {
                         prompts::cleanse_system_prompt()
                     } else {
@@ -6795,7 +6441,10 @@ Apply these fixes in the output.",
                                         expected_paths.join("\n- "),
                                     );
                                     ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
-                                    (ctx, None)
+                                    (
+                                        ctx,
+                                        Some(AllowedBatch::CleanseSchemaDatasetIds(ids.clone())),
+                                    )
                                 } else {
                                     if matches!(
                                         &next_action,
@@ -6894,7 +6543,7 @@ Apply these fixes in the output.",
                                 plan.plan_key,
                                 next.join("\n- ")
                                 ),
-                                Some(AllowedBatch::CleanseDatasetIds(next.clone())),
+                                Some(AllowedBatch::CleanseSqlDatasetIds(next.clone())),
                             )
                             }
                         } else {
@@ -7110,7 +6759,10 @@ Apply these fixes in the output.",
                                         expected_paths.join("\n- "),
                                     );
                                     ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
-                                    (ctx, None)
+                                    (
+                                        ctx,
+                                        Some(AllowedBatch::ModelSchemaItemNames(ids.clone())),
+                                    )
                                 } else {
                                     let mut ctx = format!(
                                         "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with file op=patch|rm|mv; if patching, use Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
@@ -7341,7 +6993,7 @@ Apply these fixes in the output.",
                                 }
                             } else {
                                 let allowed =
-                                    Some(AllowedBatch::ModelItemNames(next_names.clone()));
+                                    Some(AllowedBatch::ModelSqlItemNames(next_names.clone()));
                                 // Include task details for the next batch so the LLM can call gold_model with full args.
                                 let mut details: Vec<String> = Vec::new();
                                 for n in next_names.iter() {
@@ -7454,7 +7106,9 @@ Apply these fixes in the output.",
                                 crate::data_engineer::plan::load_cleanse_plan(&actx).await
                             {
                                 if let Some(ab) = allowed_batch.as_ref() {
-                                    if let AllowedBatch::CleanseDatasetIds(ds) = ab {
+                                    if let AllowedBatch::CleanseSqlDatasetIds(ds)
+                                    | AllowedBatch::CleanseSchemaDatasetIds(ds) = ab
+                                    {
                                         batch_relations =
                                             crate::data_engineer::facts::dataset_ids_to_fqns(ds);
                                     }
@@ -7475,7 +7129,9 @@ Apply these fixes in the output.",
                                 crate::data_engineer::plan::load_model_plan(&actx).await
                             {
                                 if let Some(ab) = allowed_batch.as_ref() {
-                                    if let AllowedBatch::ModelItemNames(names) = ab {
+                                    if let AllowedBatch::ModelSqlItemNames(names)
+                                    | AllowedBatch::ModelSchemaItemNames(names) = ab
+                                    {
                                         // Include relations for the models in the batch AND their declared inputs.
                                         let mut want_names: Vec<String> = names.clone();
                                         for n in names.iter() {
@@ -8430,20 +8086,29 @@ Apply these fixes in the output.",
                     // Warehouse config failures require user action.
                     let (
                         failure_class,
-                        fingerprint,
+                        failure_signature,
                         brief,
-                        failing_models,
+                        failing_targets,
                         compile_ok,
                         run_ok,
                     ) = match validate_event {
                         crate::data_engineer::controller_event::ControllerEvent::ValidateFailed {
                             class,
-                            fingerprint,
+                            signature,
                             brief,
-                            failing_models,
+                            failing_targets,
                             compile_ok,
                             run_ok,
-                        } => (class, fingerprint, brief, failing_models, compile_ok, run_ok),
+                        } => (class, signature, brief, failing_targets, compile_ok, run_ok),
+                        crate::data_engineer::controller_event::ControllerEvent::ValidateContractError {
+                            reason,
+                            brief,
+                        } => {
+                            return Err(format!(
+                                "validate_outcome_v2_contract_error: {} ({})",
+                                reason, brief
+                            ));
+                        }
                         crate::data_engineer::controller_event::ControllerEvent::ValidatePassed => {
                             // Covered by the success branch above.
                             unreachable!("validate pass should have continued above")
@@ -8476,9 +8141,16 @@ Apply these fixes in the output.",
                         } else {
                             crate::data_engineer::progress_controller::ExecutionTier::Model
                         };
-                        let backlog = crate::data_engineer::progress_controller::repair_backlog_from_failed_models(
-                            &failing_models,
-                        );
+                        let failing_models: Vec<serde_json::Value> = failing_targets
+                            .iter()
+                            .map(|t| {
+                                serde_json::json!({
+                                    "name": t.node_id.clone(),
+                                    "file": t.canonical_path
+                                })
+                            })
+                            .collect();
+                        let backlog = crate::data_engineer::progress_controller::repair_backlog_from_failed_models(&failing_models);
                         let failure_class_state = match failure_class {
                             crate::data_engineer::controller_event::ValidateFailureClass::WarehouseConfig => {
                                 crate::data_engineer::progress_controller::FailureClass::WarehouseConfig
@@ -8493,7 +8165,12 @@ Apply these fixes in the output.",
                         es.apply_validate_failure(
                             tier,
                             failure_class_state,
-                            fingerprint.clone(),
+                            crate::data_engineer::progress_controller::FailureSignature {
+                                class: failure_class_state,
+                                node_id: Some(failure_signature.node_id.clone()),
+                                canonical_path: Some(failure_signature.canonical_path.clone()),
+                                error_code: Some(failure_signature.error_code.clone()),
+                            },
                             backlog,
                             Some(brief.clone()),
                         );
@@ -9506,135 +9183,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_plan_json_payload_unwraps_plan_nested_in_work_groups() {
-        let mut payload = serde_json::json!({
-            "work_groups": [{
-                "tasks": [{"dataset_id":"c.s.t"}]
-            }]
-        });
-        DataEngineerSuite::normalize_plan_json_payload("cleanse_plan", &mut payload);
-        assert!(
-            payload.get("tasks").is_some(),
-            "expected tasks at plan root"
-        );
-        assert_eq!(
-            payload.get("status").and_then(|v| v.as_str()),
-            Some("draft")
-        );
-        assert_eq!(
-            payload.get("batches").cloned(),
-            Some(serde_json::json!([["c.s.t"]])),
-            "expected derived batches"
-        );
-    }
-
-    #[test]
-    fn normalize_plan_json_payload_drops_plan_like_objects_inside_work_groups_array() {
-        let mut payload = serde_json::json!({
-            "status": "draft",
-            "tasks": [],
-            "batches": [],
-            "work_groups": [
-                {"tasks": [{"dataset_id":"c.s.t"}]},
-                {"group_id":"wg1","label":"x","kind":"author_sql","items":[]}
-            ]
-        });
-        DataEngineerSuite::normalize_plan_json_payload("cleanse_plan", &mut payload);
-        let wgs = payload
-            .get("work_groups")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap();
-        assert_eq!(wgs.len(), 1);
-        assert_eq!(wgs[0].get("group_id").and_then(|v| v.as_str()), Some("wg1"));
-    }
-
-    #[test]
-    fn normalize_plan_json_payload_repairs_model_work_group_task_aliases() {
-        let mut payload = serde_json::json!({
-            "status": "draft",
-            "tasks": [{"name":"dim_customers"}],
-            "work_groups": [{
-                "group_id": "wg1",
-                "label": "author",
-                "kind": "author_sql",
-                "task_names": ["dim_customers"],
-                "status": "draft"
-            }]
-        });
-        DataEngineerSuite::normalize_plan_json_payload("model_plan", &mut payload);
-        let wg = payload
-            .get("work_groups")
-            .and_then(|v| v.as_array())
-            .and_then(|a| a.first())
-            .and_then(|v| v.as_object())
-            .cloned()
-            .expect("work group");
-        assert!(
-            wg.get("task_names").is_none(),
-            "legacy task_names should be removed"
-        );
-        assert!(
-            wg.get("status").is_none(),
-            "unknown status key should be removed"
-        );
-        let items = wg
-            .get("items")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .expect("items derived from task_names");
-        assert_eq!(items.len(), 1);
-        assert_eq!(
-            items[0].get("task_id").and_then(|v| v.as_str()),
-            Some("dim_customers")
-        );
-    }
-
-    #[test]
-    fn normalize_plan_json_payload_repairs_output_field_aliases() {
-        let mut payload = serde_json::json!({
-            "status": "draft",
-            "tasks": [{
-                "name":"dim_customers",
-                "implementation_spec": {
-                    "spec_version": 1,
-                    "grain": "1 row per customer_id",
-                    "inputs": [],
-                    "joins": [],
-                    "metrics": [],
-                    "assumptions": [],
-                    "output_fields": [{
-                        "name":"is_active",
-                        "kind":"quality_flag",
-                        "source_columns": [],
-                        "expression":"is_active",
-                        "nullable": false,
-                        "assumption_note": "derived from source trust"
-                    }]
-                }
-            }],
-            "batches": [["dim_customers"]]
-        });
-        DataEngineerSuite::normalize_plan_json_payload("model_plan", &mut payload);
-        let field = payload
-            .get("tasks")
-            .and_then(|v| v.as_array())
-            .and_then(|t| t.first())
-            .and_then(|t| t.get("implementation_spec"))
-            .and_then(|s| s.get("output_fields"))
-            .and_then(|v| v.as_array())
-            .and_then(|a| a.first())
-            .and_then(|v| v.as_object())
-            .cloned()
-            .expect("output field exists");
-        assert!(field.get("assumption_note").is_none());
-        assert_eq!(
-            field.get("description").and_then(|v| v.as_str()),
-            Some("derived from source trust")
-        );
-    }
-
-    #[test]
     fn select_high_value_model_candidates_uses_score_threshold_not_fixed_count() {
         let candidates: Vec<react_core::schema_registry::ModelPlanCandidateV1> = (0..10)
             .map(|i| react_core::schema_registry::ModelPlanCandidateV1 {
@@ -9859,7 +9407,7 @@ mod tests {
             &guard,
             true,
             &sctx,
-            Some(super::AllowedBatch::CleanseDatasetIds(vec![
+            Some(super::AllowedBatch::CleanseSqlDatasetIds(vec![
                 "AwsDataCatalog.db.t1".to_string(),
             ])),
             None,
@@ -10049,7 +9597,7 @@ mod tests {
             &guard,
             true,
             &sctx,
-            Some(super::AllowedBatch::CleanseDatasetIds(vec![
+            Some(super::AllowedBatch::CleanseSqlDatasetIds(vec![
                 "AwsDataCatalog.db.t1".to_string(),
             ])),
             None,
@@ -10076,6 +9624,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_batched_cleanse_schema_mode_exposes_only_schema_batch_tool() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+        let guard = crate::data_engineer::control_flow::DerivedGuardState::default();
+        let (reg, card) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::CleanseAuthor,
+            &guard,
+            true,
+            &sctx,
+            Some(super::AllowedBatch::CleanseSchemaDatasetIds(vec![
+                "AwsDataCatalog.db.t1".to_string(),
+            ])),
+            None,
+            false,
+        )
+        .expect("build_tools_for_phase should succeed");
+        assert!(card.contains("apply_next_cleanse_schema_batch"));
+        assert!(
+            !card.contains("- apply_next_cleanse_batch(args:{instructions?:string})"),
+            "sql batch tool must not be exposed in schema-next-action mode"
+        );
+        let err = reg
+            .call("apply_next_cleanse_batch", serde_json::json!({}), &actx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("unknown tool"));
+    }
+
+    #[tokio::test]
     async fn plan_batched_gold_model_is_not_exposed_to_agent() {
         let mut sctx = SuiteCtx::default();
         sctx.query = Some(Arc::new(MockQuery));
@@ -10087,7 +9665,7 @@ mod tests {
             &guard,
             true,
             &sctx,
-            Some(super::AllowedBatch::ModelItemNames(vec![
+            Some(super::AllowedBatch::ModelSqlItemNames(vec![
                 "fct_orders".to_string()
             ])),
             None,
@@ -10110,6 +9688,36 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err2.contains("no active model plan"));
+    }
+
+    #[tokio::test]
+    async fn plan_batched_model_schema_mode_exposes_only_schema_batch_tool() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+        let guard = crate::data_engineer::control_flow::DerivedGuardState::default();
+        let (reg, card) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::ModelAuthor,
+            &guard,
+            true,
+            &sctx,
+            Some(super::AllowedBatch::ModelSchemaItemNames(vec![
+                "fct_orders".to_string(),
+            ])),
+            None,
+            false,
+        )
+        .expect("build_tools_for_phase should succeed");
+        assert!(card.contains("apply_next_model_schema_batch"));
+        assert!(
+            !card.contains("- apply_next_model_batch(args:{instructions?:string})"),
+            "sql batch tool must not be exposed in schema-next-action mode"
+        );
+        let err = reg
+            .call("apply_next_model_batch", serde_json::json!({}), &actx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("unknown tool"));
     }
 
     #[tokio::test]

@@ -1,94 +1,45 @@
 {
-  "plan_key": "picnic/dev/example1/plans/b9cf8c82-f7ca-4b98-ac50-f95b002c3586/20260226T040427Z_cleanse.json",
-  "status": "completed",
+  "plan_key": "picnic/dev/example1/plans/60d637c8-efbe-45b3-ad90-37f27e9ffbcd/20260226T124648Z_cleanse.json",
+  "status": "approved",
   "project_snapshot": {
     "dbt_prefix": "picnic/dev/example1/dbt/",
     "dbt_project_yml_etag": "\"d72bcd5e07d906a565e942b077bb0c0b\"",
     "plan_design_critique": {
       "blockers": [
-        "The design assumes conventional ecommerce columns (customer_id, order_id, order_item_id, total_amount, etc.) without a concrete fallback plan if they are absent or named differently, beyond a generic \"discovery\" pre-step, so key logic and monetary checks may be impossible to implement as described.",
-        "The primary key and deduplication strategies (especially for customers via email and potential surrogate keys) are left as conditional/\"to be decided\" behaviors, which makes it unclear how PKs/FKs and uniqueness tests will actually be encoded in SQL and contracts.",
-        "Incremental/append vs. full-refresh behavior is not concretely specified: no definite watermark/change column is selected and no incremental filter pattern is defined, risking non-deterministic runtimes or full scans on large tables.",
-        "Several validations reference comparative metrics vs raw (row count relationships, monetary aggregates) with only loose language like \"within small tolerance\" or \"threshold to be defined,\" which is too vague to implement stable, non-flaky tests.",
-        "The determinism requirement conflicts with the ingestion_ts semantics: ingestion_ts is described as \"when first seen\" but also as a per-run-generated metadata column, without specifying how it will avoid changing on re-runs of the same snapshot.",
-        "Monetary consistency tests (sum of line_amounts ≈ orders.total_amount) assume specific fields and discount/tax handling but do not define a clear formula or acceptable tolerance, making the validation logic under-specified."
+        "Technical key stability is underspecified: generating _row_hash over a \"stable set of columns\" can still change when upstream corrects or backfills data, breaking idempotence and making downstream joins/history tracking non-deterministic.",
+        "Hash-based technical PK is assumed \"always unique by construction\" but no explicit collision handling or validation is defined, which is risky if the hash function or column set changes over time.",
+        "The timezone policy relies on a blanket UTC assumption when there is no explicit offset, but there is no concrete rule for when to fall back to \"preserve as naive\" vs convert, nor a mechanism to lock in that decision per-column once observed, increasing the risk of silent semantics changes later.",
+        "Row-count and drop-policy are conceptually defined (silver >= raw - allowed_drops) but there is no explicit governance for what qualifies as an \"allowed drop\" or how these are enumerated and versioned, risking ad-hoc filters creeping into sql_models without traceable justification.",
+        "Schema discovery and profiling are treated as a one-time implicit pre-work, but the plan doesn’t specify how the resulting pk_confidence, relationship_confidence, and thresholds are persisted/versioned so that future runs don’t silently shift behavior when source data characteristics drift."
       ],
       "fixes": [
-        "Explicitly document, per table, how to map discovered columns to logical roles (PKs, FKs, monetary fields), and define concrete fallback patterns (e.g., derive order_id from a specific composite, derive totals if total_amount is missing) that can be applied when expected columns are absent or differently named.",
-        "Decide and codify a single, deterministic PK and dedup strategy per entity (including whether email can be non-unique, and how surrogate keys are computed) and propagate that into the sql_model logic, schema_contract PK definitions, and uniqueness tests.",
-        "Select explicit incremental boundary columns for each table (e.g., raw_created_at or raw_ingestion_ts), define whether models run incrementally or full-refresh, and specify the exact SQL filter pattern for incremental loads.",
-        "Replace vague validation phrases with concrete, parameterized rules (e.g., row_count_silver between 90% and 110% of deduped_raw_count; monetary deltas under X%) and document how to adjust or override these thresholds by environment.",
-        "Clarify ingestion_ts behavior by either sourcing it from an immutable raw ingestion column or, if generated at runtime, excluding it from determinism requirements and documenting that all other columns must be identical on re-runs.",
-        "Define a precise monetary reconciliation rule (including which columns participate: subtotal, tax, discount, shipping; and a numeric tolerance such as relative or absolute error) and describe how to skip or soften this test when required fields are missing."
+        "Define technical_key generation per table explicitly (preferred existing ingestion/row id; if hashing, include source row identifier or load batch id) and guarantee it is invariant across re-runs for the same raw row.",
+        "Add explicit validate tests asserting technical_key uniqueness and, if hashing, document hash function and column set in the schema_contract; plan for and monitor collision metrics, even if expected to be near-zero.",
+        "For each timestamp column, decide and record in the schema_contract whether it is treated as UTC or stored-as-local/naive; forbid switching policy without a contract version bump and corresponding migration note.",
+        "Create a controlled catalog of allowed_drops (per table, per reason) that must be explicitly referenced in sql_models and validate suites, and require contract updates when new drop reasons or filters are introduced.",
+        "Introduce an explicit profiling-and-metadata artifact (e.g., a profiling report or config file) that stores pk_confidence, relationship_confidence, and key thresholds, and wire validate/schema_contract behavior to this versioned metadata rather than recomputing implicit decisions run-to-run."
       ],
       "ok": false
     },
-    "plan_design_memo": "Cleanse Plan Design Memo – RAW to SILVER (AwsDataCatalog.test_raw → Silver Layer)\n\n\n\n1. GOALS\n\nPrimary objective:\n- Design a SILVER/cleanse execution plan for three discovered RAW tables, suitable for incremental, reliable consumption by downstream GOLD/semantic models.\n\nScope:\n- Sources:\n  - AwsDataCatalog.test_raw.raw_customers\n  - AwsDataCatalog.test_raw.raw_orders\n  - AwsDataCatalog.test_raw.raw_order_items\n- Outputs (logical targets; exact database/schema names are environment-specific and can be parameterized):\n  - silver_customers\n  - silver_orders\n  - silver_order_items\n\nCleanse goals:\n- Standardize types, keys, and timestamps.\n- Enforce unique business keys (deduplication).\n- Normalize naming conventions (snake_case, semantic clarity).\n- Ensure referential integrity across entities (customers ↔ orders ↔ order_items).\n- Provide deterministic, testable contracts for each silver table.\n- Batch plan is trivial here (3 tasks < 5), but we will still define a single work-group/batch.\n\n\n\n2. ENTITIES AND RELATIONSHIPS\n\n2.1 Entities (inferred, to be confirmed via schema discovery)\n\n1) raw_customers\n   - Core entity: customer dimension-like table.\n   - Known column: email (probed and exists).\n   - Likely attributes (to be confirmed):\n     - customer_id or id (PK)\n     - email\n     - first_name, last_name or full_name\n     - created_at, updated_at\n     - address fields (address, city, state, postal_code, country)\n     - status / is_active flags\n\n2) raw_orders\n   - Core entity: order fact-like header table.\n   - Likely attributes:\n     - order_id or id (PK)\n     - customer_id (FK to customers)\n     - order_date, created_at, updated_at\n     - order_status\n     - currency\n     - total_amount or subtotal/discount/tax/shipping columns\n\n3) raw_order_items\n   - Core entity: order line items (child of orders).\n   - Likely attributes:\n     - order_item_id or line_id (PK)\n     - order_id (FK to orders)\n     - product_id or sku\n     - quantity\n     - unit_price\n     - line_amount\n\n2.2 Relationships (intended in silver layer)\n\n- silver_customers\n  - PK: customer_id (surrogate or business key).\n  - Natural keys: email (uniqueness constraints may be applied or scoped).\n\n- silver_orders\n  - PK: order_id.\n  - FK: customer_id → silver_customers.customer_id.\n\n- silver_order_items\n  - PK: order_item_id (or composite order_id + line_number).\n  - FK: order_id → silver_orders.order_id.\n\n\n\n3. TARGET SILVER LAYER OVERVIEW\n\nFor each RAW table, we will create a corresponding SILVER model with:\n\n- 1:1 row-level alignment to “logical” business entities (post-dedup).\n- Standardized column naming, types, and semantics.\n- Explicit load metadata (ingestion_ts, source_table, source_row_hash, etc.).\n- Cleanliness guarantees:\n  - No malformed keys.\n  - No obviously invalid dates or numeric values.\n  - Minimal nullability where business logic requires presence.\n\nLogical target models:\n\n- silver_customers\n  - Deduplicated customers, keyed by a stable customer_id.\n  - Email and other identifying attributes normalized and validated.\n  - One row per customer.\n\n- silver_orders\n  - Validated orders referencing a valid customer_id.\n  - Derived flags for order status, cancellation, etc. (if raw supports).\n  - Monetary fields standardized in numeric type and currency.\n\n- silver_order_items\n  - Validated order line items referencing valid order_ids.\n  - Quantities and monetary values checked for non-negativity and basic consistency.\n  - Optional downstream-enabling attributes (e.g., extended amounts).\n\n\n\n4. TASK INVENTORY (WHAT WILL BE AUTHORED)\n\nAll tasks are batched in a single cleanse group (3 entities < batch size of 5).\n\nFor each of the three target silver models, we will author:\n\nA. SQL models\n   1) sql_model.silver_customers\n   2) sql_model.silver_orders\n   3) sql_model.silver_order_items\n\nB. Schema contracts\n   4) schema_contract.silver_customers\n   5) schema_contract.silver_orders\n   6) schema_contract.silver_order_items\n\nC. Validation/test definitions\n   7) validate.silver_customers\n   8) validate.silver_orders\n   9) validate.silver_order_items\n\nOptionally (if time permits, but not required for initial cleanse_plan):\n   - A small shared macro library for:\n     - Standardized hashing / row fingerprints.\n     - Common timestamp parsing.\n     - Email validation patterns.\n   These would support consistent implementation across sql_models but are not counted as separate execution-plan tasks here.\n\n\n\n5. CHECKLIST REQUIREMENTS PER TASK TYPE\n\n5.1 sql_model tasks (for each of silver_customers, silver_orders, silver_order_items)\n\nEach sql_model must satisfy:\n\nModel definition:\n- FROM clause:\n  - Single raw source:\n    - silver_customers FROM AwsDataCatalog.test_raw.raw_customers\n    - silver_orders FROM AwsDataCatalog.test_raw.raw_orders\n    - silver_order_items FROM AwsDataCatalog.test_raw.raw_order_items\n- No cross-entity joins in this cleanse layer (joins are validated via FKs in tests, not merged into a single table at this stage).\n\nColumn selection and naming:\n- Explicit column list (no SELECT *).\n- Snake_case, descriptive column names.\n- All business-relevant raw columns explicitly mapped or explicitly dropped with rationale (via comments).\n\nType normalization:\n- Cast IDs to a consistent type (e.g., BIGINT or STRING, as appropriate to source).\n- Cast timestamps to a standard timestamp type and timezone convention (e.g., UTC).\n- Cast monetary amounts to DECIMAL/NUMERIC with consistent precision/scale.\n- Cast booleans to consistent boolean representation.\n\nKey and deduplication logic:\n- customers:\n  - Define customer_id:\n    - Prefer a stable raw key if available (e.g., raw_customers.customer_id).\n    - If missing, define a deterministic surrogate key (e.g., hash of trimmed email + normalized name).\n  - Deduplication rule:\n    - Detect duplicate records by (customer_id) or (normalized_email) + [other attributes], with deterministic ordering (e.g., latest updated_at or greatest created_at).\n- orders:\n  - Ensure order_id uniqueness.\n  - Drop exact-duplicate rows based on row-level hash or canonical key + timestamp ordering.\n- order_items:\n  - Ensure order_item_id (or order_id + line_number) uniqueness.\n  - Deduplicate via canonical rule similar to orders.\n\nData cleaning and standardization:\n- Email normalization (for customers):\n  - Trim whitespace, lowercase domain and optionally local-part.\n  - Filter clearly invalid formats (basic regex).\n- String cleanup:\n  - Trim leading/trailing whitespace.\n  - Normalize blank strings to NULL where appropriate.\n- Date/timestamp sanity:\n  - Filter or flag records with impossible dates (e.g., year < 1970 or > far-future threshold), per agreed rules.\n- Numeric validation:\n  - Enforce quantity >= 0, price >= 0, total_amount >= 0 (subject to business rules).\n  - If negative values allowed (e.g., refunds), handle explicitly with flags.\n\nMetadata columns:\n- ingestion_ts (or load_ts): a reliable timestamp representing when the raw record was first seen or loaded.\n- source_table: literal indicating underlying raw table.\n- row_hash: deterministic hash of business-critical fields for change detection (optional but recommended).\n\nPerformance and pragmatics:\n- Avoid excessive UDFs for basic transformations; favor SQL-native functions.\n- Keep logic deterministic and side-effect-free.\n- Ensure partition or clustering keys are set where the platform supports them (e.g., partition by ingestion_ts or order_date).\n\n5.2 schema_contract tasks\n\nEach schema_contract must:\n\nStructural definition:\n- Enumerate all columns with:\n  - Name\n  - Data type\n  - Nullability\n  - Primary key (single or composite) where applicable:\n    - silver_customers: customer_id PK\n    - silver_orders: order_id PK\n    - silver_order_items: order_item_id or (order_id, line_number) PK\n- Foreign key specifications:\n  - silver_orders.customer_id → silver_customers.customer_id\n  - silver_order_items.order_id → silver_orders.order_id\n\nConventions:\n- Column naming pattern:\n  - *_id for primary/foreign keys.\n  - *_ts or *_at for timestamps.\n  - *_amount, *_total, price, quantity for numeric fact measures.\n- Types:\n  - Use a canonical mapping for IDs, timestamps, and amounts consistent across the three models.\n\nNullability and defaults:\n- Explicitly define:\n  - Required (NOT NULL) fields:\n    - All PK columns.\n    - All FK columns (unless late-binding is expected; default is NOT NULL).\n    - Core business columns: e.g., email on customers (unless there is a valid use case for null).\n  - Optional fields and default semantics.\n- Default values only used where semantically safe (e.g., default status to 'unknown' instead of NULL if required).\n\nContract stability:\n- Mark which columns are considered “stable” (contract-critical) vs “evolving.”\n- Note any fields where backward-incompatible changes would be breaking (e.g., type changes).\n\n5.3 validate tasks\n\nEach validate task will encode tests and invariants against the corresponding silver model.\n\nFor silver_customers:\n- Row-level tests:\n  - customer_id is not null.\n  - customer_id is unique.\n  - email is not null for active customers (if status field exists).\n  - email format matches basic pattern (e.g., contains '@' and domain).\n- Referential tests:\n  - None (customers is a top-level dimension in this context).\n- Integrity/profile tests:\n  - Row count of silver_customers >= distinct customers in raw_customers after dedup (monotonic over time, subject to business deletions).\n  - No obviously invalid timestamps (e.g., created_at within reasonable range).\n- PII/Compliance checks:\n  - Email present only in expected columns; no extra copies introduced.\n\nFor silver_orders:\n- Row-level tests:\n  - order_id is not null and unique.\n  - customer_id is not null.\n  - order_date (or created_at) is not null.\n  - total_amount (if present) is >= 0 (or adheres to defined business logic).\n- Referential tests:\n  - Every silver_orders.customer_id exists in silver_customers.customer_id.\n- Integrity/profile tests:\n  - Row count sanity vs raw_orders (within small tolerance, accounting for duplicates removed and invalid rows filtered).\n  - Distributional checks on order_date (no impossible spikes or impossible dates).\n\nFor silver_order_items:\n- Row-level tests:\n  - PK (order_item_id or order_id + line_number) is unique and not null.\n  - quantity >= 0.\n  - unit_price >= 0, line_amount >= 0 (with refund-exception logic if applicable).\n- Referential tests:\n  - Every silver_order_items.order_id exists in silver_orders.order_id.\n- Integrity/profile tests:\n  - Sum of line_amounts per order is approximately equal to silver_orders.total_amount, within defined tolerance or explicit business logic.\n  - Row counts are in plausible relationship to orders (e.g., average items per order within expected range; not a hard constraint, but monitored).\n\n\n\n6. WORK-GROUP SEQUENCING AND DEPENDENCIES\n\nWe will structure work into a single batch (≤ 5 items), but maintain internal sequencing:\n\nWork-Group 0: Discovery & Standards (implicit prerequisite)\n- Actions (not separate tasks but preconditions):\n  - Inspect schemas for:\n    - AwsDataCatalog.test_raw.raw_customers\n    - AwsDataCatalog.test_raw.raw_orders\n    - AwsDataCatalog.test_raw.raw_order_items\n  - Document actual column names and types.\n  - Confirm presence of:\n    - Customers: candidate keys (customer_id, email), timestamps.\n    - Orders: order_id, customer_id, timestamps, monetary fields.\n    - Order_items: order_item_id/order_id, quantities, prices.\n  - Agree on:\n    - Common data type standards.\n    - Timezone / timestamp conventions.\n    - ID strategy (use natural keys vs surrogate).\n\nWork-Group 1 (Batch 1): Base Silver Models\n\nSequence and dependencies:\n\n1) sql_model.silver_customers\n   - Depends on: discovery of raw_customers.\n   - Rationale: customer dimension is upstream of orders via FK.\n\n2) schema_contract.silver_customers\n   - Depends on: sql_model.silver_customers (structure and logic defined).\n   - Can be drafted in parallel with the sql_model after discovery, bu\n... (truncated)",
+    "plan_design_memo": "Design memo: SILVER / cleanse execution plan (cleanse_plan)\n\n1. Goals\n\nThe cleanse_plan defines how to build a deterministic SILVER (cleanse) layer on top of the three discovered RAW tables:\n\n- AwsDataCatalog.test_raw.raw_customers\n- AwsDataCatalog.test_raw.raw_orders\n- AwsDataCatalog.test_raw.raw_order_items\n\nPrimary goals:\n\n- Standardize datatypes, naming, and basic quality constraints.\n- Preserve row-level fidelity to RAW:\n  - No business-level aggregation; each RAW row is preserved in SILVER, even if keys are dirty.\n- Introduce robust, explicit handling for:\n  - Primary key uncertainty (missing, non-unique, or unstable keys).\n  - Referential integrity that may be weak or absent.\n  - Timezone and timestamp normalization, with concrete and testable policies.\n  - Schema drift between RAW and SILVER and over time.\n- Provide:\n  - sql_models that materialize clean projections of RAW into SILVER.\n  - schema_contracts that formalize the SILVER schemas, keys, relationship confidence, and evolution rules.\n  - validate suites that enforce both data quality and schema contracts, including explicit schema-drift checks.\n\nAll work is driven by sql_schema discovery on the available tables; models/ is empty and not relied upon.\n\n\n2. Entities and scope\n\n2.1 Source entities\n\n- raw_customers (AwsDataCatalog.test_raw.raw_customers)\n  - Expected grain: one row per logical customer, but this must be confirmed.\n  - Evidence: created_at column is present and parseable (probe_ok = true).\n- raw_orders (AwsDataCatalog.test_raw.raw_orders)\n  - Expected grain: one row per order.\n- raw_order_items (AwsDataCatalog.test_raw.raw_order_items)\n  - Expected grain: one row per order line item.\n\n2.2 Relationships (design hypotheses to be profiled and classified)\n\nWe expect the following logical relationships, which will be classified by strength after profiling:\n\n- raw_orders → raw_customers\n  - Likely FK: customer_id-like column.\n- raw_order_items → raw_orders\n  - Likely FK: order_id-like column.\n\nDuring profiling we will:\n\n- Identify candidate primary keys (PKs) based on:\n  - Column naming (e.g., *_id).\n  - Distinct-count vs row-count comparisons.\n  - Stability over time (if technical metadata is present).\n- Classify each candidate relationship as:\n  - strong: coverage ≥ 99.9% and low volatility over time.\n  - moderate: coverage roughly 90–99.9%.\n  - weak/none: coverage < 90% or highly unstable.\n\nThis classification directly drives which validations are fail-fast vs warn-only and whether relationships are codified as strict constraints or “best-effort” checks.\n\n\n3. Target SILVER design\n\n3.1 Target schema and naming\n\n- Target logical schema: test_silver (adjustable to local convention).\n- Target SILVER tables:\n  - test_silver.silver_customers\n  - test_silver.silver_orders\n  - test_silver.silver_order_items\n\nColumn naming:\n\n- All columns use snake_case.\n- Common identifiers are named consistently across tables (customer_id, order_id, etc.).\n- Technical or surrogate keys will follow a consistent pattern (e.g., _row_hash, _technical_id).\n\n3.2 Row fidelity and key strategy\n\nRow fidelity:\n\n- Each SILVER table is a non-aggregated projection of exactly one RAW table.\n- We do not delete or merge rows solely to fabricate uniqueness.\n- If RAW contains multiple rows with identical natural keys, we keep all of them.\n\nPrimary key strategy:\n\n- For each SILVER table, we define:\n  - natural_key_candidates: one or more columns that might uniquely define the business entity (e.g., customer_id).\n  - technical_key: a deterministic key that is guaranteed stable for that row (e.g., a source technical key, a combination key, or a hash over the full row).\n  - pk_confidence: one of {strict, best_effort, none}.\n    - strict: profiling confirms a natural key is unique and stable; we can enforce uniqueness as fail-fast.\n    - best_effort: natural key is not strictly unique or may be dirty; we still expose it as a “business key” but do not enforce strict uniqueness as a hard failure.\n    - none: no reasonable natural key exists; only technical_key is considered a true key for that table.\n\nRules per table:\n\n- silver_customers:\n  - Expect a natural candidate (e.g., customer_id).\n  - If profiling proves uniqueness: customer_id is strict PK.\n  - If not: customer_id becomes a best_effort business key; we define a technical_key (e.g., _row_hash or source_technical_id) as the strict PK.\n\n- silver_orders:\n  - Similarly, expect order_id as natural PK candidate.\n  - If unique: order_id is strict PK.\n  - Else: order_id is best_effort; technical_key becomes strict PK.\n\n- silver_order_items:\n  - Expect either:\n    - A composite natural key (e.g., order_id + line_number), or\n    - A dedicated line_item_id.\n  - Same procedure: if natural key is unique → strict; otherwise → best_effort with a technical PK.\n\nWe never block the pipeline solely because a natural key is dirty; we adjust pk_confidence, PK definitions, and test strictness accordingly.\n\nTechnical key implementation:\n\n- Preferred:\n  - Use an existing immutable technical key from RAW if provided (e.g., _load_id, _internal_row_id).\n- Fallback:\n  - Generate a deterministic hash (e.g., MD5) over a stable set of columns (ideally all non-volatile columns or the entire row), named _row_hash.\n- The technical key is always unique by construction for the SILVER table; its uniqueness is a fail-fast invariant.\n\n3.3 Timezone and timestamp policy\n\nAssumptions and policy:\n\n- Unless the RAW schema provides explicit timezone context (e.g., a timezone column, or offset-aware strings like “2023-01-01T10:00:00-05:00”), we treat timestamps as UTC.\n- If explicit timezone or offset information exists:\n  - We convert all timestamps to a canonical timezone, UTC.\n- We do not infer per-row timezones from fuzzy information; we either:\n  - Apply a single agreed policy (e.g., all times are UTC), or\n  - Preserve them as naive timestamps and document that semantics.\n\nCasting rules:\n\n- All *_at / *timestamp* fields that are timestamps are cast to TIMESTAMP(…).\n- DATE-like fields are cast to DATE.\n- Parsing failures:\n  - By default, coercions that fail are set to NULL; we record and test the rate of invalids.\n  - If invalid rate exceeds an agreed threshold, we treat that as a validation failure (see validate checklist).\n\nPlausibility checks:\n\n- For critical timestamps (e.g., created_at):\n  - We assert that values lie within a plausible global range (e.g., between 2000-01-01 and “run_date + 1 day”).\n  - We add tests to detect patterns suggesting timezone misinterpretation (e.g., large spikes exactly at midnight UTC when business is local to a non-UTC timezone, or clusters of timestamps far in the future or past).\n\nThese policies are encoded in both sql_models (casts and defaults) and validate suites (semantic checks and thresholds).\n\n\n4. Task inventory (what will be authored; batched in groups of ≤ 5)\n\nWe will author 9 tasks: 3 sql_models, 3 schema_contracts, 3 validate suites. Execution and implementation are organized into two work-groups, each containing at most 5 tasks.\n\nWork-group 1 (5 tasks)\n\n1) C1: sql_model.silver_customers  \n2) O1: sql_model.silver_orders  \n3) OI1: sql_model.silver_order_items  \n4) C2: schema_contract.silver_customers  \n5) O2: schema_contract.silver_orders  \n\nWork-group 2 (4 tasks)\n\n6) OI2: schema_contract.silver_order_items  \n7) C3: validate.silver_customers  \n8) O3: validate.silver_orders  \n9) OI3: validate.silver_order_items  \n\nWork-group 1 focuses on establishing the core projections (sql_models) and the initial contracts for the two main parent entities (customers, orders). Work-group 2 completes the remaining contract and all validations, including cross-entity checks.\n\n\n5. Checklist requirements per task\n\n5.1 sql_model checklist (C1, O1, OI1)\n\nFor each sql_model:\n\nSourcing and shape:\n\n- FROM exactly one RAW table:\n  - silver_customers: FROM AwsDataCatalog.test_raw.raw_customers\n  - silver_orders: FROM AwsDataCatalog.test_raw.raw_orders\n  - silver_order_items: FROM AwsDataCatalog.test_raw.raw_order_items\n- No joins, no aggregations; strictly 1:1 row projection (modulo deterministic casting and enrichment).\n\nColumn coverage:\n\n- Every RAW column is either:\n  - Selected and (optionally) renamed/retyped, or\n  - Explicitly excluded with a comment explaining why (e.g., legacy, sensitive PII, unusable).\n- If we derive consolidated fields (e.g., full_name from first_name + last_name), we keep original components unless there is a documented reason not to.\n\nData type normalization:\n\n- Timestamps and dates:\n  - Identify timestamp/date-like fields by name and RAW type.\n  - Cast strings to TIMESTAMP or DATE using explicit format patterns.\n  - Apply the global timezone policy (default UTC).\n- Booleans:\n  - Normalize typical encodings (“Y”/“N”, “true”/“false”, 1/0) to BOOLEAN.\n- Numeric and monetary fields:\n  - Cast to DECIMAL with defined precision/scale for amounts.\n  - Use appropriate integer or numeric types for quantities and counts.\n- Identifiers:\n  - Standardize data types of IDs used across tables, e.g., ensure customer_id is the same type in customers, orders, and any other referencing tables.\n\nKey handling:\n\n- Implement natural key fields as-is (e.g., customer_id, order_id).\n- Implement a technical key column:\n  - Prefer an existing RAW technical identifier; otherwise:\n    - Define _row_hash as a deterministic hash over stable columns.\n- Do NOT deduplicate rows solely to satisfy natural key uniqueness.\n- If deduplication is necessary (e.g., to remove exact technical duplicates with identical all-column values), it must be:\n  - Deterministic (explicit ORDER BY / window spec).\n  - Documented in comments and in the schema_contract.\n\nAudit and lineage fields:\n\n- Include:\n  - _cleanse_loaded_at: set via current_timestamp or a pipeline-provided load timestamp.\n  - _source_table: static literal of the RAW table name.\n  - If present in RAW, pass through ingestion or load metadata fields (e.g., _ingested_at).\n\nDeterminism and performance:\n\n- Avoid non-deterministic functions other than the agreed _cleanse_loaded_at.\n- Avoid row-by-row UDFs unless necessary; prefer SQL built-ins.\n\n5.2 schema_contract checklist (C2, O2, OI2)\n\nFor each schema_contract:\n\nColumn definitions:\n\n- Enumerate all columns produced by the sql_model.\n- For each column:\n  - Declare type, matching the sql_model’s casted type.\n  - Declare nullability (required vs nullable).\n  - Optionally, declare description / business meaning.\n\nKey definitions:\n\n- Explicitly declare:\n  - The technical primary key (e.g., technical_key or _row_hash) for each table.\n  - Natural key candidates (if any) and their pk_confidence:\n    - strict: validated unique; used as PK for business logic and strict tests.\n    - best_effort: useful business identifier but not guaranteed unique.\n    - none: no meaningful natural key.\n- Example:\n  - silver_customers:\n    - primary_key: technical_key (strict)\n    - business_key: customer_id (pk_confidence: strict or best_effort depending on profiling)\n  - silver_orders:\n    - primary_key: technical_key\n    - business_key: order_id (strict or best_effort)\n  - silver_order_items:\n    - primary_key: technical_key\n    - business_keys: {order_id, line_number?}, as strict or best_effort.\n\nGrain documentation:\n\n- For each table, describe:\n  - Grain: one row per customer / order / order_item.\n  - Whether grain is defined by natural key, technical key, or both.\n\nRelationships and integrity:\n\n- Enumerate logical foreign keys with relationship_confidence and enforcement_level:\n  - Example:\n    - silver_orders.customer_id → silver_customers.customer_id:\n      - relationship_confidence: {strong | moderate | weak | none}\n      - enforcement_level:\n        - strict_fk: treated as hard constraint (fail-fast if broken).\n        - warn_fk: checked, but failures generate warnings/metrics only.\n        - none: documented as a known non-enforceable association.\n    - silver_order_items.order_id → silver_orders.order_id: same scheme.\n- Set enforce\n... (truncated)",
     "plan_design_review": {
       "blockers": [
-        "The design assumes conventional ecommerce columns (customer_id, order_id, order_item_id, total_amount, etc.) without a concrete fallback plan if they are absent or named differently, beyond a generic \"discovery\" pre-step, so key logic and monetary checks may be impossible to implement as described.",
-        "The primary key and deduplication strategies (especially for customers via email and potential surrogate keys) are left as conditional/\"to be decided\" behaviors, which makes it unclear how PKs/FKs and uniqueness tests will actually be encoded in SQL and contracts.",
-        "Incremental/append vs. full-refresh behavior is not concretely specified: no definite watermark/change column is selected and no incremental filter pattern is defined, risking non-deterministic runtimes or full scans on large tables.",
-        "Several validations reference comparative metrics vs raw (row count relationships, monetary aggregates) with only loose language like \"within small tolerance\" or \"threshold to be defined,\" which is too vague to implement stable, non-flaky tests.",
-        "The determinism requirement conflicts with the ingestion_ts semantics: ingestion_ts is described as \"when first seen\" but also as a per-run-generated metadata column, without specifying how it will avoid changing on re-runs of the same snapshot.",
-        "Monetary consistency tests (sum of line_amounts ≈ orders.total_amount) assume specific fields and discount/tax handling but do not define a clear formula or acceptable tolerance, making the validation logic under-specified."
+        "Technical key stability is underspecified: generating _row_hash over a \"stable set of columns\" can still change when upstream corrects or backfills data, breaking idempotence and making downstream joins/history tracking non-deterministic.",
+        "Hash-based technical PK is assumed \"always unique by construction\" but no explicit collision handling or validation is defined, which is risky if the hash function or column set changes over time.",
+        "The timezone policy relies on a blanket UTC assumption when there is no explicit offset, but there is no concrete rule for when to fall back to \"preserve as naive\" vs convert, nor a mechanism to lock in that decision per-column once observed, increasing the risk of silent semantics changes later.",
+        "Row-count and drop-policy are conceptually defined (silver >= raw - allowed_drops) but there is no explicit governance for what qualifies as an \"allowed drop\" or how these are enumerated and versioned, risking ad-hoc filters creeping into sql_models without traceable justification.",
+        "Schema discovery and profiling are treated as a one-time implicit pre-work, but the plan doesn’t specify how the resulting pk_confidence, relationship_confidence, and thresholds are persisted/versioned so that future runs don’t silently shift behavior when source data characteristics drift."
       ],
       "fixes": [
-        "Explicitly document, per table, how to map discovered columns to logical roles (PKs, FKs, monetary fields), and define concrete fallback patterns (e.g., derive order_id from a specific composite, derive totals if total_amount is missing) that can be applied when expected columns are absent or differently named.",
-        "Decide and codify a single, deterministic PK and dedup strategy per entity (including whether email can be non-unique, and how surrogate keys are computed) and propagate that into the sql_model logic, schema_contract PK definitions, and uniqueness tests.",
-        "Select explicit incremental boundary columns for each table (e.g., raw_created_at or raw_ingestion_ts), define whether models run incrementally or full-refresh, and specify the exact SQL filter pattern for incremental loads.",
-        "Replace vague validation phrases with concrete, parameterized rules (e.g., row_count_silver between 90% and 110% of deduped_raw_count; monetary deltas under X%) and document how to adjust or override these thresholds by environment.",
-        "Clarify ingestion_ts behavior by either sourcing it from an immutable raw ingestion column or, if generated at runtime, excluding it from determinism requirements and documenting that all other columns must be identical on re-runs.",
-        "Define a precise monetary reconciliation rule (including which columns participate: subtotal, tax, discount, shipping; and a numeric tolerance such as relative or absolute error) and describe how to skip or soften this test when required fields are missing."
+        "Define technical_key generation per table explicitly (preferred existing ingestion/row id; if hashing, include source row identifier or load batch id) and guarantee it is invariant across re-runs for the same raw row.",
+        "Add explicit validate tests asserting technical_key uniqueness and, if hashing, document hash function and column set in the schema_contract; plan for and monitor collision metrics, even if expected to be near-zero.",
+        "For each timestamp column, decide and record in the schema_contract whether it is treated as UTC or stored-as-local/naive; forbid switching policy without a contract version bump and corresponding migration note.",
+        "Create a controlled catalog of allowed_drops (per table, per reason) that must be explicitly referenced in sql_models and validate suites, and require contract updates when new drop reasons or filters are introduced.",
+        "Introduce an explicit profiling-and-metadata artifact (e.g., a profiling report or config file) that stores pk_confidence, relationship_confidence, and key thresholds, and wire validate/schema_contract behavior to this versioned metadata rather than recomputing implicit decisions run-to-run."
       ],
       "kind": "cleanse_plan",
       "ok": false,
-      "ts": "2026-02-26T04:06:02.044393484+00:00"
-    },
-    "review": {
-      "batches": [
-        {
-          "batch_idx": 0,
-          "batch_items": [
-            "AwsDataCatalog.test_raw.raw_customers",
-            "AwsDataCatalog.test_raw.raw_order_items",
-            "AwsDataCatalog.test_raw.raw_orders"
-          ],
-          "notes": [
-            "REQUIRES PLAN CHANGE: The implementation_spec for all three silver staging models references several raw columns that do not exist in the authoritative schemas (e.g. `id`, `order_number`, `order_timestamp`, `order_date`, `status`, `currency`, `updated_at`, `_ingest_ts`, `line_id`, `line_number`, `line_amount`, `product_id`/`sku` vs `product_sku`). As a result, the SQL implementations were forced to (a) drop some spec fields (`line_number` in `stg_test_raw_raw_order_items`), (b) approximate others from different columns (e.g. using `placed_at` for `order_date`, `created_at`, and `ingestion_ts` in `stg_test_raw_raw_orders`), and (c) leave non-nullable fields effectively nullable (e.g. `ingestion_ts` in `stg_test_raw_raw_order_items` is always NULL). This misalignment directly affects key generation and change-detection (`customer_id`, `order_id`, `row_hash`) and time-based decisions (e.g. using business timestamps vs ingestion timestamps) and will create confusion or silent divergence between the documented contract and what downstream models can actually rely on.",
-            "In `models/staging/stg_test_raw_raw_customers.sql`, the silver contract fields `updated_at` and `ingestion_ts` defined in the implementation_spec are missing entirely from the final SELECT, while they are present (even if approximated) in the other two silver models. This creates an inconsistent silver schema for customer vs order/order_item entities and breaks the expectation that downstream models (e.g. SCD/change-data logic or data quality checks) can always rely on `updated_at` and `ingestion_ts` being present across silver tables."
-          ],
-          "ts": "2026-02-26T04:14:09.080051765+00:00"
-        }
-      ],
-      "final": {
-        "dataset_ids": [
-          "example1_silver.stg_test_raw_raw_customers",
-          "example1_silver.stg_test_raw_raw_orders",
-          "example1_silver.stg_test_raw_raw_order_items"
-        ],
-        "decision": "patch_plan",
-        "text": "Plan-level issues (must be fixed before implementation proceeds)\n\n1) Core misalignment between cleanse/staging spec and actual raw schemas\n- Defect: The implementation_spec for all three silver staging models requires columns and semantics that do not exist in the authoritative raw schemas (e.g. `id`, `order_number`, `order_timestamp` / `order_date`, `status`, `currency`, `updated_at`, `_ingest_ts`, `line_id`, `line_number`, `line_amount`, `product_id`/`sku` vs `product_sku`). This has already forced the SQL to silently diverge from the spec (dropping fields like `line_number`, approximating multiple spec fields from `placed_at`, and leaving spec-required fields like `ingestion_ts` effectively always NULL).\n- Required plan change: Update the cleanse/staging implementation_spec so that, for each of the three entities, every documented silver column is:\n  - Directly mappable from a real raw column (with the correct name and type), or\n  - Explicitly defined as a derived field from clearly named raw inputs, or\n  - Explicitly dropped from the contract if it cannot be reliably populated.\n  This revision should be done by reconciling the spec against the authoritative raw table schemas for `raw_customers`, `raw_orders`, and `raw_order_items`, and then updating column names, presence/absence, and nullability requirements accordingly.\n\n2) Inconsistent lifecycle and time semantics across entities in the spec\n- Defect: The spec intends common lifecycle fields (`updated_at`, `ingestion_ts`, and `row_hash`) across customers, orders, and order_items, but (a) the raw sources do not consistently provide timestamps to support these fields, and (b) the spec does not clearly define whether these represent business event time, system update time, or ingestion time. This has already resulted in divergent behavior (e.g. `placed_at` being reused as business, update, and ingestion time in orders; `updated_at` and `ingestion_ts` missing entirely from customers in the current SQL).\n- Required plan change: Clarify and normalize the lifecycle contract in the implementation_spec before changing any SQL by:\n  - Defining, for each entity, which specific raw timestamp(s) back `updated_at`, which back `ingestion_ts`, and what each field is meant to represent (business event time vs load/ingestion time vs last-change time).\n  - Adjusting the spec so that these fields are either: (i) consistently present with well-defined semantics and allowed nullability across all three entities, or (ii) explicitly optional or omitted for entities where the raw source cannot support them.\n  Once this is specified, the staging SQL can be brought into conformance without ad-hoc approximations.\n\n3) Silver contract for customers is incomplete relative to orders/order_items\n- Defect: The implementation_spec for customers appears to mirror the orders/order_items pattern (including lifecycle and technical fields such as `updated_at`, `ingestion_ts`, and `row_hash`), but the current SQL implementation omits `updated_at` and `ingestion_ts` entirely because the raw `raw_customers` table does not expose obvious source columns. This indicates the spec for customers either overstates what is available, or the intended derivations are not documented.\n- Required plan change: Update the customer-specific portion of the implementation_spec to either (a) explicitly define how `updated_at` and `ingestion_ts` are derived from real `raw_customers` columns, or (b) change the customer silver contract so that these columns are optional, differently named, or not part of the standard customer schema. The goal is a documented silver contract for customers that can be implemented without undocumented assumptions.\n\nInsightfulness summary\n- Supported use-cases at silver (given the current raw structures and intended 1:1 staging design):\n  - Row-preserving entity tables at the grain of customer, order, and order_item, suitable for basic reporting such as customer lists, order volumes, and line-level analyses once the spec is aligned to raw.\n  - Foundation for later gold models that aggregate revenue, order frequency, and customer behavior, assuming keys and timestamps are correctly specified in the plan.\n- Top 2 semantics gaps in the plan that block higher-value analysis even at silver:\n  1) Time axis ambiguity: The spec does not clearly distinguish between business event time (e.g. when an order was placed), system update time, and ingestion/load time, or how these map from actual raw columns per entity.\n  2) Entity contract clarity: The meaning and requiredness of lifecycle/technical fields (`updated_at`, `ingestion_ts`, `row_hash`, `line_number`, `currency`, etc.) are not reconciled with what the raw sources can realistically provide, so downstream models cannot rely on a stable, documented silver schema.\n\nAssumptions & evidence gaps (to resolve in the plan)\n- Key assumptions currently implicit in the spec:\n  - `customer_id` and `order_id` are stable, unique business keys in the raw sources and can safely serve as primary keys in silver.\n  - The available raw timestamps (`placed_at` and any others) can faithfully support the intended meanings of `order_date`, `order_timestamp`, `updated_at`, and `ingestion_ts` as described in the spec.\n  - Missing fields in the raw tables (e.g. `currency`, `line_number`, certain lifecycle timestamps) are either not actually needed in the silver contract or can be derived without loss of meaning.\n- Smallest probes to validate and tighten the plan:\n  - Inspect the actual raw schemas and sample data for `raw_customers`, `raw_orders`, and `raw_order_items` to list all available timestamp, ID, and amount fields, then adjust the spec to match what truly exists.\n  - Profile uniqueness and nullability of `customer_id` and `order_id` in raw to confirm they can be treated as primary keys in the silver contract.\n  - For each lifecycle/technical field in the spec, explicitly map it to a raw column (or mark it as derived/optional) so the plan no longer relies on undocumented or impossible derivations.",
-        "tier": "silver",
-        "ts": "2026-02-26T04:15:00.881760941+00:00"
-      },
-      "phase": "cleanse_review",
-      "project_notes": [
-        "SILVER/staging models exist 1:1 with each raw source table (`raw_customers`, `raw_orders`, `raw_order_items`), which is structurally compatible with a row-preserving cleanse layer.",
-        "Folder-based `+schema` config cleanly separates SILVER (`models/staging` → `DBT_SILVER_SUFFIX`) from default GOLD (`models` root → `DBT_GOLD_SUFFIX`) using environment variables, supporting environment-specific schemas.",
-        "All raw tables are declared as dbt sources in `models/schema.yml` under `test_raw`, enabling lineage tracking from raw data into the SILVER models.",
-        "There are no core/marts (GOLD) models yet, so the project is currently focused on establishing the SILVER foundation on top of the raw sources."
-      ],
-      "project_risks": [
-        "Staging/SILVER models have no accompanying schema.yml definitions for the models themselves (columns, descriptions, data types), so there is no explicit, documented contract for the cleansed layer that downstream users can rely on.",
-        "No data tests are defined on either the sources or the staging models (e.g., `not_null`, `unique`, or referential integrity between orders and order_items), leaving key assumptions and relationship integrity unenforced and increasing the risk of silent data quality regressions.",
-        "Without visibility into the staging SQL, it is unclear whether the SILVER models are strictly row-preserving; if filters, deduplication, or business rules are applied here instead of in a higher layer, source records could be removed or altered without any explicit quality flags.",
-        "Type casting and normalization decisions for Athena-specific data types (timestamps, decimals, booleans, string encodings) are not visible or documented; if the SILVER layer does not standardize types, downstream consumers may encounter inconsistent schemas and subtle casting or comparison bugs.",
-        "There is no evident handling or flagging of soft deletes, late-arriving data, or change history at the SILVER layer; if the raw sources include overwrites or deletions, consumers cannot tell whether the SILVER tables represent current state only or some form of preserved history.",
-        "No freshness or load timestamp configuration is defined for the `test_raw` sources, reducing observability into pipeline timeliness and increasing the risk that analyses are performed on stale or incomplete data."
-      ],
-      "review_version": 1,
-      "ts": "2026-02-26T04:12:32.488613794+00:00"
+      "ts": "2026-02-26T12:48:15.040194082+00:00"
     }
   },
   "tasks": [
@@ -110,143 +61,17 @@
             "data_type": null,
             "nullable": true,
             "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
-          },
-          {
-            "name": "customer_id",
-            "kind": "clean",
-            "source_columns": [
-              "customer_id",
-              "id",
-              "email",
-              "first_name",
-              "last_name"
-            ],
-            "expression": "COALESCE(CAST(customer_id AS STRING), CAST(id AS STRING), MD5(CONCAT(COALESCE(LOWER(TRIM(email)) ,''),'|',COALESCE(LOWER(TRIM(first_name)) ,''),'|',COALESCE(LOWER(TRIM(last_name)) ,''))))",
-            "data_type": "STRING",
-            "nullable": false,
-            "description": "Primary customer identifier; prefers raw customer_id/id, otherwise deterministic hash of email + name"
-          },
-          {
-            "name": "email_raw",
-            "kind": "raw",
-            "source_columns": [
-              "email"
-            ],
-            "expression": "email",
-            "data_type": "STRING",
-            "nullable": true,
-            "description": "Raw email value from source"
-          },
-          {
-            "name": "normalized_email",
-            "kind": "clean",
-            "source_columns": [
-              "email"
-            ],
-            "expression": "CASE WHEN email IS NULL THEN NULL WHEN REGEXP_LIKE(LOWER(TRIM(email)),'^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$') THEN LOWER(TRIM(email)) ELSE NULL END",
-            "data_type": "STRING",
-            "nullable": true,
-            "description": "Lowercased, trimmed email if it matches a basic pattern; otherwise NULL"
-          },
-          {
-            "name": "is_email_valid",
-            "kind": "quality_flag",
-            "source_columns": [
-              "email"
-            ],
-            "expression": "CASE WHEN email IS NULL THEN FALSE WHEN REGEXP_LIKE(LOWER(TRIM(email)),'^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$') THEN TRUE ELSE FALSE END",
-            "data_type": "BOOLEAN",
-            "nullable": false,
-            "description": "Flag indicating whether the raw email is syntactically valid"
-          },
-          {
-            "name": "first_name",
-            "kind": "clean",
-            "source_columns": [
-              "first_name"
-            ],
-            "expression": "NULLIF(TRIM(first_name),'')",
-            "data_type": "STRING",
-            "nullable": true,
-            "description": "Trimmed first name"
-          },
-          {
-            "name": "last_name",
-            "kind": "clean",
-            "source_columns": [
-              "last_name"
-            ],
-            "expression": "NULLIF(TRIM(last_name),'')",
-            "data_type": "STRING",
-            "nullable": true,
-            "description": "Trimmed last name"
-          },
-          {
-            "name": "created_at",
-            "kind": "clean",
-            "source_columns": [
-              "created_at",
-              "updated_at",
-              "_ingest_ts"
-            ],
-            "expression": "CAST(COALESCE(created_at, updated_at, _ingest_ts) AS TIMESTAMP)",
-            "data_type": "TIMESTAMP",
-            "nullable": true,
-            "description": "Customer record creation timestamp normalized to platform timestamp type"
-          },
-          {
-            "name": "updated_at",
-            "kind": "clean",
-            "source_columns": [
-              "updated_at"
-            ],
-            "expression": "CAST(updated_at AS TIMESTAMP)",
-            "data_type": "TIMESTAMP",
-            "nullable": true,
-            "description": "Last update timestamp from source, normalized"
-          },
-          {
-            "name": "ingestion_ts",
-            "kind": "clean",
-            "source_columns": [
-              "_ingest_ts"
-            ],
-            "expression": "CAST(_ingest_ts AS TIMESTAMP)",
-            "data_type": "TIMESTAMP",
-            "nullable": false,
-            "description": "Immutable ingestion timestamp sourced from raw ingestion column"
-          },
-          {
-            "name": "source_table",
-            "kind": "derived",
-            "source_columns": [],
-            "expression": "'AwsDataCatalog.test_raw.raw_customers'",
-            "data_type": "STRING",
-            "nullable": false,
-            "description": "Literal identifier of the source table"
-          },
-          {
-            "name": "row_hash",
-            "kind": "derived",
-            "source_columns": [
-              "customer_id",
-              "email",
-              "created_at",
-              "updated_at"
-            ],
-            "expression": "MD5(CONCAT_WS('|',COALESCE(CAST(customer_id AS STRING),''),COALESCE(LOWER(TRIM(email)) ,''),COALESCE(CAST(created_at AS STRING),''),COALESCE(CAST(updated_at AS STRING),'')))",
-            "data_type": "STRING",
-            "nullable": false,
-            "description": "Deterministic hash of key customer attributes for change detection"
           }
         ],
         "prohibited_ops": [
-          "no filtering",
-          "no dedup",
-          "no grain enforcement"
+          "join",
+          "aggregate",
+          "window",
+          "delete",
+          "update"
         ]
       },
-      "status": "done",
+      "status": "in_progress",
       "checklist": [
         {
           "checklist_item_id": "sql_model",
@@ -259,16 +84,16 @@
             {
               "kind": "tool_end",
               "tool_name": "apply_next_cleanse_batch",
-              "tool_id": "8c60d5ca-dba5-453f-8c18-45cab02a77df",
-              "step_idx": 73,
-              "ts": "2026-02-26T04:10:42.460248663+00:00"
+              "tool_id": "cceec5fd-51c1-4a44-ad18-26d9c2647d3f",
+              "step_idx": 70,
+              "ts": "2026-02-26T12:50:23.693751854+00:00"
             },
             {
               "kind": "tool_end_ok",
               "tool_name": "apply_next_cleanse_batch",
-              "tool_id": "8c60d5ca-dba5-453f-8c18-45cab02a77df",
-              "step_idx": 73,
-              "ts": "2026-02-26T04:10:42.460248663+00:00"
+              "tool_id": "cceec5fd-51c1-4a44-ad18-26d9c2647d3f",
+              "step_idx": 70,
+              "ts": "2026-02-26T12:50:23.693751854+00:00"
             }
           ]
         },
@@ -276,279 +101,19 @@
           "checklist_item_id": "schema_contract",
           "label": "Author schema contract",
           "details": null,
-          "status": "done",
+          "status": "pending",
           "origin": "initial",
           "origin_step_idx": null,
-          "evidence": [
-            {
-              "kind": "tool_end",
-              "tool_name": "apply_next_cleanse_schema_batch",
-              "tool_id": "ffb5438a-7452-42eb-9ed2-438d7f41f987",
-              "step_idx": 81,
-              "ts": "2026-02-26T04:11:29.504925724+00:00"
-            },
-            {
-              "kind": "tool_end_ok",
-              "tool_name": "apply_next_cleanse_schema_batch",
-              "tool_id": "ffb5438a-7452-42eb-9ed2-438d7f41f987",
-              "step_idx": 81,
-              "ts": "2026-02-26T04:11:29.504925724+00:00"
-            }
-          ]
+          "evidence": []
         },
         {
           "checklist_item_id": "validate",
           "label": "Validate",
           "details": null,
-          "status": "done",
+          "status": "pending",
           "origin": "initial",
           "origin_step_idx": null,
-          "evidence": [
-            {
-              "kind": "tool_end_ok",
-              "tool_name": "dbt_validate",
-              "tool_id": "4475a9d2-b16b-4318-a10e-498a1b5a65c5",
-              "step_idx": 84,
-              "ts": "2026-02-26T04:11:58.738013614+00:00"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
-      "expected_model_path": "models/staging/stg_test_raw_raw_order_items.sql",
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [
-          {
-            "name": "__all_source_columns__",
-            "kind": "raw",
-            "source_columns": [
-              "*"
-            ],
-            "expression": "Pass through all raw/bronze source columns unchanged (do not drop columns); add cleaned/cast columns alongside raw as needed.",
-            "data_type": null,
-            "nullable": true,
-            "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
-          },
-          {
-            "name": "order_item_id",
-            "kind": "clean",
-            "source_columns": [
-              "order_item_id",
-              "line_id",
-              "order_id",
-              "line_number"
-            ],
-            "expression": "COALESCE(CAST(order_item_id AS STRING), CAST(line_id AS STRING), MD5(CONCAT(COALESCE(CAST(order_id AS STRING),''),'|',COALESCE(CAST(line_number AS STRING),''))))",
-            "data_type": "STRING",
-            "nullable": false,
-            "description": "Primary key for order line; prefers raw order_item_id/line_id, otherwise hash of order_id and line_number"
-          },
-          {
-            "name": "order_id",
-            "kind": "clean",
-            "source_columns": [
-              "order_id"
-            ],
-            "expression": "CAST(order_id AS STRING)",
-            "data_type": "STRING",
-            "nullable": false,
-            "description": "Foreign key to silver_orders.order_id, normalized to string"
-          },
-          {
-            "name": "product_id",
-            "kind": "clean",
-            "source_columns": [
-              "product_id",
-              "sku"
-            ],
-            "expression": "NULLIF(TRIM(COALESCE(product_id, sku)), '')",
-            "data_type": "STRING",
-            "nullable": true,
-            "description": "Product identifier or SKU, trimmed"
-          },
-          {
-            "name": "quantity",
-            "kind": "clean",
-            "source_columns": [
-              "quantity"
-            ],
-            "expression": "CAST(quantity AS INTEGER)",
-            "data_type": "INTEGER",
-            "nullable": true,
-            "description": "Ordered quantity, cast to integer"
-          },
-          {
-            "name": "unit_price",
-            "kind": "clean",
-            "source_columns": [
-              "unit_price"
-            ],
-            "expression": "CAST(unit_price AS DECIMAL(18,4))",
-            "data_type": "DECIMAL(18,4)",
-            "nullable": true,
-            "description": "Unit price, cast to canonical numeric type"
-          },
-          {
-            "name": "line_amount",
-            "kind": "derived",
-            "source_columns": [
-              "line_amount",
-              "quantity",
-              "unit_price"
-            ],
-            "expression": "COALESCE(CAST(line_amount AS DECIMAL(18,4)), CAST(quantity AS DECIMAL(18,4)) * CAST(unit_price AS DECIMAL(18,4)))",
-            "data_type": "DECIMAL(18,4)",
-            "nullable": true,
-            "description": "Line amount; uses raw line_amount when present, otherwise quantity * unit_price"
-          },
-          {
-            "name": "line_number",
-            "kind": "clean",
-            "source_columns": [
-              "line_number"
-            ],
-            "expression": "CAST(line_number AS INTEGER)",
-            "data_type": "INTEGER",
-            "nullable": true,
-            "description": "Optional line number within the order, cast to integer"
-          },
-          {
-            "name": "ingestion_ts",
-            "kind": "clean",
-            "source_columns": [
-              "_ingest_ts"
-            ],
-            "expression": "CAST(_ingest_ts AS TIMESTAMP)",
-            "data_type": "TIMESTAMP",
-            "nullable": false,
-            "description": "Immutable ingestion timestamp sourced from raw ingestion column"
-          },
-          {
-            "name": "source_table",
-            "kind": "derived",
-            "source_columns": [],
-            "expression": "'AwsDataCatalog.test_raw.raw_order_items'",
-            "data_type": "STRING",
-            "nullable": false,
-            "description": "Literal identifier of the source table"
-          },
-          {
-            "name": "row_hash",
-            "kind": "derived",
-            "source_columns": [
-              "order_item_id",
-              "order_id",
-              "product_id",
-              "quantity",
-              "unit_price"
-            ],
-            "expression": "MD5(CONCAT_WS('|',COALESCE(CAST(order_item_id AS STRING),''),COALESCE(CAST(order_id AS STRING),''),COALESCE(CAST(product_id AS STRING),''),COALESCE(CAST(quantity AS STRING),''),COALESCE(CAST(unit_price AS STRING),'')))",
-            "data_type": "STRING",
-            "nullable": false,
-            "description": "Deterministic hash of key line attributes for change detection and deduplication"
-          },
-          {
-            "name": "is_quantity_non_negative",
-            "kind": "quality_flag",
-            "source_columns": [
-              "quantity"
-            ],
-            "expression": "CASE WHEN quantity IS NOT NULL AND quantity >= 0 THEN TRUE ELSE FALSE END",
-            "data_type": "BOOLEAN",
-            "nullable": false,
-            "description": "Flag indicating non-negative quantity"
-          },
-          {
-            "name": "is_amount_non_negative",
-            "kind": "quality_flag",
-            "source_columns": [
-              "unit_price",
-              "line_amount",
-              "quantity"
-            ],
-            "expression": "CASE WHEN (unit_price IS NULL OR unit_price >= 0) AND ( (line_amount IS NULL) OR (COALESCE(line_amount, CAST(quantity AS DECIMAL(18,4)) * CAST(unit_price AS DECIMAL(18,4))) >= 0) ) THEN TRUE ELSE FALSE END",
-            "data_type": "BOOLEAN",
-            "nullable": false,
-            "description": "Flag indicating non-negative monetary values for unit_price and line_amount"
-          }
-        ],
-        "prohibited_ops": [
-          "no filtering",
-          "no dedup",
-          "no grain enforcement"
-        ]
-      },
-      "status": "done",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "done",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": [
-            {
-              "kind": "tool_end",
-              "tool_name": "apply_next_cleanse_batch",
-              "tool_id": "8c60d5ca-dba5-453f-8c18-45cab02a77df",
-              "step_idx": 73,
-              "ts": "2026-02-26T04:10:42.460248663+00:00"
-            },
-            {
-              "kind": "tool_end_ok",
-              "tool_name": "apply_next_cleanse_batch",
-              "tool_id": "8c60d5ca-dba5-453f-8c18-45cab02a77df",
-              "step_idx": 73,
-              "ts": "2026-02-26T04:10:42.460248663+00:00"
-            }
-          ]
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "done",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": [
-            {
-              "kind": "tool_end",
-              "tool_name": "apply_next_cleanse_schema_batch",
-              "tool_id": "ffb5438a-7452-42eb-9ed2-438d7f41f987",
-              "step_idx": 81,
-              "ts": "2026-02-26T04:11:29.504925724+00:00"
-            },
-            {
-              "kind": "tool_end_ok",
-              "tool_name": "apply_next_cleanse_schema_batch",
-              "tool_id": "ffb5438a-7452-42eb-9ed2-438d7f41f987",
-              "step_idx": 81,
-              "ts": "2026-02-26T04:11:29.504925724+00:00"
-            }
-          ]
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "done",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": [
-            {
-              "kind": "tool_end_ok",
-              "tool_name": "dbt_validate",
-              "tool_id": "4475a9d2-b16b-4318-a10e-498a1b5a65c5",
-              "step_idx": 84,
-              "ts": "2026-02-26T04:11:58.738013614+00:00"
-            }
-          ]
+          "evidence": []
         }
       ]
     },
@@ -570,154 +135,17 @@
             "data_type": null,
             "nullable": true,
             "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
-          },
-          {
-            "name": "order_id",
-            "kind": "clean",
-            "source_columns": [
-              "order_id",
-              "id",
-              "order_number",
-              "customer_id",
-              "order_timestamp"
-            ],
-            "expression": "COALESCE(CAST(order_id AS STRING), CAST(id AS STRING), MD5(CONCAT(COALESCE(order_number,''),'|',COALESCE(CAST(customer_id AS STRING),''),'|',COALESCE(CAST(order_timestamp AS STRING),''))))",
-            "data_type": "STRING",
-            "nullable": false,
-            "description": "Primary order identifier; prefers raw order_id/id, otherwise deterministic hash of order_number, customer key, and timestamp"
-          },
-          {
-            "name": "customer_id",
-            "kind": "clean",
-            "source_columns": [
-              "customer_id"
-            ],
-            "expression": "CAST(customer_id AS STRING)",
-            "data_type": "STRING",
-            "nullable": false,
-            "description": "Foreign key to silver_customers.customer_id, normalized to string"
-          },
-          {
-            "name": "order_date",
-            "kind": "clean",
-            "source_columns": [
-              "order_date",
-              "created_at",
-              "_ingest_ts"
-            ],
-            "expression": "CAST(COALESCE(order_date, created_at, _ingest_ts) AS TIMESTAMP)",
-            "data_type": "TIMESTAMP",
-            "nullable": false,
-            "description": "Business order date/timestamp"
-          },
-          {
-            "name": "created_at",
-            "kind": "clean",
-            "source_columns": [
-              "created_at"
-            ],
-            "expression": "CAST(created_at AS TIMESTAMP)",
-            "data_type": "TIMESTAMP",
-            "nullable": true,
-            "description": "Order record creation timestamp from source"
-          },
-          {
-            "name": "updated_at",
-            "kind": "clean",
-            "source_columns": [
-              "updated_at"
-            ],
-            "expression": "CAST(updated_at AS TIMESTAMP)",
-            "data_type": "TIMESTAMP",
-            "nullable": true,
-            "description": "Order record last update timestamp from source"
-          },
-          {
-            "name": "order_status",
-            "kind": "clean",
-            "source_columns": [
-              "status"
-            ],
-            "expression": "LOWER(NULLIF(TRIM(status),''))",
-            "data_type": "STRING",
-            "nullable": true,
-            "description": "Order status normalized to lowercase, trimmed"
-          },
-          {
-            "name": "total_amount",
-            "kind": "clean",
-            "source_columns": [
-              "total_amount"
-            ],
-            "expression": "CAST(total_amount AS DECIMAL(18,2))",
-            "data_type": "DECIMAL(18,2)",
-            "nullable": true,
-            "description": "Total monetary amount for the order, cast to canonical numeric type"
-          },
-          {
-            "name": "currency",
-            "kind": "clean",
-            "source_columns": [
-              "currency"
-            ],
-            "expression": "LOWER(NULLIF(TRIM(currency),''))",
-            "data_type": "STRING",
-            "nullable": true,
-            "description": "Three-letter currency code or raw currency field, lowercased and trimmed"
-          },
-          {
-            "name": "ingestion_ts",
-            "kind": "clean",
-            "source_columns": [
-              "_ingest_ts"
-            ],
-            "expression": "CAST(_ingest_ts AS TIMESTAMP)",
-            "data_type": "TIMESTAMP",
-            "nullable": false,
-            "description": "Immutable ingestion timestamp sourced from raw ingestion column"
-          },
-          {
-            "name": "source_table",
-            "kind": "derived",
-            "source_columns": [],
-            "expression": "'AwsDataCatalog.test_raw.raw_orders'",
-            "data_type": "STRING",
-            "nullable": false,
-            "description": "Literal identifier of the source table"
-          },
-          {
-            "name": "row_hash",
-            "kind": "derived",
-            "source_columns": [
-              "order_id",
-              "customer_id",
-              "order_date",
-              "total_amount"
-            ],
-            "expression": "MD5(CONCAT_WS('|',COALESCE(CAST(order_id AS STRING),''),COALESCE(CAST(customer_id AS STRING),''),COALESCE(CAST(order_date AS STRING),''),COALESCE(CAST(total_amount AS STRING),'')))",
-            "data_type": "STRING",
-            "nullable": false,
-            "description": "Deterministic hash of key order attributes for change detection and deduplication"
-          },
-          {
-            "name": "is_total_amount_non_negative",
-            "kind": "quality_flag",
-            "source_columns": [
-              "total_amount"
-            ],
-            "expression": "CASE WHEN total_amount IS NOT NULL AND total_amount >= 0 THEN TRUE ELSE FALSE END",
-            "data_type": "BOOLEAN",
-            "nullable": false,
-            "description": "Flag indicating that total_amount is present and non-negative"
           }
         ],
         "prohibited_ops": [
-          "no filtering",
-          "no dedup",
-          "no grain enforcement"
+          "join",
+          "aggregate",
+          "window",
+          "delete",
+          "update"
         ]
       },
-      "status": "done",
+      "status": "in_progress",
       "checklist": [
         {
           "checklist_item_id": "sql_model",
@@ -730,16 +158,16 @@
             {
               "kind": "tool_end",
               "tool_name": "apply_next_cleanse_batch",
-              "tool_id": "8c60d5ca-dba5-453f-8c18-45cab02a77df",
-              "step_idx": 73,
-              "ts": "2026-02-26T04:10:42.460248663+00:00"
+              "tool_id": "cceec5fd-51c1-4a44-ad18-26d9c2647d3f",
+              "step_idx": 70,
+              "ts": "2026-02-26T12:50:23.693751854+00:00"
             },
             {
               "kind": "tool_end_ok",
               "tool_name": "apply_next_cleanse_batch",
-              "tool_id": "8c60d5ca-dba5-453f-8c18-45cab02a77df",
-              "step_idx": 73,
-              "ts": "2026-02-26T04:10:42.460248663+00:00"
+              "tool_id": "cceec5fd-51c1-4a44-ad18-26d9c2647d3f",
+              "step_idx": 70,
+              "ts": "2026-02-26T12:50:23.693751854+00:00"
             }
           ]
         },
@@ -747,42 +175,435 @@
           "checklist_item_id": "schema_contract",
           "label": "Author schema contract",
           "details": null,
-          "status": "done",
+          "status": "pending",
           "origin": "initial",
           "origin_step_idx": null,
-          "evidence": [
-            {
-              "kind": "tool_end",
-              "tool_name": "apply_next_cleanse_schema_batch",
-              "tool_id": "ffb5438a-7452-42eb-9ed2-438d7f41f987",
-              "step_idx": 81,
-              "ts": "2026-02-26T04:11:29.504925724+00:00"
-            },
-            {
-              "kind": "tool_end_ok",
-              "tool_name": "apply_next_cleanse_schema_batch",
-              "tool_id": "ffb5438a-7452-42eb-9ed2-438d7f41f987",
-              "step_idx": 81,
-              "ts": "2026-02-26T04:11:29.504925724+00:00"
-            }
-          ]
+          "evidence": []
         },
         {
           "checklist_item_id": "validate",
           "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
+      "expected_model_path": "models/staging/stg_test_raw_raw_order_items.sql",
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [
+          {
+            "name": "__all_source_columns__",
+            "kind": "raw",
+            "source_columns": [
+              "*"
+            ],
+            "expression": "Pass through all raw/bronze source columns unchanged (do not drop columns); add cleaned/cast columns alongside raw as needed.",
+            "data_type": null,
+            "nullable": true,
+            "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
+          }
+        ],
+        "prohibited_ops": [
+          "join",
+          "aggregate",
+          "window",
+          "delete",
+          "update"
+        ]
+      },
+      "status": "in_progress",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
           "details": null,
           "status": "done",
           "origin": "initial",
           "origin_step_idx": null,
           "evidence": [
             {
+              "kind": "tool_end",
+              "tool_name": "apply_next_cleanse_batch",
+              "tool_id": "cceec5fd-51c1-4a44-ad18-26d9c2647d3f",
+              "step_idx": 70,
+              "ts": "2026-02-26T12:50:23.693751854+00:00"
+            },
+            {
               "kind": "tool_end_ok",
-              "tool_name": "dbt_validate",
-              "tool_id": "4475a9d2-b16b-4318-a10e-498a1b5a65c5",
-              "step_idx": 84,
-              "ts": "2026-02-26T04:11:58.738013614+00:00"
+              "tool_name": "apply_next_cleanse_batch",
+              "tool_id": "cceec5fd-51c1-4a44-ad18-26d9c2647d3f",
+              "step_idx": 70,
+              "ts": "2026-02-26T12:50:23.693751854+00:00"
             }
           ]
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
+      "expected_model_path": "models/staging/stg_test_raw_raw_customers.sql",
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [
+          {
+            "name": "__all_source_columns__",
+            "kind": "raw",
+            "source_columns": [
+              "*"
+            ],
+            "expression": "Pass through all raw/bronze source columns unchanged (do not drop columns); add cleaned/cast columns alongside raw as needed.",
+            "data_type": null,
+            "nullable": true,
+            "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
+          }
+        ],
+        "prohibited_ops": [
+          "no filtering",
+          "no dedup",
+          "no grain enforcement"
+        ]
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
+      "expected_model_path": "models/staging/stg_test_raw_raw_orders.sql",
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [
+          {
+            "name": "__all_source_columns__",
+            "kind": "raw",
+            "source_columns": [
+              "*"
+            ],
+            "expression": "Pass through all raw/bronze source columns unchanged (do not drop columns); add cleaned/cast columns alongside raw as needed.",
+            "data_type": null,
+            "nullable": true,
+            "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
+          }
+        ],
+        "prohibited_ops": [
+          "no filtering",
+          "no dedup",
+          "no grain enforcement"
+        ]
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
+      "expected_model_path": "models/staging/stg_test_raw_raw_order_items.sql",
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [
+          {
+            "name": "__all_source_columns__",
+            "kind": "raw",
+            "source_columns": [
+              "*"
+            ],
+            "expression": "Pass through all raw/bronze source columns unchanged (do not drop columns); add cleaned/cast columns alongside raw as needed.",
+            "data_type": null,
+            "nullable": true,
+            "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
+          }
+        ],
+        "prohibited_ops": [
+          "no filtering",
+          "no dedup",
+          "no grain enforcement"
+        ]
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
+      "expected_model_path": "models/staging/stg_test_raw_raw_customers.sql",
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [
+          {
+            "name": "__all_source_columns__",
+            "kind": "raw",
+            "source_columns": [
+              "*"
+            ],
+            "expression": "Pass through all raw/bronze source columns unchanged (do not drop columns); add cleaned/cast columns alongside raw as needed.",
+            "data_type": null,
+            "nullable": true,
+            "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
+          }
+        ],
+        "prohibited_ops": [
+          "no filtering",
+          "no dedup",
+          "no grain enforcement"
+        ]
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
+      "expected_model_path": "models/staging/stg_test_raw_raw_orders.sql",
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [
+          {
+            "name": "__all_source_columns__",
+            "kind": "raw",
+            "source_columns": [
+              "*"
+            ],
+            "expression": "Pass through all raw/bronze source columns unchanged (do not drop columns); add cleaned/cast columns alongside raw as needed.",
+            "data_type": null,
+            "nullable": true,
+            "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
+          }
+        ],
+        "prohibited_ops": [
+          "no filtering",
+          "no dedup",
+          "no grain enforcement"
+        ]
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
+      "expected_model_path": "models/staging/stg_test_raw_raw_order_items.sql",
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [
+          {
+            "name": "__all_source_columns__",
+            "kind": "raw",
+            "source_columns": [
+              "*"
+            ],
+            "expression": "Pass through all raw/bronze source columns unchanged (do not drop columns); add cleaned/cast columns alongside raw as needed.",
+            "data_type": null,
+            "nullable": true,
+            "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
+          }
+        ],
+        "prohibited_ops": [
+          "no filtering",
+          "no dedup",
+          "no grain enforcement"
+        ]
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
         }
       ]
     }
@@ -790,8 +611,16 @@
   "batches": [
     [
       "AwsDataCatalog.test_raw.raw_customers",
+      "AwsDataCatalog.test_raw.raw_orders",
       "AwsDataCatalog.test_raw.raw_order_items",
+      "AwsDataCatalog.test_raw.raw_customers",
       "AwsDataCatalog.test_raw.raw_orders"
+    ],
+    [
+      "AwsDataCatalog.test_raw.raw_order_items",
+      "AwsDataCatalog.test_raw.raw_customers",
+      "AwsDataCatalog.test_raw.raw_orders",
+      "AwsDataCatalog.test_raw.raw_order_items"
     ]
   ],
   "work_groups": [
@@ -805,11 +634,11 @@
           "checklist_item_id": "sql_model"
         },
         {
-          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
+          "task_id": "AwsDataCatalog.test_raw.raw_orders",
           "checklist_item_id": "sql_model"
         },
         {
-          "task_id": "AwsDataCatalog.test_raw.raw_orders",
+          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
           "checklist_item_id": "sql_model"
         }
       ],
@@ -825,7 +654,49 @@
           "checklist_item_id": "schema_contract"
         },
         {
+          "task_id": "AwsDataCatalog.test_raw.raw_orders",
+          "checklist_item_id": "schema_contract"
+        },
+        {
           "task_id": "AwsDataCatalog.test_raw.raw_order_items",
+          "checklist_item_id": "schema_contract"
+        }
+      ],
+      "depends_on_group_ids": [
+        "cleanse_author_sql_001"
+      ]
+    },
+    {
+      "group_id": "cleanse_author_sql_002",
+      "label": "Author SQL batch 2",
+      "kind": "author_sql",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
+          "checklist_item_id": "sql_model"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_customers",
+          "checklist_item_id": "sql_model"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_orders",
+          "checklist_item_id": "sql_model"
+        }
+      ],
+      "depends_on_group_ids": null
+    },
+    {
+      "group_id": "cleanse_author_schema_002",
+      "label": "Author schema batch 2",
+      "kind": "author_schema",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
+          "checklist_item_id": "schema_contract"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_customers",
           "checklist_item_id": "schema_contract"
         },
         {
@@ -834,7 +705,7 @@
         }
       ],
       "depends_on_group_ids": [
-        "cleanse_author_sql_001"
+        "cleanse_author_sql_002"
       ]
     },
     {
@@ -847,22 +718,23 @@
           "checklist_item_id": "validate"
         },
         {
-          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
+          "task_id": "AwsDataCatalog.test_raw.raw_orders",
           "checklist_item_id": "validate"
         },
         {
-          "task_id": "AwsDataCatalog.test_raw.raw_orders",
+          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
           "checklist_item_id": "validate"
         }
       ],
       "depends_on_group_ids": [
-        "cleanse_author_schema_001"
+        "cleanse_author_schema_001",
+        "cleanse_author_schema_002"
       ]
     }
   ],
   "mutations": [],
   "progress": {
-    "last_applied_step_idx": 85,
+    "last_applied_step_idx": 317,
     "consecutive_batch_failures": 0,
     "total_batch_failures": 0
   }

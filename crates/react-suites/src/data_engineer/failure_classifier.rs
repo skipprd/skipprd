@@ -1,5 +1,3 @@
-use serde_json::Value;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValidateFailureClass {
     SqlOrRuntime,
@@ -24,31 +22,6 @@ pub fn classify_validate_failure(
         hay.push_str(r);
     }
     classify_from_text(&hay)
-}
-
-pub fn fingerprint_validate_observation(obs: &Value) -> String {
-    let errs = obs
-        .get("errors")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty())
-                .take(8)
-                .collect::<Vec<_>>()
-                .join(" | ")
-        })
-        .unwrap_or_default();
-    let class = if obs.get("compile_ok").and_then(|v| v.as_bool()).unwrap_or(false)
-        && !obs.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false)
-    {
-        "runtime"
-    } else if !obs.get("compile_ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        "compile"
-    } else {
-        "unknown"
-    };
-    format!("{}::{}", class, errs)
 }
 
 fn classify_from_text(haystack: &str) -> ValidateFailureClass {
@@ -108,16 +81,5 @@ mod tests {
             ),
             ValidateFailureClass::SqlOrRuntime
         );
-    }
-
-    #[test]
-    fn fingerprint_validate_observation_is_deterministic() {
-        let obs = serde_json::json!({
-            "compile_ok": true,
-            "run_ok": false,
-            "errors": ["A", "B", "A", ""]
-        });
-        let fp = fingerprint_validate_observation(&obs);
-        assert_eq!(fp, "runtime::A | B | A");
     }
 }

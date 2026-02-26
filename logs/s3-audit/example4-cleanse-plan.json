@@ -1,37 +1,204 @@
 {
-  "plan_key": "picnic/dev/example4/plans/6a705a32-5eb8-48c0-ba17-e2986f890d69/20260226T052906Z_cleanse.json",
-  "status": "draft",
-  "project_snapshot": {},
+  "plan_key": "picnic/dev/example4/plans/089aa3e0-0818-4d31-ba74-20c36b458783/20260226T124638Z_cleanse.json",
+  "status": "approved",
+  "project_snapshot": {
+    "dbt_prefix": "picnic/dev/example4/dbt/",
+    "dbt_project_yml_etag": "\"7b9e11056ca15920083f9ade21dffa96\"",
+    "plan_design_critique": {
+      "blockers": [
+        "Key and timestamp selection depend on metrics like uniqueness_ratio and null_rate, but there is no concrete mechanism or task in the cleanse_plan to compute these profiles from RAW, making the PK/ET rules non-executable and potentially ad hoc at implementation time.",
+        "The incremental watermark strategy assumes existence and management of AwsDataCatalog.test_silver._load_watermarks, but no task is defined to create, maintain, or read from this table, so incremental runs cannot reliably function as designed.",
+        "The plan relies on abstract macros/functions (e.g., get_last_watermark, is_full_refresh_run, effective_timestamp macro) that are not tied to any concrete framework or implementation detail, leaving incremental filtering behavior ambiguous and at risk of diverging across models.",
+        "Primary key selection for silver_order_items (natural vs composite vs surrogate) is described as a decision tree but not translated into a deterministic, schema-driven rule that can run without prior profiling, risking inconsistent PK choice between sql_model, schema_contract, and validate tasks.",
+        "Schema_contract is described as depending on the corresponding sql_model being materialized, which inverts a normal contract-first pattern and risks the contract being reverse-engineered from an already-deployed schema, weakening its role as a guardrail against unintended schema drift.",
+        "Validation rules that compare SILVER/RAW volume ratios and orphan rates assume direct access to RAW in validate tasks, but the dependency graph does not explicitly declare RAW as an input for these validations, risking broken validations in environments where validate only sees SILVER outputs."
+      ],
+      "fixes": [
+        "Add an explicit, repeatable profiling step (or pre-run SQL) for each RAW table to compute uniqueness and null-rate stats for candidate key and timestamp columns, and base PK/ET selection strictly on those computed metrics.",
+        "Introduce a dedicated DDL/setup task (or documented bootstrap step) to create and manage AwsDataCatalog.test_silver._load_watermarks, including its schema and update semantics, before any incremental sql_model runs.",
+        "Define or select a specific execution framework and explicitly map macros like get_last_watermark, is_full_refresh_run, and effective_timestamp to concrete configuration/SQL patterns that will be used in all sql_models.",
+        "Refine the silver_order_items PK decision rules into a concrete, schema-only algorithm (e.g., explicit column-name precedence and uniqueness checks derived from the profiling step) and codify that exact choice in sql_model, schema_contract, and validate definitions.",
+        "Flip the dependency so schema_contracts are authored first (based on discovered schemas and design intent) and have sql_models conform to them, using validate to enforce contract adherence and catch any deviation.",
+        "Explicitly declare RAW tables as inputs for validate tasks that compute SILVER/RAW volume ratios and referential orphans, and document the required joins/queries so validations can reliably access both RAW and SILVER in all environments."
+      ],
+      "ok": false
+    },
+    "plan_design_memo": "Design Memo: cleanse_plan for SILVER Layer  \n(AwsDataCatalog.test_raw → AwsDataCatalog.test_silver)\n\n--------------------------------------------------\n1. Goals\n--------------------------------------------------\n\n- Stand up a first-cut SILVER/cleanse layer on top of three RAW tables:\n\n  - AwsDataCatalog.test_raw.raw_customers  \n  - AwsDataCatalog.test_raw.raw_orders  \n  - AwsDataCatalog.test_raw.raw_order_items  \n\n- Use actual RAW schemas (via sql_schema discovery) to define:\n  - Stable business grains and keys.\n  - Type-normalized, analytics-ready columns.\n  - Deterministic deduplication and incremental patterns.\n\n- Implement a practical data quality regime:\n  - Critical vs warning-level validations.\n  - Reasonable, parameterized thresholds.\n  - Clear handling for referential orphans and dirty source data.\n\n- Deliver concrete, executable tasks:\n  - sql_model, schema_contract, and validate for three SILVER tables.\n  - Batching in groups of ≤ 5 tasks with well-defined dependencies.\n\n\n--------------------------------------------------\n2. Entities and Target SILVER Layer\n--------------------------------------------------\n\n2.1 Source Entities (RAW)\n\nWe will rely on sql_schema / information_schema discovery to determine actual column names and types. Logical expectations:\n\n- raw_customers\n  - Entity: Customer.\n  - Logical fields to map:\n    - Customer key: one of (customer_id, id, customer_pk, etc.).\n    - Attributes: name fields, email, status, possibly soft-delete flag.\n    - Timestamps: created_at (confirmed via probe), maybe updated_at, ingestion_ts.\n\n- raw_orders\n  - Entity: Order header / transaction.\n  - Logical fields to map:\n    - Order key: one of (order_id, id, order_pk, etc.).\n    - Customer foreign key: one of (customer_id, cust_id, etc.).\n    - Dates: order_date, created_at, submitted_at, etc.\n    - Amounts: total_amount, grand_total, etc.\n    - Status and possible soft-delete or cancellation flags.\n\n- raw_order_items\n  - Entity: Order line item.\n  - Logical fields to map:\n    - Line key: order_item_id OR composite (order_id, line_number/line_id).\n    - Order foreign key: order_id / order_header_id / similar.\n    - Product key, quantities, unit_price, line_amount.\n    - Timestamps: created_at, line_created_at, etc.\n\n2.2 Target SILVER Schemas & Grains\n\nWe assume target:\n\n- Catalog: AwsDataCatalog\n- Schema: test_silver\n\nTarget SILVER models:\n\n- silver_customers\n  - Grain: 1 row per unique business customer.\n  - Key: business key derived from RAW (see Section 3 for detection).\n  - Source: raw_customers.\n\n- silver_orders\n  - Grain: 1 row per unique business order.\n  - Key: business key derived from RAW.\n  - Source: raw_orders.\n  - Foreign key: customer_id aligned to silver_customers.\n\n- silver_order_items\n  - Grain: 1 row per unique order line.\n  - Key: chosen per rule:\n    - Prefer natural order_item_id if valid.\n    - Else composite (order_id, line_number).\n    - Else deterministic surrogate (see Section 3).\n  - Source: raw_order_items.\n  - Foreign key: order_id aligned to silver_orders.\n\n\n--------------------------------------------------\n3. Physical-to-Logical Mapping, Keys, and Timestamps\n--------------------------------------------------\n\n3.1 Column Discovery and Mapping\n\nBefore authoring final SQL:\n\n- Use sql_schema / information_schema to list columns and types for:\n  - AwsDataCatalog.test_raw.raw_customers\n  - AwsDataCatalog.test_raw.raw_orders\n  - AwsDataCatalog.test_raw.raw_order_items\n\n- For each RAW table, implement a mapping step (via code comments/macros, not separate tasks) that:\n\n  - Identifies candidate primary-key columns by:\n    - Name heuristics (e.g., *_id, id).\n    - Uniqueness profile (COUNT(DISTINCT col)/COUNT(*) close to 1).\n    - Low null rate (e.g., < 1%).\n\n  - Identifies timestamp columns:\n    - Prefer updated_at if exists and null_rate < 30%.\n    - Else prefer created_at if exists and null_rate < 30%.\n    - Else use ingestion_ts / load_timestamp if available.\n    - Else treat the model as non-incremental for now.\n\n  - Identifies soft-delete flags:\n    - Columns like is_deleted, deleted_at, active_flag.\n    - Standardize to is_active boolean in SILVER.\n\n  - Maps known business attributes:\n    - For customers: email, names, status.\n    - For orders: total_amount, status, order_date.\n    - For items: quantity, unit_price, line_amount, product_id.\n\nThis mapping will be documented as comments at the top of each sql_model, indicating the RAW column names used for each logical field.\n\n3.2 Primary Key Selection Rules\n\n- silver_customers:\n  - Candidate key: first column matching name pattern in (customer_id, id, customer_pk, customer_key) with:\n    - uniqueness_ratio ≥ 0.99 and null_rate ≤ 1%.\n  - If no such column exists:\n    - Create deterministic surrogate key:\n      - customer_sk = hash( coalesce(<best_name_column>, ''), coalesce(<best_email_column>, ''), coalesce(created_at, '1900-01-01') ).\n    - Document this clearly in schema_contract and validate tests.\n\n- silver_orders:\n  - Candidate key: column matching (order_id, id, order_pk, order_key) with similar uniqueness/null rules.\n  - Fallback: surrogate order_sk = hash(customer_id, order_date, raw_order_id/sequence) using stable attributes.\n\n- silver_order_items:\n  - Step 1: If column named order_item_id / item_id:\n    - If uniqueness_ratio ≥ 0.99 and null_rate ≤ 1%, use as primary key.\n  - Step 2: Else if columns (order_id, line_number/line_id) exist and the pair is unique:\n    - Use composite key (order_id, line_number).\n  - Step 3: Else:\n    - Create deterministic line_sk as:\n      - hash(order_id, coalesce(line_number, row_number() over (partition by order_id order by created_at, product_id, quantity, unit_price))).\n    - Persist line_sk as the SILVER primary key.\n\nAll key-selection logic will be encoded into the sql_models and referenced directly by schema_contract and validate tasks.\n\n3.3 Timestamp / Watermark Strategy\n\nPer table:\n\n- Choose effective_timestamp (ET) column:\n  - Prefer updated_at if:\n    - Column exists AND null_rate < 30%.\n  - Else prefer created_at if:\n    - Column exists AND null_rate < 30%.\n  - Else prefer ingestion_ts if present.\n  - Else:\n    - Mark the model as full-refresh only (no incremental watermark).\n\nWatermark storage:\n\n- Maintain a metadata table:\n  - AwsDataCatalog.test_silver._load_watermarks\n  - Columns:\n    - model_name (string)\n    - watermark_column (string)\n    - last_successful_watermark (timestamp)\n    - last_run_at (timestamp)\n\nIncremental condition in sql_model (conceptual macro):\n\n- WHERE\n    {{ effective_timestamp }} > {{ get_last_watermark('silver_<model>') }}\n  OR {{ is_full_refresh_run() }}\n\nIf ET is deemed unreliable (high nulls, inconsistent range), we will:\n\n- Default to full-refresh.\n- Document this in model comments.\n- Avoid using incremental configuration until ET quality improves.\n\n\n--------------------------------------------------\n4. Task Inventory (What Will Be Authored)\n--------------------------------------------------\n\nWe will author 9 tasks:\n\n1) sql_model: AwsDataCatalog.test_silver.silver_customers  \n2) schema_contract: AwsDataCatalog.test_silver.silver_customers  \n3) validate: AwsDataCatalog.test_silver.silver_customers  \n\n4) sql_model: AwsDataCatalog.test_silver.silver_orders  \n5) schema_contract: AwsDataCatalog.test_silver.silver_orders  \n6) validate: AwsDataCatalog.test_silver.silver_orders  \n\n7) sql_model: AwsDataCatalog.test_silver.silver_order_items  \n8) schema_contract: AwsDataCatalog.test_silver.silver_order_items  \n9) validate: AwsDataCatalog.test_silver.silver_order_items  \n\n\n--------------------------------------------------\n5. Checklist Requirements per Task\n--------------------------------------------------\n\n5.1 sql_model Tasks (Global Requirements)\n\nFor each sql_model (silver_customers, silver_orders, silver_order_items):\n\n- Source reference:\n  - Explicit FROM AwsDataCatalog.test_raw.<raw_table>.\n  - No SELECT *; enumerate all columns with explicit casts.\n\n- Grain and keys:\n  - Comment block at top:\n    - Declares business grain.\n    - Declares chosen primary key column(s) and rationale (mapping to RAW).\n  - Implement deterministic dedup:\n    - Use ROW_NUMBER() OVER (PARTITION BY <business_key> ORDER BY effective_timestamp DESC, ingestion_ts DESC, raw_surrogate DESC) = 1.\n    - If no ET, use ingestion_ts or raw creation surrogate.\n\n- Type normalization:\n  - IDs:\n    - Use consistent type across related tables (likely STRING/VARCHAR):\n      - customer_id: same type in customers and orders.\n      - order_id: same type in orders and order_items.\n  - Timestamps:\n    - Cast to TIMESTAMP (with timezone normalization if needed).\n  - Numerics:\n    - Amounts → DECIMAL(18, 2).\n    - Quantities → DECIMAL(18, 4) or INTEGER as appropriate.\n  - Booleans:\n    - Map flags to TRUE/FALSE using a CASE expression.\n\n- Incremental scaffolding:\n  - Implement ET-based filtering, parameterized via macro as above.\n  - If ET not reliable, include commented incremental clauses with clear note: “full-refresh only for now.”\n\n- Common cleansing:\n  - TRIM() identifiers and string attributes where leading/trailing spaces likely.\n  - Normalize emails to LOWER(email) where defined.\n  - Standardize status values if there is an obvious normalization (e.g., uppercase codes).\n\n- Orphan-flagging (for referential integrity):\n  - silver_orders:\n    - Optionally LEFT JOIN to silver_customers in a side CTE to compute is_customer_orphan (boolean).\n    - Prefer not to join in the model if it would create circular dependencies; instead:\n      - Either:\n        - Keep orders pure (from RAW) and compute orphan checks only in validate tests.\n      - Or:\n        - Use a pattern where orphan_flag is computed via a separate validation query.  \n    - For this plan, we keep silver_orders sourced solely from RAW and rely on validate tests for referential checks; we do not filter orphans in the core model.\n\n  - silver_order_items:\n    - Same approach for order_id → silver_orders.\n    - Core model does not drop orphans; referential checks and potential downstream filtered views handle that.\n\n5.1.a sql_model: silver_customers\n\n- Determine customer business key per Section 3 and:\n  - Deduplicate on that key with ET tie-breaker.\n- Standard transformations:\n  - Clean/trim name fields.\n  - Lowercase and trim email.\n  - Derive is_active from any soft-delete columns.\n- Columns (conceptual):\n  - customer_id (business/surrogate key)\n  - email, first_name, last_name, status, is_active\n  - created_at, updated_at, ingestion_ts (where available)\n  - audit columns (e.g., _cleaned_at, _source_table)\n\n5.1.b sql_model: silver_orders\n\n- Determine order business key per Section 3.\n- Ensure customer_id is cast to same type as silver_customers.customer_id.\n- Standard transformations:\n  - Normalize order_date/created_at to order_timestamp.\n  - Cast total_amount to DECIMAL(18, 2).\n  - Normalize order_status (e.g., uppercasing, trimming).\n- Columns (conceptual):\n  - order_id (business/surrogate key)\n  - customer_id\n  - order_timestamp, created_at, updated_at\n  - total_amount, currency, order_status\n  - audit and _source_table\n\n5.1.c sql_model: silver_order_items\n\n- Apply PK decision tree in Section 3.\n- Ensure order_id type aligns with silver_orders.order_id.\n- Standard transformations:\n  - quantity, unit_price to numeric types.\n  - Derive line_amount if missing/invalid:\n    - CASE WHEN raw_line_amount is null OR raw_line_amount < 0 THEN quantity * unit_price ELSE raw_line_amount END.\n- Columns (conceptual):\n  - order_item_id OR line_sk (primary key)\n  - order_id\n  - product_id\n  - quantity, unit_price, line_amount\n  - timestamps and audit columns\n\n5.2 schema_contract Tasks\n\nFor each SILVER table:\n\n- Column definitions:\n  - Explicitly list all columns with final data types:\n    - IDs: VARCHAR / BIGINT (consistent across tables).\n    - Timestamps: TIMESTAMP.\n    - Amounts: DECIMAL(18, 2).\n    - Quantities: DECIMAL or INTEGER.\n    - Booleans: BOOLEAN.\n  - Document any computed columns (e.g.,\n... (truncated)",
+    "plan_design_review": {
+      "blockers": [
+        "Key and timestamp selection depend on metrics like uniqueness_ratio and null_rate, but there is no concrete mechanism or task in the cleanse_plan to compute these profiles from RAW, making the PK/ET rules non-executable and potentially ad hoc at implementation time.",
+        "The incremental watermark strategy assumes existence and management of AwsDataCatalog.test_silver._load_watermarks, but no task is defined to create, maintain, or read from this table, so incremental runs cannot reliably function as designed.",
+        "The plan relies on abstract macros/functions (e.g., get_last_watermark, is_full_refresh_run, effective_timestamp macro) that are not tied to any concrete framework or implementation detail, leaving incremental filtering behavior ambiguous and at risk of diverging across models.",
+        "Primary key selection for silver_order_items (natural vs composite vs surrogate) is described as a decision tree but not translated into a deterministic, schema-driven rule that can run without prior profiling, risking inconsistent PK choice between sql_model, schema_contract, and validate tasks.",
+        "Schema_contract is described as depending on the corresponding sql_model being materialized, which inverts a normal contract-first pattern and risks the contract being reverse-engineered from an already-deployed schema, weakening its role as a guardrail against unintended schema drift.",
+        "Validation rules that compare SILVER/RAW volume ratios and orphan rates assume direct access to RAW in validate tasks, but the dependency graph does not explicitly declare RAW as an input for these validations, risking broken validations in environments where validate only sees SILVER outputs."
+      ],
+      "fixes": [
+        "Add an explicit, repeatable profiling step (or pre-run SQL) for each RAW table to compute uniqueness and null-rate stats for candidate key and timestamp columns, and base PK/ET selection strictly on those computed metrics.",
+        "Introduce a dedicated DDL/setup task (or documented bootstrap step) to create and manage AwsDataCatalog.test_silver._load_watermarks, including its schema and update semantics, before any incremental sql_model runs.",
+        "Define or select a specific execution framework and explicitly map macros like get_last_watermark, is_full_refresh_run, and effective_timestamp to concrete configuration/SQL patterns that will be used in all sql_models.",
+        "Refine the silver_order_items PK decision rules into a concrete, schema-only algorithm (e.g., explicit column-name precedence and uniqueness checks derived from the profiling step) and codify that exact choice in sql_model, schema_contract, and validate definitions.",
+        "Flip the dependency so schema_contracts are authored first (based on discovered schemas and design intent) and have sql_models conform to them, using validate to enforce contract adherence and catch any deviation.",
+        "Explicitly declare RAW tables as inputs for validate tasks that compute SILVER/RAW volume ratios and referential orphans, and document the required joins/queries so validations can reliably access both RAW and SILVER in all environments."
+      ],
+      "kind": "cleanse_plan",
+      "ok": false,
+      "ts": "2026-02-26T12:48:11.984700041+00:00"
+    },
+    "validate_fail_facts": [
+      {
+        "dialect": "Amazon Athena (engine v3 / Trino SQL)",
+        "relations": [],
+        "scope": "validate_fail",
+        "targets": {
+          "failing_models": [],
+          "missing_columns": []
+        },
+        "tool_contracts": {
+          "file": {
+            "ops": {
+              "mv": {
+                "example": {
+                  "action": "file",
+                  "args": {
+                    "from": "models/staging/foo.sql",
+                    "op": "mv",
+                    "to": "models/staging/stg_test_raw_raw_customers.sql"
+                  }
+                },
+                "rules": [
+                  "args.op MUST equal \"mv\"",
+                  "args.from and args.to MUST be project-relative paths (no absolute paths, no '..')",
+                  "Destination MUST NOT already exist (no implicit overwrite)",
+                  "If expected_sha256 is provided, it MUST match the current source file sha256"
+                ],
+                "top_level_args": {
+                  "expected_sha256": "optional string (checked against the source file content)",
+                  "from": "string (project-relative path)",
+                  "op": "mv",
+                  "to": "string (project-relative path)"
+                }
+              },
+              "patch": {
+                "example": {
+                  "op": "patch",
+                  "patch_text": "@@ ... @@\n- select old_col from {{ source('raw','events') }}\n+ select new_col from {{ source('raw','events') }}\n",
+                  "path": "models/staging/stg_example.sql"
+                },
+                "rules": [
+                  "args.op MUST equal \"patch\"",
+                  "Provide patch_text only (legacy patch primitives are not allowed)",
+                  "args.path MUST be provided and patch_text MUST target exactly that one path",
+                  "patch_text MUST start with '@@' and MUST NOT include git file headers (---/+++), diff --git preamble, or diffy-style headers (--- original / +++ modified)",
+                  "Hunk headers MUST be Cursor/Aider style: '@@ ... @@' (no line numbers; never '@@ -a,b +c,d @@')"
+                ],
+                "top_level_args": {
+                  "op": "patch",
+                  "patch_text": "string (Cursor/Aider hunks-only unified diff; starts with '@@'; no file headers)",
+                  "path": "string (single target file; required)"
+                }
+              },
+              "rm": {
+                "example": {
+                  "action": "file",
+                  "args": {
+                    "op": "rm",
+                    "path": "models/staging/staging.sql"
+                  }
+                },
+                "rules": [
+                  "args.op MUST equal \"rm\"",
+                  "args.path MUST be a project-relative path (no absolute paths, no '..')",
+                  "If expected_sha256 is provided and the file exists, it MUST match the current file content sha256"
+                ],
+                "top_level_args": {
+                  "expected_sha256": "optional string (only checked if the file exists)",
+                  "op": "rm",
+                  "path": "string (project-relative path)"
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
   "tasks": [
     {
       "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
-      "expected_model_path": null,
+      "expected_model_path": "models/staging/stg_test_raw_raw_customers.sql",
       "invariants": [],
       "implementation_spec": {
         "spec_version": 1,
         "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
+        "output_fields": [
+          {
+            "name": "__all_source_columns__",
+            "kind": "raw",
+            "source_columns": [
+              "*"
+            ],
+            "expression": "Pass through all raw/bronze source columns unchanged (do not drop columns); add cleaned/cast columns alongside raw as needed.",
+            "data_type": null,
+            "nullable": true,
+            "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
+          }
+        ],
+        "prohibited_ops": [
+          "no filtering",
+          "no dedup",
+          "no grain enforcement"
+        ]
       },
-      "status": "pending",
+      "status": "in_progress",
       "checklist": [
         {
           "checklist_item_id": "sql_model",
           "label": "Author staging SQL",
           "details": null,
-          "status": "pending",
+          "status": "done",
           "origin": "initial",
           "origin_step_idx": null,
-          "evidence": []
+          "evidence": [
+            {
+              "kind": "tool_end",
+              "tool_name": "apply_next_cleanse_batch",
+              "tool_id": "2d3699d7-52f7-4638-a0c2-48e544dd8135",
+              "step_idx": 67,
+              "ts": "2026-02-26T12:49:25.614730733+00:00"
+            },
+            {
+              "kind": "tool_end_ok",
+              "tool_name": "apply_next_cleanse_batch",
+              "tool_id": "2d3699d7-52f7-4638-a0c2-48e544dd8135",
+              "step_idx": 67,
+              "ts": "2026-02-26T12:49:25.614730733+00:00"
+            }
+          ]
         },
         {
           "checklist_item_id": "schema_contract",
           "label": "Author schema contract",
           "details": null,
-          "status": "pending",
+          "status": "done",
           "origin": "initial",
           "origin_step_idx": null,
-          "evidence": []
+          "evidence": [
+            {
+              "kind": "tool_end",
+              "tool_name": "apply_next_cleanse_schema_batch",
+              "tool_id": "9b628bb3-5e53-4c4e-8468-71b842dba188",
+              "step_idx": 75,
+              "ts": "2026-02-26T12:50:24.260568365+00:00"
+            },
+            {
+              "kind": "tool_end_ok",
+              "tool_name": "apply_next_cleanse_schema_batch",
+              "tool_id": "9b628bb3-5e53-4c4e-8468-71b842dba188",
+              "step_idx": 75,
+              "ts": "2026-02-26T12:50:24.260568365+00:00"
+            }
+          ]
         },
         {
           "checklist_item_id": "validate",
@@ -46,33 +213,79 @@
     },
     {
       "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
-      "expected_model_path": null,
+      "expected_model_path": "models/staging/stg_test_raw_raw_orders.sql",
       "invariants": [],
       "implementation_spec": {
         "spec_version": 1,
         "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
+        "output_fields": [
+          {
+            "name": "__all_source_columns__",
+            "kind": "raw",
+            "source_columns": [
+              "*"
+            ],
+            "expression": "Pass through all raw/bronze source columns unchanged (do not drop columns); add cleaned/cast columns alongside raw as needed.",
+            "data_type": null,
+            "nullable": true,
+            "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
+          }
+        ],
+        "prohibited_ops": [
+          "no filtering",
+          "no dedup",
+          "no grain enforcement"
+        ]
       },
-      "status": "pending",
+      "status": "in_progress",
       "checklist": [
         {
           "checklist_item_id": "sql_model",
           "label": "Author staging SQL",
           "details": null,
-          "status": "pending",
+          "status": "done",
           "origin": "initial",
           "origin_step_idx": null,
-          "evidence": []
+          "evidence": [
+            {
+              "kind": "tool_end",
+              "tool_name": "apply_next_cleanse_batch",
+              "tool_id": "2d3699d7-52f7-4638-a0c2-48e544dd8135",
+              "step_idx": 67,
+              "ts": "2026-02-26T12:49:25.614730733+00:00"
+            },
+            {
+              "kind": "tool_end_ok",
+              "tool_name": "apply_next_cleanse_batch",
+              "tool_id": "2d3699d7-52f7-4638-a0c2-48e544dd8135",
+              "step_idx": 67,
+              "ts": "2026-02-26T12:49:25.614730733+00:00"
+            }
+          ]
         },
         {
           "checklist_item_id": "schema_contract",
           "label": "Author schema contract",
           "details": null,
-          "status": "pending",
+          "status": "done",
           "origin": "initial",
           "origin_step_idx": null,
-          "evidence": []
+          "evidence": [
+            {
+              "kind": "tool_end",
+              "tool_name": "apply_next_cleanse_schema_batch",
+              "tool_id": "9b628bb3-5e53-4c4e-8468-71b842dba188",
+              "step_idx": 75,
+              "ts": "2026-02-26T12:50:24.260568365+00:00"
+            },
+            {
+              "kind": "tool_end_ok",
+              "tool_name": "apply_next_cleanse_schema_batch",
+              "tool_id": "9b628bb3-5e53-4c4e-8468-71b842dba188",
+              "step_idx": 75,
+              "ts": "2026-02-26T12:50:24.260568365+00:00"
+            }
+          ]
         },
         {
           "checklist_item_id": "validate",
@@ -87,935 +300,79 @@
     },
     {
       "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
-      "expected_model_path": null,
+      "expected_model_path": "models/staging/stg_test_raw_raw_order_items.sql",
       "invariants": [],
       "implementation_spec": {
         "spec_version": 1,
         "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
+        "output_fields": [
+          {
+            "name": "__all_source_columns__",
+            "kind": "raw",
+            "source_columns": [
+              "*"
+            ],
+            "expression": "Pass through all raw/bronze source columns unchanged (do not drop columns); add cleaned/cast columns alongside raw as needed.",
+            "data_type": null,
+            "nullable": true,
+            "description": "Default silver contract: preserve all raw columns; do not filter/dedup in silver."
+          }
+        ],
+        "prohibited_ops": [
+          "no filtering",
+          "no dedup",
+          "no grain enforcement"
+        ]
       },
-      "status": "pending",
+      "status": "in_progress",
       "checklist": [
         {
           "checklist_item_id": "sql_model",
           "label": "Author staging SQL",
           "details": null,
-          "status": "pending",
+          "status": "done",
           "origin": "initial",
           "origin_step_idx": null,
-          "evidence": []
+          "evidence": [
+            {
+              "kind": "tool_end",
+              "tool_name": "apply_next_cleanse_batch",
+              "tool_id": "2d3699d7-52f7-4638-a0c2-48e544dd8135",
+              "step_idx": 67,
+              "ts": "2026-02-26T12:49:25.614730733+00:00"
+            },
+            {
+              "kind": "tool_end_ok",
+              "tool_name": "apply_next_cleanse_batch",
+              "tool_id": "2d3699d7-52f7-4638-a0c2-48e544dd8135",
+              "step_idx": 67,
+              "ts": "2026-02-26T12:49:25.614730733+00:00"
+            }
+          ]
         },
         {
           "checklist_item_id": "schema_contract",
           "label": "Author schema contract",
           "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "validate",
-          "label": "Validate",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        }
-      ]
-    },
-    {
-      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
-      "expected_model_path": null,
-      "invariants": [],
-      "implementation_spec": {
-        "spec_version": 1,
-        "row_preserving": true,
-        "output_fields": [],
-        "prohibited_ops": []
-      },
-      "status": "pending",
-      "checklist": [
-        {
-          "checklist_item_id": "sql_model",
-          "label": "Author staging SQL",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
-        },
-        {
-          "checklist_item_id": "schema_contract",
-          "label": "Author schema contract",
-          "details": null,
-          "status": "pending",
-          "origin": "initial",
-          "origin_step_idx": null,
-          "evidence": []
+          "status": "done",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": [
+            {
+              "kind": "tool_end",
+              "tool_name": "apply_next_cleanse_schema_batch",
+              "tool_id": "9b628bb3-5e53-4c4e-8468-71b842dba188",
+              "step_idx": 75,
+              "ts": "2026-02-26T12:50:24.260568365+00:00"
+            },
+            {
+              "kind": "tool_end_ok",
+              "tool_name": "apply_next_cleanse_schema_batch",
+              "tool_id": "9b628bb3-5e53-4c4e-8468-71b842dba188",
+              "step_idx": 75,
+              "ts": "2026-02-26T12:50:24.260568365+00:00"
+            }
+          ]
         },
         {
           "checklist_item_id": "validate",
@@ -1033,37 +390,7 @@
     [
       "AwsDataCatalog.test_raw.raw_customers",
       "AwsDataCatalog.test_raw.raw_orders",
-      "AwsDataCatalog.test_raw.raw_order_items",
-      "AwsDataCatalog.test_raw.raw_customers",
-      "AwsDataCatalog.test_raw.raw_orders"
-    ],
-    [
-      "AwsDataCatalog.test_raw.raw_customers",
-      "AwsDataCatalog.test_raw.raw_customers",
-      "AwsDataCatalog.test_raw.raw_customers",
-      "AwsDataCatalog.test_raw.raw_customers",
-      "AwsDataCatalog.test_raw.raw_customers"
-    ],
-    [
-      "AwsDataCatalog.test_raw.raw_orders",
-      "AwsDataCatalog.test_raw.raw_orders",
-      "AwsDataCatalog.test_raw.raw_orders",
-      "AwsDataCatalog.test_raw.raw_orders",
-      "AwsDataCatalog.test_raw.raw_orders"
-    ],
-    [
-      "AwsDataCatalog.test_raw.raw_order_items",
-      "AwsDataCatalog.test_raw.raw_order_items",
-      "AwsDataCatalog.test_raw.raw_order_items",
-      "AwsDataCatalog.test_raw.raw_order_items",
       "AwsDataCatalog.test_raw.raw_order_items"
-    ],
-    [
-      "AwsDataCatalog.test_raw.raw_customers",
-      "AwsDataCatalog.test_raw.raw_orders",
-      "AwsDataCatalog.test_raw.raw_order_items",
-      "AwsDataCatalog.test_raw.raw_customers",
-      "AwsDataCatalog.test_raw.raw_orders"
     ]
   ],
   "work_groups": [
@@ -1110,126 +437,6 @@
       ]
     },
     {
-      "group_id": "cleanse_author_sql_002",
-      "label": "Author SQL batch 2",
-      "kind": "author_sql",
-      "items": [
-        {
-          "task_id": "AwsDataCatalog.test_raw.raw_customers",
-          "checklist_item_id": "sql_model"
-        }
-      ],
-      "depends_on_group_ids": null
-    },
-    {
-      "group_id": "cleanse_author_schema_002",
-      "label": "Author schema batch 2",
-      "kind": "author_schema",
-      "items": [
-        {
-          "task_id": "AwsDataCatalog.test_raw.raw_customers",
-          "checklist_item_id": "schema_contract"
-        }
-      ],
-      "depends_on_group_ids": [
-        "cleanse_author_sql_002"
-      ]
-    },
-    {
-      "group_id": "cleanse_author_sql_003",
-      "label": "Author SQL batch 3",
-      "kind": "author_sql",
-      "items": [
-        {
-          "task_id": "AwsDataCatalog.test_raw.raw_orders",
-          "checklist_item_id": "sql_model"
-        }
-      ],
-      "depends_on_group_ids": null
-    },
-    {
-      "group_id": "cleanse_author_schema_003",
-      "label": "Author schema batch 3",
-      "kind": "author_schema",
-      "items": [
-        {
-          "task_id": "AwsDataCatalog.test_raw.raw_orders",
-          "checklist_item_id": "schema_contract"
-        }
-      ],
-      "depends_on_group_ids": [
-        "cleanse_author_sql_003"
-      ]
-    },
-    {
-      "group_id": "cleanse_author_sql_004",
-      "label": "Author SQL batch 4",
-      "kind": "author_sql",
-      "items": [
-        {
-          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
-          "checklist_item_id": "sql_model"
-        }
-      ],
-      "depends_on_group_ids": null
-    },
-    {
-      "group_id": "cleanse_author_schema_004",
-      "label": "Author schema batch 4",
-      "kind": "author_schema",
-      "items": [
-        {
-          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
-          "checklist_item_id": "schema_contract"
-        }
-      ],
-      "depends_on_group_ids": [
-        "cleanse_author_sql_004"
-      ]
-    },
-    {
-      "group_id": "cleanse_author_sql_005",
-      "label": "Author SQL batch 5",
-      "kind": "author_sql",
-      "items": [
-        {
-          "task_id": "AwsDataCatalog.test_raw.raw_customers",
-          "checklist_item_id": "sql_model"
-        },
-        {
-          "task_id": "AwsDataCatalog.test_raw.raw_orders",
-          "checklist_item_id": "sql_model"
-        },
-        {
-          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
-          "checklist_item_id": "sql_model"
-        }
-      ],
-      "depends_on_group_ids": null
-    },
-    {
-      "group_id": "cleanse_author_schema_005",
-      "label": "Author schema batch 5",
-      "kind": "author_schema",
-      "items": [
-        {
-          "task_id": "AwsDataCatalog.test_raw.raw_customers",
-          "checklist_item_id": "schema_contract"
-        },
-        {
-          "task_id": "AwsDataCatalog.test_raw.raw_orders",
-          "checklist_item_id": "schema_contract"
-        },
-        {
-          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
-          "checklist_item_id": "schema_contract"
-        }
-      ],
-      "depends_on_group_ids": [
-        "cleanse_author_sql_005"
-      ]
-    },
-    {
       "group_id": "cleanse_validate",
       "label": "Validate plan",
       "kind": "validate",
@@ -1248,17 +455,13 @@
         }
       ],
       "depends_on_group_ids": [
-        "cleanse_author_schema_001",
-        "cleanse_author_schema_002",
-        "cleanse_author_schema_003",
-        "cleanse_author_schema_004",
-        "cleanse_author_schema_005"
+        "cleanse_author_schema_001"
       ]
     }
   ],
   "mutations": [],
   "progress": {
-    "last_applied_step_idx": 0,
+    "last_applied_step_idx": 76,
     "consecutive_batch_failures": 0,
     "total_batch_failures": 0
   }

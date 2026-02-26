@@ -44,6 +44,7 @@ Hard rules:
   - If you need to revise scope/order, return to planning by asking the user to reject/adjust the plan (do not spam approvals mid-authoring).
 - Execution invariants (hard cutover):
   - Authoring is checklist/work-group driven from an approved executable plan.
+  - When plan-batched mode is active, the dispatcher provides exactly one allowed next action; call only that deterministic batch tool and do not choose alternatives.
   - Do NOT assume downstream phases will compensate for missing work_groups/checklist structure.
   - If plan structure is incomplete, return to planning instead of improvising.
 - For build/publish: when publish tools are available, ALWAYS require approval before any dbt build. Use `publish_dbt_to_provider` (first call returns await_approval; on approval call again with confirm=true).

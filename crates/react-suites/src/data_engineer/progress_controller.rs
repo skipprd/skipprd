@@ -94,6 +94,24 @@ pub enum FailureClass {
     Unknown,
 }
 
+impl Default for FailureClass {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FailureSignature {
+    pub class: FailureClass,
+    #[serde(default)]
+    pub node_id: Option<String>,
+    #[serde(default)]
+    pub canonical_path: Option<String>,
+    #[serde(default)]
+    pub error_code: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProgressDelta {
@@ -102,7 +120,7 @@ pub struct ProgressDelta {
     #[serde(default)]
     pub failed_target_count_delta: i64,
     #[serde(default)]
-    pub validate_error_fingerprint_delta: bool,
+    pub failure_signature_changed: bool,
     #[serde(default)]
     pub checklist_completed_delta: i64,
     #[serde(default)]
@@ -128,7 +146,7 @@ pub struct ExecutionState {
     #[serde(default)]
     pub last_validate_ok: Option<bool>,
     #[serde(default)]
-    pub last_validate_error_fingerprint: Option<String>,
+    pub last_failure_signature: Option<FailureSignature>,
     #[serde(default)]
     pub repair_backlog: Vec<RepairTarget>,
     #[serde(default)]
@@ -208,7 +226,7 @@ impl ExecutionState {
             ..LastValidateState::default()
         });
         self.last_validate_ok = Some(true);
-        self.last_validate_error_fingerprint = None;
+        self.last_failure_signature = None;
         self.repair_backlog.clear();
         self.hard_mutation_repair_mode = false;
         self.single_target_repair_path = None;
@@ -233,12 +251,12 @@ impl ExecutionState {
         &mut self,
         tier: ExecutionTier,
         failure_class: FailureClass,
-        error_fingerprint: String,
+        failure_signature: FailureSignature,
         backlog: Vec<RepairTarget>,
         brief: Option<String>,
     ) {
         let prev_count = self.repair_backlog.len() as i64;
-        let prev_fp = self.last_validate_error_fingerprint.clone();
+        let prev_signature = self.last_failure_signature.clone();
         self.current_tier = tier;
         self.mode = ExecutionMode::Mutate;
         self.last_validate = Some(LastValidateState {
@@ -263,7 +281,7 @@ impl ExecutionState {
             ..LastValidateState::default()
         });
         self.last_validate_ok = Some(false);
-        self.last_validate_error_fingerprint = Some(error_fingerprint.clone());
+        self.last_failure_signature = Some(failure_signature.clone());
         self.repair_backlog = backlog;
         self.hard_mutation_repair_mode = true;
         self.single_target_repair_path = self
@@ -289,9 +307,8 @@ impl ExecutionState {
             .collect();
 
         let failed_target_count_delta = self.repair_backlog.len() as i64 - prev_count;
-        let validate_error_fingerprint_delta =
-            prev_fp.as_deref().unwrap_or("") != error_fingerprint.as_str();
-        let progress_made = failed_target_count_delta != 0 || validate_error_fingerprint_delta;
+        let failure_signature_changed = prev_signature != Some(failure_signature);
+        let progress_made = failed_target_count_delta < 0;
         if progress_made {
             self.stall_count = 0;
         } else {
@@ -300,7 +317,7 @@ impl ExecutionState {
         self.last_progress_delta = Some(ProgressDelta {
             target_hash_changed: false,
             failed_target_count_delta,
-            validate_error_fingerprint_delta,
+            failure_signature_changed,
             checklist_completed_delta: 0,
             progress_made,
         });
@@ -460,5 +477,91 @@ mod tests {
         st.mark_failed("x");
         assert_eq!(st.mode, ExecutionMode::Failed);
         assert_eq!(st.last_error_brief.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn repeated_equivalent_validate_failures_do_not_count_as_progress() {
+        let mut st = ExecutionState::new();
+        let sig = FailureSignature {
+            class: FailureClass::SqlOrRuntime,
+            node_id: Some("model.pkg.fct_orders".to_string()),
+            canonical_path: Some("models/marts/fct_orders.sql".to_string()),
+            error_code: Some("E_SQL".to_string()),
+        };
+        let backlog = vec![RepairTarget {
+            model_name: Some("model.pkg.fct_orders".to_string()),
+            path: Some("models/marts/fct_orders.sql".to_string()),
+            error_class: Some(FailureClass::SqlOrRuntime),
+        }];
+
+        st.apply_validate_failure(
+            ExecutionTier::Model,
+            FailureClass::SqlOrRuntime,
+            sig.clone(),
+            backlog.clone(),
+            Some("first".to_string()),
+        );
+        let stall_after_first = st.stall_count;
+
+        st.apply_validate_failure(
+            ExecutionTier::Model,
+            FailureClass::SqlOrRuntime,
+            sig,
+            backlog,
+            Some("second".to_string()),
+        );
+
+        let delta = st.last_progress_delta.expect("delta");
+        assert!(!delta.progress_made);
+        assert_eq!(delta.failed_target_count_delta, 0);
+        assert!(!delta.failure_signature_changed);
+        assert_eq!(st.stall_count, stall_after_first.saturating_add(1));
+    }
+
+    #[test]
+    fn shrinking_repair_backlog_counts_as_structural_progress() {
+        let mut st = ExecutionState::new();
+        let sig = FailureSignature {
+            class: FailureClass::SqlOrRuntime,
+            node_id: Some("model.pkg.fct_orders".to_string()),
+            canonical_path: Some("models/marts/fct_orders.sql".to_string()),
+            error_code: Some("E_SQL".to_string()),
+        };
+        let two = vec![
+            RepairTarget {
+                model_name: Some("model.pkg.fct_orders".to_string()),
+                path: Some("models/marts/fct_orders.sql".to_string()),
+                error_class: Some(FailureClass::SqlOrRuntime),
+            },
+            RepairTarget {
+                model_name: Some("model.pkg.dim_users".to_string()),
+                path: Some("models/marts/dim_users.sql".to_string()),
+                error_class: Some(FailureClass::SqlOrRuntime),
+            },
+        ];
+        st.apply_validate_failure(
+            ExecutionTier::Model,
+            FailureClass::SqlOrRuntime,
+            sig.clone(),
+            two,
+            Some("first".to_string()),
+        );
+
+        let one = vec![RepairTarget {
+            model_name: Some("model.pkg.fct_orders".to_string()),
+            path: Some("models/marts/fct_orders.sql".to_string()),
+            error_class: Some(FailureClass::SqlOrRuntime),
+        }];
+        st.apply_validate_failure(
+            ExecutionTier::Model,
+            FailureClass::SqlOrRuntime,
+            sig,
+            one,
+            Some("second".to_string()),
+        );
+
+        let delta = st.last_progress_delta.expect("delta");
+        assert!(delta.progress_made);
+        assert_eq!(delta.failed_target_count_delta, -1);
     }
 }

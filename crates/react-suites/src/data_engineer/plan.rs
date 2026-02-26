@@ -798,6 +798,41 @@ pub struct PlanSemanticValidation {
     pub errors: Vec<String>,
 }
 
+fn duplicate_values(values: &[String]) -> Vec<String> {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for v in values.iter() {
+        let t = v.trim();
+        if t.is_empty() {
+            continue;
+        }
+        *counts.entry(t.to_string()).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .filter_map(|(k, n)| if n > 1 { Some(k) } else { None })
+        .collect()
+}
+
+fn duplicate_workgroup_refs(groups: &[PlanWorkGroup]) -> Vec<(String, String)> {
+    let mut counts = std::collections::BTreeMap::<(String, String), usize>::new();
+    for g in groups.iter() {
+        for it in g.items.iter() {
+            let tid = it.task_id.trim();
+            let cid = it.checklist_item_id.trim();
+            if tid.is_empty() || cid.is_empty() {
+                continue;
+            }
+            *counts
+                .entry((tid.to_string(), cid.to_string()))
+                .or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(k, n)| if n > 1 { Some(k) } else { None })
+        .collect()
+}
+
 fn is_runnable_checklist_status(s: ChecklistItemStatus) -> bool {
     matches!(
         s,
@@ -807,41 +842,6 @@ fn is_runnable_checklist_status(s: ChecklistItemStatus) -> bool {
     )
 }
 
-fn excerpt_for_prompt(s: &str, max_chars: usize) -> String {
-    let t = s.trim();
-    if max_chars == 0 || t.is_empty() {
-        return String::new();
-    }
-    if t.len() <= max_chars {
-        return t.to_string();
-    }
-    let mut end = 0usize;
-    for (i, ch) in t.char_indices() {
-        if i >= max_chars {
-            break;
-        }
-        end = i + ch.len_utf8();
-    }
-    if end == 0 {
-        return String::new();
-    }
-    let mut out = t[..end].to_string();
-    out.push_str("…[truncated]");
-    out
-}
-
-fn parse_json_object_lenient(text: &str) -> Result<Value, String> {
-    if let Ok(v) = serde_json::from_str::<Value>(text) {
-        return Ok(v);
-    }
-    let s = text.trim();
-    let st = s.find('{').ok_or_else(|| "no '{' found".to_string())?;
-    let en = s.rfind('}').ok_or_else(|| "no '}' found".to_string())?;
-    if en <= st {
-        return Err("invalid brace span".to_string());
-    }
-    serde_json::from_str::<Value>(&s[st..=en]).map_err(|e| e.to_string())
-}
 
 pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValidation {
     let mut errors: Vec<String> = Vec::new();
@@ -851,9 +851,23 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
     if plan.tasks.is_empty() {
         errors.push("tasks is empty".to_string());
     }
+    let task_ids = plan
+        .tasks
+        .iter()
+        .map(|t| t.dataset_id.clone())
+        .collect::<Vec<_>>();
+    for dup in duplicate_values(&task_ids) {
+        errors.push(format!("duplicate task.dataset_id is not allowed: {}", dup));
+    }
     for (bi, b) in plan.batches.iter().enumerate() {
         if b.len() > 5 {
             errors.push(format!("batches[{bi}] has >5 items (len={})", b.len()));
+        }
+        for dup in duplicate_values(b) {
+            errors.push(format!(
+                "batches[{bi}] contains duplicate dataset_id '{}' (duplicates are forbidden)",
+                dup
+            ));
         }
     }
     for t in plan.tasks.iter() {
@@ -916,6 +930,12 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
     // Work-group refs should exist in tasks.
     if plan.work_groups.is_empty() {
         errors.push("work_groups is empty".to_string());
+    }
+    for (task_id, checklist_item_id) in duplicate_workgroup_refs(&plan.work_groups) {
+        errors.push(format!(
+            "work_groups contains duplicate task/checklist ref: task_id='{}' checklist_item_id='{}'",
+            task_id, checklist_item_id
+        ));
     }
     for g in plan.work_groups.iter() {
         if g.items.len() > 5 {
@@ -1059,9 +1079,19 @@ pub fn validate_model_plan_semantics(
     if plan.tasks.is_empty() {
         errors.push("tasks is empty".to_string());
     }
+    let task_names = plan.tasks.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+    for dup in duplicate_values(&task_names) {
+        errors.push(format!("duplicate task.name is not allowed: {}", dup));
+    }
     for (bi, b) in plan.batches.iter().enumerate() {
         if b.len() > 5 {
             errors.push(format!("batches[{bi}] has >5 items (len={})", b.len()));
+        }
+        for dup in duplicate_values(b) {
+            errors.push(format!(
+                "batches[{bi}] contains duplicate model name '{}' (duplicates are forbidden)",
+                dup
+            ));
         }
     }
     for t in plan.tasks.iter() {
@@ -1139,6 +1169,12 @@ pub fn validate_model_plan_semantics(
     // Work-group refs should exist in tasks.
     if plan.work_groups.is_empty() {
         errors.push("work_groups is empty".to_string());
+    }
+    for (task_id, checklist_item_id) in duplicate_workgroup_refs(&plan.work_groups) {
+        errors.push(format!(
+            "work_groups contains duplicate task/checklist ref: task_id='{}' checklist_item_id='{}'",
+            task_id, checklist_item_id
+        ));
     }
     for g in plan.work_groups.iter() {
         if g.items.len() > 5 {
@@ -1371,110 +1407,6 @@ impl PersistableModelPlan {
             Self::Terminal(v) => v,
         }
     }
-}
-
-fn plan_repair_system_prompt(kind: &str) -> String {
-    // Keep this short and hard-constraint focused (JSON-only, no tools).
-    format!(
-        "You are a plan repair agent.\n\
-Your job is to repair a {kind} plan JSON so it satisfies server validation.\n\
-\n\
-Hard constraints:\n\
-- Your entire response MUST be a JSON object only (no markdown, no commentary).\n\
-- Output ONE JSON object that matches the plan schema.\n\
-- Preserve plan_key and status; preserve tasks/batches/work_groups unless required to fix validation.\n\
-- DO NOT add tool calls, do not ask questions.\n\
-- If a task cannot be repaired without guessing, mark it blocked by setting its sql_model checklist item to status=\"blocked\" and add a short details message.\n\
-\n\
-Goal: fix only what's needed so the plan can execute deterministically."
-    )
-}
-
-pub async fn repair_cleanse_plan_semantics_via_llm(
-    ctx: &AgentCtx,
-    plan: &CleansePlan,
-    validation_errors: &[String],
-) -> Result<CleansePlan, String> {
-    use react_core::llm::ChatMessage;
-    use react_core::llm::LlmCallOptions;
-    let sys = plan_repair_system_prompt("cleanse");
-    let plan_json = serde_json::to_string_pretty(plan).map_err(|e| e.to_string())?;
-    let errs = validation_errors.join("\n");
-    let user = format!(
-        "Validation errors:\n{errs}\n\nCurrent plan JSON (FULL):\n{}\n\nRe-emit the corrected plan JSON only.",
-        excerpt_for_prompt(&plan_json, 200_000)
-    );
-    let messages = vec![
-        ChatMessage {
-            role: "system".to_string(),
-            content: sys,
-        },
-        ChatMessage {
-            role: "user".to_string(),
-            content: user,
-        },
-    ];
-    let call_opts = LlmCallOptions {
-        prompt_id: "data_engineer.cleanse_plan_semantic_repair",
-        thread_id: ctx.thread_id.clone(),
-        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-        temperature: Some(0.0),
-        top_p: Some(1.0),
-        max_output_tokens: Some(3600),
-        reasoning_effort: None,
-    };
-    let raw = ctx
-        .llm
-        .chat(&messages, &call_opts)
-        .map_err(|e| e.to_string())?;
-    let v = parse_json_object_lenient(&raw)?;
-    serde_json::from_value::<CleansePlan>(v).map_err(|e| e.to_string())
-}
-
-pub async fn repair_model_plan_semantics_via_llm(
-    ctx: &AgentCtx,
-    plan: &ModelPlan,
-    validation_errors: &[String],
-    allowed_staging_models: &[String],
-) -> Result<ModelPlan, String> {
-    use react_core::llm::ChatMessage;
-    use react_core::llm::LlmCallOptions;
-    let sys = plan_repair_system_prompt("model");
-    let plan_json = serde_json::to_string_pretty(plan).map_err(|e| e.to_string())?;
-    let errs = validation_errors.join("\n");
-    let mut allowed = allowed_staging_models.to_vec();
-    allowed.sort();
-    allowed.dedup();
-    let user = format!(
-        "Validation errors:\n{errs}\n\nAllowed staging model inputs (values for task.inputs):\n{}\n\nCurrent plan JSON (FULL):\n{}\n\nRe-emit the corrected plan JSON only.",
-        serde_json::to_string_pretty(&allowed).unwrap_or_else(|_| "[]".to_string()),
-        excerpt_for_prompt(&plan_json, 200_000)
-    );
-    let messages = vec![
-        ChatMessage {
-            role: "system".to_string(),
-            content: sys,
-        },
-        ChatMessage {
-            role: "user".to_string(),
-            content: user,
-        },
-    ];
-    let call_opts = LlmCallOptions {
-        prompt_id: "data_engineer.model_plan_semantic_repair",
-        thread_id: ctx.thread_id.clone(),
-        expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-        temperature: Some(0.0),
-        top_p: Some(1.0),
-        max_output_tokens: Some(3600),
-        reasoning_effort: None,
-    };
-    let raw = ctx
-        .llm
-        .chat(&messages, &call_opts)
-        .map_err(|e| e.to_string())?;
-    let v = parse_json_object_lenient(&raw)?;
-    serde_json::from_value::<ModelPlan>(v).map_err(|e| e.to_string())
 }
 
 pub async fn ensure_cleanse_plan_semantically_valid_or_repaired(
@@ -3877,6 +3809,52 @@ mod tests {
     }
 
     #[test]
+    fn validate_cleanse_plan_semantics_rejects_duplicate_ids() {
+        let mut plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![
+                CleanseTask {
+                    dataset_id: "a.b.c".to_string(),
+                    expected_model_path: Some("models/staging/stg_b_c.sql".to_string()),
+                    invariants: vec![],
+                    implementation_spec: dummy_cleanse_spec(),
+                    status: TaskStatus::Pending,
+                    checklist: std_checklist("Author staging SQL"),
+                },
+                CleanseTask {
+                    dataset_id: "a.b.c".to_string(),
+                    expected_model_path: Some("models/staging/stg_b_c.sql".to_string()),
+                    invariants: vec![],
+                    implementation_spec: dummy_cleanse_spec(),
+                    status: TaskStatus::Pending,
+                    checklist: std_checklist("Author staging SQL"),
+                },
+            ],
+            batches: vec![vec!["a.b.c".to_string(), "a.b.c".to_string()]],
+            work_groups: canonical_work_groups_from_batches(&[vec!["a.b.c".to_string()]], "cleanse"),
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        plan.work_groups[0].items.push(WorkGroupItemRef {
+            task_id: "a.b.c".to_string(),
+            checklist_item_id: CHECKLIST_SQL_MODEL.to_string(),
+        });
+        let v = validate_cleanse_plan_semantics(&plan);
+        assert!(!v.ok);
+        assert!(v
+            .errors
+            .iter()
+            .any(|e| e.contains("duplicate task.dataset_id")));
+        assert!(v.errors.iter().any(|e| e.contains("contains duplicate dataset_id")));
+        assert!(v
+            .errors
+            .iter()
+            .any(|e| e.contains("duplicate task/checklist ref")));
+    }
+
+    #[test]
     fn validate_model_plan_semantics_rejects_missing_grain_in_design_spec() {
         let mut bad_spec = dummy_model_spec();
         bad_spec.grain = "".to_string();
@@ -3942,6 +3920,59 @@ mod tests {
             .errors
             .iter()
             .any(|e| e.contains("references unknown model task_id=missing_task")));
+    }
+
+    #[test]
+    fn validate_model_plan_semantics_rejects_duplicate_ids() {
+        let mut plan = ModelPlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![
+                ModelTask {
+                    name: "fct_orders".to_string(),
+                    folder: "marts".to_string(),
+                    goal: "orders fact".to_string(),
+                    inputs: vec!["stg_orders".to_string()],
+                    expected_model_path: Some("models/marts/fct_orders.sql".to_string()),
+                    invariants: vec![],
+                    implementation_spec: dummy_model_spec(),
+                    status: TaskStatus::Pending,
+                    checklist: std_checklist("Author gold SQL"),
+                },
+                ModelTask {
+                    name: "fct_orders".to_string(),
+                    folder: "marts".to_string(),
+                    goal: "orders fact".to_string(),
+                    inputs: vec!["stg_orders".to_string()],
+                    expected_model_path: Some("models/marts/fct_orders.sql".to_string()),
+                    invariants: vec![],
+                    implementation_spec: dummy_model_spec(),
+                    status: TaskStatus::Pending,
+                    checklist: std_checklist("Author gold SQL"),
+                },
+            ],
+            batches: vec![vec!["fct_orders".to_string(), "fct_orders".to_string()]],
+            work_groups: canonical_work_groups_from_batches(&[vec!["fct_orders".to_string()]], "model"),
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        plan.work_groups[0].items.push(WorkGroupItemRef {
+            task_id: "fct_orders".to_string(),
+            checklist_item_id: CHECKLIST_SQL_MODEL.to_string(),
+        });
+        let allowed = std::collections::BTreeSet::from(["stg_orders".to_string()]);
+        let v = validate_model_plan_semantics(&plan, Some(&allowed));
+        assert!(!v.ok);
+        assert!(v.errors.iter().any(|e| e.contains("duplicate task.name")));
+        assert!(v
+            .errors
+            .iter()
+            .any(|e| e.contains("contains duplicate model name")));
+        assert!(v
+            .errors
+            .iter()
+            .any(|e| e.contains("duplicate task/checklist ref")));
     }
 
     fn status_of(items: &[PlanChecklistItem], id: &str) -> ChecklistItemStatus {

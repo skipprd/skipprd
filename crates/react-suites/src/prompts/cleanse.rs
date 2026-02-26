@@ -19,6 +19,7 @@ Cleanse-specific rules:
 - Throughput (CRITICAL):
   - If there are many raw tables (>20), you MUST NOT cleanse only one table and stop.
   - In agent mode, an approved cleanse plan will be provided in the question. Execute it deterministically using the batch authoring tool from the current tool card.
+  - The dispatcher/tool card defines exactly one allowed next action for this step; call only that tool path and do not choose alternatives.
   - If a deterministic batch tool is available for this step, call it instead of calling `staging_model` directly.
 - Data-aware test rules (CRITICAL):
   - NEVER add unconditional `not_null` tests on parsed/cast columns produced via `try_cast` (especially timestamps/dates).
