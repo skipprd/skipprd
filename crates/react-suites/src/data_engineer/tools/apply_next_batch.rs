@@ -120,7 +120,10 @@ impl Tool for ApplyNextCleanseBatchTool {
         if controller_kernel::batch_budget(&plan.progress).exhausted() {
             return Ok(serde_json::json!({
                 "ok": false,
-                "errors": ["too many consecutive batch failures; apply a targeted mutating fix (file op=patch|rm|mv) before retrying"],
+                "kind": "batch_locked",
+                "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
+                "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
                 "attempted_dataset_ids": [],
                 "succeeded_dataset_ids": [],
                 "failed_dataset_ids": [],
@@ -363,10 +366,13 @@ impl Tool for ApplyNextCleanseBatchTool {
         if budget.exhausted() {
             return Ok(serde_json::json!({
                 "ok": false,
+                "kind": "batch_locked",
+                "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
                 "attempted_dataset_ids": attempted,
                 "succeeded_dataset_ids": succeeded,
                 "failed_dataset_ids": failed,
-                "errors": ["too many consecutive batch failures; apply a targeted mutating fix (file op=patch|rm|mv) before retrying"],
+                "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
             }));
         }
 
@@ -428,7 +434,10 @@ impl Tool for ApplyNextModelBatchTool {
         if controller_kernel::batch_budget(&plan.progress).exhausted() {
             return Ok(serde_json::json!({
                 "ok": false,
-                "errors": ["too many consecutive batch failures; apply a targeted mutating fix (file op=patch|rm|mv) before retrying"],
+                "kind": "batch_locked",
+                "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
+                "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
                 "attempted_item_names": [],
                 "succeeded_item_names": [],
                 "failed_item_names": [],
@@ -688,10 +697,13 @@ impl Tool for ApplyNextModelBatchTool {
         if budget.exhausted() {
             return Ok(serde_json::json!({
                 "ok": false,
+                "kind": "batch_locked",
+                "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
                 "attempted_item_names": batch_names,
                 "succeeded_item_names": succeeded,
                 "failed_item_names": failed,
-                "errors": ["too many consecutive batch failures; apply a targeted mutating fix (file op=patch|rm|mv) before retrying"],
+                "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
             }));
         }
 

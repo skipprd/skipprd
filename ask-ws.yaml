@@ -162,7 +162,7 @@ components:
           description: Suite id to use (e.g. data_engineer | kb)
         agentType:
           type: string
-          description: Agent/mode to use (ask | cleanse | model | kb | agent | review). Required.
+          description: Agent/mode to use (ask | kb | agent | review). Required.
           enum: [ask, cleanse, model, kb, agent, review]
 
     OpenRequest:

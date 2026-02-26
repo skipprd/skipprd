@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data_engineer::progress_controller::RepairLadderStep;
+use react_core::session::PlanKind;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PlanContextPacket {
     #[serde(default)]
-    pub plan_kind: Option<String>,
+    pub plan_kind: Option<PlanKind>,
     #[serde(default)]
     pub plan_key: Option<String>,
     /// Rendered, human-readable context (bounded by the builder).

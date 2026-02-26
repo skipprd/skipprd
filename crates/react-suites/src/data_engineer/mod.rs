@@ -3099,18 +3099,14 @@ Apply these fixes in the output.",
                     let guard =
                         crate::data_engineer::control_flow::derive_guard_state(log.as_ref());
                     if guard.last_validate_failed && !guard.mutated_since_fail {
-                        return Err(
-                            "dbt_validate is blocked after a failed validation until you APPLY A FIX to the dbt project.\n\
-                             Next step must be a mutating fix action (e.g. `staging_model` or `file op=patch|rm|mv` to update schema/tests)."
-                                .to_string(),
-                        );
+                        return Err(crate::data_engineer::controller_kernel::guard_block_error(
+                            crate::data_engineer::controller_kernel::GuardReason::MutationRequiredAfterValidateFailure,
+                        ));
                     }
                     if runtime_validate && guard.probe_required && !guard.probe_satisfied {
-                        return Err(
-                            "dbt_validate (build/run) is blocked after a runtime failure until you run meaningful SQL probes.\n\
-                             Next step must include `run_sql` against the failing relation(s) (not `SELECT 1`) to diagnose data issues, then APPLY a fix."
-                                .to_string(),
-                        );
+                        return Err(crate::data_engineer::controller_kernel::guard_block_error(
+                            crate::data_engineer::controller_kernel::GuardReason::ProbeRequiredAfterRuntimeFailure,
+                        ));
                     }
                 }
                 self.inner.call(args, ctx).await
@@ -3357,17 +3353,12 @@ Apply these fixes in the output.",
         reg.register(ArtifactsTool);
 
         let tools_card: String;
-        // Hard cutover: agent-mode phases are non-interactive by design.
-        let allow_user_interrupt_tools = false;
 
         match phase {
             control_flow::Phase::CleansePlan | control_flow::Phase::ModelPlan => {
                 // Plan phases: read-only discovery + (optional) probes. No dbt file mutations.
                 let suppress_manifest_json =
                     suppress_manifest_json_in_plan && phase == control_flow::Phase::ModelPlan;
-                if allow_user_interrupt_tools {
-                    reg.register(tools::ask_user::AskUserTool);
-                }
                 reg.register(SqlRunTool {
                     query: query.clone(),
                 });
@@ -3411,9 +3402,6 @@ Apply these fixes in the output.",
                     "- run_sql (targeted probes)".to_string(),
                     "- artifacts".to_string(),
                 ];
-                if allow_user_interrupt_tools {
-                    tool_lines.push("- ask_user".to_string());
-                }
                 if suppress_manifest_json {
                     tool_lines.push("- json_file is temporarily disabled for this model_plan retry due to repeated manifest lookup failures; use deterministic fallback evidence (file + sql_schema + sql_stats/sql_sample).".to_string());
                 } else {
@@ -3436,10 +3424,6 @@ Apply these fixes in the output.",
                 // If the last validation failed and no mutation has happened since, enforce a hard tool lock:
                 // the next step MUST be a mutation.
                 let hard_mutation_only = guard.last_validate_failed && !guard.mutated_since_fail;
-
-                if allow_user_interrupt_tools {
-                    reg.register(tools::ask_user::AskUserTool);
-                }
 
                 if hard_mutation_only {
                     // Mutation-only file tool to avoid "read-only thrash" when we require a mutation next.
@@ -3715,7 +3699,7 @@ Apply these fixes in the output.",
                     let plan_batched_model = phase == control_flow::Phase::ModelAuthor
                         && matches!(allowed_batch, Some(AllowedBatch::ModelItemNames(_)));
                     if plan_batched_cleanse {
-                        let mut lines = vec![
+                        let lines = vec![
                             "- apply_next_cleanse_batch(args:{instructions?:string})".to_string(),
                             "- apply_next_cleanse_schema_batch(args:{instructions?:string})"
                                 .to_string(),
@@ -3726,9 +3710,6 @@ Apply these fixes in the output.",
                             "- run_sql (targeted probes)".to_string(),
                             "- artifacts".to_string(),
                         ];
-                        if allow_user_interrupt_tools {
-                            lines.insert(6, "- ask_user".to_string());
-                        }
                         tools_card = Self::build_tools_card(
                             "Allowed tools (authoring phase; plan-batched, deterministic):",
                             lines,
@@ -3736,7 +3717,7 @@ Apply these fixes in the output.",
                             Some("Not available in this phase: staging_model (batch tool calls it deterministically), dbt_validate, publish_dbt_to_provider.".to_string()),
                         );
                     } else if plan_batched_model {
-                        let mut lines = vec![
+                        let lines = vec![
                             "- apply_next_model_batch(args:{instructions?:string})".to_string(),
                             "- apply_next_model_schema_batch(args:{instructions?:string})"
                                 .to_string(),
@@ -3747,9 +3728,6 @@ Apply these fixes in the output.",
                             "- run_sql (targeted probes)".to_string(),
                             "- artifacts".to_string(),
                         ];
-                        if allow_user_interrupt_tools {
-                            lines.insert(6, "- ask_user".to_string());
-                        }
                         tools_card = Self::build_tools_card(
                             "Allowed tools (authoring phase; plan-batched, deterministic):",
                             lines,
@@ -3784,9 +3762,6 @@ Apply these fixes in the output.",
                             "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})".to_string(),
                             "- json_file(args:{op:\"get_item\", path:string, pointer?:string} | {op:\"query\", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})".to_string(),
                         ]);
-                        if allow_user_interrupt_tools {
-                            lines.push("- ask_user(args:{prompt:string})".to_string());
-                        }
                         tools_card = Self::build_tools_card(
                             "Allowed tools (authoring phase):",
                             lines,
@@ -6388,7 +6363,7 @@ Apply these fixes in the output.",
                                         Phase::CleansePlan,
                                         Some(PhaseReasonCode::PlanMissing),
                                         Some(serde_json::json!({
-                                            "plan_kind": "cleanse",
+                                            "plan_kind": react_core::session::PlanKind::Cleanse,
                                             "note": "authoring entered without an active cleanse plan; routing back to planning",
                                         })),
                                     )
@@ -6780,7 +6755,7 @@ Apply these fixes in the output.",
                                         Phase::ModelPlan,
                                         Some(PhaseReasonCode::PlanMissing),
                                         Some(serde_json::json!({
-                                            "plan_kind": "model",
+                                            "plan_kind": react_core::session::PlanKind::Model,
                                             "note": "authoring entered without an active model plan; routing back to planning",
                                         })),
                                     )

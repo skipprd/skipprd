@@ -242,12 +242,13 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             return Ok(serde_json::json!({
                 "ok": false,
                 "kind": "batch_locked",
-                "message": "too many consecutive schema-batch failures; apply a targeted mutating fix before retrying",
+                "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
                 "checklist_item_id": checklist_item_id,
                 "attempted_dataset_ids": [],
                 "succeeded_dataset_ids": [],
                 "failed_dataset_ids": [],
-                "errors": ["too many consecutive schema-batch failures; apply a targeted mutating fix before retrying"],
+                "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
             }));
         }
 
@@ -488,7 +489,8 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             return Ok(serde_json::json!({
                 "ok": false,
                 "kind": "batch_locked",
-                "message": "too many consecutive schema-batch failures; apply a targeted mutating fix before retrying",
+                "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
                 "checklist_item_id": checklist_item_id,
                 "attempted_dataset_ids": batch,
                 "succeeded_dataset_ids": succeeded,
@@ -559,6 +561,20 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 "attempted_item_names": [],
                 "succeeded_item_names": [],
                 "failed_item_names": [],
+            }));
+        }
+
+        if controller_kernel::batch_budget(&plan.progress).exhausted() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "kind": "batch_locked",
+                "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
+                "checklist_item_id": checklist_item_id,
+                "attempted_item_names": [],
+                "succeeded_item_names": [],
+                "failed_item_names": [],
+                "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
             }));
         }
 
@@ -691,12 +707,25 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                     for n in names.iter() {
                         plan::model_schema_contract_mark_needs_update(&mut plan, n);
                     }
-                    controller_kernel::note_batch_result(&mut plan.progress, false);
+                    let budget = controller_kernel::note_batch_result(&mut plan.progress, false);
                     plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
                         format!(
                             "failed to persist model schema batch failure state after patch error: {save_err}"
                         )
                     })?;
+                    if budget.exhausted() {
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "kind": "batch_locked",
+                            "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                            "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
+                            "checklist_item_id": checklist_item_id,
+                            "attempted_item_names": attempted_names.clone(),
+                            "succeeded_item_names": [],
+                            "failed_item_names": attempted_names.clone(),
+                            "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
+                        }));
+                    }
                     return Ok(serde_json::json!({
                         "ok": false,
                         "attempted_item_names": attempted_names.clone(),
@@ -718,12 +747,25 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 for n in names.iter() {
                     plan::model_schema_contract_mark_needs_update(&mut plan, n);
                 }
-                controller_kernel::note_batch_result(&mut plan.progress, false);
+                let budget = controller_kernel::note_batch_result(&mut plan.progress, false);
                 plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
                     format!(
                         "failed to persist model schema batch failure state after post-check error: {save_err}"
                     )
                 })?;
+                if budget.exhausted() {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "kind": "batch_locked",
+                        "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                        "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
+                        "checklist_item_id": checklist_item_id,
+                        "attempted_item_names": attempted_names.clone(),
+                        "succeeded_item_names": [],
+                        "failed_item_names": attempted_names.clone(),
+                        "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
+                    }));
+                }
                 return Ok(serde_json::json!({
                     "ok": false,
                     "attempted_item_names": attempted_names.clone(),
@@ -743,12 +785,25 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             for n in names.iter() {
                 plan::model_schema_contract_mark_needs_update(&mut plan, n);
             }
-            controller_kernel::note_batch_result(&mut plan.progress, false);
+            let budget = controller_kernel::note_batch_result(&mut plan.progress, false);
             plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
                 format!(
                     "failed to persist model schema batch failure state after write error: {save_err}"
                 )
             })?;
+            if budget.exhausted() {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "kind": "batch_locked",
+                    "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                    "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
+                    "checklist_item_id": checklist_item_id,
+                    "attempted_item_names": attempted_names.clone(),
+                    "succeeded_item_names": [],
+                    "failed_item_names": attempted_names.clone(),
+                    "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
+                }));
+            }
             return Ok(serde_json::json!({
                 "ok": false,
                 "attempted_item_names": attempted_names.clone(),
@@ -766,10 +821,25 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 plan::ChecklistItemStatus::Done,
             );
         }
-        controller_kernel::note_batch_result(&mut plan.progress, true);
+        let budget = controller_kernel::note_batch_result(&mut plan.progress, true);
         plan::save_model_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to persist model schema batch result state: {e}"))?;
+
+        if budget.exhausted() {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "kind": "batch_locked",
+                "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
+                "checklist_item_id": checklist_item_id,
+                "attempted_item_names": attempted_names.clone(),
+                "succeeded_item_names": attempted_names.clone(),
+                "failed_item_names": [],
+                "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
+                "warnings": warnings,
+            }));
+        }
 
         Ok(serde_json::json!({
             "ok": true,
@@ -1365,6 +1435,101 @@ mod tests {
         let got = ctx.storage.get_bytes(&key).await.unwrap();
         let got = String::from_utf8_lossy(&got).to_string();
         assert!(got.contains("dim_customers"));
+    }
+
+    #[tokio::test]
+    async fn apply_next_model_schema_batch_stops_when_local_failure_budget_exhausted() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
+            replies: Mutex::new(vec![]),
+        });
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 2,
+            thread_id: Some("tid_model_lock".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(react_core::agent::DefaultPolicy),
+            llm,
+            storage: storage.clone(),
+            scope: scope.clone(),
+            keyspace,
+            query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            exec_ctx: None,
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+        };
+
+        let plan_key = plan::new_model_plan_key(&ctx);
+        let mut checklist = plan::canonical_task_checklist(false);
+        if let Some(item) = checklist
+            .iter_mut()
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SQL_MODEL)
+        {
+            item.status = plan::ChecklistItemStatus::Done;
+        }
+        let batches = vec![vec!["dim_customers".to_string()]];
+        let mut progress = plan::PlanProgress::default();
+        progress.consecutive_batch_failures = controller_kernel::max_consecutive_batch_failures();
+        let p = plan::ModelPlan {
+            plan_key,
+            status: plan::PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![plan::ModelTask {
+                name: "dim_customers".to_string(),
+                folder: "marts".to_string(),
+                goal: "g".to_string(),
+                inputs: vec!["stg_test_raw_raw_customers".to_string()],
+                expected_model_path: Some("models/marts/dim_customers.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: plan::ModelImplementationSpec {
+                    spec_version: 1,
+                    grain: "1 row per customer".to_string(),
+                    inputs: vec!["stg_test_raw_raw_customers".to_string()],
+                    joins: vec![],
+                    metrics: vec![],
+                    output_fields: vec![plan::OutputFieldSpec {
+                        name: "customer_id".to_string(),
+                        kind: plan::FieldKind::Clean,
+                        source_columns: vec!["customer_id".to_string()],
+                        expression: "customer_id passthrough".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    assumptions: vec![],
+                },
+                status: plan::TaskStatus::InProgress,
+                checklist,
+            }],
+            batches: batches.clone(),
+            work_groups: plan::canonical_work_groups_from_batches(&batches, "model"),
+            mutations: vec![],
+            progress,
+        };
+        plan::save_model_plan(&ctx, &p).await.unwrap();
+
+        let tool = ApplyNextModelSchemaBatchTool { datasets: None };
+        let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
+        assert_eq!(res.get("kind").and_then(|v| v.as_str()), Some("batch_locked"));
+        assert_eq!(
+            res.get("attempted_item_names")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(0)
+        );
     }
 
     #[tokio::test]

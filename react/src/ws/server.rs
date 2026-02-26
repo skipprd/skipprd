@@ -711,7 +711,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
             let question = req.question.clone().unwrap_or_default();
             let thread_id = Uuid::new_v4().to_string();
             let suite_id = req.suite_id.clone();
-            let agent = normalize_agent_new(req.agent_type)?;
+            let agent = normalize_agent_new(req.agent_type);
             state
                 .current_suite
                 .insert(thread_id.clone(), suite_id.clone());
@@ -995,7 +995,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
                 .clone()
                 .unwrap_or_else(|| "Continue.".to_string());
             let requested_suite = req.suite_id.clone();
-            let requested_agent = normalize_agent_open(req.agent_type)?;
+            let requested_agent = normalize_agent_open(req.agent_type);
 
             // Derive current suite/agent from persisted thread log (durable across reconnects)
             let store = state.thread_store();
@@ -2550,7 +2550,7 @@ async fn process_new(
     let question = req.question.clone().unwrap_or_default();
     let thread_id = Uuid::new_v4().to_string();
     let suite_id = req.suite_id.clone();
-    let agent = normalize_agent_new(req.agent_type)?;
+    let agent = normalize_agent_new(req.agent_type);
     state
         .current_suite
         .insert(thread_id.clone(), suite_id.clone());
@@ -2660,7 +2660,7 @@ async fn process_open(
         .clone()
         .unwrap_or_else(|| "Continue.".to_string());
     let requested_suite = req.suite_id.clone();
-    let requested_agent = normalize_agent_open(req.agent_type)?;
+    let requested_agent = normalize_agent_open(req.agent_type);
 
     // Derive current suite/agent from persisted thread log (durable across reconnects)
     let store = state.thread_store();
@@ -3009,30 +3009,21 @@ async fn process_reject(
 }
 // normalize_agent removed (unused)
 
-fn normalize_agent_new(a: api::new_request::AgentType) -> Result<String, String> {
+fn normalize_agent_new(a: api::new_request::AgentType) -> String {
     match a {
-		api::new_request::AgentType::Ask => Ok("ask".to_string()),
-		api::new_request::AgentType::Agent => Ok("agent".to_string()),
-		api::new_request::AgentType::Review => Ok("review".to_string()),
-		api::new_request::AgentType::Kb => Ok("kb".to_string()),
-		// No legacy modes: remove cleanse/model from WS-facing agent types.
-		api::new_request::AgentType::Cleanse | api::new_request::AgentType::Model => Err(
-			"agent_type 'cleanse'/'model' is no longer supported; use agent_type='agent' and let phases handle cleanse vs model."
-				.to_string(),
-		),
+		api::new_request::AgentType::Ask => "ask".to_string(),
+		api::new_request::AgentType::Agent => "agent".to_string(),
+		api::new_request::AgentType::Review => "review".to_string(),
+		api::new_request::AgentType::Kb => "kb".to_string(),
 	}
 }
 
-fn normalize_agent_open(a: api::open_request::AgentType) -> Result<String, String> {
+fn normalize_agent_open(a: api::open_request::AgentType) -> String {
     match a {
-		api::open_request::AgentType::Ask => Ok("ask".to_string()),
-		api::open_request::AgentType::Agent => Ok("agent".to_string()),
-		api::open_request::AgentType::Review => Ok("review".to_string()),
-		api::open_request::AgentType::Kb => Ok("kb".to_string()),
-		api::open_request::AgentType::Cleanse | api::open_request::AgentType::Model => Err(
-			"agent_type 'cleanse'/'model' is no longer supported; use agent_type='agent' and let phases handle cleanse vs model."
-				.to_string(),
-		),
+		api::open_request::AgentType::Ask => "ask".to_string(),
+		api::open_request::AgentType::Agent => "agent".to_string(),
+		api::open_request::AgentType::Review => "review".to_string(),
+		api::open_request::AgentType::Kb => "kb".to_string(),
 	}
 }
 async fn run_suite_and_stream(
@@ -4459,26 +4450,10 @@ mod tests {
 
     #[test]
     fn normalize_agent_includes_agent_and_review() {
-        assert_eq!(
-            normalize_agent_new(api::new_request::AgentType::Agent).unwrap(),
-            "agent"
-        );
-        assert_eq!(
-            normalize_agent_new(api::new_request::AgentType::Review).unwrap(),
-            "review"
-        );
-        assert_eq!(
-            normalize_agent_open(api::open_request::AgentType::Agent).unwrap(),
-            "agent"
-        );
-        assert_eq!(
-            normalize_agent_open(api::open_request::AgentType::Review).unwrap(),
-            "review"
-        );
-        assert!(normalize_agent_new(api::new_request::AgentType::Cleanse).is_err());
-        assert!(normalize_agent_new(api::new_request::AgentType::Model).is_err());
-        assert!(normalize_agent_open(api::open_request::AgentType::Cleanse).is_err());
-        assert!(normalize_agent_open(api::open_request::AgentType::Model).is_err());
+        assert_eq!(normalize_agent_new(api::new_request::AgentType::Agent), "agent");
+        assert_eq!(normalize_agent_new(api::new_request::AgentType::Review), "review");
+        assert_eq!(normalize_agent_open(api::open_request::AgentType::Agent), "agent");
+        assert_eq!(normalize_agent_open(api::open_request::AgentType::Review), "review");
     }
 
     #[test]

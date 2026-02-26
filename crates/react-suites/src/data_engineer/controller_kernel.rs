@@ -1,10 +1,68 @@
 use crate::data_engineer::retry_budget;
 use crate::data_engineer::{plan, retry_budget::RetryBudget};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug)]
 pub enum PlanTrack {
     Cleanse,
     Model,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardReason {
+    MutationRequiredAfterValidateFailure,
+    ProbeRequiredAfterRuntimeFailure,
+}
+
+impl GuardReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::MutationRequiredAfterValidateFailure => {
+                "mutation_required_after_validate_failure"
+            }
+            Self::ProbeRequiredAfterRuntimeFailure => "probe_required_after_runtime_failure",
+        }
+    }
+
+    pub fn user_message(self) -> &'static str {
+        match self {
+            Self::MutationRequiredAfterValidateFailure => {
+                "dbt_validate is blocked after a failed validation until you APPLY A FIX to the dbt project.\n\
+                 Next step must be a mutating fix action (e.g. `staging_model` or `file op=patch|rm|mv` to update schema/tests)."
+            }
+            Self::ProbeRequiredAfterRuntimeFailure => {
+                "dbt_validate (build/run) is blocked after a runtime failure until you run meaningful SQL probes.\n\
+                 Next step must include `run_sql` against the failing relation(s) (not `SELECT 1`) to diagnose data issues, then APPLY a fix."
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchLockReason {
+    ConsecutiveFailureBudgetExhausted,
+}
+
+impl BatchLockReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ConsecutiveFailureBudgetExhausted => "consecutive_failure_budget_exhausted",
+        }
+    }
+}
+
+pub fn guard_block_error(reason: GuardReason) -> String {
+    format!("guard_block:{}: {}", reason.code(), reason.user_message())
+}
+
+pub fn batch_lock_error_message(reason: BatchLockReason) -> &'static str {
+    match reason {
+        BatchLockReason::ConsecutiveFailureBudgetExhausted => {
+            "too many consecutive batch failures; apply a targeted mutating fix (file op=patch|rm|mv) before retrying"
+        }
+    }
 }
 
 impl PlanTrack {
@@ -82,4 +140,22 @@ pub fn note_batch_result(progress: &mut plan::PlanProgress, ok: bool) -> RetryBu
 
 pub fn max_consecutive_batch_failures() -> usize {
     retry_budget::MAX_CONSECUTIVE_BATCH_FAILURES
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{batch_lock_error_message, guard_block_error, BatchLockReason, GuardReason};
+
+    #[test]
+    fn guard_block_error_emits_canonical_reason_code() {
+        let msg = guard_block_error(GuardReason::MutationRequiredAfterValidateFailure);
+        assert!(msg.starts_with("guard_block:mutation_required_after_validate_failure:"));
+    }
+
+    #[test]
+    fn batch_lock_error_message_is_stable() {
+        let msg =
+            batch_lock_error_message(BatchLockReason::ConsecutiveFailureBudgetExhausted);
+        assert!(msg.contains("too many consecutive batch failures"));
+    }
 }

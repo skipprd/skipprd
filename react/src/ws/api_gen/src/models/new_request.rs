@@ -25,7 +25,7 @@ pub struct NewRequest {
     /// Suite id to use (e.g. data_engineer | kb)
     #[serde(rename = "suiteId")]
     pub suite_id: String,
-    /// Agent/mode to use (ask | cleanse | model | kb | agent | review). Required.
+    /// Agent/mode to use (ask | kb | agent | review). Required.
     #[serde(rename = "agentType")]
     pub agent_type: AgentType,
 }
@@ -60,15 +60,11 @@ impl Default for Type {
         Self::New
     }
 }
-/// Agent/mode to use (ask | cleanse | model | kb | agent | review). Required.
+/// Agent/mode to use (ask | kb | agent | review). Required.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum AgentType {
     #[serde(rename = "ask")]
     Ask,
-    #[serde(rename = "cleanse")]
-    Cleanse,
-    #[serde(rename = "model")]
-    Model,
     #[serde(rename = "kb")]
     Kb,
     #[serde(rename = "agent")]

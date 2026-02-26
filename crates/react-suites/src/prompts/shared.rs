@@ -37,7 +37,9 @@ Hard rules:
   - NEVER create `models/sources.yml` or any other YAML file containing a top-level `sources:` block (including under `models/staging/`).
   - If dbt_validate reports duplicate sources, fix by consolidating/merging into `models/schema.yml` and removing the duplicate source definition(s), then re-run dbt_validate until clean.
 - Approval flow:
-  - In agent mode, approvals happen in the plan phases (cleanse_plan/model_plan). Do NOT call ask_approval during authoring; just execute the approved plan.
+  - In agent mode, approvals happen in the plan phases (cleanse_plan/model_plan).
+  - During agent-mode authoring, treat interrupt tools as unavailable unless explicitly present in the current tool card.
+  - Do NOT call ask_user/ask_approval during agent-mode authoring; just execute the approved plan.
   - If you need to revise scope/order, return to planning by asking the user to reject/adjust the plan (do not spam approvals mid-authoring).
 - Execution invariants (hard cutover):
   - Authoring is checklist/work-group driven from an approved executable plan.
@@ -65,8 +67,8 @@ pub fn tool_card_common_prefix() -> &'static str {
 - sql_stats(args:{table:string, field:string}) -> {"ok":true,"stats":{...}}
 - sql_sample(args:{table:string, field:string, k:int}) -> {"ok":true,"values":[...]}
 - run_sql(args:{sql:string}) -> {"ok":true,"header":[string], "rows":[[string]]} or {"ok":false,"error":string}
-- ask_user(args:{prompt:string}) -> {"ok":true,"prompt":string}
-- ask_approval(args:{prompt:string}) -> {"ok":true,"prompt":string}
+- ask_user(args:{prompt:string}) -> {"ok":true,"prompt":string}   # optional; only when present in the current tool card
+- ask_approval(args:{prompt:string}) -> {"ok":true,"prompt":string}   # optional; only when present in the current tool card
 - dbt_validate(args:{project_name?:string, profiles_dir?:string, target?:string, dataset_ids?:[string], build?:bool, run?:bool})
 - publish_dbt_to_provider(args:{target?:string, dataset_ids?:[string], confirm?:bool})
 - sql_register(args:{dataset_ids:[string]}) -> {"ok":true,"count":int}
@@ -121,5 +123,6 @@ mod tests {
         let c = author_system_prompt_common();
         assert!(c.contains("checklist/work-group driven"));
         assert!(c.contains("downstream phases will compensate"));
+        assert!(c.contains("Do NOT call ask_user/ask_approval during agent-mode authoring"));
     }
 }

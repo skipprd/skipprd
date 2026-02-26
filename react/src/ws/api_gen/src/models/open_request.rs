@@ -70,10 +70,6 @@ impl Default for Type {
 pub enum AgentType {
     #[serde(rename = "ask")]
     Ask,
-    #[serde(rename = "cleanse")]
-    Cleanse,
-    #[serde(rename = "model")]
-    Model,
     #[serde(rename = "kb")]
     Kb,
     #[serde(rename = "agent")]
