@@ -1,0 +1,1265 @@
+{
+  "plan_key": "picnic/dev/example4/plans/6a705a32-5eb8-48c0-ba17-e2986f890d69/20260226T052906Z_cleanse.json",
+  "status": "draft",
+  "project_snapshot": {},
+  "tasks": [
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_order_items",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_customers",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "dataset_id": "AwsDataCatalog.test_raw.raw_orders",
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "row_preserving": true,
+        "output_fields": [],
+        "prohibited_ops": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author staging SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    }
+  ],
+  "batches": [
+    [
+      "AwsDataCatalog.test_raw.raw_customers",
+      "AwsDataCatalog.test_raw.raw_orders",
+      "AwsDataCatalog.test_raw.raw_order_items",
+      "AwsDataCatalog.test_raw.raw_customers",
+      "AwsDataCatalog.test_raw.raw_orders"
+    ],
+    [
+      "AwsDataCatalog.test_raw.raw_customers",
+      "AwsDataCatalog.test_raw.raw_customers",
+      "AwsDataCatalog.test_raw.raw_customers",
+      "AwsDataCatalog.test_raw.raw_customers",
+      "AwsDataCatalog.test_raw.raw_customers"
+    ],
+    [
+      "AwsDataCatalog.test_raw.raw_orders",
+      "AwsDataCatalog.test_raw.raw_orders",
+      "AwsDataCatalog.test_raw.raw_orders",
+      "AwsDataCatalog.test_raw.raw_orders",
+      "AwsDataCatalog.test_raw.raw_orders"
+    ],
+    [
+      "AwsDataCatalog.test_raw.raw_order_items",
+      "AwsDataCatalog.test_raw.raw_order_items",
+      "AwsDataCatalog.test_raw.raw_order_items",
+      "AwsDataCatalog.test_raw.raw_order_items",
+      "AwsDataCatalog.test_raw.raw_order_items"
+    ],
+    [
+      "AwsDataCatalog.test_raw.raw_customers",
+      "AwsDataCatalog.test_raw.raw_orders",
+      "AwsDataCatalog.test_raw.raw_order_items",
+      "AwsDataCatalog.test_raw.raw_customers",
+      "AwsDataCatalog.test_raw.raw_orders"
+    ]
+  ],
+  "work_groups": [
+    {
+      "group_id": "cleanse_author_sql_001",
+      "label": "Author SQL batch 1",
+      "kind": "author_sql",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_customers",
+          "checklist_item_id": "sql_model"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_orders",
+          "checklist_item_id": "sql_model"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
+          "checklist_item_id": "sql_model"
+        }
+      ],
+      "depends_on_group_ids": null
+    },
+    {
+      "group_id": "cleanse_author_schema_001",
+      "label": "Author schema batch 1",
+      "kind": "author_schema",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_customers",
+          "checklist_item_id": "schema_contract"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_orders",
+          "checklist_item_id": "schema_contract"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
+          "checklist_item_id": "schema_contract"
+        }
+      ],
+      "depends_on_group_ids": [
+        "cleanse_author_sql_001"
+      ]
+    },
+    {
+      "group_id": "cleanse_author_sql_002",
+      "label": "Author SQL batch 2",
+      "kind": "author_sql",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_customers",
+          "checklist_item_id": "sql_model"
+        }
+      ],
+      "depends_on_group_ids": null
+    },
+    {
+      "group_id": "cleanse_author_schema_002",
+      "label": "Author schema batch 2",
+      "kind": "author_schema",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_customers",
+          "checklist_item_id": "schema_contract"
+        }
+      ],
+      "depends_on_group_ids": [
+        "cleanse_author_sql_002"
+      ]
+    },
+    {
+      "group_id": "cleanse_author_sql_003",
+      "label": "Author SQL batch 3",
+      "kind": "author_sql",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_orders",
+          "checklist_item_id": "sql_model"
+        }
+      ],
+      "depends_on_group_ids": null
+    },
+    {
+      "group_id": "cleanse_author_schema_003",
+      "label": "Author schema batch 3",
+      "kind": "author_schema",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_orders",
+          "checklist_item_id": "schema_contract"
+        }
+      ],
+      "depends_on_group_ids": [
+        "cleanse_author_sql_003"
+      ]
+    },
+    {
+      "group_id": "cleanse_author_sql_004",
+      "label": "Author SQL batch 4",
+      "kind": "author_sql",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
+          "checklist_item_id": "sql_model"
+        }
+      ],
+      "depends_on_group_ids": null
+    },
+    {
+      "group_id": "cleanse_author_schema_004",
+      "label": "Author schema batch 4",
+      "kind": "author_schema",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
+          "checklist_item_id": "schema_contract"
+        }
+      ],
+      "depends_on_group_ids": [
+        "cleanse_author_sql_004"
+      ]
+    },
+    {
+      "group_id": "cleanse_author_sql_005",
+      "label": "Author SQL batch 5",
+      "kind": "author_sql",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_customers",
+          "checklist_item_id": "sql_model"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_orders",
+          "checklist_item_id": "sql_model"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
+          "checklist_item_id": "sql_model"
+        }
+      ],
+      "depends_on_group_ids": null
+    },
+    {
+      "group_id": "cleanse_author_schema_005",
+      "label": "Author schema batch 5",
+      "kind": "author_schema",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_customers",
+          "checklist_item_id": "schema_contract"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_orders",
+          "checklist_item_id": "schema_contract"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
+          "checklist_item_id": "schema_contract"
+        }
+      ],
+      "depends_on_group_ids": [
+        "cleanse_author_sql_005"
+      ]
+    },
+    {
+      "group_id": "cleanse_validate",
+      "label": "Validate plan",
+      "kind": "validate",
+      "items": [
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_customers",
+          "checklist_item_id": "validate"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_orders",
+          "checklist_item_id": "validate"
+        },
+        {
+          "task_id": "AwsDataCatalog.test_raw.raw_order_items",
+          "checklist_item_id": "validate"
+        }
+      ],
+      "depends_on_group_ids": [
+        "cleanse_author_schema_001",
+        "cleanse_author_schema_002",
+        "cleanse_author_schema_003",
+        "cleanse_author_schema_004",
+        "cleanse_author_schema_005"
+      ]
+    }
+  ],
+  "mutations": [],
+  "progress": {
+    "last_applied_step_idx": 0,
+    "consecutive_batch_failures": 0,
+    "total_batch_failures": 0
+  }
+}

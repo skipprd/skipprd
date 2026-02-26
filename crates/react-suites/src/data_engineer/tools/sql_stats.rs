@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 
-use crate::data_engineer::references::DatasetRef;
+use crate::data_engineer::probe_target::ProbeTarget;
 use react_core::agent::AgentCtx;
 use react_core::providers::{CatalogProvider, DatasetCatalogProvider, DatasetId};
 use react_core::tools::Tool;
@@ -18,7 +18,7 @@ impl Tool for SqlStatsTool {
         "sql_stats"
     }
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
-        let table = args
+        let raw_table = args
             .get("table")
             .and_then(|x| x.as_str())
             .unwrap_or("")
@@ -30,7 +30,7 @@ impl Tool for SqlStatsTool {
             .unwrap_or("")
             .trim()
             .to_string();
-        if table.is_empty() {
+        if raw_table.is_empty() {
             return Ok(serde_json::json!({
                 "ok": false,
                 "error": "probe_policy_invalid_target",
@@ -38,6 +38,19 @@ impl Tool for SqlStatsTool {
                 "hint": "Provide args.table as fully-qualified <catalog>.<database>.<table>."
             }));
         }
+        let target = match ProbeTarget::from_table_and_field(ctx, &raw_table, Some(&field)) {
+            Ok(t) => t,
+            Err(code) => {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error": "probe_policy_invalid_target",
+                    "code": code,
+                    "table": raw_table,
+                    "hint": "Provide args.table as fully-qualified <catalog>.<database>.<table>."
+                }));
+            }
+        };
+        let table = target.table_fqn();
         if field.is_empty() {
             return Ok(serde_json::json!({
                 "ok": false,
@@ -60,7 +73,7 @@ impl Tool for SqlStatsTool {
         }
         if known_fields.is_none() {
             if let Some(dsprov) = self.datasets.as_ref() {
-                if let Ok(ds) = parse_dataset_id_strict(&table) {
+                if let Ok(ds) = DatasetId::parse_fqn_strict(&table) {
                     if let Ok(cols) = dsprov.get_dataset_schema(&ds).await {
                         let names: Vec<String> = cols.into_iter().map(|(n, _)| n).collect();
                         if !names.is_empty() {
@@ -120,7 +133,7 @@ impl Tool for SqlStatsTool {
         {
             // Optional fallback to provider stats (if available)
             if let Some(dsprov) = self.datasets.as_ref() {
-                if let Ok(ds) = parse_dataset_id_strict(&table) {
+                if let Ok(ds) = DatasetId::parse_fqn_strict(&table) {
                     if let Ok((ns_stats, _ds_stats)) = dsprov.get_dataset_stats(&ds, 80).await {
                         if let Some(fs) = ns_stats.fields.get(&field) {
                             distinct = fs.approx_distinct;
@@ -154,14 +167,3 @@ impl Tool for SqlStatsTool {
     }
 }
 
-fn parse_dataset_id_strict(s: &str) -> Result<DatasetId, String> {
-    let ds = DatasetRef::parse(s).ok_or_else(|| {
-        "table must be fully-qualified <catalog>.<database>.<table> for provider stats fallback"
-            .to_string()
-    })?;
-    Ok(DatasetId {
-        catalog: ds.catalog,
-        database: ds.schema,
-        table: ds.table,
-    })
-}

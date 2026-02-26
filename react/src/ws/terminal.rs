@@ -654,7 +654,7 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ctx.checklist_item_id.clone(),
                 ) {
                     let k = key_from_ctx(&Some(ctx.clone()));
-                    update_focus_with_stickiness(tv, pk, k.clone());
+                    update_focus_with_stickiness(tv, plan_kind_key(&pk), k.clone());
                     tv.expanded_work_items.insert(k);
                 }
             }
@@ -735,7 +735,7 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ctx.checklist_item_id.clone(),
                 ) {
                     let k = key_from_ctx(&Some(ctx.clone()));
-                    update_focus_with_stickiness(tv, pk, k.clone());
+                    update_focus_with_stickiness(tv, plan_kind_key(&pk), k.clone());
                     tv.expanded_work_items.insert(k);
                 }
             }
@@ -772,7 +772,7 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ctx.checklist_item_id.clone(),
                 ) {
                     let k = key_from_ctx(&Some(ctx.clone()));
-                    update_focus_with_stickiness(tv, pk, k.clone());
+                    update_focus_with_stickiness(tv, plan_kind_key(&pk), k.clone());
                     tv.expanded_work_items.insert(k);
                 }
             }
@@ -821,7 +821,7 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ctx.checklist_item_id.clone(),
                 ) {
                     let k = key_from_ctx(&Some(ctx.clone()));
-                    update_focus_with_stickiness(tv, pk, k.clone());
+                    update_focus_with_stickiness(tv, plan_kind_key(&pk), k.clone());
                     tv.expanded_work_items.insert(k);
                 }
             }
@@ -854,6 +854,13 @@ fn update_focus_with_stickiness(tv: &mut ThreadView, plan_kind: String, next_key
     };
     if should_update {
         tv.focus_by_kind.insert(plan_kind, next_key);
+    }
+}
+
+fn plan_kind_key(kind: &api::PlanKind) -> String {
+    match kind {
+        api::PlanKind::Cleanse => "cleanse".to_string(),
+        api::PlanKind::Model => "model".to_string(),
     }
 }
 
@@ -1153,7 +1160,7 @@ fn key_from_ctx(ctx: &Option<api::ExecutionContext>) -> WorkItemKey {
             checklist_item_id: None,
         },
         Some(c) => WorkItemKey {
-            plan_kind: c.plan_kind.clone(),
+            plan_kind: c.plan_kind.as_ref().map(plan_kind_key),
             plan_key: c.plan_key.clone(),
             workgroup_id: c.workgroup_id.clone(),
             task_id: c.task_id.clone(),
@@ -2142,7 +2149,7 @@ mod tests {
             )],
         );
         let plan = api::PlanSnapshot::new(
-            api::plan_snapshot::PlanKind::Cleanse,
+            api::PlanKind::Cleanse,
             "plan_k".to_string(),
             api::PlanStatus::Approved,
             vec![api::PlanTask::Cleanse(task)],
@@ -2213,7 +2220,7 @@ mod tests {
             ],
         );
         let plan = api::PlanSnapshot::new(
-            api::plan_snapshot::PlanKind::Cleanse,
+            api::PlanKind::Cleanse,
             "plan_k".to_string(),
             api::PlanStatus::Approved,
             vec![api::PlanTask::Cleanse(task1), api::PlanTask::Cleanse(task2)],
@@ -2285,7 +2292,7 @@ mod tests {
             ],
         );
         let plan = api::PlanSnapshot::new(
-            api::plan_snapshot::PlanKind::Cleanse,
+            api::PlanKind::Cleanse,
             "plan_k".to_string(),
             api::PlanStatus::Approved,
             vec![api::PlanTask::Cleanse(task1), api::PlanTask::Cleanse(task2)],

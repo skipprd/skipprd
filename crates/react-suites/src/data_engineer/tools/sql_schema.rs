@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 
+use crate::data_engineer::probe_target::ProbeTarget;
 use react_core::agent::AgentCtx;
 use react_core::providers::{CatalogProvider, DatasetCatalogProvider, QueryProvider};
 use react_core::tools::Tool;
@@ -23,8 +24,20 @@ impl Tool for SqlSchemaTool {
             .and_then(|x| x.as_str())
             .map(|s| s.trim().to_string());
         if let Some(t) = table_opt {
+            let canonical = match ProbeTarget::canonical_table(ctx, &t) {
+                Ok(ds) => ds.fqn(),
+                Err(code) => {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error": "probe_policy_invalid_target",
+                        "code": code,
+                        "table": t,
+                        "hint": "Provide args.table as fully-qualified <catalog>.<database>.<table>."
+                    }));
+                }
+            };
             if let Some(cat) = self.catalog.as_ref() {
-                if let Ok(Some(c)) = cat.read_catalog(&ctx.scope, &t).await {
+                if let Ok(Some(c)) = cat.read_catalog(&ctx.scope, &canonical).await {
                     let cols: Vec<Value> = c
                         .fields
                         .iter()
@@ -37,9 +50,9 @@ impl Tool for SqlSchemaTool {
                     }
                 }
             }
-            match self.query.schema(&t).await {
+            match self.query.schema(&canonical).await {
                 Ok(cols) => Ok(
-                    serde_json::json!({"ok": true, "columns": cols.into_iter().map(|(n,t)| serde_json::json!({"name": n, "type": t})).collect::<Vec<_>>(), "source": "provider"}),
+                    serde_json::json!({"ok": true, "columns": cols.into_iter().map(|(n,t)| serde_json::json!({"name": n, "type": t})).collect::<Vec<_>>(), "source": "provider", "table": canonical}),
                 ),
                 Err(e) => Ok(serde_json::json!({"ok": false, "error": e})),
             }

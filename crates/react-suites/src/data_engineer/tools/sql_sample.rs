@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 
-use crate::data_engineer::references::{ColumnRef, DatasetRef};
+use crate::data_engineer::references::ColumnRef;
+use crate::data_engineer::probe_target::ProbeTarget;
 use react_core::agent::AgentCtx;
 use react_core::providers::QueryProvider;
 use react_core::tools::Tool;
@@ -16,7 +17,7 @@ impl Tool for SqlSampleTool {
     fn name(&self) -> &'static str {
         "sql_sample"
     }
-    async fn call(&self, args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
+    async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
         let table = args.get("table").and_then(|x| x.as_str()).unwrap_or("");
         let field = args.get("field").and_then(|x| x.as_str()).unwrap_or("");
         let k = args.get("k").and_then(|x| x.as_u64()).unwrap_or(10);
@@ -28,16 +29,20 @@ impl Tool for SqlSampleTool {
                 "hint": "Provide args.table as fully-qualified <catalog>.<database>.<table>."
             }));
         }
-        let Some(ds_ref) = DatasetRef::parse(table) else {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error": "probe_policy_invalid_target",
-                "code": "invalid_table_format",
-                "table": table,
-                "hint": "Provide args.table as fully-qualified <catalog>.<database>.<table>."
-            }));
+        let target = match ProbeTarget::from_table_and_field(ctx, table, Some(field)) {
+            Ok(t) => t,
+            Err(code) => {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error": "probe_policy_invalid_target",
+                    "code": code,
+                    "table": table,
+                    "hint": "Provide args.table as fully-qualified <catalog>.<database>.<table>."
+                }));
+            }
         };
-        if field.trim().is_empty() {
+        let table = target.table_fqn();
+        let Some(field) = target.field.as_deref() else {
             return Ok(serde_json::json!({
                 "ok": false,
                 "error": "probe_policy_invalid_target",
@@ -45,8 +50,8 @@ impl Tool for SqlSampleTool {
                 "table": table,
                 "hint": "sql_sample requires args.field. Call sql_schema(args:{table}) first and pick a field. For row samples use run_sql LIMIT."
             }));
-        }
-        if ColumnRef::new(ds_ref, field).is_none() {
+        };
+        if ColumnRef::new(target.dataset.clone(), field).is_none() {
             return Ok(serde_json::json!({
                 "ok": false,
                 "error": "probe_policy_invalid_target",
@@ -55,7 +60,7 @@ impl Tool for SqlSampleTool {
                 "field": field,
             }));
         }
-        match self.query.schema(table).await {
+        match self.query.schema(&table).await {
             Ok(cols) => {
                 let names: Vec<String> = cols.into_iter().map(|(n, _)| n).collect();
                 if !names.iter().any(|n| n == field) {

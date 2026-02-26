@@ -163,7 +163,7 @@ components:
         agentType:
           type: string
           description: Agent/mode to use (ask | kb | agent | review). Required.
-          enum: [ask, cleanse, model, kb, agent, review]
+          enum: [ask, kb, agent, review]
 
     OpenRequest:
       type: object
@@ -189,7 +189,7 @@ components:
         agentType:
           type: string
           description: Agent to use for this message; if differs from current, a switch_agent step is recorded.
-          enum: [ask, cleanse, model, kb, agent, review]
+          enum: [ask, kb, agent, review]
 
     UserRequest:
       type: object
@@ -523,8 +523,7 @@ components:
         changed:
           type: array
           items:
-            type: string
-            enum: [cleanse, model]
+            $ref: '#/components/schemas/PlanKind'
           description: Which plan kinds changed. UI should fetch `plans` to get latest snapshots.
         cleanse_plan_key: { type: string, nullable: true }
         model_plan_key: { type: string, nullable: true }
@@ -703,6 +702,10 @@ components:
           nullable: true
           additionalProperties: true
  
+    PlanKind:
+      type: string
+      enum: [cleanse, model]
+
     ToolEventStatus:
       type: string
       enum: [running, ok, failed]
@@ -712,7 +715,7 @@ components:
       additionalProperties: false
       properties:
         plan_kind:
-          type: string
+          $ref: '#/components/schemas/PlanKind'
           nullable: true
           description: Plan kind (cleanse|model).
         plan_key:
@@ -886,8 +889,7 @@ components:
       required: [planKind, planKey, status, tasks, workGroups]
       properties:
         planKind:
-          type: string
-          enum: [cleanse, model]
+          $ref: '#/components/schemas/PlanKind'
         planKey:
           type: string
         status:
@@ -1269,7 +1271,7 @@ components:
             unread_count: 2
             last_message_preview: "Can you tell me more?"
             suiteId: "data_engineer"
-            agentType: "model"
+            agentType: "agent"
     suitesResponse:
       summary: Suites listed
       value:
@@ -1285,8 +1287,8 @@ components:
             defaultAgentType: "ask"
           - suiteId: "analytics_suite"
             label: "Analytics"
-            allowedAgentTypes: ["cleanse", "model"]
-            defaultAgentType: "model"
+            allowedAgentTypes: ["ask", "agent"]
+            defaultAgentType: "agent"
 
     newRequest:
       summary: Start a new thread

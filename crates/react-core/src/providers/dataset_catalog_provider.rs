@@ -15,6 +15,48 @@ impl DatasetId {
     pub fn fqn(&self) -> String {
         format!("{}.{}.{}", self.catalog, self.database, self.table)
     }
+
+    pub fn parse_fqn_strict(raw: &str) -> Result<Self, String> {
+        let parts: Vec<&str> = raw.trim().split('.').collect();
+        if parts.len() != 3 {
+            return Err(
+                "dataset_id must be fully-qualified <catalog>.<database>.<table>".to_string(),
+            );
+        }
+        let catalog = parts[0].trim();
+        let database = parts[1].trim();
+        let table = parts[2].trim();
+        if catalog.is_empty() || database.is_empty() || table.is_empty() {
+            return Err(
+                "dataset_id must be fully-qualified <catalog>.<database>.<table>".to_string(),
+            );
+        }
+        Ok(Self {
+            catalog: catalog.to_string(),
+            database: database.to_string(),
+            table: table.to_string(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DatasetId;
+
+    #[test]
+    fn parse_fqn_strict_accepts_canonical_triplet() {
+        let ds = DatasetId::parse_fqn_strict("AwsDataCatalog.test_raw.raw_customers").unwrap();
+        assert_eq!(ds.catalog, "AwsDataCatalog");
+        assert_eq!(ds.database, "test_raw");
+        assert_eq!(ds.table, "raw_customers");
+    }
+
+    #[test]
+    fn parse_fqn_strict_rejects_non_triplet_inputs() {
+        assert!(DatasetId::parse_fqn_strict("raw_customers").is_err());
+        assert!(DatasetId::parse_fqn_strict("a.b").is_err());
+        assert!(DatasetId::parse_fqn_strict("a..c").is_err());
+    }
 }
 
 /// Provider capability for enumerating datasets and retrieving schema.

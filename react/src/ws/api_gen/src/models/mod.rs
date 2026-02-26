@@ -151,6 +151,9 @@ pub use plan_checklist_item_status::PlanChecklistItemStatus;
 pub mod plan_checklist_origin;
 pub use plan_checklist_origin::PlanChecklistOrigin;
 
+pub mod plan_kind;
+pub use plan_kind::PlanKind;
+
 pub mod plan_checklist_evidence;
 pub use plan_checklist_evidence::PlanChecklistEvidence;
 

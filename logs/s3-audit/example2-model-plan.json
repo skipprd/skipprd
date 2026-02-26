@@ -1,0 +1,385 @@
+{
+  "plan_key": "picnic/dev/example2/plans/6c686afd-15cf-4e36-b26b-b57189bd8bba/20260226T051437Z_model.json",
+  "status": "draft",
+  "project_snapshot": {
+    "model_candidate_selection": {
+      "candidate_count": 5,
+      "min_score": 70,
+      "selected": [
+        {
+          "insight": "Define order-level fact directly from models/staging/stg_orders (optionally joined to stg_customers) with explicit revenue/discount/net_amount logic and documented status filters and tolerances.",
+          "name": "fct_order",
+          "observation": "Core transaction fact needed for almost all sales analytics and reconciliation; uses only staging sources and resolves grain/PK assumptions early.",
+          "value_score": 98
+        },
+        {
+          "insight": "Model item-level metrics from models/staging/stg_order_items joined to stg_orders and stg_customers, selecting a canonical PK (order_item_id or order_id+line_number) and standard revenue math shared with fct_order.",
+          "name": "fct_order_item",
+          "observation": "Enables detailed line-item analysis and robust order vs item reconciliation while remaining staging-only; critical for high-fidelity metrics.",
+          "value_score": 97
+        },
+        {
+          "insight": "Refactor as pure dimension sourced only from models/staging/stg_customers with enforced 1-row-per-customer_id grain and strong PK tests.",
+          "name": "dim_customer",
+          "observation": "High-impact conformed customer dimension for all joins; no GOLD dependencies and aligned with constraint to use only SILVER inputs.",
+          "value_score": 95
+        },
+        {
+          "insight": "Compute sales KPIs (orders, revenue, AOV, active customers) straight from stg_orders/stg_order_items with explicit filters (e.g., exclude cancelled/test orders) and clear reconciliation rules and bounds.",
+          "name": "agg_sales_summary",
+          "observation": "Dashboard-ready aggregate layer that now depends only on staging inputs; high business value once upstream facts are validated.",
+          "value_score": 93
+        },
+        {
+          "insight": "Build daily customer-order aggregates directly from stg_orders (and stg_order_items as needed), standardizing timezone and date-truncation, with specified numeric tolerances vs source facts.",
+          "name": "fct_customer_order_daily",
+          "observation": "Removes prior GOLD-to-GOLD dependencies by aggregating straight from SILVER, providing behavior/time-series features for reporting and modeling.",
+          "value_score": 92
+        }
+      ],
+      "selected_count": 5
+    }
+  },
+  "tasks": [
+    {
+      "name": "fct_order",
+      "folder": "",
+      "goal": "",
+      "inputs": [],
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "grain": "TBD",
+        "inputs": [],
+        "joins": [],
+        "metrics": [],
+        "output_fields": [],
+        "assumptions": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author gold SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "name": "fct_order_item",
+      "folder": "",
+      "goal": "",
+      "inputs": [],
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "grain": "TBD",
+        "inputs": [],
+        "joins": [],
+        "metrics": [],
+        "output_fields": [],
+        "assumptions": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author gold SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "name": "dim_customer",
+      "folder": "",
+      "goal": "",
+      "inputs": [],
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "grain": "TBD",
+        "inputs": [],
+        "joins": [],
+        "metrics": [],
+        "output_fields": [],
+        "assumptions": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author gold SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "name": "agg_sales_summary",
+      "folder": "",
+      "goal": "",
+      "inputs": [],
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "grain": "TBD",
+        "inputs": [],
+        "joins": [],
+        "metrics": [],
+        "output_fields": [],
+        "assumptions": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author gold SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "name": "fct_customer_order_daily",
+      "folder": "",
+      "goal": "",
+      "inputs": [],
+      "expected_model_path": null,
+      "invariants": [],
+      "implementation_spec": {
+        "spec_version": 1,
+        "grain": "TBD",
+        "inputs": [],
+        "joins": [],
+        "metrics": [],
+        "output_fields": [],
+        "assumptions": []
+      },
+      "status": "pending",
+      "checklist": [
+        {
+          "checklist_item_id": "sql_model",
+          "label": "Author gold SQL",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "schema_contract",
+          "label": "Author schema contract",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        },
+        {
+          "checklist_item_id": "validate",
+          "label": "Validate",
+          "details": null,
+          "status": "pending",
+          "origin": "initial",
+          "origin_step_idx": null,
+          "evidence": []
+        }
+      ]
+    }
+  ],
+  "batches": [
+    [
+      "fct_order",
+      "fct_order_item",
+      "dim_customer",
+      "agg_sales_summary",
+      "fct_customer_order_daily"
+    ]
+  ],
+  "work_groups": [
+    {
+      "group_id": "model_author_sql_001",
+      "label": "Author SQL batch 1",
+      "kind": "author_sql",
+      "items": [
+        {
+          "task_id": "fct_order",
+          "checklist_item_id": "sql_model"
+        },
+        {
+          "task_id": "fct_order_item",
+          "checklist_item_id": "sql_model"
+        },
+        {
+          "task_id": "dim_customer",
+          "checklist_item_id": "sql_model"
+        },
+        {
+          "task_id": "agg_sales_summary",
+          "checklist_item_id": "sql_model"
+        },
+        {
+          "task_id": "fct_customer_order_daily",
+          "checklist_item_id": "sql_model"
+        }
+      ],
+      "depends_on_group_ids": null
+    },
+    {
+      "group_id": "model_author_schema_001",
+      "label": "Author schema batch 1",
+      "kind": "author_schema",
+      "items": [
+        {
+          "task_id": "fct_order",
+          "checklist_item_id": "schema_contract"
+        },
+        {
+          "task_id": "fct_order_item",
+          "checklist_item_id": "schema_contract"
+        },
+        {
+          "task_id": "dim_customer",
+          "checklist_item_id": "schema_contract"
+        },
+        {
+          "task_id": "agg_sales_summary",
+          "checklist_item_id": "schema_contract"
+        },
+        {
+          "task_id": "fct_customer_order_daily",
+          "checklist_item_id": "schema_contract"
+        }
+      ],
+      "depends_on_group_ids": [
+        "model_author_sql_001"
+      ]
+    },
+    {
+      "group_id": "model_validate",
+      "label": "Validate plan",
+      "kind": "validate",
+      "items": [
+        {
+          "task_id": "fct_order",
+          "checklist_item_id": "validate"
+        },
+        {
+          "task_id": "fct_order_item",
+          "checklist_item_id": "validate"
+        },
+        {
+          "task_id": "dim_customer",
+          "checklist_item_id": "validate"
+        },
+        {
+          "task_id": "agg_sales_summary",
+          "checklist_item_id": "validate"
+        },
+        {
+          "task_id": "fct_customer_order_daily",
+          "checklist_item_id": "validate"
+        }
+      ],
+      "depends_on_group_ids": [
+        "model_author_schema_001"
+      ]
+    }
+  ],
+  "mutations": [],
+  "progress": {
+    "last_applied_step_idx": 0,
+    "consecutive_batch_failures": 0,
+    "total_batch_failures": 0
+  }
+}

@@ -45,26 +45,38 @@ else
 fi
 
 # openapi-generator (rust/models-only) occasionally fails to add newly generated models
-# to src/models/mod.rs. Ensure ExecutionContext is exported when present.
+# to src/models/mod.rs. Ensure key generated types are exported when present.
 MODELS_MOD="${OUT_DIR}/src/models/mod.rs"
-if [ -f "${OUT_DIR}/src/models/execution_context.rs" ] && command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1; then
 	MODELS_MOD="${MODELS_MOD}" python3 - <<'PY'
 from pathlib import Path
 import os
 
 mod_path = Path(os.environ["MODELS_MOD"])
 txt = mod_path.read_text(encoding="utf-8")
-if "pub mod execution_context;" in txt and "pub use execution_context::ExecutionContext;" in txt:
-    raise SystemExit(0)
 
-# Insert near other message/context-ish models (after llm_end_response export if present).
-needle = "pub mod llm_end_response;\npub use llm_end_response::LlmEndResponse;\n"
-insert = needle + "\npub mod execution_context;\npub use execution_context::ExecutionContext;\n"
-if needle in txt:
-    txt = txt.replace(needle, insert, 1)
-else:
-    # Fallback: prepend at top.
-    txt = "pub mod execution_context;\npub use execution_context::ExecutionContext;\n\n" + txt
+def ensure_pair(txt: str, mod_name: str, type_name: str, anchor: str) -> str:
+    mod_line = f"pub mod {mod_name};\n"
+    use_line = f"pub use {mod_name}::{type_name};\n"
+    if mod_line in txt and use_line in txt:
+        return txt
+    insert = mod_line + use_line
+    if anchor in txt:
+        return txt.replace(anchor, anchor + "\n" + insert, 1)
+    return insert + "\n" + txt
+
+txt = ensure_pair(
+    txt,
+    "execution_context",
+    "ExecutionContext",
+    "pub mod llm_end_response;\npub use llm_end_response::LlmEndResponse;\n",
+)
+txt = ensure_pair(
+    txt,
+    "plan_kind",
+    "PlanKind",
+    "pub mod plan_checklist_origin;\npub use plan_checklist_origin::PlanChecklistOrigin;\n",
+)
 mod_path.write_text(txt, encoding="utf-8")
 PY
 fi

@@ -103,11 +103,38 @@ fn ws_final_result_from_typed_final(
     }
 }
 
-fn map_plan_kind(plan_kind: Option<react_core::session::PlanKind>) -> Option<String> {
+fn map_plan_kind(
+    plan_kind: Option<react_core::session::PlanKind>,
+) -> Option<api::PlanKind> {
     match plan_kind {
-        Some(react_core::session::PlanKind::Cleanse) => Some("cleanse".to_string()),
-        Some(react_core::session::PlanKind::Model) => Some("model".to_string()),
+        Some(react_core::session::PlanKind::Cleanse) => Some(api::PlanKind::Cleanse),
+        Some(react_core::session::PlanKind::Model) => Some(api::PlanKind::Model),
         None => None,
+    }
+}
+
+fn map_thread_event_kind(event_kind: &str) -> api::ThreadEventKind {
+    match event_kind {
+        "tool_start" => api::ThreadEventKind::ToolStart,
+        "tool_end" => api::ThreadEventKind::ToolEnd,
+        "llm_start" => api::ThreadEventKind::LlmStart,
+        "llm_end" => api::ThreadEventKind::LlmEnd,
+        _ => api::ThreadEventKind::ToolEnd,
+    }
+}
+
+fn map_tool_event_status(status: Option<&str>, observation_ok: Option<bool>) -> api::ToolEventStatus {
+    match status {
+        Some("running") => api::ToolEventStatus::Running,
+        Some("ok") => api::ToolEventStatus::Ok,
+        Some("failed") => api::ToolEventStatus::Failed,
+        _ => {
+            if observation_ok.unwrap_or(true) {
+                api::ToolEventStatus::Ok
+            } else {
+                api::ToolEventStatus::Failed
+            }
+        }
     }
 }
 
@@ -193,13 +220,7 @@ fn ws_thread_state_snapshot_from_core(
         .events
         .iter()
         .map(|ev| {
-            let kind = match ev.event_kind.as_str() {
-                "tool_start" => api::ThreadEventKind::ToolStart,
-                "tool_end" => api::ThreadEventKind::ToolEnd,
-                "llm_start" => api::ThreadEventKind::LlmStart,
-                "llm_end" => api::ThreadEventKind::LlmEnd,
-                _ => api::ThreadEventKind::ToolEnd,
-            };
+            let kind = map_thread_event_kind(&ev.event_kind);
             let mut out = api::ThreadEvent::new(ev.step_idx as i32, kind, ev.ts.clone());
             out.tool_id = ev.tool_id.clone();
             out.name = ev.name.clone();
@@ -209,12 +230,10 @@ fn ws_thread_state_snapshot_from_core(
             out.call_id = ev.call_id.map(|n| n as i32);
             out.model = ev.model.clone();
             out.phase = ev.phase.clone();
-            out.status = ev.status.as_deref().map(|s| match s {
-                "running" => api::ToolEventStatus::Running,
-                "ok" => api::ToolEventStatus::Ok,
-                "failed" => api::ToolEventStatus::Failed,
-                _ => api::ToolEventStatus::Running,
-            });
+            out.status = ev
+                .status
+                .as_deref()
+                .map(|s| map_tool_event_status(Some(s), None));
             out.payload = ev.payload.as_ref().and_then(|v| v.as_object()).map(|obj| {
                 let mut hm: std::collections::HashMap<String, serde_json::Value> =
                     std::collections::HashMap::new();
@@ -2228,7 +2247,7 @@ fn map_project_snapshot(v: serde_json::Value) -> Option<HashMap<String, serde_js
 }
 
 fn plan_parse_error_snapshot(
-    plan_kind: api::plan_snapshot::PlanKind,
+    plan_kind: api::PlanKind,
     plan_key: String,
     err: String,
 ) -> api::PlanSnapshot {
@@ -2241,7 +2260,7 @@ fn plan_parse_error_snapshot(
     item.details = Some(err.clone());
 
     let task = match plan_kind {
-        api::plan_snapshot::PlanKind::Cleanse => {
+        api::PlanKind::Cleanse => {
             let snap = api::CleanseTaskSnapshot::new(
                 "parse_error".to_string(),
                 "parse_error".to_string(),
@@ -2250,7 +2269,7 @@ fn plan_parse_error_snapshot(
             );
             api::PlanTask::Cleanse(snap)
         }
-        api::plan_snapshot::PlanKind::Model => {
+        api::PlanKind::Model => {
             let snap = api::ModelTaskSnapshot::new(
                 "parse_error".to_string(),
                 "parse_error".to_string(),
@@ -2333,7 +2352,7 @@ async fn load_latest_plans(
                             })
                             .collect::<Vec<_>>();
                         let mut snap = api::PlanSnapshot::new(
-                            api::plan_snapshot::PlanKind::Cleanse,
+                            api::PlanKind::Cleanse,
                             plan_key,
                             map_plan_status(status),
                             tasks,
@@ -2349,7 +2368,7 @@ async fn load_latest_plans(
                 Err(e) => {
                     // Hard cutover: surface a parse error snapshot so the UI doesn't silently drop plans.
                     cleanse_active = Some(plan_parse_error_snapshot(
-                        api::plan_snapshot::PlanKind::Cleanse,
+                        api::PlanKind::Cleanse,
                         k.to_string(),
                         format!("failed to parse cleanse plan JSON at {}: {}", k, e),
                     ));
@@ -2393,7 +2412,7 @@ async fn load_latest_plans(
             })
             .collect::<Vec<_>>();
         let mut snap = api::PlanSnapshot::new(
-            api::plan_snapshot::PlanKind::Cleanse,
+            api::PlanKind::Cleanse,
             plan_key,
             map_plan_status(status),
             tasks,
@@ -2455,7 +2474,7 @@ async fn load_latest_plans(
                             })
                             .collect::<Vec<_>>();
                         let mut snap = api::PlanSnapshot::new(
-                            api::plan_snapshot::PlanKind::Model,
+                            api::PlanKind::Model,
                             plan_key,
                             map_plan_status(status),
                             tasks,
@@ -2470,7 +2489,7 @@ async fn load_latest_plans(
                 }
                 Err(e) => {
                     model_active = Some(plan_parse_error_snapshot(
-                        api::plan_snapshot::PlanKind::Model,
+                        api::PlanKind::Model,
                         k.to_string(),
                         format!("failed to parse model plan JSON at {}: {}", k, e),
                     ));
@@ -2523,7 +2542,7 @@ async fn load_latest_plans(
             })
             .collect::<Vec<_>>();
         let mut snap = api::PlanSnapshot::new(
-            api::plan_snapshot::PlanKind::Model,
+            api::PlanKind::Model,
             plan_key,
             map_plan_status(status),
             tasks,
@@ -3346,13 +3365,13 @@ async fn run_agent_with_processing_suite(
                     };
                     let new_cleanse_fp = fp(&cleanse);
                     let new_model_fp = fp(&model);
-                    let mut changed: Vec<api::plans_changed_response::Changed> = Vec::new();
+                    let mut changed: Vec<api::PlanKind> = Vec::new();
                     if new_cleanse_fp != last_cleanse_plan_fp {
-                        changed.push(api::plans_changed_response::Changed::Cleanse);
+                        changed.push(api::PlanKind::Cleanse);
                         last_cleanse_plan_fp = new_cleanse_fp;
                     }
                     if new_model_fp != last_model_plan_fp {
-                        changed.push(api::plans_changed_response::Changed::Model);
+                        changed.push(api::PlanKind::Model);
                         last_model_plan_fp = new_model_fp;
                     }
                     if !changed.is_empty() {
@@ -3485,12 +3504,7 @@ async fn run_agent_with_processing_suite(
                             }
                         }
                         ThreadStep::ToolStart { tool_id, name, clean_name, status, payload, ctx, .. } => {
-                            let st = match status.as_str() {
-                                "running" => api::ToolEventStatus::Running,
-                                "ok" => api::ToolEventStatus::Ok,
-                                "failed" => api::ToolEventStatus::Failed,
-                                _ => api::ToolEventStatus::Running,
-                            };
+                            let st = map_tool_event_status(Some(status.as_str()), None);
                             let mut ev = api::ToolStartResponse::new(
                                 1,
                                 api::tool_start_response::Type::ToolStart,
@@ -3522,12 +3536,7 @@ async fn run_agent_with_processing_suite(
                             emit_ws(state, write, api::ServerMessage::ToolStart(ev)).await;
                         }
                         ThreadStep::ToolEnd { tool_id, name, clean_name, status, payload, ctx, observation, .. } => {
-                            let st = match status.as_str() {
-                                "running" => api::ToolEventStatus::Running,
-                                "ok" => api::ToolEventStatus::Ok,
-                                "failed" => api::ToolEventStatus::Failed,
-                                _ => if observation.ok { api::ToolEventStatus::Ok } else { api::ToolEventStatus::Failed },
-                            };
+                            let st = map_tool_event_status(Some(status.as_str()), Some(observation.ok));
                             let mut ev = api::ToolEndResponse::new(
                                 1,
                                 api::tool_end_response::Type::ToolEnd,
@@ -4211,7 +4220,7 @@ mod tests {
         let reg = react_suites::registry::SuiteRegistry::new();
         let snap = ws_thread_state_snapshot_from_core(&core, &reg);
         let ctx = snap.events[0].ctx.as_ref().expect("ctx");
-        assert_eq!(ctx.plan_kind.as_deref(), Some("cleanse"));
+        assert_eq!(ctx.plan_kind, Some(api::PlanKind::Cleanse));
         assert_eq!(ctx.plan_key.as_deref(), Some("p1"));
         assert_eq!(ctx.workgroup_id.as_deref(), Some("wg1"));
         assert_eq!(ctx.task_id.as_deref(), Some("task1"));

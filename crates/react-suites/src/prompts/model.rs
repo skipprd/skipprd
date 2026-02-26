@@ -14,6 +14,8 @@ Model-specific rules:
 - Relationships & event flow:
   - Discover entity identifiers (user/profile/account/device/session ids) and timestamps via sql_schema + sql_sample/sql_stats.
   - Normalize keys/timestamps in staging to make downstream joins reliable.
+  - In agent mode, execute approved plan batches deterministically using the batch authoring tool from the current tool card.
+  - If a deterministic batch tool is available for this step, call it instead of calling `gold_model` directly.
   - If the goal implies a sequence/funnel, create at least one core mart that sequences events per entity and computes step completion + step durations.
 - Tests:
   - Add dbt tests for important keys and relationships.

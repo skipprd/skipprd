@@ -13,7 +13,7 @@ pub mod utils;
 
 pub use types::{DataCatalog, SemanticModel};
 
-use react_core::providers::CatalogProvider;
+use react_core::providers::{CatalogProvider, DatasetId};
 
 /// Default catalog provider implementation (current behavior).
 ///
@@ -44,6 +44,17 @@ impl DefaultCatalogProvider {
             llm_batch_size,
         }
     }
+
+    fn canonical_dataset_id(dataset_id: &str) -> Result<String, String> {
+        DatasetId::parse_fqn_strict(dataset_id)
+            .map(|d| d.fqn())
+            .map_err(|_| {
+                format!(
+                    "catalog dataset_id must be canonical <catalog>.<database>.<table>; got '{}'",
+                    dataset_id
+                )
+            })
+    }
 }
 
 #[async_trait]
@@ -53,7 +64,8 @@ impl CatalogProvider for DefaultCatalogProvider {
         scope: &crate::providers::RequestScope,
         dataset_id: &str,
     ) -> Result<Option<DataCatalog>, String> {
-        let key = self.keyspace.catalog_key(scope, dataset_id);
+        let canonical = Self::canonical_dataset_id(dataset_id)?;
+        let key = self.keyspace.catalog_key(scope, &canonical);
         match self.storage.get_json(&key).await {
             Ok(val) => Ok(Some(
                 serde_json::from_value::<DataCatalog>(val).map_err(|e| e.to_string())?,
@@ -69,7 +81,8 @@ impl CatalogProvider for DefaultCatalogProvider {
         catalog: &DataCatalog,
     ) -> Result<(), String> {
         // Match legacy behavior: YAML -> serde_yaml::Value -> JSON written.
-        let key = self.keyspace.catalog_key(scope, dataset_id);
+        let canonical = Self::canonical_dataset_id(dataset_id)?;
+        let key = self.keyspace.catalog_key(scope, &canonical);
         let yaml = serde_yaml::to_string(catalog).map_err(|e| e.to_string())?;
         let value =
             serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);

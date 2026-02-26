@@ -15,13 +15,14 @@ Hard rules:
 - You CAN execute DBT when those tools are available in the current tool card:
   - Use the available validate tool to run deps/parse/compile and optionally build.
   - Use the available publish tool to publish (it may require approval before build).
-  - NEVER claim “I can’t run dbt” or “run it locally for me”. If DBT fails, iterate until it passes or until you must ask for missing external config.
+  - NEVER claim “I can’t run dbt” or “run it locally for me”. If DBT fails, iterate until it passes; if blocked by external config and interrupt tools are unavailable, return a concise blocking requirement in final output.
 - Iteration discipline (CRITICAL):
+  - Apply this section only when `dbt_validate` is available in the current tool card.
   - If `dbt_validate` fails for ANY reason, you MUST NOT finalize. Instead:
     - identify the failure class (YAML/profile/config vs SQL/refs vs warehouse environment),
     - make the smallest artifact edit(s) necessary,
     - re-run `dbt_validate` and repeat until clean.
-  - After authoring/saving DBT artifacts, compile-only validation is NOT sufficient to finalize. You must run `dbt_validate` with build=true (or run=true) and achieve run_ok=true, unless the system explicitly allows compile-only finalization.
+  - After authoring/saving DBT artifacts, compile-only validation is NOT sufficient to finalize. When validation is available, run `dbt_validate` with build=true (or run=true) and achieve run_ok=true, unless the system explicitly allows compile-only finalization.
   - If `dbt_validate` fails AFTER a successful compile (runtime/test failures; `compile_ok=true` but `run_ok=false`):
     - Your next step MUST be a FIX to DBT artifacts.
     - Do NOT immediately re-run `dbt_validate` as the very next step.
@@ -45,8 +46,8 @@ Hard rules:
   - Authoring is checklist/work-group driven from an approved executable plan.
   - Do NOT assume downstream phases will compensate for missing work_groups/checklist structure.
   - If plan structure is incomplete, return to planning instead of improvising.
-- For build/publish: ALWAYS require approval before any dbt build. Use `publish_dbt_to_provider` (first call returns await_approval; on approval call again with confirm=true).
-- At the outset, search for relevant DBT examples using search_dbt_examples with a short query inferred from the dataset/problem, and follow the top match's conventions (naming, structure).
+- For build/publish: when publish tools are available, ALWAYS require approval before any dbt build. Use `publish_dbt_to_provider` (first call returns await_approval; on approval call again with confirm=true).
+- At the outset, when `search_dbt_examples` is available in the current tool card, use it with a short query inferred from the dataset/problem and follow the top match's conventions (naming, structure).
 - Use run_sql ONLY to validate authored SQL fragments; NEVER to answer.
 - Output format is enforced by the system-provided output contract; return exactly one contracted object per step."#
 }
@@ -58,7 +59,9 @@ pub fn tool_card_common_prefix() -> &'static str {
     args:
       | {op:"list", prefix?:string, limit?:int}
       | {op:"get", path:string, max_chars?:int}
-  | {op:"patch", path:string, patch_text:string}
+      | {op:"patch", path:string, patch_text:string}
+      | {op:"rm", path:string, expected_sha256?:string}
+      | {op:"mv", from:string, to:string, expected_sha256?:string}
   )
 - json_file(args:{op:"get_item", path:string, pointer?:string} | {op:"query", path:string, pointer?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int})
 - vect_query(args:{scope:"dataset"|"field"|"doc"|"artifact"|"metric"|"model", query_text:string, k:int})

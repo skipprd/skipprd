@@ -11,7 +11,7 @@ Name | Type | Description | Notes
 **thread_id** | **String** |  | 
 **thread_seq** | Option<**i32**> |  | [optional]
 **for_cid** | Option<**String**> |  | [optional]
-**changed** | **Vec<String>** | Which plan kinds changed. UI should fetch `plans` to get latest snapshots. | 
+**changed** | [**Vec<models::PlanKind>**](PlanKind.md) | Which plan kinds changed. UI should fetch `plans` to get latest snapshots. | 
 **cleanse_plan_key** | Option<**String**> |  | [optional]
 **model_plan_key** | Option<**String**> |  | [optional]
 

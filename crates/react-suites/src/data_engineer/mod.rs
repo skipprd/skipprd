@@ -33,6 +33,7 @@ pub mod naming;
 pub mod patch_contract;
 pub mod patch_protocol;
 pub mod plan;
+pub mod probe_target;
 pub mod progress_controller;
 pub mod project_files;
 pub mod project_fs;
@@ -265,6 +266,23 @@ impl AgentMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum AgentToolCapability {
+    ReadOnlyFile,
+    MutableFile,
+    RunSql,
+    AskUser,
+    AskApproval,
+    SearchDbtExamples,
+    StagingModel,
+    GoldModel,
+    DbtValidate,
+    PublishDbt,
+    SqlRegister,
+    CatalogNote,
+    Artifacts,
+}
+
 #[derive(Clone, Debug, Default)]
 struct ManifestLookupRetrySignal {
     fallback_mode: bool,
@@ -276,6 +294,54 @@ struct ManifestLookupRetrySignal {
 }
 
 impl DataEngineerSuite {
+    fn agent_capability_profile(
+        agent_mode: AgentMode,
+        allow_user_interrupt_tools: bool,
+    ) -> BTreeSet<AgentToolCapability> {
+        let mut caps = BTreeSet::new();
+        match agent_mode {
+            AgentMode::Review => {
+                caps.insert(AgentToolCapability::ReadOnlyFile);
+                caps.insert(AgentToolCapability::Artifacts);
+            }
+            AgentMode::Ask => {
+                caps.insert(AgentToolCapability::MutableFile);
+                caps.insert(AgentToolCapability::RunSql);
+                caps.insert(AgentToolCapability::AskApproval);
+                caps.insert(AgentToolCapability::Artifacts);
+            }
+            AgentMode::Cleanse => {
+                caps.insert(AgentToolCapability::MutableFile);
+                caps.insert(AgentToolCapability::RunSql);
+                caps.insert(AgentToolCapability::AskApproval);
+                caps.insert(AgentToolCapability::SearchDbtExamples);
+                caps.insert(AgentToolCapability::StagingModel);
+                caps.insert(AgentToolCapability::DbtValidate);
+                caps.insert(AgentToolCapability::PublishDbt);
+                caps.insert(AgentToolCapability::SqlRegister);
+                caps.insert(AgentToolCapability::CatalogNote);
+                caps.insert(AgentToolCapability::Artifacts);
+            }
+            AgentMode::Model | AgentMode::Agent => {
+                caps.insert(AgentToolCapability::MutableFile);
+                caps.insert(AgentToolCapability::RunSql);
+                caps.insert(AgentToolCapability::AskApproval);
+                caps.insert(AgentToolCapability::SearchDbtExamples);
+                caps.insert(AgentToolCapability::StagingModel);
+                caps.insert(AgentToolCapability::GoldModel);
+                caps.insert(AgentToolCapability::DbtValidate);
+                caps.insert(AgentToolCapability::PublishDbt);
+                caps.insert(AgentToolCapability::SqlRegister);
+                caps.insert(AgentToolCapability::CatalogNote);
+                caps.insert(AgentToolCapability::Artifacts);
+            }
+        }
+        if allow_user_interrupt_tools && agent_mode != AgentMode::Review {
+            caps.insert(AgentToolCapability::AskUser);
+        }
+        caps
+    }
+
     fn headless_mode_enabled() -> bool {
         std::env::var("REACT_HEADLESS")
             .ok()
@@ -1575,6 +1641,76 @@ impl DataEngineerSuite {
             &opts,
         )?;
         Self::parse_json_typed_lenient::<react_core::schema_registry::PlanDesignCritiqueV1>(&raw)
+    }
+
+    async fn revise_design_memo(
+        ctx: &AgentCtx,
+        is_cleanse: bool,
+        planning_context: &str,
+        memo: &str,
+        critique: &react_core::schema_registry::PlanDesignCritiqueV1,
+    ) -> Result<String, String> {
+        use react_core::llm::ChatMessage;
+        let kind = if is_cleanse {
+            "cleanse_plan"
+        } else {
+            "model_plan"
+        };
+        let sys = crate::prompts::plan::plan_design_memo_system_prompt(kind);
+        let user = format!(
+            "Planning kind: {kind}\n\nContext:\n{}\n\nCurrent design memo:\n{}\n\nCritique JSON:\n{}\n\nRewrite the design memo in free text so the critique blockers/fixes are addressed.\nDo not return JSON.",
+            Self::excerpt(planning_context, 90_000),
+            Self::excerpt(memo, 40_000),
+            serde_json::to_string_pretty(critique).unwrap_or_else(|_| "{}".to_string()),
+        );
+        let opts = Self::planning_llm_options(
+            PlanningLlmProfile::DesignMemo,
+            "data_engineer.plan_design_memo_revise",
+            ctx.thread_id.clone(),
+        );
+        ctx.llm
+            .chat(
+                &[
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: sys,
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: user,
+                    },
+                ],
+                &opts,
+            )
+            .map_err(|e| e.to_string())
+    }
+
+    async fn produce_critiqued_design_memo(
+        ctx: &AgentCtx,
+        is_cleanse: bool,
+        planning_context: &str,
+    ) -> Result<
+        (
+            String,
+            react_core::schema_registry::PlanDesignCritiqueV1,
+        ),
+        String,
+    > {
+        let mut memo = Self::generate_design_memo(ctx, is_cleanse, planning_context).await?;
+        let mut critique = Self::critique_design_memo(ctx, is_cleanse, planning_context, &memo)
+            .await?;
+        // Bounded revision loop: critique feedback must update memo reasoning before extraction.
+        for _ in 0..1 {
+            if critique.ok {
+                break;
+            }
+            memo =
+                Self::revise_design_memo(ctx, is_cleanse, planning_context, &memo, &critique)
+                    .await?;
+            critique = Self::critique_design_memo(ctx, is_cleanse, planning_context, &memo)
+                .await?;
+        }
+        Ok((memo, critique))
     }
 
     fn critique_guidance(critique: &react_core::schema_registry::PlanDesignCritiqueV1) -> String {
@@ -3137,115 +3273,88 @@ Apply these fixes in the output.",
         registry.register(VectQueryTool);
 
         let allow_user_interrupt_tools = !Self::headless_mode_enabled();
-        match agent_mode {
-            // review uses read-only tools only
-            AgentMode::Review => {
-                // Allow review to read the current dbt project state (manifest/schema/models)
-                // without permitting writes.
-                struct ReadOnlyDbtFilesTool {
-                    inner: DbtFilesTool,
-                }
-                #[async_trait::async_trait]
-                impl react_core::tools::Tool for ReadOnlyDbtFilesTool {
-                    fn name(&self) -> &'static str {
-                        "file"
-                    }
-                    async fn call(
-                        &self,
-                        args: serde_json::Value,
-                        ctx: &react_core::agent::AgentCtx,
-                    ) -> Result<serde_json::Value, String> {
-                        let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                        if matches!(op, "patch" | "rm" | "mv") {
-                            return Err(
-                                "file is read-only for review; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string(),
-                            );
-                        }
-                        self.inner.call(args, ctx).await
-                    }
-                }
-                registry.register(ReadOnlyDbtFilesTool {
-                    inner: DbtFilesTool {
-                        datasets: sctx.datasets.clone(),
-                    },
-                });
-                registry.register(ArtifactsTool);
+        let caps = Self::agent_capability_profile(agent_mode, allow_user_interrupt_tools);
+
+        // Allow review to read the current dbt project state (manifest/schema/models)
+        // without permitting writes.
+        struct ReadOnlyDbtFilesTool {
+            inner: DbtFilesTool,
+        }
+        #[async_trait::async_trait]
+        impl react_core::tools::Tool for ReadOnlyDbtFilesTool {
+            fn name(&self) -> &'static str {
+                "file"
             }
-            // cleanse uses shared tools + authoring/validation/publish loop
-            AgentMode::Cleanse => {
-                registry.register(SqlRunTool {
-                    query: query.clone(),
-                });
-                if allow_user_interrupt_tools {
-                    registry.register(tools::ask_user::AskUserTool);
+            async fn call(
+                &self,
+                args: serde_json::Value,
+                ctx: &react_core::agent::AgentCtx,
+            ) -> Result<serde_json::Value, String> {
+                let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
+                if matches!(op, "patch" | "rm" | "mv") {
+                    return Err(
+                        "file is read-only for review; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string(),
+                    );
                 }
-                registry.register(tools::ask_approval::AskApprovalTool);
-                registry.register(tools::dbt_examples::SearchDbtExamplesTool);
-                registry.register(tools::staging_model::StagingModelTool {
+                self.inner.call(args, ctx).await
+            }
+        }
+
+        if caps.contains(&AgentToolCapability::ReadOnlyFile) {
+            registry.register(ReadOnlyDbtFilesTool {
+                inner: DbtFilesTool {
                     datasets: sctx.datasets.clone(),
-                });
-                registry.register(ThreadDerivedDbtValidateTool {
-                    inner: tools::dbt_validate::DbtValidateTool {
-                        datasets: sctx.datasets.clone(),
-                        catalog: sctx.catalog.clone(),
-                    },
-                });
-                registry.register(tools::publish_dbt_to_provider::PublishDbtToProviderTool {
+                },
+            });
+        } else if caps.contains(&AgentToolCapability::MutableFile) {
+            registry.register(DbtFilesTool {
+                datasets: sctx.datasets.clone(),
+            });
+        }
+        if caps.contains(&AgentToolCapability::RunSql) {
+            registry.register(SqlRunTool {
+                query: query.clone(),
+            });
+        }
+        if caps.contains(&AgentToolCapability::AskUser) {
+            registry.register(tools::ask_user::AskUserTool);
+        }
+        if caps.contains(&AgentToolCapability::AskApproval) {
+            registry.register(tools::ask_approval::AskApprovalTool);
+        }
+        if caps.contains(&AgentToolCapability::SearchDbtExamples) {
+            registry.register(tools::dbt_examples::SearchDbtExamplesTool);
+        }
+        if caps.contains(&AgentToolCapability::StagingModel) {
+            registry.register(tools::staging_model::StagingModelTool {
+                datasets: sctx.datasets.clone(),
+            });
+        }
+        if caps.contains(&AgentToolCapability::GoldModel) {
+            registry.register(tools::gold_model::GoldModelTool);
+        }
+        if caps.contains(&AgentToolCapability::DbtValidate) {
+            registry.register(ThreadDerivedDbtValidateTool {
+                inner: tools::dbt_validate::DbtValidateTool {
                     datasets: sctx.datasets.clone(),
                     catalog: sctx.catalog.clone(),
-                });
-                registry.register(tools::sql_register::SqlRegisterTool);
-                registry.register(tools::catalog_note::CatalogNoteTool);
-                registry.register(DbtFilesTool {
-                    datasets: sctx.datasets.clone(),
-                });
-                registry.register(ArtifactsTool);
-            }
-            // ask uses shared tools + user/approval interrupts + artifacts
-            AgentMode::Ask => {
-                registry.register(SqlRunTool {
-                    query: query.clone(),
-                });
-                if allow_user_interrupt_tools {
-                    registry.register(tools::ask_user::AskUserTool);
-                }
-                registry.register(tools::ask_approval::AskApprovalTool);
-                registry.register(DbtFilesTool {
-                    datasets: sctx.datasets.clone(),
-                });
-                registry.register(ArtifactsTool);
-            }
-            // model uses ask tools + artifact authoring + dbt helpers + artifacts
-            AgentMode::Model | AgentMode::Agent => {
-                registry.register(SqlRunTool {
-                    query: query.clone(),
-                });
-                if allow_user_interrupt_tools {
-                    registry.register(tools::ask_user::AskUserTool);
-                }
-                registry.register(tools::ask_approval::AskApprovalTool);
-                registry.register(tools::dbt_examples::SearchDbtExamplesTool);
-                registry.register(tools::staging_model::StagingModelTool {
-                    datasets: sctx.datasets.clone(),
-                });
-                registry.register(tools::gold_model::GoldModelTool);
-                registry.register(ThreadDerivedDbtValidateTool {
-                    inner: tools::dbt_validate::DbtValidateTool {
-                        datasets: sctx.datasets.clone(),
-                        catalog: sctx.catalog.clone(),
-                    },
-                });
-                registry.register(tools::publish_dbt_to_provider::PublishDbtToProviderTool {
-                    datasets: sctx.datasets.clone(),
-                    catalog: sctx.catalog.clone(),
-                });
-                registry.register(tools::sql_register::SqlRegisterTool);
-                registry.register(tools::catalog_note::CatalogNoteTool);
-                registry.register(DbtFilesTool {
-                    datasets: sctx.datasets.clone(),
-                });
-                registry.register(ArtifactsTool);
-            }
+                },
+            });
+        }
+        if caps.contains(&AgentToolCapability::PublishDbt) {
+            registry.register(tools::publish_dbt_to_provider::PublishDbtToProviderTool {
+                datasets: sctx.datasets.clone(),
+                catalog: sctx.catalog.clone(),
+            });
+        }
+        if caps.contains(&AgentToolCapability::SqlRegister) {
+            registry.register(tools::sql_register::SqlRegisterTool);
+        }
+        if caps.contains(&AgentToolCapability::CatalogNote) {
+            registry.register(tools::catalog_note::CatalogNoteTool);
+        }
+        if caps.contains(&AgentToolCapability::Artifacts) {
+            registry.register(ArtifactsTool);
         }
 
         Ok(registry)
@@ -3253,6 +3362,7 @@ Apply these fixes in the output.",
 
     fn build_tools_card_for_agent_type(agent_mode: AgentMode) -> String {
         let allow_user_interrupt_tools = !Self::headless_mode_enabled();
+        let caps = Self::agent_capability_profile(agent_mode, allow_user_interrupt_tools);
         match agent_mode {
             AgentMode::Review => Self::build_tools_card(
                 "Allowed tools (review mode, read-only):",
@@ -3268,44 +3378,70 @@ Apply these fixes in the output.",
                 ),
             ),
             AgentMode::Ask => {
-                let mut lines = vec![
-                    "- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
-                    "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string(),
-                    "- run_sql(args:{sql:string})".to_string(),
-                    "- ask_approval(args:{prompt:string})".to_string(),
-                    "- artifacts".to_string(),
-                ];
-                if allow_user_interrupt_tools {
+                let mut lines = vec!["- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
+                    "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string()];
+                if caps.contains(&AgentToolCapability::RunSql) {
+                    lines.push("- run_sql(args:{sql:string})".to_string());
+                }
+                if caps.contains(&AgentToolCapability::AskApproval) {
+                    lines.push("- ask_approval(args:{prompt:string})".to_string());
+                }
+                if caps.contains(&AgentToolCapability::Artifacts) {
+                    lines.push("- artifacts".to_string());
+                }
+                if caps.contains(&AgentToolCapability::AskUser) {
                     lines.push("- ask_user(args:{prompt:string})".to_string());
                 }
                 Self::build_tools_card("Allowed tools (ask mode):", lines, Vec::new(), None)
             }
             AgentMode::Cleanse => {
-                let mut lines = vec![
-                    "- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
-                    "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string(),
-                    "- run_sql(args:{sql:string})".to_string(),
-                    "- staging_model(args:{dataset_ids:[string], instructions?:string, sql?:string|staging_model?:string|expression?:string})".to_string(),
-                    "- dbt_validate / publish_dbt_to_provider".to_string(),
-                    "- ask_approval(args:{prompt:string})".to_string(),
-                    "- artifacts".to_string(),
-                ];
-                if allow_user_interrupt_tools {
+                let mut lines = vec!["- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
+                    "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string()];
+                if caps.contains(&AgentToolCapability::RunSql) {
+                    lines.push("- run_sql(args:{sql:string})".to_string());
+                }
+                if caps.contains(&AgentToolCapability::StagingModel) {
+                    lines.push("- staging_model(args:{dataset_ids:[string], instructions?:string, sql?:string|staging_model?:string|expression?:string})".to_string());
+                }
+                if caps.contains(&AgentToolCapability::DbtValidate)
+                    || caps.contains(&AgentToolCapability::PublishDbt)
+                {
+                    lines.push("- dbt_validate / publish_dbt_to_provider".to_string());
+                }
+                if caps.contains(&AgentToolCapability::AskApproval) {
+                    lines.push("- ask_approval(args:{prompt:string})".to_string());
+                }
+                if caps.contains(&AgentToolCapability::Artifacts) {
+                    lines.push("- artifacts".to_string());
+                }
+                if caps.contains(&AgentToolCapability::AskUser) {
                     lines.push("- ask_user(args:{prompt:string})".to_string());
                 }
                 Self::build_tools_card("Allowed tools (cleanse mode):", lines, Vec::new(), None)
             }
             AgentMode::Model | AgentMode::Agent => {
-                let mut lines = vec![
-                    "- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
-                    "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string(),
-                    "- run_sql(args:{sql:string})".to_string(),
-                    "- staging_model / gold_model".to_string(),
-                    "- dbt_validate / publish_dbt_to_provider".to_string(),
-                    "- ask_approval(args:{prompt:string})".to_string(),
-                    "- artifacts".to_string(),
-                ];
-                if allow_user_interrupt_tools {
+                let mut lines = vec!["- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
+                    "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string()];
+                if caps.contains(&AgentToolCapability::RunSql) {
+                    lines.push("- run_sql(args:{sql:string})".to_string());
+                }
+                if caps.contains(&AgentToolCapability::StagingModel)
+                    || caps.contains(&AgentToolCapability::GoldModel)
+                {
+                    lines.push("- staging_model / gold_model".to_string());
+                }
+                if caps.contains(&AgentToolCapability::DbtValidate)
+                    || caps.contains(&AgentToolCapability::PublishDbt)
+                {
+                    lines.push("- dbt_validate / publish_dbt_to_provider".to_string());
+                }
+                if caps.contains(&AgentToolCapability::AskApproval) {
+                    lines.push("- ask_approval(args:{prompt:string})".to_string());
+                }
+                if caps.contains(&AgentToolCapability::Artifacts) {
+                    lines.push("- artifacts".to_string());
+                }
+                if caps.contains(&AgentToolCapability::AskUser) {
                     lines.push("- ask_user(args:{prompt:string})".to_string());
                 }
                 Self::build_tools_card("Allowed tools (model mode):", lines, Vec::new(), None)
@@ -5524,11 +5660,8 @@ Apply these fixes in the output.",
                                 }
                             }
 
-                            let design_memo =
-                                Self::generate_design_memo(&actx, is_cleanse, &q).await?;
-                            let design_critique =
-                                Self::critique_design_memo(&actx, is_cleanse, &q, &design_memo)
-                                    .await?;
+                            let (design_memo, design_critique) =
+                                Self::produce_critiqued_design_memo(&actx, is_cleanse, &q).await?;
                             if is_cleanse {
                                 let skeleton = Self::generate_cleanse_skeleton(
                                     &actx,
@@ -5606,15 +5739,8 @@ Apply these fixes in the output.",
                                 plan.status = crate::data_engineer::plan::PlanStatus::Draft;
                                 plan.plan_key =
                                     crate::data_engineer::plan::new_cleanse_plan_key(&actx);
-                                // Crash-safety: checkpoint the draft plan immediately so the thread
-                                // can be resumed even if we crash during grounding/critique.
-                                crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
-                                    .await
-                                    .map_err(|e| {
-                                        format!(
-                                            "failed to checkpoint parsed cleanse draft plan before grounding: {e}"
-                                        )
-                                    })?;
+                                // Hard cutover: do not persist pre-grounded draft plans.
+                                // Persistence begins only after grounding + semantic gates.
                                 // Scope progress to the current plan instance so we don't replay the full
                                 // historical log and accidentally mark tasks done from prior cycles.
                                 plan.progress.last_applied_step_idx =
@@ -5757,7 +5883,11 @@ Apply these fixes in the output.",
                                 .await?;
                                 // Crash-safety: persist the grounded/pruned draft so resume/inspection reflects
                                 // what we actually validated/critiqued (not just the initial parsed JSON).
-                                crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
+                                crate::data_engineer::plan::save_cleanse_plan_grounded(
+                                    &actx,
+                                    &plan,
+                                    Some(&grounded.allowed),
+                                )
                                     .await
                                     .map_err(|e| {
                                         format!(
@@ -5802,7 +5932,11 @@ Apply these fixes in the output.",
                                 };
                                 // Crash-safety: persist the normalized draft so resume/inspection reflects
                                 // what we actually validated (not just the initial parsed JSON).
-                                crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
+                                crate::data_engineer::plan::save_cleanse_plan_grounded(
+                                    &actx,
+                                    &plan,
+                                    Some(&grounded.allowed),
+                                )
                                     .await
                                     .map_err(|e| {
                                         format!(
@@ -5866,7 +6000,12 @@ Apply these fixes in the output.",
                                     );
                                 }
 
-                                crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await?;
+                                crate::data_engineer::plan::save_cleanse_plan_grounded(
+                                    &actx,
+                                    &plan,
+                                    Some(&grounded.allowed),
+                                )
+                                .await?;
                                 if Self::should_reset_subjective_retry_after_plan_save(
                                     entered_from_actionable_review,
                                 ) {
@@ -5990,10 +6129,8 @@ Apply these fixes in the output.",
                                 plan.status = crate::data_engineer::plan::PlanStatus::Draft;
                                 plan.plan_key =
                                     crate::data_engineer::plan::new_model_plan_key(&actx);
-                                // Crash-safety: checkpoint the draft plan immediately so the thread
-                                // can be resumed even if we crash during grounding/critique.
-                                let _ =
-                                    crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
+                                // Hard cutover: do not persist pre-grounded draft plans.
+                                // Persistence begins only after grounding + semantic gates.
                                 // Scope progress to the current plan instance so we don't replay the full
                                 // historical log and accidentally mark tasks done from prior cycles.
                                 plan.progress.last_applied_step_idx =
@@ -6114,8 +6251,17 @@ Apply these fixes in the output.",
                                 .await?;
                                 // Crash-safety: persist the grounded/pruned draft so resume/inspection reflects
                                 // what we actually validated/critiqued (not just the initial parsed JSON).
-                                let _ =
-                                    crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
+                                crate::data_engineer::plan::save_model_plan_grounded(
+                                    &actx,
+                                    &plan,
+                                    Some(&stg.allowed_models),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    format!(
+                                        "failed to checkpoint grounded/pruned model draft plan: {e}"
+                                    )
+                                })?;
 
                                 // Quality gate 1: semantic validity (includes implementation_spec requirements).
                                 // Hard cutover: normalize conservative defaults before validating (no LLM repair).
@@ -6156,8 +6302,17 @@ Apply these fixes in the output.",
                                 };
                                 // Crash-safety: persist the normalized draft so resume/inspection reflects
                                 // what we actually validated (not just the initial parsed JSON).
-                                let _ =
-                                    crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
+                                crate::data_engineer::plan::save_model_plan_grounded(
+                                    &actx,
+                                    &plan,
+                                    Some(&stg.allowed_models),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    format!(
+                                        "failed to checkpoint normalized model draft plan: {e}"
+                                    )
+                                })?;
                                 if !sem.ok {
                                     let reason = format!(
                                         "Plan failed semantic validation (design-first). Errors:\n- {}",
@@ -6215,7 +6370,12 @@ Apply these fixes in the output.",
                                     );
                                 }
 
-                                crate::data_engineer::plan::save_model_plan(&actx, &plan).await?;
+                                crate::data_engineer::plan::save_model_plan_grounded(
+                                    &actx,
+                                    &plan,
+                                    Some(&stg.allowed_models),
+                                )
+                                .await?;
                                 if Self::should_reset_subjective_retry_after_plan_save(
                                     entered_from_actionable_review,
                                 ) {
@@ -7568,7 +7728,8 @@ Apply these fixes in the output.",
                             }),
                         };
                         let mut repair =
-                            crate::data_engineer::prompt_packets::render_envelope(&envelope);
+                            crate::data_engineer::prompt_packets::render_envelope(&envelope)
+                                .map_err(|e| format!("invalid repair prompt envelope: {e}"))?;
 
                         repair.push_str("\nRules:\n");
                         repair.push_str("- You MUST call file with a mutating op next (patch|rm|mv).\n");

@@ -419,6 +419,30 @@ pub struct ModelPlan {
     pub progress: PlanProgress,
 }
 
+#[derive(Clone, Debug)]
+pub enum PlanIRDraft {
+    Cleanse(CleansePlan),
+    Model(ModelPlan),
+}
+
+#[derive(Clone, Debug)]
+pub struct GroundedCleansePlan(pub CleansePlan);
+
+#[derive(Clone, Debug)]
+pub struct GroundedModelPlan(pub ModelPlan);
+
+#[derive(Clone, Debug)]
+pub enum PersistableCleansePlan {
+    Grounded(GroundedCleansePlan),
+    Terminal(CleansePlan),
+}
+
+#[derive(Clone, Debug)]
+pub enum PersistableModelPlan {
+    Grounded(GroundedModelPlan),
+    Terminal(ModelPlan),
+}
+
 fn ensure_expected_model_paths_cleanse(ctx: Option<&AgentCtx>, plan: &mut CleansePlan) -> bool {
     let mut changed = false;
     for t in plan.tasks.iter_mut() {
@@ -694,11 +718,26 @@ pub async fn save_cleanse_plan(ctx: &AgentCtx, plan: &CleansePlan) -> Result<(),
     if plan.plan_key.trim().is_empty() {
         return Err("cleanse plan missing plan_key".to_string());
     }
-    let bytes = serde_json::to_vec_pretty(plan).map_err(|e| e.to_string())?;
+    let candidate = PersistableCleansePlan::try_from(plan.clone())?.into_inner();
+    let bytes = serde_json::to_vec_pretty(&candidate).map_err(|e| e.to_string())?;
     ctx.storage
-        .put_bytes(&plan.plan_key, &bytes, "application/json")
+        .put_bytes(&candidate.plan_key, &bytes, "application/json")
         .await
         .map_err(|e| e.to_string())
+}
+
+pub async fn save_cleanse_plan_grounded(
+    ctx: &AgentCtx,
+    plan: &CleansePlan,
+    allowed_raw: Option<&std::collections::BTreeSet<String>>,
+) -> Result<(), String> {
+    let mut candidate = plan.clone();
+    ensure_expected_model_paths_cleanse(Some(ctx), &mut candidate);
+    if let Some(allowed) = allowed_raw {
+        prune_cleanse_plan_to_grounded_raw_datasets(&mut candidate, allowed);
+    }
+    let grounded = GroundedCleansePlan::try_from(candidate)?;
+    save_cleanse_plan(ctx, &grounded.0).await
 }
 
 pub async fn load_model_plan(ctx: &AgentCtx) -> Option<ModelPlan> {
@@ -731,11 +770,26 @@ pub async fn save_model_plan(ctx: &AgentCtx, plan: &ModelPlan) -> Result<(), Str
     if plan.plan_key.trim().is_empty() {
         return Err("model plan missing plan_key".to_string());
     }
-    let bytes = serde_json::to_vec_pretty(plan).map_err(|e| e.to_string())?;
+    let candidate = PersistableModelPlan::try_from(plan.clone())?.into_inner();
+    let bytes = serde_json::to_vec_pretty(&candidate).map_err(|e| e.to_string())?;
     ctx.storage
-        .put_bytes(&plan.plan_key, &bytes, "application/json")
+        .put_bytes(&candidate.plan_key, &bytes, "application/json")
         .await
         .map_err(|e| e.to_string())
+}
+
+pub async fn save_model_plan_grounded(
+    ctx: &AgentCtx,
+    plan: &ModelPlan,
+    allowed_staging_models: Option<&std::collections::BTreeSet<String>>,
+) -> Result<(), String> {
+    let mut candidate = plan.clone();
+    ensure_expected_model_paths_model(&mut candidate);
+    if let Some(allowed) = allowed_staging_models {
+        prune_model_plan_to_grounded_staging_models(&mut candidate, allowed);
+    }
+    let grounded = GroundedModelPlan::try_from(candidate)?;
+    save_model_plan(ctx, &grounded.0).await
 }
 
 #[derive(Clone, Debug)]
@@ -1133,6 +1187,189 @@ pub fn validate_model_plan_semantics(
     PlanSemanticValidation {
         ok: errors.is_empty(),
         errors,
+    }
+}
+
+fn strict_cleanse_grounding_errors(plan: &CleansePlan) -> Vec<String> {
+    let mut errors = Vec::new();
+    for t in &plan.tasks {
+        if t.dataset_id.trim().is_empty() {
+            errors.push("task.dataset_id is empty".to_string());
+        }
+        let missing_path = t
+            .expected_model_path
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        if missing_path {
+            errors.push(format!(
+                "{}: expected_model_path is required",
+                t.dataset_id
+            ));
+        }
+        if t.implementation_spec.output_fields.is_empty() {
+            errors.push(format!(
+                "{}: implementation_spec.output_fields is required",
+                t.dataset_id
+            ));
+        }
+    }
+    errors
+}
+
+fn strict_model_grounding_errors(
+    plan: &ModelPlan,
+    allowed_staging_models: Option<&std::collections::BTreeSet<String>>,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for t in &plan.tasks {
+        if t.name.trim().is_empty() {
+            errors.push("task.name is empty".to_string());
+            continue;
+        }
+        let missing_path = t
+            .expected_model_path
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        if missing_path {
+            errors.push(format!("{}: expected_model_path is required", t.name));
+        }
+        if t.goal.trim().is_empty() {
+            errors.push(format!("{}: goal is required", t.name));
+        }
+        let nonempty_inputs: Vec<String> = t
+            .inputs
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if nonempty_inputs.is_empty() {
+            errors.push(format!("{}: at least one task.inputs item is required", t.name));
+        }
+        let impl_inputs: Vec<String> = t
+            .implementation_spec
+            .inputs
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if impl_inputs.is_empty() {
+            errors.push(format!(
+                "{}: implementation_spec.inputs must be non-empty",
+                t.name
+            ));
+        }
+        if !impl_inputs.is_empty() && !nonempty_inputs.is_empty() {
+            let left: std::collections::BTreeSet<String> = nonempty_inputs.iter().cloned().collect();
+            let right: std::collections::BTreeSet<String> = impl_inputs.iter().cloned().collect();
+            if left != right {
+                errors.push(format!(
+                    "{}: implementation_spec.inputs must match task.inputs exactly",
+                    t.name
+                ));
+            }
+        }
+        if let Some(allowed) = allowed_staging_models {
+            for inp in nonempty_inputs {
+                if !allowed.contains(&inp) {
+                    errors.push(format!(
+                        "{}: input '{}' not grounded in models/staging/",
+                        t.name, inp
+                    ));
+                }
+            }
+        }
+    }
+    errors
+}
+
+impl TryFrom<CleansePlan> for GroundedCleansePlan {
+    type Error = String;
+
+    fn try_from(mut value: CleansePlan) -> Result<Self, Self::Error> {
+        normalize_cleanse_plan_defaults(&mut value);
+        let mut errors = strict_cleanse_grounding_errors(&value);
+        let sem = validate_cleanse_plan_semantics(&value);
+        errors.extend(sem.errors);
+        if !errors.is_empty() {
+            errors.sort();
+            errors.dedup();
+            return Err(format!(
+                "cleanse_plan_grounding_failed: {}",
+                errors.join(" | ")
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+impl GroundedCleansePlan {
+    pub fn into_inner(self) -> CleansePlan {
+        self.0
+    }
+}
+
+impl TryFrom<CleansePlan> for PersistableCleansePlan {
+    type Error = String;
+
+    fn try_from(value: CleansePlan) -> Result<Self, Self::Error> {
+        if value.status.is_terminal() {
+            return Ok(Self::Terminal(value));
+        }
+        Ok(Self::Grounded(GroundedCleansePlan::try_from(value)?))
+    }
+}
+
+impl PersistableCleansePlan {
+    pub fn into_inner(self) -> CleansePlan {
+        match self {
+            Self::Grounded(v) => v.into_inner(),
+            Self::Terminal(v) => v,
+        }
+    }
+}
+
+impl TryFrom<ModelPlan> for GroundedModelPlan {
+    type Error = String;
+
+    fn try_from(mut value: ModelPlan) -> Result<Self, Self::Error> {
+        ensure_expected_model_paths_model(&mut value);
+        let mut errors = strict_model_grounding_errors(&value, None);
+        let sem = validate_model_plan_semantics(&value, None);
+        errors.extend(sem.errors);
+        if !errors.is_empty() {
+            errors.sort();
+            errors.dedup();
+            return Err(format!("model_plan_grounding_failed: {}", errors.join(" | ")));
+        }
+        Ok(Self(value))
+    }
+}
+
+impl GroundedModelPlan {
+    pub fn into_inner(self) -> ModelPlan {
+        self.0
+    }
+}
+
+impl TryFrom<ModelPlan> for PersistableModelPlan {
+    type Error = String;
+
+    fn try_from(value: ModelPlan) -> Result<Self, Self::Error> {
+        if value.status.is_terminal() {
+            return Ok(Self::Terminal(value));
+        }
+        Ok(Self::Grounded(GroundedModelPlan::try_from(value)?))
+    }
+}
+
+impl PersistableModelPlan {
+    pub fn into_inner(self) -> ModelPlan {
+        match self {
+            Self::Grounded(v) => v.into_inner(),
+            Self::Terminal(v) => v,
+        }
     }
 }
 
@@ -3509,6 +3746,81 @@ mod tests {
             }],
             assumptions: vec![],
         }
+    }
+
+    #[test]
+    fn persistable_cleanse_plan_rejects_non_terminal_ungrounded() {
+        let plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![CleanseTask {
+                dataset_id: "a.b.c".to_string(),
+                expected_model_path: None,
+                invariants: vec![],
+                implementation_spec: dummy_cleanse_spec(),
+                status: TaskStatus::Pending,
+                checklist: std_checklist("Author staging SQL"),
+            }],
+            batches: vec![vec!["a.b.c".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        let err = PersistableCleansePlan::try_from(plan).unwrap_err();
+        assert!(err.contains("cleanse_plan_grounding_failed"));
+    }
+
+    #[test]
+    fn persistable_model_plan_rejects_non_terminal_ungrounded() {
+        let plan = ModelPlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![ModelTask {
+                name: "dim_orders".to_string(),
+                folder: "marts".to_string(),
+                goal: "".to_string(),
+                inputs: vec![],
+                expected_model_path: None,
+                invariants: vec![],
+                implementation_spec: dummy_model_spec(),
+                status: TaskStatus::Pending,
+                checklist: std_checklist("Author gold SQL"),
+            }],
+            batches: vec![vec!["dim_orders".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        let err = PersistableModelPlan::try_from(plan).unwrap_err();
+        assert!(err.contains("model_plan_grounding_failed"));
+    }
+
+    #[test]
+    fn persistable_terminal_plans_allow_non_executable_shape() {
+        let cleanse = CleansePlan {
+            plan_key: "k1".to_string(),
+            status: PlanStatus::Cancelled,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![],
+            batches: vec![],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        let model = ModelPlan {
+            plan_key: "k2".to_string(),
+            status: PlanStatus::Completed,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![],
+            batches: vec![],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        assert!(PersistableCleansePlan::try_from(cleanse).is_ok());
+        assert!(PersistableModelPlan::try_from(model).is_ok());
     }
 
     #[test]

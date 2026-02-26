@@ -4,7 +4,7 @@
 
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
-**plan_kind** | Option<**String**> | Plan kind (cleanse|model). | [optional]
+**plan_kind** | Option<[**models::PlanKind**](PlanKind.md)> | Plan kind (cleanse|model). | [optional]
 **plan_key** | Option<**String**> |  | [optional]
 **workgroup_id** | Option<**String**> |  | [optional]
 **task_id** | Option<**String**> |  | [optional]

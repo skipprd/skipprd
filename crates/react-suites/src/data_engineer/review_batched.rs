@@ -2019,7 +2019,35 @@ mod tests {
                         prohibited_ops: vec![],
                     },
                     status: de_plan::TaskStatus::Done,
-                    checklist: vec![],
+                    checklist: vec![
+                        de_plan::PlanChecklistItem {
+                            checklist_item_id: "sql_model".to_string(),
+                            label: "Author staging SQL".to_string(),
+                            details: None,
+                            status: de_plan::ChecklistItemStatus::Done,
+                            origin: de_plan::ChecklistOrigin::Initial,
+                            origin_step_idx: None,
+                            evidence: vec![],
+                        },
+                        de_plan::PlanChecklistItem {
+                            checklist_item_id: "schema_contract".to_string(),
+                            label: "Author schema contract".to_string(),
+                            details: None,
+                            status: de_plan::ChecklistItemStatus::Done,
+                            origin: de_plan::ChecklistOrigin::Initial,
+                            origin_step_idx: None,
+                            evidence: vec![],
+                        },
+                        de_plan::PlanChecklistItem {
+                            checklist_item_id: "validate".to_string(),
+                            label: "Validate model".to_string(),
+                            details: None,
+                            status: de_plan::ChecklistItemStatus::Done,
+                            origin: de_plan::ChecklistOrigin::Initial,
+                            origin_step_idx: None,
+                            evidence: vec![],
+                        },
+                    ],
                 },
                 de_plan::CleanseTask {
                     dataset_id: "a.b.b".to_string(),
@@ -2040,11 +2068,88 @@ mod tests {
                         prohibited_ops: vec![],
                     },
                     status: de_plan::TaskStatus::Done,
-                    checklist: vec![],
+                    checklist: vec![
+                        de_plan::PlanChecklistItem {
+                            checklist_item_id: "sql_model".to_string(),
+                            label: "Author staging SQL".to_string(),
+                            details: None,
+                            status: de_plan::ChecklistItemStatus::Done,
+                            origin: de_plan::ChecklistOrigin::Initial,
+                            origin_step_idx: None,
+                            evidence: vec![],
+                        },
+                        de_plan::PlanChecklistItem {
+                            checklist_item_id: "schema_contract".to_string(),
+                            label: "Author schema contract".to_string(),
+                            details: None,
+                            status: de_plan::ChecklistItemStatus::Done,
+                            origin: de_plan::ChecklistOrigin::Initial,
+                            origin_step_idx: None,
+                            evidence: vec![],
+                        },
+                        de_plan::PlanChecklistItem {
+                            checklist_item_id: "validate".to_string(),
+                            label: "Validate model".to_string(),
+                            details: None,
+                            status: de_plan::ChecklistItemStatus::Done,
+                            origin: de_plan::ChecklistOrigin::Initial,
+                            origin_step_idx: None,
+                            evidence: vec![],
+                        },
+                    ],
                 },
             ],
             batches: vec![vec!["a.b.a".to_string()], vec!["a.b.b".to_string()]],
-            work_groups: vec![],
+            work_groups: vec![
+                de_plan::PlanWorkGroup {
+                    group_id: "wg_sql".to_string(),
+                    label: "Author SQL".to_string(),
+                    kind: de_plan::WorkGroupKind::AuthorSql,
+                    items: vec![
+                        de_plan::WorkGroupItemRef {
+                            task_id: "a.b.a".to_string(),
+                            checklist_item_id: "sql_model".to_string(),
+                        },
+                        de_plan::WorkGroupItemRef {
+                            task_id: "a.b.b".to_string(),
+                            checklist_item_id: "sql_model".to_string(),
+                        },
+                    ],
+                    depends_on_group_ids: None,
+                },
+                de_plan::PlanWorkGroup {
+                    group_id: "wg_schema".to_string(),
+                    label: "Author schema".to_string(),
+                    kind: de_plan::WorkGroupKind::AuthorSchema,
+                    items: vec![
+                        de_plan::WorkGroupItemRef {
+                            task_id: "a.b.a".to_string(),
+                            checklist_item_id: "schema_contract".to_string(),
+                        },
+                        de_plan::WorkGroupItemRef {
+                            task_id: "a.b.b".to_string(),
+                            checklist_item_id: "schema_contract".to_string(),
+                        },
+                    ],
+                    depends_on_group_ids: Some(vec!["wg_sql".to_string()]),
+                },
+                de_plan::PlanWorkGroup {
+                    group_id: "wg_validate".to_string(),
+                    label: "Validate".to_string(),
+                    kind: de_plan::WorkGroupKind::Validate,
+                    items: vec![
+                        de_plan::WorkGroupItemRef {
+                            task_id: "a.b.a".to_string(),
+                            checklist_item_id: "validate".to_string(),
+                        },
+                        de_plan::WorkGroupItemRef {
+                            task_id: "a.b.b".to_string(),
+                            checklist_item_id: "validate".to_string(),
+                        },
+                    ],
+                    depends_on_group_ids: Some(vec!["wg_schema".to_string()]),
+                },
+            ],
             mutations: vec![],
             progress: de_plan::PlanProgress::default(),
         };

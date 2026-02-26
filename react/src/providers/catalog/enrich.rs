@@ -328,24 +328,14 @@ fn compact_catalog_for_global_context(
     })
 }
 
-fn deterministic_dataset_description(dataset_id: &str, fields: &[String]) -> String {
-    let short = fields
-        .iter()
-        .take(5)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ");
-    if short.is_empty() {
-        format!(
-            "Dataset {} contains operational records used for downstream analytics modeling.",
-            dataset_id
-        )
-    } else {
-        format!(
-            "Dataset {} contains records with key fields {} for downstream analytics modeling.",
-            dataset_id, short
-        )
-    }
+fn invalid_placeholder_text(s: &str) -> bool {
+    let t = s.trim().to_ascii_lowercase();
+    t.is_empty() || t.contains('<') || t.contains('>') || t.contains("strict json")
+}
+
+fn valid_ascii_span(s: &str, min_len: usize, max_len: usize) -> bool {
+    let t = s.trim();
+    t.len() >= min_len && t.len() <= max_len && t.chars().all(|c| c.is_ascii() && !c.is_control())
 }
 
 fn deterministic_global_context_from_compact(
@@ -485,7 +475,7 @@ Reasoning memo:\n{memo}\n\nOutput JSON only:",
             fields = field_names.join(", "),
             memo = reason_memo
         );
-        let mut summary_raw = None;
+        let mut summary_raw: Option<String> = None;
         if let Some(v) = llm_compile_pass_json(
             llm.clone(),
             compile_prompt,
@@ -498,50 +488,71 @@ Reasoning memo:\n{memo}\n\nOutput JSON only:",
                 summary_raw = Some(parsed.description);
             }
         }
-        if summary_raw.is_none() {
-            summary_raw = Some(deterministic_dataset_description(dataset_id, &field_names));
+        let summary_invalid = summary_raw
+            .as_deref()
+            .map(|s| !valid_ascii_span(s, 8, 220) || invalid_placeholder_text(s))
+            .unwrap_or(true);
+        if summary_invalid {
+            let followup_prompt = format!(
+                "The previous compile was missing/invalid.\n\
+Return exactly {{\"description\":\"...\"}} with one or two short ASCII sentences (<=40 words), no placeholders.\n\
+Dataset: {dataset_id}\n\
+Fields: {fields}\n\
+Output JSON only:",
+                dataset_id = dataset_id,
+                fields = field_names.join(", ")
+            );
+            if let Some(v) = llm_compile_pass_json(
+                llm.clone(),
+                followup_prompt,
+                "react.catalog.enrich.dataset.compile_followup",
+                llm_timeout_secs,
+            )
+            .await
+            {
+                if let Ok(parsed) = serde_json::from_value::<DatasetDescriptionCompile>(v) {
+                    summary_raw = Some(parsed.description);
+                }
+            }
         }
-        if let Some(text) = summary_raw {
+        if let Some(text) = summary_raw.filter(|s| {
+            valid_ascii_span(s, 8, 220) && !invalid_placeholder_text(s)
+        }) {
             debug!(
                 "{} LLM Enrich: dataset description compiled for dataset_id='{}': {}",
                 chrono::Utc::now().to_rfc3339(),
                 dataset_id,
                 text
             );
-            // Guard against placeholder/echoed prompt content (e.g., when LLM backend echoes the prompt)
-            let is_placeholder = text.contains('<')
-                || text.contains('>')
-                || text.to_lowercase().contains("strict json");
-            // Heuristic: ensure short, printable, and not obviously garbage
-            let s_trim = text.trim();
-            let ascii_ok = s_trim.chars().all(|c| c.is_ascii() && !c.is_control());
-            let len_ok = s_trim.len() <= 220 && s_trim.len() >= 8;
-            if !is_placeholder && ascii_ok && len_ok {
-                let key = keyspace.catalog_key(scope, dataset_id);
-                if let Ok(mut v) = storage.get_json(&key).await {
-                    // Do NOT overwrite an existing human-edited description.
-                    let mut should_write = true;
-                    if let Some(obj) = v.as_object() {
-                        if obj
-                            .get("description")
-                            .and_then(|x| x.as_str())
-                            .map(|s| !s.trim().is_empty())
-                            .unwrap_or(false)
-                        {
-                            should_write = false;
-                        }
-                    }
-                    if should_write {
-                        v.as_object_mut().map(|obj| {
-                            obj.insert(
-                                "description".to_string(),
-                                serde_json::Value::String(text.clone()),
-                            )
-                        });
-                        storage.put_json(&key, &v).await?;
+            let key = keyspace.catalog_key(scope, dataset_id);
+            if let Ok(mut v) = storage.get_json(&key).await {
+                // Do NOT overwrite an existing human-edited description.
+                let mut should_write = true;
+                if let Some(obj) = v.as_object() {
+                    if obj
+                        .get("description")
+                        .and_then(|x| x.as_str())
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false)
+                    {
+                        should_write = false;
                     }
                 }
+                if should_write {
+                    v.as_object_mut().map(|obj| {
+                        obj.insert(
+                            "description".to_string(),
+                            serde_json::Value::String(text.clone()),
+                        )
+                    });
+                    storage.put_json(&key, &v).await?;
+                }
             }
+        } else {
+            return Err(format!(
+                "catalog dataset description compile incomplete for '{}': missing valid description after follow-up",
+                dataset_id
+            ));
         }
     }
 
@@ -816,14 +827,63 @@ Dataset: {ns}\nFieldNames: {fnames}\nReasoning notes:\n{memo}\n\nOutput JSON onl
                     }
                 }
             }
-            // Deterministic fallback for any missing field descriptions.
-            for fname in fields.iter() {
-                if !desc_map_all.contains_key(fname) {
-                    desc_map_all.insert(
-                        fname.clone(),
-                        format!("Field {} from dataset {}.", fname, dataset_id),
-                    );
+            // Follow-up pass for missing field descriptions (hard cutover: no default filler).
+            let missing_desc: Vec<String> = fields
+                .iter()
+                .filter(|f| !desc_map_all.contains_key((*f).as_str()))
+                .cloned()
+                .collect();
+            if !missing_desc.is_empty() {
+                let missing_json = format!(
+                    "[{}]",
+                    missing_desc
+                        .iter()
+                        .map(|n| format!("\"{}\"", n))
+                        .collect::<Vec<String>>()
+                        .join(",")
+                );
+                let followup_desc = format!(
+                    "Complete missing field descriptions only.\n\
+Return exactly {{\"descriptionByField\": {{\"<field>\": \"...\"}}}} for the requested missing fields.\n\
+Rules: keys MUST match MissingFieldNames exactly; one sentence <= 20 words; ASCII only; no placeholders.\n\
+Dataset: {ns}\nMissingFieldNames: {missing}\nReasoning notes:\n{memo}\n\nOutput JSON only:",
+                    ns = dataset_id,
+                    missing = missing_json,
+                    memo = desc_reason
+                );
+                if let Some(v) = llm_compile_pass_json(
+                    llm.clone(),
+                    followup_desc,
+                    "react.catalog.enrich.fields.compile_descriptions_followup",
+                    llm_timeout_secs,
+                )
+                .await
+                {
+                    if let Ok(parsed) = serde_json::from_value::<FieldDescriptionsCompile>(v) {
+                        for (k, val) in parsed.description_by_field {
+                            if !missing_desc.iter().any(|m| m == &k) {
+                                continue;
+                            }
+                            let s2 = val.trim();
+                            if !s2.is_empty() && !invalid_placeholder_text(s2) {
+                                desc_map_all.insert(k, s2.to_string());
+                            }
+                        }
+                    }
                 }
+            }
+            let still_missing_desc: Vec<String> = fields
+                .iter()
+                .filter(|f| !desc_map_all.contains_key((*f).as_str()))
+                .cloned()
+                .collect();
+            if !still_missing_desc.is_empty() {
+                return Err(format!(
+                    "catalog field description compile incomplete for '{}': missing {} fields after follow-up ({})",
+                    dataset_id,
+                    still_missing_desc.len(),
+                    still_missing_desc.into_iter().take(12).collect::<Vec<_>>().join(", ")
+                ));
             }
 
             // Synonyms batch

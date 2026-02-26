@@ -20,7 +20,7 @@ async fn provider_write_semantic_uses_keyspace_key_and_roundtrips() {
         workspace: "w".into(),
         project_id: "p".into(),
     };
-    let ns = "events";
+    let ns = "AwsDataCatalog.db.events";
     let sem = SemanticModel {
         dataset_id: ns.into(),
         catalog: String::new(),
@@ -55,7 +55,7 @@ async fn provider_write_catalog_uses_keyspace_key_and_roundtrips() {
         workspace: "w".into(),
         project_id: "p".into(),
     };
-    let ns = "events";
+    let ns = "AwsDataCatalog.db.events";
     let cat = DataCatalog {
         dataset_id: ns.into(),
         catalog: String::new(),
