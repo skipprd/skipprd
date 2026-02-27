@@ -96,6 +96,15 @@ pub async fn build_grounded_raw_dataset_set(
     }
     out.candidates = uniq.iter().cloned().collect();
 
+    let cfg_container = source_container_from_cfg(ctx);
+    let cfg_namespace = source_namespace_from_cfg(ctx);
+    tracing::info!(
+        "grounding: configured container={:?}, namespace={:?}, {} unique candidate(s)",
+        cfg_container,
+        cfg_namespace,
+        uniq.len()
+    );
+
     for ds in uniq.into_iter() {
         if parse_dataset_fqn_3(&ds).is_none() {
             out.rejected.push(RejectedDataset {
@@ -106,17 +115,26 @@ pub async fn build_grounded_raw_dataset_set(
             continue;
         }
         if !is_in_source_container(ctx, &ds) {
+            let parts = parse_dataset_fqn_3(&ds);
             out.rejected.push(RejectedDataset {
                 dataset_id: ds,
-                reason: "dataset is not in configured source container".to_string(),
+                reason: format!(
+                    "dataset is not in configured source container (got {:?}, expected {:?})",
+                    parts.as_ref().map(|p| &p.catalog),
+                    cfg_container
+                ),
             });
             continue;
         }
         if !is_in_source_namespace(ctx, &ds) {
+            let parts = parse_dataset_fqn_3(&ds);
             out.rejected.push(RejectedDataset {
                 dataset_id: ds,
-                reason: "dataset is not in configured raw source namespace (cleanse/silver only)"
-                    .to_string(),
+                reason: format!(
+                    "not in configured raw source namespace (got {:?}, expected {:?})",
+                    parts.as_ref().map(|p| &p.schema),
+                    cfg_namespace
+                ),
             });
             continue;
         }

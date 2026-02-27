@@ -5463,9 +5463,17 @@ Apply these fixes in the output.",
                                         it.evidence.clear();
                                     }
                                 }
+                                let pre_raw_ids: Vec<String> = plan.tasks.iter().map(|t| t.dataset_id.clone()).collect();
                                 let removed_non_raw_initial =
                                     Self::enforce_cleanse_plan_raw_only(&mut plan);
                                 if removed_non_raw_initial > 0 {
+                                    let post_raw_ids: Vec<String> = plan.tasks.iter().map(|t| t.dataset_id.clone()).collect();
+                                    tracing::warn!(
+                                        "enforce_cleanse_plan_raw_only: removed {} non-raw tasks. before={:?}, after={:?}",
+                                        removed_non_raw_initial,
+                                        pre_raw_ids,
+                                        post_raw_ids,
+                                    );
                                     Self::push_snapshot_array_event(
                                         &mut plan.project_snapshot,
                                         "deterministic_plan_repairs",
@@ -5580,9 +5588,28 @@ Apply these fixes in the output.",
                                 }
                                 candidates.sort();
                                 candidates.dedup();
+                                tracing::info!(
+                                    "cleanse plan grounding: {} candidate dataset(s) before schema validation: {:?}",
+                                    candidates.len(),
+                                    candidates
+                                );
                                 let grounded =
                                     crate::data_engineer::dataset_truth::build_grounded_raw_dataset_set(&actx, &actx.warehouse, &candidates)
                                         .await;
+                                if !grounded.rejected.is_empty() {
+                                    for rej in grounded.rejected.iter() {
+                                        tracing::warn!(
+                                            "cleanse plan grounding: rejected dataset_id={:?} reason={:?}",
+                                            rej.dataset_id,
+                                            rej.reason
+                                        );
+                                    }
+                                }
+                                tracing::info!(
+                                    "cleanse plan grounding: {} allowed, {} rejected",
+                                    grounded.allowed.len(),
+                                    grounded.rejected.len()
+                                );
                                 crate::data_engineer::plan::prune_cleanse_plan_to_grounded_raw_datasets(
                                     &mut plan,
                                     &grounded.allowed,
@@ -5603,7 +5630,16 @@ Apply these fixes in the output.",
                                             200,
                                         );
                                     } else {
-                                        return Err("cleanse plan contained no grounded raw datasets and deterministic synthesis had no grounded raw inputs".to_string());
+                                        return Err(format!(
+                                            "cleanse plan grounding failed: 0 datasets survived. \
+                                            candidates={:?}, allowed={:?}, rejected=[{}]",
+                                            grounded.candidates,
+                                            grounded.allowed,
+                                            grounded.rejected.iter()
+                                                .map(|r| format!("{}:{}", r.dataset_id, r.reason))
+                                                .collect::<Vec<_>>()
+                                                .join(", ")
+                                        ));
                                     }
                                 }
                                 let enrich_ids: Vec<String> = plan
