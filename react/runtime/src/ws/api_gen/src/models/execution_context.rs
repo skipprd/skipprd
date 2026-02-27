@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 pub struct ExecutionContext {
     /// Suite-defined plan kind token.
     #[serde(rename = "plan_kind", skip_serializing_if = "Option::is_none")]
-    pub plan_kind: Option<models::PlanKind>,
+    pub plan_kind: Option<String>,
     #[serde(rename = "plan_key", skip_serializing_if = "Option::is_none")]
     pub plan_key: Option<String>,
     #[serde(rename = "workgroup_id", skip_serializing_if = "Option::is_none")]

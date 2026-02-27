@@ -14,7 +14,7 @@ Name | Type | Description | Notes
 **step_idx** | **i32** | Index of the backing ThreadStep::Phase in the thread log. | 
 **phase** | **String** |  | 
 **from_phase** | Option<**String**> |  | [optional]
-**reason_code** | Option<[**models::PhaseReasonCode**](PhaseReasonCode.md)> |  | [optional]
+**reason_code** | Option<**String**> | Suite-defined phase transition reason token. | [optional]
 **reason_detail** | Option<[**models::PhaseReasonDetail**](PhaseReasonDetail.md)> |  | [optional]
 **ts** | **String** | RFC3339 timestamp stored in the thread log for this phase transition. | 
 **runs** | [**Vec<models::PhaseRun>**](PhaseRun.md) | List of start/end windows for this phase across the thread lifetime. Each re-entry into the phase appends a new run.  | 

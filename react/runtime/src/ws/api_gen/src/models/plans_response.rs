@@ -32,7 +32,7 @@ pub struct PlansResponse {
 }
 
 impl PlansResponse {
-    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, thread_id: String) -> PlansResponse {
+    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, thread_id: String, plans: Vec<models::PlanSnapshot>) -> PlansResponse {
         PlansResponse {
             v,
             r#type,
@@ -41,7 +41,7 @@ impl PlansResponse {
             thread_id,
             thread_seq: None,
             for_cid: None,
-            plans: vec![],
+            plans,
         }
     }
 }

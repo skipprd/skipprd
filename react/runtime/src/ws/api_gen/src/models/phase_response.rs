@@ -34,8 +34,9 @@ pub struct PhaseResponse {
     pub phase: String,
     #[serde(rename = "from_phase", skip_serializing_if = "Option::is_none")]
     pub from_phase: Option<String>,
+    /// Suite-defined phase transition reason token.
     #[serde(rename = "reason_code", skip_serializing_if = "Option::is_none")]
-    pub reason_code: Option<models::PhaseReasonCode>,
+    pub reason_code: Option<String>,
     #[serde(rename = "reason_detail", skip_serializing_if = "Option::is_none")]
     pub reason_detail: Option<models::PhaseReasonDetail>,
     /// RFC3339 timestamp stored in the thread log for this phase transition.

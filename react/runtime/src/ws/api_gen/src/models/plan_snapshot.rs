@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlanSnapshot {
+    /// Suite-defined plan kind token.
     #[serde(rename = "planKind")]
-    pub plan_kind: models::PlanKind,
+    pub plan_kind: String,
     #[serde(rename = "planKey")]
     pub plan_key: String,
     #[serde(rename = "status")]
@@ -30,7 +31,7 @@ pub struct PlanSnapshot {
 }
 
 impl PlanSnapshot {
-    pub fn new(plan_kind: models::PlanKind, plan_key: String, status: models::PlanStatus, tasks: Vec<models::PlanTask>, work_groups: Vec<models::PlanWorkGroup>) -> PlanSnapshot {
+    pub fn new(plan_kind: String, plan_key: String, status: models::PlanStatus, tasks: Vec<models::PlanTask>, work_groups: Vec<models::PlanWorkGroup>) -> PlanSnapshot {
         PlanSnapshot {
             plan_kind,
             plan_key,
