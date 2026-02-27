@@ -1024,7 +1024,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         // Seed a cleanse plan with sql_model done and schema_contract pending.
@@ -1154,7 +1154,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         let plan_key = plan::new_cleanse_plan_key(&ctx);
@@ -1249,7 +1249,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         let plan_key = plan::new_cleanse_plan_key(&ctx);
@@ -1373,7 +1373,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         // Seed a model plan with sql_model done and schema_contract pending.
@@ -1470,7 +1470,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         let plan_key = plan::new_model_plan_key(&ctx);
@@ -1569,7 +1569,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         let plan_key = plan::new_model_plan_key(&ctx);
@@ -1698,7 +1698,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         // Seed model SQL so allowed_columns can be derived.
@@ -1808,7 +1808,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         // Seed model plan.

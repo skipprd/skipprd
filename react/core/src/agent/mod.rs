@@ -1,5 +1,4 @@
 use serde_json::Value;
-use std::any::Any;
 use std::sync::Arc;
 use tracing::info;
 
@@ -63,11 +62,11 @@ pub struct AgentCtx {
     /// Optional explicit execution context for hierarchical UI rendering.
     pub exec_ctx: Option<ExecutionContext>,
 
-    /// Optional runtime-specific context/configuration blob (type-erased).
+    /// Resolved runtime configuration (parsed YAML config).
     ///
-    /// Suites/tools may downcast this to access runtime wiring/config without
-    /// coupling the core runner to any particular config type.
-    pub runtime: Option<Arc<dyn Any + Send + Sync>>,
+    /// Injected by the runtime so suites/tools can access warehouse, dbt,
+    /// and other provider configuration without coupling to parsing logic.
+    pub resolved_config: Option<Arc<crate::resolved_config::ReactResolvedConfig>>,
 }
 
 pub struct Agent;
@@ -1424,7 +1423,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: None,
+            resolved_config: None,
         };
 
         let out = Agent::run_until_block(
@@ -1494,7 +1493,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: None,
+            resolved_config: None,
         };
         let opts = crate::llm::LlmCallOptions {
             prompt_id: "react_core.agent.tests.capture_options",
@@ -1550,7 +1549,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: None,
+            resolved_config: None,
         };
 
         let out = Agent::run_until_block(
@@ -1671,7 +1670,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: None,
+            resolved_config: None,
         };
 
         let out = Agent::run_until_block(
@@ -1743,7 +1742,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: None,
+            resolved_config: None,
         };
 
         let res = Agent::run_until_block(
@@ -1879,7 +1878,7 @@ mod tests {
                     ("suite".to_string(), serde_json::json!("suite_x")),
                 ]),
             }),
-            runtime: None,
+            resolved_config: None,
         };
 
         let out = Agent::run_until_block(
@@ -1985,7 +1984,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: None,
+            resolved_config: None,
         };
 
         let out = Agent::run_until_block_non_interactive(
@@ -2053,7 +2052,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: None,
+            resolved_config: None,
         };
 
         let out = Agent::run_until_block_non_interactive(

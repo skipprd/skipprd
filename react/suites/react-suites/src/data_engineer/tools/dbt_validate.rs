@@ -274,10 +274,7 @@ impl Tool for DbtValidateTool {
                 .to_string()
         })?;
 
-        let dialect = ctx
-            .runtime
-            .as_ref()
-            .and_then(|_| crate::config::resolved_config_from_ctx(ctx))
+        let dialect = crate::config::resolved_config_from_ctx(ctx)
             .map(crate::data_engineer::dbt_repair::remediate::active_provider_dialect)
             .unwrap_or_else(|| "Unknown SQL dialect".to_string());
 
@@ -801,7 +798,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         let tool = DbtValidateTool {

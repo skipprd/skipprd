@@ -537,7 +537,7 @@ mod tests {
             vector: None,
             thread_store: Some(store.clone()),
             exec_ctx: None,
-            runtime: None,
+            resolved_config: None,
         };
 
         let policy = SqlValidatedPolicy::default();

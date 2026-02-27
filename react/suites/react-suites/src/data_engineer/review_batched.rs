@@ -1338,10 +1338,7 @@ pub async fn run_batched_review(
         vector: sctx.vector.clone(),
         thread_store: Some(thread_store.clone()),
         exec_ctx: None,
-        runtime: sctx
-            .resolved_config
-            .clone()
-            .map(|c| c as Arc<dyn std::any::Any + Send + Sync>),
+        resolved_config: sctx.resolved_config.clone(),
     };
 
     // Determine which plan (if any) to use for batching + persistence target.
@@ -1971,7 +1968,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: None,
+            resolved_config: None,
         };
 
         // dbt files

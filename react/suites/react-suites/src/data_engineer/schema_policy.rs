@@ -800,7 +800,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: None,
+            resolved_config: None,
         }
     }
 

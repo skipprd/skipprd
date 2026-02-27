@@ -884,7 +884,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         let (outcome, notes) = llm_patch_loop_single_file(

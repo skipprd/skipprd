@@ -595,7 +595,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         struct AlwaysFailDbt;
@@ -703,7 +703,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         struct CompileOkRunFailDbt;
@@ -836,7 +836,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
         // Attach a thread store so llm_call steps can be persisted.
         let store = react_core::session::ThreadStore::new(
@@ -994,7 +994,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         struct SqlFailureOnceDbt;
@@ -1112,7 +1112,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         struct SqlFailureOnceDbt;
@@ -1218,7 +1218,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(minimal_cfg()),
         };
 
         struct MissingMacroThenOkDbt {

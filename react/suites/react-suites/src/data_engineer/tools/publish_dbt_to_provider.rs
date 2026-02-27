@@ -409,17 +409,10 @@ fn extract_relations(m: &Manifest) -> Vec<PublishedRelation> {
 }
 
 fn resolved_config(ctx: &AgentCtx) -> Result<&ReactResolvedConfig, String> {
-    let any = ctx
-        .runtime
+    ctx.resolved_config
         .as_ref()
-        .ok_or_else(|| "resolved_config missing (server must inject resolved YAML config into AgentCtx.runtime)".to_string())?;
-    if let Some(cfg) = any.downcast_ref::<Arc<ReactResolvedConfig>>() {
-        return Ok(cfg.as_ref());
-    }
-    if let Some(cfg) = any.downcast_ref::<ReactResolvedConfig>() {
-        return Ok(cfg);
-    }
-    Err("resolved_config has unexpected type in AgentCtx.runtime".to_string())
+        .map(|c| c.as_ref())
+        .ok_or_else(|| "resolved_config missing (server must inject resolved YAML config into AgentCtx.resolved_config)".to_string())
 }
 
 #[cfg(test)]
@@ -634,7 +627,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(cfg.clone() as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(cfg.clone()),
         };
 
         let tool = PublishDbtToProviderTool {

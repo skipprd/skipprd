@@ -4103,10 +4103,7 @@ Apply these fixes in the output.",
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
             exec_ctx: None,
-            runtime: sctx
-                .resolved_config
-                .clone()
-                .map(|c| c as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: sctx.resolved_config.clone(),
         };
 
         match Agent::run_until_block(
@@ -4183,10 +4180,7 @@ Apply these fixes in the output.",
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
             exec_ctx: None,
-            runtime: sctx
-                .resolved_config
-                .clone()
-                .map(|c| c as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: sctx.resolved_config.clone(),
         };
 
         let prompt = Self::inject_review_question(question);
@@ -4254,10 +4248,7 @@ Apply these fixes in the output.",
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
             exec_ctx: None,
-            runtime: sctx
-                .resolved_config
-                .clone()
-                .map(|c| c as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: sctx.resolved_config.clone(),
         }
     }
 
@@ -4293,10 +4284,7 @@ Apply these fixes in the output.",
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
             exec_ctx: None,
-            runtime: sctx
-                .resolved_config
-                .clone()
-                .map(|c| c as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: sctx.resolved_config.clone(),
         }
     }
 
@@ -6222,10 +6210,7 @@ Apply these fixes in the output.",
                         vector: sctx.vector.clone(),
                         thread_store: Some(thread_store.clone()),
                         exec_ctx: None,
-                        runtime: sctx
-                            .resolved_config
-                            .clone()
-                            .map(|c| c as Arc<dyn std::any::Any + Send + Sync>),
+                        resolved_config: sctx.resolved_config.clone(),
                     };
 
                     // Plan-driven batching: load the approved plan, update progress from the thread log,
@@ -8849,10 +8834,7 @@ Apply these fixes in the output.",
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store.clone()),
             exec_ctx: None,
-            runtime: sctx
-                .resolved_config
-                .clone()
-                .map(|c| c as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: sctx.resolved_config.clone(),
         };
 
         let mut last_final: Option<react_core::session::ThreadResult> = None;

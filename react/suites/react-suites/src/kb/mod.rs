@@ -70,7 +70,7 @@ impl KbSuite {
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
             exec_ctx: None,
-            runtime: None,
+            resolved_config: None,
         };
 
         match Agent::run_until_block(&registry, &actx, sys, tools_card, question, {

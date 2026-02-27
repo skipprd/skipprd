@@ -1223,7 +1223,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(cfg as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(cfg),
         };
 
         let tool = StagingModelTool { datasets: None };
@@ -1478,7 +1478,7 @@ mod tests {
             vector: None,
             thread_store: None,
             exec_ctx: None,
-            runtime: Some(cfg as Arc<dyn std::any::Any + Send + Sync>),
+            resolved_config: Some(cfg),
         };
 
         // Seed an approved cleanse plan with invariants/checklist for this dataset.
