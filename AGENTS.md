@@ -1,5 +1,15 @@
 # AGENTS.md
 
+## Design principles
+
+When making changes to this codebase, follow these principles in order of priority:
+
+1. **Compile-time guarantees:** Prefer types, enums, and trait bounds over runtime checks. If an invariant can be enforced by the compiler, it must be. Use Rust's type system (`enum` variants, `Option`, `Result`, newtypes) to make illegal states unrepresentable. Feature-gated code (`#[cfg(feature = "...")]`) must compile cleanly when the feature is enabled — CI runs `--all-features`.
+
+2. **Design simplicity:** Favour the simplest design that satisfies the requirements. Avoid over-abstraction. A flat function is better than a trait hierarchy with one implementor. If a module exists only to re-export, remove the indirection.
+
+3. **DRY (Don't Repeat Yourself):** Extract shared logic into functions, traits, or shared modules. When the same pattern appears in multiple suites/providers/tools, lift it into `react-core` or a shared utility. Duplicated error messages, validation logic, or serialization patterns are bugs waiting to diverge.
+
 ## Cursor Cloud specific instructions
 
 ### Overview
@@ -50,3 +60,4 @@ For full LLM functionality, set `LLM_API_KEY` env var and update the config's `l
 3. **`cargo clippy` warnings exist** — run without `-D warnings` to avoid false build failures on existing code.
 4. **OpenAPI generated code** in `react/runtime/src/ws/api_gen/` — this code is auto-generated and has its own formatting style. Don't modify manually.
 5. **WebSocket API uses camelCase field names** — e.g. `suiteId`, `agentType`, `threadId` (not snake_case). Refer to the OpenAPI spec in `react/runtime/openapi/ws-core.yaml`.
+6. **CI runs `cargo test --release --all --all-features`** for the `skippr` build. Feature-gated code (e.g. `llama_cpp`) must compile even when that feature is active. Always verify with `cargo check --all-features` locally before pushing.
