@@ -1,0 +1,29 @@
+version: 1
+
+server:
+  port: 8787
+
+storage:
+  mode: local
+  path: "./.react"
+
+scope:
+  tenant: "smoketest"
+  workspace: "default"
+  project_id: "demo"
+
+llm:
+  provider: "null"
+
+providers:
+  warehouse:
+    kind: postgres
+    database: smoketest
+    schema: public
+
+  catalog:
+    enabled: false
+  dbt:
+    enabled: false
+  vector:
+    enabled: false
