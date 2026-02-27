@@ -58,42 +58,43 @@ jobs:
 #      - name: Run tests
 #        run: cargo test
 
-  cleanup:
-    runs-on: ubuntu-latest
-    container:
-      image: python:3.8-alpine
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
-      - name: Install dependencies
-        run: |
-          apk add --no-cache groff less jq
-          pip install awscli
-      - name: Configure AWS and clean resources
-        run: |
-          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws configure set default.region us-east-1          
-          aws s3 rm s3://skippr-e2e-sample-data-output --recursive
-          aws s3 rm s3://skippr-metadata-test --recursive
-          aws glue delete-database --catalog-id 353855562591 --name bikehire || true
+  # --- Skippr-specific jobs disabled (skippr is separate from react) ---
+  # cleanup:
+  #   runs-on: ubuntu-latest
+  #   container:
+  #     image: python:3.8-alpine
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v2
+  #     - name: Install dependencies
+  #       run: |
+  #         apk add --no-cache groff less jq
+  #         pip install awscli
+  #     - name: Configure AWS and clean resources
+  #       run: |
+  #         aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #         aws configure set default.region us-east-1
+  #         aws s3 rm s3://skippr-e2e-sample-data-output --recursive
+  #         aws s3 rm s3://skippr-metadata-test --recursive
+  #         aws glue delete-database --catalog-id 353855562591 --name bikehire || true
 
-  purge_dynamodb:
-    runs-on: ubuntu-latest
-    container:
-      image: node:14
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: us-east-1
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
-      - name: Install dependencies
-        run: |
-          npm install aws-sdk
-      - name: Run script
-        run: node _files/purge-dynamodb.js
+  # purge_dynamodb:
+  #   runs-on: ubuntu-latest
+  #   container:
+  #     image: node:14
+  #   env:
+  #     AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #     AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #     AWS_DEFAULT_REGION: us-east-1
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v2
+  #     - name: Install dependencies
+  #       run: |
+  #         npm install aws-sdk
+  #     - name: Run script
+  #       run: node _files/purge-dynamodb.js
 
   react_cleanup:
     name: React cleanup
@@ -265,19 +266,17 @@ jobs:
 #          rust-version: stable
 #          architecture_name: macos_x86
 
-  linux_x86:
-#    needs: smoke_test
-    name: cargo build and test (linux x86)
-    runs-on:
-      - ubuntu-latest-32-cores
-#      - ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Build linux x86 release
-        uses: ./.github/actions/rust-build-release
-        with:
-          rust-version: stable
-          architecture_name: linux_x86
+  # linux_x86:  # Skippr build disabled
+  #   name: cargo build and test (linux x86)
+  #   runs-on:
+  #     - ubuntu-latest-32-cores
+  #   steps:
+  #     - uses: actions/checkout@v3
+  #     - name: Build linux x86 release
+  #       uses: ./.github/actions/rust-build-release
+  #       with:
+  #         rust-version: stable
+  #         architecture_name: linux_x86
 
   react_binary_build:
     name: react build (${{ matrix.name }})
@@ -403,117 +402,12 @@ jobs:
 #          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 #          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
-  linux_x86_test:
-    needs:
-      - cleanup
-      - purge_dynamodb
-      - linux_x86
-    name: test build (linux x86)
-    runs-on:
-      - ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Test linux x86 release
-        uses: ./.github/actions/e2e/bike_hire
-#        uses: ./.github/actions/e2e/bike_hire_many
-        with:
-          architecture_name: linux_x86
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
-
-  linux_x86_llm_tests:
-    needs:
-      - linux_x86
-    name: LLM functional tests (linux x86)
-    runs-on:
-      - ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake
-      - name: Build with local llama feature (no model)
-        run: |
-          cargo build --features llama_cpp
-      - name: Run LLM functional tests
-        env:
-          RUST_BACKTRACE: 1
-        run: |
-          cargo test --tests -- --nocapture llm_
-
-  chaos_mode_test:
-    needs:
-      - cleanup
-      - purge_dynamodb
-      - linux_x86
-    name: Chaos Mode (linux x86)
-    runs-on:
-      - ubuntu-latest-32-cores
-    #      - ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Test linux x86 release
-        uses: ./.github/actions/e2e/bike_hire_many
-        with:
-          architecture_name: linux_x86
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
-
-  s3_wal_test:
-    needs:
-      - cleanup
-      - purge_dynamodb
-      - linux_x86
-    name: S3 WAL (linux x86)
-    runs-on:
-      - ubuntu-latest-32-cores
-    #      - ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Test linux x86 release
-        uses: ./.github/actions/e2e/bike_hire_s3_wal_many
-        with:
-          architecture_name: linux_x86
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
-
-  deadletters_test:
-    needs:
-      - cleanup
-      - purge_dynamodb
-      - linux_x86
-    name: Deadletters Test
-    runs-on:
-      - ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Test linux x86 release
-        uses: ./.github/actions/e2e/deadletters
-        with:
-          architecture_name: linux_x86
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
+  # --- All skippr E2E/test/LLM jobs disabled ---
+  # linux_x86_test:
+  # linux_x86_llm_tests:
+  # chaos_mode_test:
+  # s3_wal_test:
+  # deadletters_test:
 
 
 #  linux_x86_event_types_test:
@@ -540,49 +434,37 @@ jobs:
 #          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
 
-  publish:
-    name: Publish Release
-    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
-    needs:
-      - linux_x86_test
-      - chaos_mode_test
-#      - deadletters_test
-      - s3_wal_test
-#      - macos_arm64
-#      - macos_x86
-#      - macos_arm64_test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out code
-        uses: actions/checkout@v3
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Compress Release Artifacts
-        run: |
-          ls -la .
-          tar -czvf skippr-linux_x86.tar.gz skippr-linux_x86/
-#          tar -czvf skippr-macos_arm64.tar.gz skippr-macos_arm64/
-#          tar -czvf skippr-macos_x86.tar.gz skippr-macos_x86/
-      - name: Release builds to GitHub
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            install.sh
-            ./skippr-linux_x86.tar.gz
-#            ./skippr-macos_arm64.tar.gz
-#            ./skippr-macos_x86.tar.gz
-          tag_name: ${{ github.ref_name }}
-          body: ${{ github.event.head_commit.message }}
-          body_path: CHANGELOG.txt
-          draft: false
-          prerelease: false
-          #          target_commitish: ${{ github.sha }}
-          name: Release ${{ github.ref_name }}
-          token: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
-          repository: skipprd/skipprd
-          fail_on_unmatched_files: true
+  # publish:  # Skippr publish disabled
+  #   name: Publish Release
+  #   if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
+  #   needs:
+  #     - linux_x86_test
+  #     - chaos_mode_test
+  #     - s3_wal_test
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Check out code
+  #       uses: actions/checkout@v3
+  #     - name: Download Artifacts
+  #       uses: actions/download-artifact@v4
+  #     - name: Compress Release Artifacts
+  #       run: |
+  #         tar -czvf skippr-linux_x86.tar.gz skippr-linux_x86/
+  #     - name: Release builds to GitHub
+  #       uses: softprops/action-gh-release@v1
+  #       with:
+  #         files: |
+  #           install.sh
+  #           ./skippr-linux_x86.tar.gz
+  #         tag_name: ${{ github.ref_name }}
+  #         body: ${{ github.event.head_commit.message }}
+  #         body_path: CHANGELOG.txt
+  #         draft: false
+  #         prerelease: false
+  #         name: Release ${{ github.ref_name }}
+  #         token: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+  #         repository: skipprd/skipprd
+  #         fail_on_unmatched_files: true
 
   publish_react:
     name: Publish React Release Assets
@@ -618,43 +500,30 @@ jobs:
           repository: skipprd/skipprd
           fail_on_unmatched_files: false
 
-  dockerize:
-    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
-    needs:
-      - publish
-#      - macos_arm64
-#      - macos_x86
-#      - linux_x86
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out code
-        uses: actions/checkout@v3
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Docker Login
-        uses: docker/login-action@v2
-        with:
-          username: skippr
-          password: ${{ secrets.DOCKER_HUB_PASS }}
-
-      - name: ls artifacts
-        run: |
-          ls -la .
-
-      - name: Build and push Docker image
-        run: |
-          docker build -t ${{ env.CONTAINER_IMAGE }} -f Dockerfile .
-          
-          docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_IMAGE }}
-          docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_IMAGE }}
-
-          docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
-          docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
-
-          docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/skippr:stable
-          docker push ${{ env.DOCKER_HUB_REPO }}/skippr:stable
+  # dockerize:  # Skippr Docker disabled
+  #   if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
+  #   needs:
+  #     - publish
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Check out code
+  #       uses: actions/checkout@v3
+  #     - name: Download Artifacts
+  #       uses: actions/download-artifact@v4
+  #     - name: Docker Login
+  #       uses: docker/login-action@v2
+  #       with:
+  #         username: skippr
+  #         password: ${{ secrets.DOCKER_HUB_PASS }}
+  #     - name: Build and push Docker image
+  #       run: |
+  #         docker build -t ${{ env.CONTAINER_IMAGE }} -f Dockerfile .
+  #         docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_IMAGE }}
+  #         docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_IMAGE }}
+  #         docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
+  #         docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
+  #         docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/skippr:stable
+  #         docker push ${{ env.DOCKER_HUB_REPO }}/skippr:stable
 
 
 #  linux_x86_test_many:
