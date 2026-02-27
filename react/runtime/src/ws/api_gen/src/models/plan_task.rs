@@ -24,7 +24,7 @@ pub struct PlanTask {
     #[serde(rename = "checklist")]
     pub checklist: Vec<models::PlanChecklistItem>,
     #[serde(rename = "details", skip_serializing_if = "Option::is_none")]
-    pub details: Option<serde_json::Value>,
+    pub details: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl PlanTask {
@@ -39,5 +39,4 @@ impl PlanTask {
         }
     }
 }
-
 

@@ -29,14 +29,14 @@ pub struct PlansChangedResponse {
     pub for_cid: Option<String>,
     /// Which plan kinds changed. UI should fetch `plans` to get latest snapshots.
     #[serde(rename = "changed")]
-    pub changed: Vec<models::PlanKind>,
+    pub changed: Vec<String>,
     /// Plan keys that changed (same order as `changed` where available).
     #[serde(rename = "changed_plan_keys", skip_serializing_if = "Option::is_none")]
     pub changed_plan_keys: Option<Vec<String>>,
 }
 
 impl PlansChangedResponse {
-    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, thread_id: String, changed: Vec<models::PlanKind>) -> PlansChangedResponse {
+    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, thread_id: String, changed: Vec<String>) -> PlansChangedResponse {
         PlansChangedResponse {
             v,
             r#type,

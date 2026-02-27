@@ -4,7 +4,7 @@
 
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
-**plan_kind** | [**models::PlanKind**](PlanKind.md) |  | 
+**plan_kind** | **String** | Suite-defined plan kind token. | 
 **plan_key** | **String** |  | 
 **status** | [**models::PlanStatus**](PlanStatus.md) |  | 
 **tasks** | [**Vec<models::PlanTask>**](PlanTask.md) |  | 
