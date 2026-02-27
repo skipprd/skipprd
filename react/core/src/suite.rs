@@ -1,0 +1,200 @@
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::discover::Metadata;
+use crate::helpers::progress::ProgressUi;
+use crate::keyspace::{DefaultKeyspace, Keyspace};
+use crate::llm::{DynLlm, NullModel};
+use crate::providers::{
+    CatalogProvider, DatasetCatalogProvider, DbtProvider, NullSecretsProvider,
+    NullWarehouseProvider, QueryProvider, SecretsProvider, StateStore, VectorStore,
+    WarehouseProvider,
+};
+use crate::resolved_config::ReactResolvedConfig;
+use crate::scope::RequestScope;
+use crate::storage::{InMemoryStorageAdapter, StorageAdapter};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::sync::mpsc::UnboundedSender;
+
+/// Standardized suite output type.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum FlowFrame {
+    Final {
+        kind: String,
+        payload: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+    },
+    Review {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meta: Option<Value>,
+    },
+    AwaitUser { prompt: String },
+    AwaitApproval { prompt: String },
+}
+
+/// Context passed to suites.
+#[derive(Clone)]
+pub struct SuiteCtx {
+    pub storage: Arc<dyn StorageAdapter>,
+    pub scope: RequestScope,
+    pub keyspace: Arc<dyn Keyspace>,
+    pub secrets: Arc<dyn SecretsProvider>,
+    pub llm: DynLlm,
+    pub resolved_config: Option<Arc<ReactResolvedConfig>>,
+    pub trace_tx: Option<UnboundedSender<String>>,
+
+    pub query: Option<Arc<dyn QueryProvider>>,
+    pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
+    pub warehouse: Arc<dyn WarehouseProvider>,
+    pub catalog: Option<Arc<dyn CatalogProvider>>,
+    pub vector: Option<Arc<dyn VectorStore>>,
+    pub dbt: Option<Arc<dyn DbtProvider>>,
+    pub state: Option<Arc<dyn StateStore>>,
+
+    pub _metadata_stub: Option<Arc<Metadata>>,
+    pub _progress_ui_stub: Option<Arc<ProgressUi>>,
+}
+
+impl SuiteCtx {
+    pub fn new(
+        storage: Arc<dyn StorageAdapter>,
+        secrets: Arc<dyn SecretsProvider>,
+        llm: DynLlm,
+        scope: RequestScope,
+        keyspace: Arc<dyn Keyspace>,
+    ) -> Self {
+        Self {
+            storage,
+            scope,
+            keyspace,
+            secrets,
+            llm,
+            resolved_config: None,
+            trace_tx: None,
+            query: None,
+            datasets: None,
+            warehouse: Arc::new(NullWarehouseProvider::default()),
+            catalog: None,
+            vector: None,
+            dbt: None,
+            state: None,
+            _metadata_stub: None,
+            _progress_ui_stub: None,
+        }
+    }
+}
+
+impl Default for SuiteCtx {
+    fn default() -> Self {
+        Self {
+            storage: Arc::new(InMemoryStorageAdapter::default()),
+            scope: RequestScope {
+                tenant: "default".to_string(),
+                workspace: "default".to_string(),
+                project_id: "default".to_string(),
+            },
+            keyspace: Arc::new(DefaultKeyspace::new("unset".to_string())),
+            secrets: Arc::new(NullSecretsProvider::default()),
+            llm: Arc::new(NullModel::new()),
+            resolved_config: None,
+            trace_tx: None,
+            query: None,
+            datasets: None,
+            warehouse: Arc::new(NullWarehouseProvider::default()),
+            catalog: None,
+            vector: None,
+            dbt: None,
+            state: None,
+            _metadata_stub: None,
+            _progress_ui_stub: None,
+        }
+    }
+}
+
+#[async_trait]
+pub trait Suite: Send + Sync {
+    fn id(&self) -> &'static str;
+
+    fn label(&self) -> &'static str {
+        self.id()
+    }
+
+    fn supported_agent_types(&self) -> Vec<String> {
+        vec!["ask".to_string()]
+    }
+
+    fn default_agent_type(&self) -> &'static str {
+        "ask"
+    }
+
+    fn phase_order(&self, _agent_type: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    async fn load_ws_plans(
+        &self,
+        _thread_id: &str,
+        _ctx: &SuiteCtx,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn handle_new(
+        &self,
+        thread_id: &str,
+        question: &str,
+        agent_type: &str,
+        ctx: &SuiteCtx,
+    ) -> Result<Vec<FlowFrame>, String>;
+
+    async fn handle_open(
+        &self,
+        thread_id: &str,
+        question: &str,
+        agent_type: &str,
+        ctx: &SuiteCtx,
+    ) -> Result<Vec<FlowFrame>, String>;
+
+    async fn handle_user(
+        &self,
+        thread_id: &str,
+        text: &str,
+        agent_type: &str,
+        ctx: &SuiteCtx,
+    ) -> Result<Vec<FlowFrame>, String>;
+}
+
+pub type DynSuite = Arc<dyn Suite>;
+
+pub struct SuiteRegistry {
+    suites: HashMap<&'static str, DynSuite>,
+}
+
+impl SuiteRegistry {
+    pub fn new() -> Self {
+        Self {
+            suites: HashMap::new(),
+        }
+    }
+
+    pub fn register<S: Suite + 'static>(&mut self, suite: S) {
+        let id = suite.id();
+        self.suites.insert(id, Arc::new(suite));
+    }
+
+    pub fn get(&self, suite_id: &str) -> Option<DynSuite> {
+        self.suites.get(suite_id).cloned()
+    }
+
+    pub fn list_ids(&self) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = self.suites.keys().copied().collect();
+        out.sort();
+        out
+    }
+}

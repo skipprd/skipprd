@@ -20,4 +20,5 @@ pub mod schema_registry;
 pub mod scope;
 pub mod session;
 pub mod storage;
+pub mod suite;
 pub mod tools;

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "skippr",
   "react/runtime",
+  "react/server",
   "react/core",
   "react/suites/react-suites",
   "react/modules/storage",

@@ -14,8 +14,8 @@ use react_core::session::{
     ThreadItemState as CoreThreadItemState, ThreadItemStatus as CoreThreadItemStatus, ThreadLog,
     ThreadState as CoreThreadState, ThreadStep, ThreadStore, ToolObservation,
 };
-use react_suites::registry::SuiteRegistry;
-use react_suites::SuiteCtx;
+use react_core::suite::SuiteRegistry;
+use react_core::suite::SuiteCtx;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -441,8 +441,8 @@ fn ws_log_out(txt: &str) {
 ///
 /// This is the preferred entrypoint for keeping `react` runtime generic: callers
 /// decide how to build configuration, storage roots, credentials, etc.
-pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String> {
-    let reg = Arc::new(react_suites::default_registry());
+pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx, registry: SuiteRegistry) -> Result<(), String> {
+    let reg = Arc::new(registry);
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await.map_err(|e| e.to_string())?;
     tracing::info!("WebSocket server listening on ws://{}", addr);
@@ -1573,13 +1573,14 @@ pub async fn run_headless_with_hub(
     suite_id: String,
     agent: String,
     hub: EventHub,
+    registry: SuiteRegistry,
 ) -> Result<String, String> {
     use serde_json::json;
     use std::collections::VecDeque;
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
-    let reg = Arc::new(react_suites::default_registry());
+    let reg = Arc::new(registry);
     let mut state = ConnState::new(reg, suite_ctx, Some(hub));
     #[derive(Clone, Default)]
     struct Capture {
@@ -3318,12 +3319,12 @@ async fn run_agent_with_processing_suite(
                     Ok(Err(e)) => return Err(e),
                     Err(e) => return Err(format!("agent task failed: {}", e)),
                 };
-                let convert = |ff: react_suites::FlowFrame| -> AgentFrame {
+                let convert = |ff: react_core::suite::FlowFrame| -> AgentFrame {
                     match ff {
-                        react_suites::FlowFrame::Final { kind, payload, display } => AgentFrame::Final { kind, payload, display },
-                        react_suites::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
-                        react_suites::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
-                        react_suites::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
+                        react_core::suite::FlowFrame::Final { kind, payload, display } => AgentFrame::Final { kind, payload, display },
+                        react_core::suite::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
+                        react_core::suite::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
+                        react_core::suite::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
                     }
                 };
                 let frames = frames.into_iter().map(convert).collect::<Vec<_>>();
@@ -3586,9 +3587,9 @@ async fn run_agent_and_frames(
     sctx: &SuiteCtx,
 ) -> Result<Vec<AgentFrame>, String> {
     // Delegate to suites
-    let convert = |ff: react_suites::FlowFrame| -> AgentFrame {
+    let convert = |ff: react_core::suite::FlowFrame| -> AgentFrame {
         match ff {
-            react_suites::FlowFrame::Final {
+            react_core::suite::FlowFrame::Final {
                 kind,
                 payload,
                 display,
@@ -3597,9 +3598,9 @@ async fn run_agent_and_frames(
                 payload,
                 display,
             },
-            react_suites::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
-            react_suites::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
-            react_suites::FlowFrame::AwaitApproval { prompt } => {
+            react_core::suite::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
+            react_core::suite::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
+            react_core::suite::FlowFrame::AwaitApproval { prompt } => {
                 AgentFrame::AwaitApproval { prompt }
             }
         }
@@ -3624,9 +3625,9 @@ async fn run_user_and_frames(
     reg: &SuiteRegistry,
     sctx: &SuiteCtx,
 ) -> Result<Vec<AgentFrame>, String> {
-    let convert = |ff: react_suites::FlowFrame| -> AgentFrame {
+    let convert = |ff: react_core::suite::FlowFrame| -> AgentFrame {
         match ff {
-            react_suites::FlowFrame::Final {
+            react_core::suite::FlowFrame::Final {
                 kind,
                 payload,
                 display,
@@ -3635,9 +3636,9 @@ async fn run_user_and_frames(
                 payload,
                 display,
             },
-            react_suites::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
-            react_suites::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
-            react_suites::FlowFrame::AwaitApproval { prompt } => {
+            react_core::suite::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
+            react_core::suite::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
+            react_core::suite::FlowFrame::AwaitApproval { prompt } => {
                 AgentFrame::AwaitApproval { prompt }
             }
         }
@@ -3843,7 +3844,7 @@ mod tests {
             }),
             ..Default::default()
         }];
-        let reg = react_suites::registry::SuiteRegistry::new();
+        let reg = react_core::suite::SuiteRegistry::new();
         let snap = ws_thread_state_snapshot_from_core(&core, &reg);
         let ctx = snap.events[0].ctx.as_ref().expect("ctx");
         assert_eq!(ctx.plan_kind, Some("cleanse".to_string()));
@@ -3893,7 +3894,7 @@ mod tests {
     struct StubDataEngineerSuite;
 
     #[async_trait]
-    impl react_suites::suite::Suite for StubDataEngineerSuite {
+    impl react_core::suite::Suite for StubDataEngineerSuite {
         fn id(&self) -> &'static str {
             "suite_x"
         }
@@ -3908,8 +3909,8 @@ mod tests {
             _question: &str,
             _agent_type: &str,
             _ctx: &SuiteCtx,
-        ) -> Result<Vec<react_suites::FlowFrame>, String> {
-            Ok(vec![react_suites::FlowFrame::Final {
+        ) -> Result<Vec<react_core::suite::FlowFrame>, String> {
+            Ok(vec![react_core::suite::FlowFrame::Final {
                 kind: "ask".to_string(),
                 payload: serde_json::json!({"answer":"ok","sql":"SELECT 1"}),
                 display: Some("ok".to_string()),
@@ -3922,8 +3923,8 @@ mod tests {
             _question: &str,
             _agent_type: &str,
             _ctx: &SuiteCtx,
-        ) -> Result<Vec<react_suites::FlowFrame>, String> {
-            Ok(vec![react_suites::FlowFrame::Final {
+        ) -> Result<Vec<react_core::suite::FlowFrame>, String> {
+            Ok(vec![react_core::suite::FlowFrame::Final {
                 kind: "ask".to_string(),
                 payload: serde_json::json!({"answer":"ok","sql":"SELECT 1"}),
                 display: Some("ok".to_string()),
@@ -3936,7 +3937,7 @@ mod tests {
             _text: &str,
             _agent_type: &str,
             ctx: &SuiteCtx,
-        ) -> Result<Vec<react_suites::FlowFrame>, String> {
+        ) -> Result<Vec<react_core::suite::FlowFrame>, String> {
             // Emit a tool_start/tool_end pair into the durable thread log so WS can stream tool events.
             let store =
                 ThreadStore::new(ctx.storage.clone(), ctx.scope.clone(), ctx.keyspace.clone());
@@ -3977,7 +3978,7 @@ mod tests {
 
             // Sleep long enough for WS ticks (tool/state) to emit at least once.
             tokio::time::sleep(Duration::from_millis(650)).await;
-            Ok(vec![react_suites::FlowFrame::Final {
+            Ok(vec![react_core::suite::FlowFrame::Final {
                 kind: "ask".to_string(),
                 payload: serde_json::json!({"answer":"ok","sql":"SELECT 1"}),
                 display: Some("ok".to_string()),
@@ -3988,7 +3989,7 @@ mod tests {
     struct StubAwaitApprovalSuite;
 
     #[async_trait]
-    impl react_suites::suite::Suite for StubAwaitApprovalSuite {
+    impl react_core::suite::Suite for StubAwaitApprovalSuite {
         fn id(&self) -> &'static str {
             "suite_x"
         }
@@ -4003,8 +4004,8 @@ mod tests {
             _question: &str,
             _agent_type: &str,
             _ctx: &SuiteCtx,
-        ) -> Result<Vec<react_suites::FlowFrame>, String> {
-            Ok(vec![react_suites::FlowFrame::AwaitApproval {
+        ) -> Result<Vec<react_core::suite::FlowFrame>, String> {
+            Ok(vec![react_core::suite::FlowFrame::AwaitApproval {
                 prompt: "approve?".to_string(),
             }])
         }
@@ -4015,8 +4016,8 @@ mod tests {
             _question: &str,
             _agent_type: &str,
             _ctx: &SuiteCtx,
-        ) -> Result<Vec<react_suites::FlowFrame>, String> {
-            Ok(vec![react_suites::FlowFrame::AwaitApproval {
+        ) -> Result<Vec<react_core::suite::FlowFrame>, String> {
+            Ok(vec![react_core::suite::FlowFrame::AwaitApproval {
                 prompt: "approve?".to_string(),
             }])
         }
@@ -4027,8 +4028,8 @@ mod tests {
             _text: &str,
             _agent_type: &str,
             _ctx: &SuiteCtx,
-        ) -> Result<Vec<react_suites::FlowFrame>, String> {
-            Ok(vec![react_suites::FlowFrame::AwaitApproval {
+        ) -> Result<Vec<react_core::suite::FlowFrame>, String> {
+            Ok(vec![react_core::suite::FlowFrame::AwaitApproval {
                 prompt: "approve?".to_string(),
             }])
         }
@@ -4037,7 +4038,7 @@ mod tests {
     struct StubBatchLockedSuite;
 
     #[async_trait]
-    impl react_suites::suite::Suite for StubBatchLockedSuite {
+    impl react_core::suite::Suite for StubBatchLockedSuite {
         fn id(&self) -> &'static str {
             "suite_x"
         }
@@ -4052,8 +4053,8 @@ mod tests {
             _question: &str,
             _agent_type: &str,
             _ctx: &SuiteCtx,
-        ) -> Result<Vec<react_suites::FlowFrame>, String> {
-            Ok(vec![react_suites::FlowFrame::AwaitUser {
+        ) -> Result<Vec<react_core::suite::FlowFrame>, String> {
+            Ok(vec![react_core::suite::FlowFrame::AwaitUser {
                 prompt: "Plan-batched authoring is locked (cleanse).".to_string(),
             }])
         }
@@ -4064,8 +4065,8 @@ mod tests {
             _question: &str,
             _agent_type: &str,
             _ctx: &SuiteCtx,
-        ) -> Result<Vec<react_suites::FlowFrame>, String> {
-            Ok(vec![react_suites::FlowFrame::AwaitUser {
+        ) -> Result<Vec<react_core::suite::FlowFrame>, String> {
+            Ok(vec![react_core::suite::FlowFrame::AwaitUser {
                 prompt: "Plan-batched authoring is locked (cleanse).".to_string(),
             }])
         }
@@ -4076,8 +4077,8 @@ mod tests {
             _text: &str,
             _agent_type: &str,
             _ctx: &SuiteCtx,
-        ) -> Result<Vec<react_suites::FlowFrame>, String> {
-            Ok(vec![react_suites::FlowFrame::AwaitUser {
+        ) -> Result<Vec<react_core::suite::FlowFrame>, String> {
+            Ok(vec![react_core::suite::FlowFrame::AwaitUser {
                 prompt: "Plan-batched authoring is locked (cleanse).".to_string(),
             }])
         }
@@ -4278,6 +4279,7 @@ mod tests {
             "suite_x".to_string(),
             "agent".to_string(),
             hub,
+            SuiteRegistry::new(),
         )
         .await
         .unwrap_err();
@@ -4302,7 +4304,7 @@ mod tests {
             keyspace,
         );
 
-        let mut reg = react_suites::registry::SuiteRegistry::new();
+        let mut reg = react_core::suite::SuiteRegistry::new();
         reg.register(StubBatchLockedSuite);
         let reg = Arc::new(reg);
         let mut state = ConnState::new(reg, suite_ctx, None);
@@ -4582,7 +4584,7 @@ mod tests {
             scope.clone(),
             keyspace.clone(),
         );
-        let mut reg = react_suites::registry::SuiteRegistry::new();
+        let mut reg = react_core::suite::SuiteRegistry::new();
         reg.register(StubDataEngineerSuite);
         let reg = Arc::new(reg);
         let mut state = ConnState::new(reg, suite_ctx.clone(), None);
@@ -4637,7 +4639,7 @@ mod tests {
             scope.clone(),
             keyspace.clone(),
         );
-        let mut reg = react_suites::registry::SuiteRegistry::new();
+        let mut reg = react_core::suite::SuiteRegistry::new();
         reg.register(StubDataEngineerSuite);
         let reg = Arc::new(reg);
         let mut state = ConnState::new(reg, suite_ctx.clone(), None);
@@ -4681,7 +4683,7 @@ mod tests {
             scope.clone(),
             keyspace.clone(),
         );
-        let mut reg = react_suites::registry::SuiteRegistry::new();
+        let mut reg = react_core::suite::SuiteRegistry::new();
         reg.register(StubAwaitApprovalSuite);
         let reg = Arc::new(reg);
         let mut state = ConnState::new(reg, suite_ctx.clone(), None);
@@ -4757,7 +4759,7 @@ mod tests {
             )
             .await;
 
-        let mut reg = react_suites::registry::SuiteRegistry::new();
+        let mut reg = react_core::suite::SuiteRegistry::new();
         reg.register(StubDataEngineerSuite);
         let reg = Arc::new(reg);
         let mut state = ConnState::new(reg, suite_ctx, None);

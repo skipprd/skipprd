@@ -16,6 +16,5 @@ pub mod suite;
 pub mod util;
 
 pub use config::ReactResolvedConfig;
-pub use flow_frame::FlowFrame;
-pub use registry::{default_registry, SuiteRegistry};
-pub use suite::{DynSuite, Suite, SuiteCtx};
+pub use react_core::suite::{DynSuite, FlowFrame, Suite, SuiteCtx, SuiteRegistry};
+pub use registry::default_registry;

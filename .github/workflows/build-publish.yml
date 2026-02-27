@@ -168,7 +168,7 @@ jobs:
         run: cargo test -p react --lib --tests
 
       - name: Build react binary (debug)
-        run: cargo build -p react --bin react
+        run: cargo build -p react-server --bin react
 
       - name: Run React examples (1..4) in parallel
         env:
@@ -179,7 +179,7 @@ jobs:
           AWS_DEFAULT_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
           AWS_REGION: ${{ secrets.CIRCLES_AWS_REGION }}
         run: |
-          ./target/debug/react --log info run --parallel --storage-mode s3 \
+          ./target/debug/react --log info run --parallel  --storage-mode s3 \
             --config ./react/react1.yaml \
             --config ./react/react2.yaml \
             --config ./react/react3.yaml \
@@ -312,7 +312,7 @@ jobs:
         uses: arduino/setup-protoc@v3
 
       - name: Build react release binary
-        run: cargo build --release -p react --target ${{ matrix.target }}
+        run: cargo build --release -p react-server --target ${{ matrix.target }}
 
       - name: Install dbt runtime (linux)
         if: runner.os == 'Linux'

@@ -3,7 +3,7 @@
 //! Design goal: subscribe to the same typed events as WS without using a socket.
 
 use react_core::session::{ThreadEventStatus, ThreadItemStatus, ThreadStore};
-use react_suites::SuiteCtx;
+use react_core::suite::{SuiteCtx, SuiteRegistry};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
@@ -97,7 +97,7 @@ pub struct RunOpts {
 /// - 0: no failed items in materialized thread_state
 /// - 1: at least one failed item
 /// - 2: no final state could be determined
-pub async fn run_headless(ctx: SuiteCtx, opts: RunOpts) -> Result<(i32, String), String> {
+pub async fn run_headless(ctx: SuiteCtx, opts: RunOpts, registry: SuiteRegistry) -> Result<(i32, String), String> {
     let hub = EventHub::new(4096);
     let mut rx = hub.subscribe();
     let plain_progress = std::env::var("REACT_PLAIN_PROGRESS")
@@ -213,6 +213,7 @@ pub async fn run_headless(ctx: SuiteCtx, opts: RunOpts) -> Result<(i32, String),
         opts.suite_id,
         opts.agent,
         hub.clone(),
+        registry,
     )
     .await?;
 

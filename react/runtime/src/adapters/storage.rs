@@ -1,1 +1,1 @@
-pub use react_module_storage::{LocalFileStorageAdapter, S3StorageAdapter, StorageAdapter};
+pub use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};

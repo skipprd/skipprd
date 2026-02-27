@@ -1,0 +1,32 @@
+[package]
+name = "react-server"
+version = "0.0.0-git"
+edition = "2021"
+
+[[bin]]
+name = "react"
+path = "src/main.rs"
+
+[dependencies]
+react = { path = "../runtime" }
+react-core = { path = "../core" }
+react-suites = { path = "../suites/react-suites" }
+react-module-provider-vector-lance = { path = "../modules/provider-vector-lance" }
+react-module-storage = { path = "../modules/storage" }
+react-module-provider-postgres = { path = "../modules/provider-postgres" }
+react-module-provider-bigquery = { path = "../modules/provider-bigquery" }
+react-module-provider-athena = { path = "../modules/provider-athena" }
+react-module-provider-dbt = { path = "../modules/provider-dbt" }
+
+clap = { version = "4.0.32", features = ["derive"] }
+serde_json = "1.0.85"
+serde_yaml = "0.9.16"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"
+chrono = "=0.4.42"
+crossterm = "0.27"
+
+[features]
+llama_cpp = []

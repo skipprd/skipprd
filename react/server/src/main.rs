@@ -10,18 +10,15 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use react::adapters::storage::{LocalFileStorageAdapter, S3StorageAdapter};
 use react::llm;
 use react::providers::catalog::DefaultCatalogProvider;
-use react::providers::dbt::DbtRunnerConfig;
-use react::providers::{
-    AthenaQueryProvider, AthenaSettings, BigQueryProvider, BigQuerySettings, PostgresProvider,
-    PostgresSettings,
-};
-use react::providers::{
-    DbtProjectProvider, DefaultKeyspace, EnvSecretsProvider, LanceVectorStore, LocalKeyspace,
-};
-use react_suites::SuiteCtx;
+use react::providers::{DefaultKeyspace, EnvSecretsProvider, LanceVectorStore, LocalKeyspace};
+use react_core::suite::SuiteCtx;
+use react_module_provider_athena::{AthenaQueryProvider, AthenaSettings};
+use react_module_provider_bigquery::{BigQueryProvider, BigQuerySettings};
+use react_module_provider_dbt::{DbtProjectProvider, DbtRunnerConfig};
+use react_module_provider_postgres::{PostgresProvider, PostgresSettings};
+use react_module_storage::{LocalFileStorageAdapter, S3StorageAdapter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinSet;
@@ -808,7 +805,8 @@ async fn main() {
                 )));
             }
 
-            if let Err(e) = react::ws::server::start_with_ctx(cfg.server.port, suite_ctx).await {
+            let registry = react_suites::default_registry();
+            if let Err(e) = react::ws::server::start_with_ctx(cfg.server.port, suite_ctx, registry).await {
                 eprintln!("ERROR: {}", e);
                 std::process::exit(1);
             }
@@ -1144,6 +1142,7 @@ async fn main() {
                 .clone()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(resolve_default_suite_id);
+            let registry = react_suites::default_registry();
             let run_fut = react::run::headless::run_headless(
                 suite_ctx,
                 react::run::headless::RunOpts {
@@ -1152,6 +1151,7 @@ async fn main() {
                     agent,
                     thread_id_tx,
                 },
+                registry,
             );
 
             let mut thread_id_for_logs: Option<String> = None;
