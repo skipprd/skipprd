@@ -452,7 +452,7 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     ..Default::default()
                 });
             for p in plans {
-                let kind = p.plan_kind.0.trim().to_string();
+                let kind = p.plan_kind.trim().to_string();
                 if kind.is_empty() {
                     continue;
                 }
@@ -513,10 +513,10 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
                     };
                     if tv
                         .plans_by_kind
-                        .get(&kind.0)
+                        .get(kind)
                         .is_some_and(|p| p.plan_key.as_str() != new_key.as_str())
                     {
-                        tv.plans_by_kind.remove(&kind.0);
+                        tv.plans_by_kind.remove(kind);
                     }
                 }
             }
@@ -551,7 +551,7 @@ fn apply_event(m: &mut Model, ev: TerminalEvent) {
             // Set current phase (phase we're entering).
             tv.current_phase = Some(ev.phase.clone());
             if let Some(rc) = ev.reason_code.clone() {
-                tv.phase_reason_code.insert(ev.phase.clone(), rc.0);
+                tv.phase_reason_code.insert(ev.phase.clone(), rc);
             }
             if let Some(rd) = ev.reason_detail.clone() {
                 if let Ok(v) = serde_json::to_value(&rd) {
@@ -840,16 +840,16 @@ fn update_focus_with_stickiness(tv: &mut ThreadView, plan_kind: String, next_key
     }
 }
 
-fn plan_kind_key(kind: &api::PlanKind) -> String {
-    kind.0.clone()
+fn plan_kind_key(kind: &str) -> String {
+    kind.trim().to_ascii_lowercase()
 }
 
-fn plan_kind_from_str(kind: &str) -> Option<api::PlanKind> {
+fn plan_kind_from_str(kind: &str) -> Option<String> {
     let k = kind.trim().to_ascii_lowercase();
     if k.is_empty() {
         None
     } else {
-        Some(api::PlanKind(k))
+        Some(k)
     }
 }
 
@@ -1127,7 +1127,7 @@ fn lookup_checklist_item<'a>(
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct WorkItemKey {
-    plan_kind: Option<api::PlanKind>,
+    plan_kind: Option<String>,
     plan_key: Option<String>,
     workgroup_id: Option<String>,
     task_id: Option<String>,
@@ -2076,7 +2076,7 @@ mod tests {
             )],
         );
         let plan = api::PlanSnapshot::new(
-            api::PlanKind("cleanse".to_string()),
+            "cleanse".to_string(),
             "plan_k".to_string(),
             api::PlanStatus::Approved,
             vec![task],
@@ -2086,7 +2086,7 @@ mod tests {
         let mut span_buckets: HashMap<WorkItemKey, Vec<SpanAgg>> = HashMap::new();
         span_buckets.insert(
             WorkItemKey {
-                plan_kind: Some(api::PlanKind("cleanse".to_string())),
+                plan_kind: Some("cleanse".to_string()),
                 plan_key: Some("plan_k".to_string()),
                 workgroup_id: Some("wg1".to_string()),
                 task_id: Some("t1".to_string()),
@@ -2149,7 +2149,7 @@ mod tests {
             ],
         );
         let plan = api::PlanSnapshot::new(
-            api::PlanKind("cleanse".to_string()),
+            "cleanse".to_string(),
             "plan_k".to_string(),
             api::PlanStatus::Approved,
             vec![task1, task2],
@@ -2158,7 +2158,7 @@ mod tests {
 
         // Focus moved to t2, but t1 is sticky-expanded.
         let preferred = WorkItemKey {
-            plan_kind: Some(api::PlanKind("cleanse".to_string())),
+            plan_kind: Some("cleanse".to_string()),
             plan_key: Some("plan_k".to_string()),
             workgroup_id: Some("wg1".to_string()),
             task_id: Some("t2".to_string()),
@@ -2166,7 +2166,7 @@ mod tests {
         };
         let mut expanded: std::collections::HashSet<WorkItemKey> = std::collections::HashSet::new();
         expanded.insert(WorkItemKey {
-            plan_kind: Some(api::PlanKind("cleanse".to_string())),
+            plan_kind: Some("cleanse".to_string()),
             plan_key: Some("plan_k".to_string()),
             workgroup_id: Some("wg1".to_string()),
             task_id: Some("t1".to_string()),
@@ -2223,7 +2223,7 @@ mod tests {
             ],
         );
         let plan = api::PlanSnapshot::new(
-            api::PlanKind("cleanse".to_string()),
+            "cleanse".to_string(),
             "plan_k".to_string(),
             api::PlanStatus::Approved,
             vec![task1, task2],
@@ -2231,7 +2231,7 @@ mod tests {
         );
 
         let preferred = WorkItemKey {
-            plan_kind: Some(api::PlanKind("cleanse".to_string())),
+            plan_kind: Some("cleanse".to_string()),
             plan_key: Some("plan_k".to_string()),
             workgroup_id: Some("wg1".to_string()),
             task_id: Some("t2".to_string()),
@@ -2241,7 +2241,7 @@ mod tests {
         let mut span_buckets: HashMap<WorkItemKey, Vec<SpanAgg>> = HashMap::new();
         span_buckets.insert(
             WorkItemKey {
-                plan_kind: Some(api::PlanKind("cleanse".to_string())),
+                plan_kind: Some("cleanse".to_string()),
                 plan_key: Some("plan_k".to_string()),
                 workgroup_id: Some("wg1".to_string()),
                 task_id: Some("t1".to_string()),

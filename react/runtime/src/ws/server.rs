@@ -103,8 +103,8 @@ fn ws_final_result_from_typed_final(
     }
 }
 
-fn map_plan_kind(plan_kind: Option<react_core::session::ExecutionPlanKind>) -> Option<api::PlanKind> {
-    plan_kind.map(|k| api::PlanKind(k.0))
+fn map_plan_kind(plan_kind: Option<react_core::session::ExecutionPlanKind>) -> Option<String> {
+    plan_kind.map(|k| k.0)
 }
 
 fn map_thread_event_kind(event_kind: react_core::session::ThreadEventKind) -> api::ThreadEventKind {
@@ -322,10 +322,10 @@ async fn upsert_thread_state_from_plans(
     }
 
     for p in plans.iter() {
-        let kind = if p.plan_kind.0.trim().is_empty() {
+        let kind = if p.plan_kind.trim().is_empty() {
             "plan".to_string()
         } else {
-            p.plan_kind.0.clone()
+            p.plan_kind.clone()
         };
         let suite_state = st
             .suite_state
@@ -766,11 +766,11 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
                         0,
                     );
                     ev.for_cid = Some(cid.clone());
-                    ev.reason_code = Some(api::PhaseReasonCode(
+                    ev.reason_code = Some(
                         react_core::control_flow::PhaseReasonCode::PreflightStart
                             .as_str()
                             .to_string(),
-                    ));
+                    );
                     let s = serde_json::to_string(&api::ServerMessage::Phase(ev)).unwrap();
                     state.buffer_last(&s);
                     out.push(s);
@@ -1085,11 +1085,11 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
                         0,
                     );
                     ev.for_cid = Some(cid.clone());
-                    ev.reason_code = Some(api::PhaseReasonCode(
+                    ev.reason_code = Some(
                         react_core::control_flow::PhaseReasonCode::PreflightStart
                             .as_str()
                             .to_string(),
-                    ));
+                    );
                     let s = serde_json::to_string(&api::ServerMessage::Phase(ev)).unwrap();
                     state.buffer_last(&s);
                     out.push(s);
@@ -1485,9 +1485,9 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
                 now_iso(),
                 state.next_seq(),
                 thread_id.clone(),
+                plans,
             );
             resp.for_cid = Some(req.cid.clone());
-            resp.plans = plans;
             if let Some(t) = state.term() {
                 t.emit(TerminalEvent::Plans {
                     thread_id: thread_id.clone(),
@@ -2796,11 +2796,11 @@ async fn run_agent_with_processing_suite(
                 0,
             );
             ev.for_cid = Some(cid.to_string());
-            ev.reason_code = Some(api::PhaseReasonCode(
+            ev.reason_code = Some(
                 react_core::control_flow::PhaseReasonCode::PreflightStart
                     .as_str()
                     .to_string(),
-            ));
+            );
             let s = serde_json::to_string(&api::ServerMessage::Phase(ev)).unwrap();
             state.buffer_last(&s);
             ws_log_out(&s);
@@ -3001,14 +3001,14 @@ async fn run_agent_with_processing_suite(
                         serde_json::to_string(&norm).unwrap_or_default()
                     }
 
-                    let mut changed: Vec<api::PlanKind> = Vec::new();
+                    let mut changed: Vec<String> = Vec::new();
                     let mut changed_plan_keys: Vec<String> = Vec::new();
                     for p in plans.iter() {
-                        let kind = p.plan_kind.0.clone();
+                        let kind = p.plan_kind.clone();
                         let new_fp = semantic_plan_fp(p);
                         let prev = last_plan_fp_by_kind.get(&kind);
                         if prev.map(|s| s.as_str()) != Some(new_fp.as_str()) {
-                            changed.push(p.plan_kind.clone());
+                            changed.push(kind.clone());
                             changed_plan_keys.push(p.plan_key.clone());
                             last_plan_fp_by_kind.insert(kind, new_fp);
                         }
@@ -3037,9 +3037,9 @@ async fn run_agent_with_processing_suite(
                             now_iso(),
                             state.next_seq(),
                             thread_id.to_string(),
+                            plans.clone(),
                         );
                         pr.for_cid = Some(cid.to_string());
-                        pr.plans = plans.clone();
                         emit_ws(state, write, api::ServerMessage::Plans(pr)).await;
                     }
                 }
@@ -3094,10 +3094,8 @@ async fn run_agent_with_processing_suite(
                             );
                             ev.for_cid = Some(cid.to_string());
                             ev.from_phase = from_phase.clone();
-                            ev.reason_code = reason_code
-                                .as_ref()
-                                .and_then(|rc| serde_json::to_value(rc).ok())
-                                .and_then(|v| serde_json::from_value::<api::PhaseReasonCode>(v).ok());
+                            ev.reason_code =
+                                reason_code.as_ref().map(|rc| rc.as_str().to_string());
                             ev.from_phase_runs = from_runs;
                             ev.from_phase_total_runtime_ms = from_total;
                             ev.reason_detail = reason_detail.as_ref().and_then(|v| {
@@ -3848,7 +3846,7 @@ mod tests {
         let reg = react_suites::registry::SuiteRegistry::new();
         let snap = ws_thread_state_snapshot_from_core(&core, &reg);
         let ctx = snap.events[0].ctx.as_ref().expect("ctx");
-        assert_eq!(ctx.plan_kind, Some(api::PlanKind("cleanse".to_string())));
+        assert_eq!(ctx.plan_kind, Some("cleanse".to_string()));
         assert_eq!(ctx.plan_key.as_deref(), Some("p1"));
         assert_eq!(ctx.workgroup_id.as_deref(), Some("wg1"));
         assert_eq!(ctx.task_id.as_deref(), Some("task1"));
