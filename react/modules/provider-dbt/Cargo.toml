@@ -1,0 +1,12 @@
+[package]
+name = "react-module-provider-dbt"
+version = "0.0.0-git"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1.77"
+serde_json = "1.0.85"
+serde_yaml = "0.9.16"
+tempfile = "3.10"
+tracing = "0.1"
+react-core = { path = "../../core" }

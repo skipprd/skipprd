@@ -7295,11 +7295,6 @@ dependencies = [
  "arrow-buffer",
  "arrow-schema",
  "async-trait",
- "aws-config",
- "aws-sdk-athena",
- "aws-sdk-glue",
- "aws-sdk-s3",
- "aws-types",
  "bytes",
  "chrono",
  "clap",
@@ -7307,16 +7302,19 @@ dependencies = [
  "dashmap 5.5.3",
  "futures",
  "futures-util",
- "gcp-bigquery-client",
  "hex",
  "httpmock",
  "itertools 0.12.1",
- "lancedb",
  "lazy_static",
  "once_cell",
- "parquet",
  "rand 0.8.5",
  "react-core",
+ "react-module-provider-athena",
+ "react-module-provider-bigquery",
+ "react-module-provider-dbt",
+ "react-module-provider-postgres",
+ "react-module-provider-vector-lance",
+ "react-module-storage",
  "react-suites",
  "regex",
  "serde",
@@ -7327,7 +7325,6 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
- "tokio-postgres",
  "tokio-tungstenite",
  "tokio-util",
  "tracing",
@@ -7359,6 +7356,81 @@ dependencies = [
 ]
 
 [[package]]
+name = "react-module-provider-athena"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "aws-config",
+ "aws-sdk-athena",
+ "aws-sdk-glue",
+ "react-core",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "react-module-provider-bigquery"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "gcp-bigquery-client",
+ "react-core",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "react-module-provider-dbt"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "react-core",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "react-module-provider-postgres"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "futures",
+ "react-core",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "react-module-provider-vector-lance"
+version = "0.0.0-git"
+dependencies = [
+ "arrow",
+ "arrow-buffer",
+ "async-trait",
+ "futures",
+ "lancedb",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "react-module-storage"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "react-core",
+ "serde_json",
+]
+
+[[package]]
 name = "react-suites"
 version = "0.0.0-git"
 dependencies = [
@@ -7367,6 +7439,7 @@ dependencies = [
  "diffy",
  "hex",
  "react-core",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "serde_yaml",

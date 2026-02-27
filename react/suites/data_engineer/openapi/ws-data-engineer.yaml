@@ -1,0 +1,38 @@
+openapi: 3.1.0
+info:
+  title: ReAct Data Engineer Suite WS Extension
+  version: 0.1.0
+  description: |
+    Suite-owned schemas for data engineer specific payloads.
+    Clients should compose this with `react/runtime/openapi/ws-core.yaml`.
+
+components:
+  schemas:
+    PlanKind:
+      type: string
+      enum: [cleanse, model]
+
+    ExecutionContextExtension:
+      type: object
+      additionalProperties: false
+      properties:
+        plan_kind:
+          $ref: '#/components/schemas/PlanKind'
+        plan_key:
+          type: string
+          nullable: true
+        workgroup_id:
+          type: string
+          nullable: true
+        task_id:
+          type: string
+          nullable: true
+        checklist_item_id:
+          type: string
+          nullable: true
+
+    PlansEnvelope:
+      type: object
+      additionalProperties: true
+      description: |
+        Suite-owned plans payload envelope for UI and clients.

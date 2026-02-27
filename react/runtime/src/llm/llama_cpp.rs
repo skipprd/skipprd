@@ -574,7 +574,11 @@ impl LlamaCppModel {
 }
 
 impl LargeLanguageModel for LlamaCppModel {
-    fn chat(&self, messages: &[ChatMessage]) -> Result<String, String> {
+    fn chat(
+        &self,
+        messages: &[ChatMessage],
+        _options: &react_core::llm::LlmCallOptions,
+    ) -> Result<String, String> {
         inner::chat(&self.cfg, messages)
     }
 

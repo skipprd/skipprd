@@ -698,7 +698,7 @@ This run is inefficient and effectively loops in `model_plan`: the model repeate
 ### Evidence (thread + logs + codebase)
 - The run reaches `model_plan` and does not progress past it; phase transitions stop at `model_plan` after successful cleanse phases. (`.react/picnic/dev/example_bigquery/threads/6a5f1998-8b0d-4572-91f2-40461dfdd194.json`)
 - Logs show repeated `invalid_json_from_model` observations with large payload sizes (for example `bytes: 13371` / `13282`) and repeated response hashes for model-plan attempts (notably `e6d78a...` appears multiple times and `7d9c04...` repeats), indicating the system is retrying into the same failure shape rather than converging. (`.react/logs/react.log.2026-02-14`, transcript `agent-transcripts/3c3b1a31-b31d-4af2-b876-f20225b071cf.txt`)
-- Agent retry behavior confirms only two generic retries are attempted on invalid JSON, then the loop continues at the outer step level with another model call; there is no dedupe/short-circuit on repeated identical invalid responses. (`crates/react-core/src/agent/mod.rs`)
+- Agent retry behavior confirms only two generic retries are attempted on invalid JSON, then the loop continues at the outer step level with another model call; there is no dedupe/short-circuit on repeated identical invalid responses. (`react/core/src/agent/mod.rs`)
 - Provider-level strict JSON mode is enabled only when prompt text matches a narrow phrase set (`"respond with strict json"`, `"respond with json only"`, etc.). Common instructions used in this run (`"Return ONLY a single JSON object (no markdown, no code fences)."`) are not guaranteed to trigger provider JSON-object mode. (`react/src/llm/session.rs`)
 
 ### Root cause (evidenced)
@@ -715,7 +715,7 @@ This run is inefficient and effectively loops in `model_plan`: the model repeate
 1. **Broaden JSON-mode detection to reliably enable provider JSON objects.**
    - In `react/src/llm/session.rs`, treat additional phrases as JSON intent (e.g. `json object`, `return only json`, `only a single json object`, `no markdown`, `no code fences`) and/or key on expected envelope markers (`"action"` / `"final"` contract prompts) so `response_format: {"type":"json_object"}` is set consistently.
 2. **Add repeated-invalid-response guard in agent retry flow.**
-   - In `crates/react-core/src/agent/mod.rs`, if `invalid_json_from_model` repeats with the same `response_hash` for the same phase across retries, stop reissuing equivalent prompts and emit a deterministic fallback (for example, force ultra-minimal schema-only instruction or surface a targeted blocking error once).
+   - In `react/core/src/agent/mod.rs`, if `invalid_json_from_model` repeats with the same `response_hash` for the same phase across retries, stop reissuing equivalent prompts and emit a deterministic fallback (for example, force ultra-minimal schema-only instruction or surface a targeted blocking error once).
 3. **Constrain `model_plan` final payload verbosity.**
    - Keep task count/batch size unchanged, but cap verbose fields (long prose/invariants) in the final envelope so responses remain comfortably parseable and less truncation-prone.
 

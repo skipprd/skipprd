@@ -1,0 +1,12 @@
+[package]
+name = "react-module-provider-bigquery"
+version = "0.0.0-git"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1.77"
+gcp-bigquery-client = "0.27"
+serde_json = "1.0.85"
+tokio = { version = "1", features = ["sync"] }
+react-core = { path = "../../core" }
+tracing = "0.1"

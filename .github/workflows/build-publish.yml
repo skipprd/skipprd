@@ -161,7 +161,7 @@ jobs:
           python3 -m pip install dbt-core dbt-athena-community
 
       - name: Check OpenAPI generated artifact drift
-        run: bash scripts/check-openapi-drift.sh
+        run: bash scripts/check-openapi-drift-core.sh && bash scripts/check-openapi-drift-suite-data-engineer.sh
 
       - name: Test react crate
         run: cargo test -p react --lib --tests

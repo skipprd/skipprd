@@ -44,8 +44,8 @@ flowchart TD
 Primary files:
 
 - [crates/react-suites/src/data_engineer/mod.rs](crates/react-suites/src/data_engineer/mod.rs)
-- [crates/react-core/src/session/mod.rs](crates/react-core/src/session/mod.rs)
-- [crates/react-core/src/tools/mod.rs](crates/react-core/src/tools/mod.rs)
+- [react/core/src/session/mod.rs](react/core/src/session/mod.rs)
+- [react/core/src/tools/mod.rs](react/core/src/tools/mod.rs)
 - [crates/react-suites/src/data_engineer/tools/dbt_files.rs](crates/react-suites/src/data_engineer/tools/dbt_files.rs)
 
 ## Phase 1: Typed references and chunk-safe planning
@@ -56,8 +56,8 @@ Primary files:
 
 Primary files:
 
-- [crates/react-core/src/providers/dataset_catalog_provider.rs](crates/react-core/src/providers/dataset_catalog_provider.rs)
-- [crates/react-core/src/providers/warehouse.rs](crates/react-core/src/providers/warehouse.rs)
+- [react/core/src/providers/dataset_catalog_provider.rs](react/core/src/providers/dataset_catalog_provider.rs)
+- [react/core/src/providers/warehouse.rs](react/core/src/providers/warehouse.rs)
 - [crates/react-suites/src/data_engineer/dataset_truth.rs](crates/react-suites/src/data_engineer/dataset_truth.rs)
 - [crates/react-suites/src/data_engineer/tools/staging_model.rs](crates/react-suites/src/data_engineer/tools/staging_model.rs)
 - [crates/react-suites/src/data_engineer/tools/sql_stats.rs](crates/react-suites/src/data_engineer/tools/sql_stats.rs)
@@ -88,7 +88,7 @@ Primary files:
 Primary files:
 
 - [crates/react-suites/src/data_engineer/mod.rs](crates/react-suites/src/data_engineer/mod.rs)
-- [crates/react-core/src/agent/mod.rs](crates/react-core/src/agent/mod.rs)
+- [react/core/src/agent/mod.rs](react/core/src/agent/mod.rs)
 
 ## Phase 4: Canonical enums at source
 
@@ -135,7 +135,7 @@ Primary files:
 
 Primary files:
 
-- [crates/react-core/src/agent/mod.rs](crates/react-core/src/agent/mod.rs)
+- [react/core/src/agent/mod.rs](react/core/src/agent/mod.rs)
 - [crates/react-suites/src/data_engineer/mod.rs](crates/react-suites/src/data_engineer/mod.rs)
 
 ## Verification strategy

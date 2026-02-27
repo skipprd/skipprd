@@ -11,10 +11,10 @@ This crate implements a **WebSocket-based ReAct agent runtime**. Clients send JS
 From the workspace root:
 
 ```bash
-cargo run -p react -- serve --config react/config.example.yml --port 8787 --terminal
+cargo run -p react -- serve --config react/runtime/config.example.yml --port 8787 --terminal
 ```
 
-The server speaks WebSocket on `ws://localhost:8787/` using schemas in `../ask-ws.yaml`.
+The server speaks WebSocket on `ws://localhost:8787/` using schemas in `runtime/openapi/ws-core.yaml` plus suite overlays.
 
 Notes:
 - By default, storage is **local** (`storage.mode: local`) and persists under `storage.path` (default `./.react`).
@@ -24,14 +24,14 @@ Notes:
 
 The **effective output token limit** is controlled by the environment variable **`LLM_MAX_TOKENS`**.
 
-- When you run `react serve` with a YAML config (e.g. `react/react.yaml`), the loader in `src/config.rs` will **set `LLM_MAX_TOKENS` from `llm.max_tokens` if it is not already set**.
+- When you run `react serve` with a YAML config (e.g. `react/runtime/config.example.yml`), the loader in `src/config.rs` will **set `LLM_MAX_TOKENS` from `llm.max_tokens` if it is not already set**.
 - If you see errors like `parser_error invalid JSON twice` during large batch scaffolds, your model output is likely being **truncated**. Increase `llm.max_tokens` (or set `LLM_MAX_TOKENS` explicitly) so tool-call JSON can fit (for `gpt-5.x`, **8192** is a reasonable starting point).
 
 ### Core architecture
 
 #### Transport: WebSocket server
 
-- **File**: `src/ws/server.rs`
+- **File**: `runtime/src/ws/server.rs`
 - Responsibilities:
   - Parse/validate inbound frames (`type: new/open/user/...`)
   - Manage thread lifecycle (create thread id, persist user steps, stream responses)
@@ -39,21 +39,22 @@ The **effective output token limit** is controlled by the environment variable *
 
 #### Suites: product surfaces
 
-- **Files**: `src/suites/*`
+- **Files**: `suites/react-suites/src/*`
 - A **suite** owns:
   - Which tools exist (tool registry)
   - Which prompts are used (system prompt + tool card)
   - Which policy defines “final” and interrupts
   - Optional preflight behavior (dataset discovery/context injection)
 
-The default registry is built in `src/suites/registry.rs`. The primary suite is:
-- **`data_engineer`**: modes `ask` / `model` / `cleanse` (`src/suites/data_engineer_suite/`)
+The default registry is built in `suites/react-suites/src/registry.rs`. Registered suites include:
+- **`data_engineer`**: analytics + DBT workflow (`suites/react-suites/src/data_engineer/`)
+- **`kb`**: local knowledge-base workflow (`suites/react-suites/src/kb/`)
 
 Suites receive a `SuiteCtx` (injected capabilities) and return `FlowFrame`s (`Final`, `AwaitUser`, `AwaitApproval`).
 
 #### Agent loop: ReAct runtime
 
-- **File**: `src/agent/mod.rs`
+- **File**: `../core/src/agent/mod.rs`
 - Responsibilities:
   - Maintain transcript state
   - Call the LLM and parse strict JSON actions:
@@ -64,17 +65,16 @@ Suites receive a `SuiteCtx` (injected capabilities) and return `FlowFrame`s (`Fi
 
 #### Tools
 
-- **File**: `src/tools/mod.rs`
-- Tools are dynamic actions by name. Suites decide which tools are available for a mode.
+Tools are dynamic actions by name. Suites decide which tools are available for each suite-defined flow.
 
 #### Persistence: threads and artifacts
 
-- **Threads**: `src/session/mod.rs` (`ThreadStore` persists steps as JSON via `StorageAdapter` + `Keyspace`)
+- **Threads**: `../core/src/session/mod.rs` (`ThreadStore` persists steps as JSON via `StorageAdapter` + `Keyspace`)
 - **Artifacts/catalog**: stored via `StorageAdapter` at keys derived from `Keyspace`
 
 ### Providers (capabilities injection)
 
-Providers live under `src/providers/*` and are injected via `SuiteCtx`:
+Providers live under `runtime/src/providers/*` and are injected via `SuiteCtx`:
 - `QueryProvider` (SQL execution/schema/sample)
 - `DatasetCatalogProvider` (dataset discovery)
 - `CatalogProvider` (catalog/semantic)
@@ -82,12 +82,12 @@ Providers live under `src/providers/*` and are injected via `SuiteCtx`:
 - `DbtProvider` (dbt project scaffolding/validation)
 - `StorageAdapter` + `Keyspace` (persistence layout)
 
-The concrete providers used by the CLI server (`src/main.rs`) determine whether the runtime uses Athena, etc. Suites and the agent loop remain provider-agnostic.
+The concrete providers used by the CLI server (`runtime/src/main.rs`) determine whether the runtime uses Athena, etc. Suites and the agent loop remain provider-agnostic.
 
 ### Extending the system
 
-- **Add a new suite**: create `src/suites/<your_suite>/` and register it in `src/suites/registry.rs`
-- **Add a tool**: implement `Tool` and register it in the relevant suite mode’s tool registry
+- **Add a new suite**: create `suites/react-suites/src/<your_suite>/` and register it in `suites/react-suites/src/registry.rs`
+- **Add a tool**: implement `Tool` and register it in the relevant suite flow’s tool registry
 - **Change “final” semantics**: implement a new `AgentPolicy` and use it in the suite’s `AgentCtx`
 - **Swap infra**: construct a different `SuiteCtx` (different providers/storage/keyspace) and pass it to `ws::server::start_with_ctx`
 

@@ -12,34 +12,35 @@
 
 To generate Rust models from the ReAct WebSocket OpenAPI schema and (optionally) wire updates:
 
-1. Ensure the canonical spec is present at `ask-ws.yaml`.
+1. Ensure the core canonical spec is present at `react/runtime/openapi/ws-core.yaml` and suite spec at `react/suites/data_engineer/openapi/ws-data-engineer.yaml`.
 2. Use the helper script to run OpenAPI Generator (Docker or local jar):
 
 ```bash
-scripts/gen-openapi.sh
+scripts/gen-openapi-core.sh
+scripts/gen-openapi-suite-data-engineer.sh
 ```
 
-This will generate Rust models under `react/src/ws/api_gen/`. Only `components/schemas` are used for model generation. The WebSocket path exists for documentation. The server additionally enforces strict request validation and UUID v4 thread IDs.
+This will generate core Rust models under `react/runtime/src/ws/api_gen/`. Only `components/schemas` are used for model generation. The WebSocket path exists for documentation. The server additionally enforces strict request validation and UUID v4 thread IDs.
 
 ## Start the WebSocket server (ReAct API)
 
 Run the server locally (default port 8787 shown; choose any open port):
 
 ```bash
-cargo run -p react -- serve --config react/config.example.yml --port 8787 --terminal
+cargo run -p react -- serve --config react/runtime/config.example.yml --port 8787 --terminal
 ```
 
 ## Suites
 
 The `react` server supports multiple suites. The default suite registry currently includes:
-- `data_engineer`: unified analytics + DBT-oriented suite (`ask` | `model` | `cleanse`)
+- `data_engineer`: unified analytics + DBT-oriented suite (suite-defined flows/modes)
 - `kb`: minimal local knowledge-base suite (ingest local `.txt`/`.md` files into vectors and answer questions)
 
 Connect a WebSocket client to:
 
 - `ws://localhost:8787/`
 
-Send JSON frames matching `ask-ws.yaml`. Example requests:
+Send JSON frames matching `react/runtime/openapi/ws-core.yaml` (+ suite schema overlays). Example requests:
 
 ```json
 {"v":1,"type":"list","cid":"b2a4c2b5-1d19-4b5c-a0b3-2f8f7a7c9d11"}
@@ -60,7 +61,7 @@ Send JSON frames matching `ask-ws.yaml`. Example requests:
 Notes:
 - No authentication is required (for now).
 - The server strictly rejects unknown properties and uses UUID v4 thread IDs.
-- Full schemas and examples are in `ask-ws.yaml`.
+- Full schemas and examples are in `react/runtime/openapi/ws-core.yaml`.
 
 ### What is Skippr?
 
