@@ -16,7 +16,9 @@ pub struct ServerResolved {
 
 #[derive(Clone, Debug)]
 pub struct StorageResolved {
-    pub bucket: String,
+    pub mode: String,
+    pub bucket: Option<String>,
+    pub path: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]

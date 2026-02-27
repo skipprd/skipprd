@@ -417,9 +417,7 @@ mod tests {
     fn generate_athena_profiles_requires_result_s3() {
         let cfg = ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved {
-                bucket: "b".to_string(),
-            },
+            storage: crate::config::StorageResolved { mode: "local".to_string(), bucket: None, path: None },
             scope: RequestScope {
                 tenant: "t".to_string(),
                 workspace: "w".to_string(),

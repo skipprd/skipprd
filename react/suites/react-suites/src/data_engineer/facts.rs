@@ -558,9 +558,7 @@ mod tests {
     fn minimal_cfg() -> Arc<config::ReactResolvedConfig> {
         Arc::new(config::ReactResolvedConfig {
             server: config::ServerResolved { port: 1 },
-            storage: config::StorageResolved {
-                bucket: "b".to_string(),
-            },
+            storage: config::StorageResolved { mode: "local".to_string(), bucket: None, path: None },
             scope: RequestScope {
                 tenant: "t".to_string(),
                 workspace: "w".to_string(),

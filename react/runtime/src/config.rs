@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::providers::RequestScope;
 use react_core::providers::DEFAULT_WAREHOUSE_MAX_CONCURRENCY;
+use react_core::resolved_config as rc;
 
 /// # `react` configuration
 ///
@@ -228,91 +229,16 @@ pub struct VectorFile {
     pub enabled: Option<bool>,
 }
 
-#[derive(Clone, Debug)]
-pub struct ReactResolvedConfig {
-    pub server: ServerResolved,
-    pub storage: StorageResolved,
-    pub scope: RequestScope,
-    pub llm: LlmResolved,
-    pub providers: ProvidersResolved,
-}
-
-#[derive(Clone, Debug)]
-pub struct ServerResolved {
-    pub port: u16,
-}
-
-#[derive(Clone, Debug)]
-pub struct StorageResolved {
-    pub mode: String,           // local|s3
-    pub bucket: Option<String>, // required for s3
-    pub path: Option<String>,   // required for local (absolute)
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct LlmResolved {
-    pub provider: Option<String>,
-    pub base_url: Option<String>,
-    pub chat_model: Option<String>,
-    pub embed_model: Option<String>,
-    pub context_length: Option<usize>,
-    pub gpu_layers: Option<usize>,
-    pub http_timeout_secs: Option<u64>,
-    pub max_tokens: Option<u32>,
-    pub temperature: Option<f32>,
-    pub top_p: Option<f32>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ProvidersResolved {
-    pub warehouse: WarehouseResolved,
-    pub catalog: CatalogResolved,
-    pub dbt: DbtResolved,
-    pub vector: VectorResolved,
-}
-
-#[derive(Clone, Debug)]
-pub struct WarehouseResolved {
-    pub kind: String, // snake_case kind
-    /// Provider-specific container name (catalog/project/database) if applicable.
-    pub container: Option<String>,
-    /// Provider-specific default namespace (schema/dataset) if applicable.
-    pub namespace: Option<String>,
-    /// Provider-specific additional parameters (non-secret).
-    pub extras: serde_json::Value,
-}
-
-#[derive(Clone, Debug)]
-pub struct CatalogResolved {
-    pub enabled: bool,
-    pub refresh_secs: u64,
-    pub max_concurrency: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct DbtResolved {
-    pub enabled: bool,
-    pub profiles_dir: Option<String>,
-    pub target: Option<String>,
-    pub naming: DbtNamingResolved,
-    pub runner: String,
-    pub docker_image: Option<String>,
-    pub docker_platform: Option<String>,
-    pub docker_network: Option<String>,
-    pub docker_mount_aws_dir: bool,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct DbtNamingResolved {
-    pub target_schema: Option<String>,
-    pub silver_suffix: Option<String>,
-    pub gold_suffix: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct VectorResolved {
-    pub enabled: bool,
-}
+pub use rc::ReactResolvedConfig;
+pub use rc::ServerResolved;
+pub use rc::StorageResolved;
+pub use rc::LlmResolved;
+pub use rc::ProvidersResolved;
+pub use rc::WarehouseResolved;
+pub use rc::CatalogResolved;
+pub use rc::DbtResolved;
+pub use rc::DbtNamingResolved;
+pub use rc::VectorResolved;
 
 fn getenv_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().and_then(|v| {
@@ -354,8 +280,7 @@ impl ReactConfigFile {
     }
 }
 
-impl ReactResolvedConfig {
-    pub fn resolve(file: ReactConfigFile, ov: ServeOverrides) -> Result<Self, String> {
+pub fn resolve_config(file: ReactConfigFile, ov: ServeOverrides) -> Result<ReactResolvedConfig, String> {
         let server_port = ov
             .port
             .or_else(|| file.server.as_ref().and_then(|s| s.port))
@@ -490,8 +415,8 @@ impl ReactResolvedConfig {
                     discovery_cache_ttl_secs,
                 } => WarehouseResolved {
                     kind: "athena".to_string(),
-                    container: Some(catalog.unwrap_or_else(|| "AwsDataCatalog".to_string())),
-                    namespace: schema,
+                    container: catalog.unwrap_or_else(|| "AwsDataCatalog".to_string()),
+                    namespace: schema.unwrap_or_default(),
                     extras: serde_json::json!({
                         "workgroup": workgroup,
                         "region": region,
@@ -502,14 +427,14 @@ impl ReactResolvedConfig {
                 },
                 WarehouseFile::Postgres { database, schema } => WarehouseResolved {
                     kind: "postgres".to_string(),
-                    container: database,
-                    namespace: schema,
+                    container: database.unwrap_or_default(),
+                    namespace: schema.unwrap_or_default(),
                     extras: serde_json::json!({}),
                 },
                 WarehouseFile::Mssql { database, schema } => WarehouseResolved {
                     kind: "mssql".to_string(),
-                    container: database,
-                    namespace: schema,
+                    container: database.unwrap_or_default(),
+                    namespace: schema.unwrap_or_default(),
                     extras: serde_json::json!({}),
                 },
                 WarehouseFile::Snowflake {
@@ -519,8 +444,8 @@ impl ReactResolvedConfig {
                     role,
                 } => WarehouseResolved {
                     kind: "snowflake".to_string(),
-                    container: database,
-                    namespace: schema,
+                    container: database.unwrap_or_default(),
+                    namespace: schema.unwrap_or_default(),
                     extras: serde_json::json!({ "warehouse": warehouse, "role": role }),
                 },
                 WarehouseFile::Bigquery {
@@ -531,8 +456,8 @@ impl ReactResolvedConfig {
                     discovery_cache_ttl_secs,
                 } => WarehouseResolved {
                     kind: "bigquery".to_string(),
-                    container: project,
-                    namespace: dataset,
+                    container: project.unwrap_or_default(),
+                    namespace: dataset.unwrap_or_default(),
                     extras: serde_json::json!({
                         "location": location,
                         "max_concurrency": max_concurrency,
@@ -542,7 +467,7 @@ impl ReactResolvedConfig {
             }
         }
 
-        let cfg = Self {
+        let cfg = ReactResolvedConfig {
             server: ServerResolved { port: server_port },
             storage: StorageResolved {
                 mode: mode.clone(),
@@ -565,11 +490,13 @@ impl ReactResolvedConfig {
                 dbt: DbtResolved {
                     enabled: dbt_f.enabled.unwrap_or(true),
                     profiles_dir: getenv_nonempty("DBT_PROFILES_DIR").or(dbt_f.profiles_dir),
-                    target: getenv_nonempty("DBT_TARGET").or(dbt_f.target),
+                    target: getenv_nonempty("DBT_TARGET")
+                        .or(dbt_f.target)
+                        .unwrap_or_default(),
                     naming: DbtNamingResolved {
-                        target_schema: naming_target_schema,
-                        silver_suffix: naming_silver_suffix,
-                        gold_suffix: naming_gold_suffix,
+                        target_schema: naming_target_schema.unwrap_or_default(),
+                        silver_suffix: naming_silver_suffix.unwrap_or_default(),
+                        gold_suffix: naming_gold_suffix.unwrap_or_default(),
                     },
                     runner: getenv_nonempty("DBT_RUNNER")
                         .or(dbt_f.runner)
@@ -628,18 +555,17 @@ impl ReactResolvedConfig {
         if let Some(v) = cfg.providers.dbt.profiles_dir.as_ref() {
             set_env_if_unset("DBT_PROFILES_DIR", v);
         }
-        if let Some(v) = cfg.providers.dbt.target.as_ref() {
-            set_env_if_unset("DBT_TARGET", v);
+        if !cfg.providers.dbt.target.is_empty() {
+            set_env_if_unset("DBT_TARGET", &cfg.providers.dbt.target);
         }
-        // DBT naming env defaults (portable)
-        if let Some(v) = cfg.providers.dbt.naming.target_schema.as_ref() {
-            set_env_if_unset("DBT_TARGET_SCHEMA", v);
+        if !cfg.providers.dbt.naming.target_schema.is_empty() {
+            set_env_if_unset("DBT_TARGET_SCHEMA", &cfg.providers.dbt.naming.target_schema);
         }
-        if let Some(v) = cfg.providers.dbt.naming.silver_suffix.as_ref() {
-            set_env_if_unset("DBT_SILVER_SUFFIX", v);
+        if !cfg.providers.dbt.naming.silver_suffix.is_empty() {
+            set_env_if_unset("DBT_SILVER_SUFFIX", &cfg.providers.dbt.naming.silver_suffix);
         }
-        if let Some(v) = cfg.providers.dbt.naming.gold_suffix.as_ref() {
-            set_env_if_unset("DBT_GOLD_SUFFIX", v);
+        if !cfg.providers.dbt.naming.gold_suffix.is_empty() {
+            set_env_if_unset("DBT_GOLD_SUFFIX", &cfg.providers.dbt.naming.gold_suffix);
         }
         set_env_if_unset("DBT_RUNNER", &cfg.providers.dbt.runner);
         if let Some(v) = cfg.providers.dbt.docker_image.as_ref() {
@@ -660,8 +586,7 @@ impl ReactResolvedConfig {
             },
         );
 
-        Ok(cfg)
-    }
+    Ok(cfg)
 }
 
 #[cfg(test)]
@@ -707,7 +632,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cfg = ReactResolvedConfig::resolve(file, ov).expect("resolve");
+        let cfg = resolve_config(file, ov).expect("resolve");
         assert_eq!(cfg.storage.mode, "s3");
         assert_eq!(cfg.storage.bucket, Some("cli-bucket".to_string()));
 
@@ -732,7 +657,7 @@ mod tests {
             storage_mode: Some("s3".into()),
             ..Default::default()
         };
-        let err = ReactResolvedConfig::resolve(file, ov)
+        let err = resolve_config(file, ov)
             .err()
             .unwrap_or_default();
         assert!(err.contains("missing storage bucket for s3 mode"));
@@ -762,7 +687,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let err = ReactResolvedConfig::resolve(file, ServeOverrides::default())
+        let err = resolve_config(file, ServeOverrides::default())
             .err()
             .unwrap_or_default();
         assert!(err.contains("must not contain path separators"));
@@ -786,7 +711,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let cfg = ReactResolvedConfig::resolve(file, ServeOverrides::default()).expect("resolve");
+        let cfg = resolve_config(file, ServeOverrides::default()).expect("resolve");
         assert_eq!(cfg.storage.mode, "local");
         assert!(cfg.storage.bucket.is_none());
         assert!(cfg.storage.path.as_ref().is_some());

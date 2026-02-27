@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+
+fn nonempty(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
+}
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -287,12 +292,12 @@ fn resolve_athena_settings(cfg: &react::config::ReactResolvedConfig) -> AthenaSe
 
     let default_catalog = getenv_nonempty("ATHENA_TARGET_CATALOG")
         .or_else(|| getenv_nonempty("ATHENA_CATALOG"))
-        .or_else(|| cfg.providers.warehouse.container.clone())
+        .or_else(|| Some(cfg.providers.warehouse.container.clone()).filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "AwsDataCatalog".to_string());
 
     let source_schema = getenv_nonempty("ATHENA_SOURCE_SCHEMA")
         .or_else(|| getenv_nonempty("ATHENA_SOURCE_DATABASE"))
-        .or_else(|| cfg.providers.warehouse.namespace.clone());
+        .or_else(|| Some(cfg.providers.warehouse.namespace.clone()).filter(|s| !s.is_empty()));
 
     let max_concurrency = env_usize("ATHENA_MAX_CONCURRENCY")
         .or_else(|| {
@@ -613,7 +618,7 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            let cfg = match react::config::ReactResolvedConfig::resolve(
+            let cfg = match react::config::resolve_config(
                 file_cfg,
                 react::config::ServeOverrides {
                     port,
@@ -694,77 +699,8 @@ async fn main() {
 
             let mut suite_ctx =
                 SuiteCtx::new(storage, secrets, llm, cfg.scope.clone(), keyspace.clone());
-            suite_ctx.resolved_config = Some(Arc::new(react_suites::ReactResolvedConfig {
-                server: react_suites::config::ServerResolved {
-                    port: cfg.server.port,
-                },
-                storage: react_suites::config::StorageResolved {
-                    bucket: suite_bucket.clone(),
-                },
-                scope: cfg.scope.clone(),
-                llm: react_suites::config::LlmResolved::default(),
-                providers: react_suites::config::ProvidersResolved {
-                    warehouse: react_suites::config::WarehouseResolved {
-                        kind: cfg.providers.warehouse.kind.clone(),
-                        container: cfg
-                            .providers
-                            .warehouse
-                            .container
-                            .clone()
-                            .unwrap_or_default(),
-                        namespace: cfg
-                            .providers
-                            .warehouse
-                            .namespace
-                            .clone()
-                            .unwrap_or_default(),
-                        extras: cfg.providers.warehouse.extras.clone(),
-                    },
-                    catalog: react_suites::config::CatalogResolved {
-                        enabled: cfg.providers.catalog.enabled,
-                        refresh_secs: cfg.providers.catalog.refresh_secs,
-                        max_concurrency: cfg.providers.catalog.max_concurrency,
-                    },
-                    dbt: react_suites::config::DbtResolved {
-                        enabled: cfg.providers.dbt.enabled,
-                        profiles_dir: cfg.providers.dbt.profiles_dir.clone(),
-                        target: cfg.providers.dbt.target.clone().unwrap_or_default(),
-                        naming: react_suites::config::DbtNamingResolved {
-                            target_schema: cfg
-                                .providers
-                                .dbt
-                                .naming
-                                .target_schema
-                                .clone()
-                                .unwrap_or_default(),
-                            silver_suffix: cfg
-                                .providers
-                                .dbt
-                                .naming
-                                .silver_suffix
-                                .clone()
-                                .unwrap_or_default(),
-                            gold_suffix: cfg
-                                .providers
-                                .dbt
-                                .naming
-                                .gold_suffix
-                                .clone()
-                                .unwrap_or_default(),
-                        },
-                        runner: cfg.providers.dbt.runner.clone(),
-                        docker_image: cfg.providers.dbt.docker_image.clone(),
-                        docker_platform: cfg.providers.dbt.docker_platform.clone(),
-                        docker_network: cfg.providers.dbt.docker_network.clone(),
-                        docker_mount_aws_dir: cfg.providers.dbt.docker_mount_aws_dir,
-                    },
-                    vector: react_suites::config::VectorResolved {
-                        enabled: cfg.providers.vector.enabled,
-                    },
-                },
-            }));
+            suite_ctx.resolved_config = Some(Arc::new(cfg.clone()));
 
-            // Warehouse provider (single provider; dbt target)
             let wh_kind = cfg.providers.warehouse.kind.trim().to_ascii_lowercase();
             if wh_kind == "athena" {
                 apply_aws_region_fallback_from_warehouse(&cfg.providers.warehouse.extras);
@@ -772,12 +708,11 @@ async fn main() {
                     AthenaQueryProvider::from_settings(resolve_athena_settings(&cfg)).await,
                 );
                 suite_ctx.warehouse = athena.clone();
-                // Keep these set for now (some older call sites still use them), but suites should prefer `warehouse`.
                 suite_ctx.query = Some(athena.clone());
                 suite_ctx.datasets = Some(athena.clone());
             } else if wh_kind == "postgres" {
-                let dbname = cfg.providers.warehouse.container.clone();
-                let default_schema = cfg.providers.warehouse.namespace.clone();
+                let dbname = nonempty(&cfg.providers.warehouse.container);
+                let default_schema = nonempty(&cfg.providers.warehouse.namespace);
                 let pg = Arc::new(PostgresProvider::from_settings(PostgresSettings {
                     dbname,
                     default_schema,
@@ -787,8 +722,8 @@ async fn main() {
                 suite_ctx.query = Some(pg.clone());
                 suite_ctx.datasets = Some(pg.clone());
             } else if wh_kind == "bigquery" {
-                let project = cfg.providers.warehouse.container.clone();
-                let dataset = cfg.providers.warehouse.namespace.clone();
+                let project = nonempty(&cfg.providers.warehouse.container);
+                let dataset = nonempty(&cfg.providers.warehouse.namespace);
                 let location = cfg
                     .providers
                     .warehouse
@@ -943,7 +878,7 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            let cfg = match react::config::ReactResolvedConfig::resolve(
+            let cfg = match react::config::resolve_config(
                 file_cfg,
                 react::config::ServeOverrides {
                     port: None,
@@ -1069,75 +1004,8 @@ async fn main() {
 
             let mut suite_ctx =
                 SuiteCtx::new(storage, secrets, llm, cfg.scope.clone(), keyspace.clone());
-            suite_ctx.resolved_config = Some(Arc::new(react_suites::ReactResolvedConfig {
-                server: react_suites::config::ServerResolved { port: 0 },
-                storage: react_suites::config::StorageResolved {
-                    bucket: suite_bucket.clone(),
-                },
-                scope: cfg.scope.clone(),
-                llm: react_suites::config::LlmResolved::default(),
-                providers: react_suites::config::ProvidersResolved {
-                    warehouse: react_suites::config::WarehouseResolved {
-                        kind: cfg.providers.warehouse.kind.clone(),
-                        container: cfg
-                            .providers
-                            .warehouse
-                            .container
-                            .clone()
-                            .unwrap_or_default(),
-                        namespace: cfg
-                            .providers
-                            .warehouse
-                            .namespace
-                            .clone()
-                            .unwrap_or_default(),
-                        extras: cfg.providers.warehouse.extras.clone(),
-                    },
-                    catalog: react_suites::config::CatalogResolved {
-                        enabled: cfg.providers.catalog.enabled,
-                        refresh_secs: cfg.providers.catalog.refresh_secs,
-                        max_concurrency: cfg.providers.catalog.max_concurrency,
-                    },
-                    dbt: react_suites::config::DbtResolved {
-                        enabled: cfg.providers.dbt.enabled,
-                        profiles_dir: cfg.providers.dbt.profiles_dir.clone(),
-                        target: cfg.providers.dbt.target.clone().unwrap_or_default(),
-                        naming: react_suites::config::DbtNamingResolved {
-                            target_schema: cfg
-                                .providers
-                                .dbt
-                                .naming
-                                .target_schema
-                                .clone()
-                                .unwrap_or_default(),
-                            silver_suffix: cfg
-                                .providers
-                                .dbt
-                                .naming
-                                .silver_suffix
-                                .clone()
-                                .unwrap_or_default(),
-                            gold_suffix: cfg
-                                .providers
-                                .dbt
-                                .naming
-                                .gold_suffix
-                                .clone()
-                                .unwrap_or_default(),
-                        },
-                        runner: cfg.providers.dbt.runner.clone(),
-                        docker_image: cfg.providers.dbt.docker_image.clone(),
-                        docker_platform: cfg.providers.dbt.docker_platform.clone(),
-                        docker_network: cfg.providers.dbt.docker_network.clone(),
-                        docker_mount_aws_dir: cfg.providers.dbt.docker_mount_aws_dir,
-                    },
-                    vector: react_suites::config::VectorResolved {
-                        enabled: cfg.providers.vector.enabled,
-                    },
-                },
-            }));
+            suite_ctx.resolved_config = Some(Arc::new(cfg.clone()));
 
-            // Warehouse provider (single provider; dbt target)
             let wh_kind = cfg.providers.warehouse.kind.trim().to_ascii_lowercase();
             if wh_kind == "athena" {
                 apply_aws_region_fallback_from_warehouse(&cfg.providers.warehouse.extras);
@@ -1148,8 +1016,8 @@ async fn main() {
                 suite_ctx.query = Some(athena.clone());
                 suite_ctx.datasets = Some(athena.clone());
             } else if wh_kind == "postgres" {
-                let dbname = cfg.providers.warehouse.container.clone();
-                let default_schema = cfg.providers.warehouse.namespace.clone();
+                let dbname = nonempty(&cfg.providers.warehouse.container);
+                let default_schema = nonempty(&cfg.providers.warehouse.namespace);
                 let pg = Arc::new(PostgresProvider::from_settings(PostgresSettings {
                     dbname,
                     default_schema,
@@ -1159,8 +1027,8 @@ async fn main() {
                 suite_ctx.query = Some(pg.clone());
                 suite_ctx.datasets = Some(pg.clone());
             } else if wh_kind == "bigquery" {
-                let project = cfg.providers.warehouse.container.clone();
-                let dataset = cfg.providers.warehouse.namespace.clone();
+                let project = nonempty(&cfg.providers.warehouse.container);
+                let dataset = nonempty(&cfg.providers.warehouse.namespace);
                 let location = cfg
                     .providers
                     .warehouse
