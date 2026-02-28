@@ -558,7 +558,7 @@ mod tests {
     fn minimal_cfg() -> Arc<config::ReactResolvedConfig> {
         Arc::new(config::ReactResolvedConfig {
             server: config::ServerResolved { port: 1 },
-            storage: config::StorageResolved { mode: "local".to_string(), bucket: None, path: None },
+            storage: config::StorageResolved { mode: react_core::resolved_config::StorageMode::Local, bucket: None, path: None },
             scope: RequestScope {
                 tenant: "t".to_string(),
                 workspace: "w".to_string(),
@@ -567,7 +567,7 @@ mod tests {
             llm: config::LlmResolved::default(),
             providers: config::ProvidersResolved {
                 warehouse: config::WarehouseResolved {
-                    kind: "athena".to_string(),
+                    kind: react_core::resolved_config::WarehouseKind::Athena,
                     container: "AwsDataCatalog".to_string(),
                     namespace: "test_raw".to_string(),
                     extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),

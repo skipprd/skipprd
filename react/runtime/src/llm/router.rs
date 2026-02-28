@@ -159,12 +159,11 @@ impl LlmRouter {
     }
 
     pub fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, String> {
-        // Choose adapter dynamically for OpenAI based on model family, preserving local llama behavior
-        let provider = Config::llm_provider().to_uppercase();
-        let adapter: Arc<dyn Adapter> = match provider.as_str() {
-            "LLAMA_CPP" => self.adapter.clone(),
-            "OPENAI" | "OPENAI_COMPAT" | "HTTP" => pick_openai_adapter_for_model(&req.model),
-            _ => self.adapter.clone(),
+        use react_core::resolved_config::LlmProvider;
+        let provider = LlmProvider::from_str_loose(&Config::llm_provider());
+        let adapter: Arc<dyn Adapter> = match provider {
+            LlmProvider::LlamaCpp | LlmProvider::Null => self.adapter.clone(),
+            LlmProvider::Openai | LlmProvider::OpenaiCompat | LlmProvider::Http => pick_openai_adapter_for_model(&req.model),
         };
         // Memoization key: model + hash(messages JSON)
         let mut hasher = DefaultHasher::new();
@@ -411,11 +410,11 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
     }
 
     pub fn embed(&self, req: &EmbedRequest) -> Result<EmbedResponse, String> {
-        let provider = Config::llm_provider().to_uppercase();
-        let adapter: Arc<dyn Adapter> = match provider.as_str() {
-            "LLAMA_CPP" => self.adapter.clone(),
-            "OPENAI" | "OPENAI_COMPAT" | "HTTP" => pick_openai_adapter_for_model(&req.model),
-            _ => self.adapter.clone(),
+        use react_core::resolved_config::LlmProvider;
+        let provider = LlmProvider::from_str_loose(&Config::llm_provider());
+        let adapter: Arc<dyn Adapter> = match provider {
+            LlmProvider::LlamaCpp | LlmProvider::Null => self.adapter.clone(),
+            LlmProvider::Openai | LlmProvider::OpenaiCompat | LlmProvider::Http => pick_openai_adapter_for_model(&req.model),
         };
         let http_req = adapter.build_embed_http(req)?;
         if http_req.url.starts_with("local://embed") {

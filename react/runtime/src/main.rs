@@ -13,6 +13,7 @@ use std::time::Instant;
 use react::llm;
 use react::providers::catalog::DefaultCatalogProvider;
 use react::providers::{DefaultKeyspace, EnvSecretsProvider, LanceVectorStore, LocalKeyspace};
+use react_core::resolved_config as rc;
 use react_core::suite::SuiteCtx;
 use react_module_provider_athena::{AthenaQueryProvider, AthenaSettings};
 use react_module_provider_bigquery::{BigQueryProvider, BigQuerySettings};
@@ -196,7 +197,7 @@ fn resolve_log_dir(cfg: &react::config::ReactResolvedConfig) -> PathBuf {
             return PathBuf::from(p);
         }
     }
-    if cfg.storage.mode == "local" {
+    if cfg.storage.mode == rc::StorageMode::Local {
         if let Some(ref root) = cfg.storage.path {
             return PathBuf::from(root).join("logs");
         }
@@ -653,7 +654,7 @@ async fn main() {
                 }
             }
 
-            let (storage, keyspace, suite_bucket) = if cfg.storage.mode == "local" {
+            let (storage, keyspace, suite_bucket) = if cfg.storage.mode == rc::StorageMode::Local {
                 let root = cfg
                     .storage
                     .path
@@ -698,8 +699,8 @@ async fn main() {
                 SuiteCtx::new(storage, secrets, llm, cfg.scope.clone(), keyspace.clone());
             suite_ctx.resolved_config = Some(Arc::new(cfg.clone()));
 
-            let wh_kind = cfg.providers.warehouse.kind.trim().to_ascii_lowercase();
-            if wh_kind == "athena" {
+            let wh_kind = cfg.providers.warehouse.kind;
+            if wh_kind == rc::WarehouseKind::Athena {
                 apply_aws_region_fallback_from_warehouse(&cfg.providers.warehouse.extras);
                 let athena = Arc::new(
                     AthenaQueryProvider::from_settings(resolve_athena_settings(&cfg)).await,
@@ -707,7 +708,7 @@ async fn main() {
                 suite_ctx.warehouse = athena.clone();
                 suite_ctx.query = Some(athena.clone());
                 suite_ctx.datasets = Some(athena.clone());
-            } else if wh_kind == "postgres" {
+            } else if wh_kind == rc::WarehouseKind::Postgres {
                 let dbname = nonempty(&cfg.providers.warehouse.container);
                 let default_schema = nonempty(&cfg.providers.warehouse.namespace);
                 let pg = Arc::new(PostgresProvider::from_settings(PostgresSettings {
@@ -718,7 +719,7 @@ async fn main() {
                 suite_ctx.warehouse = pg.clone();
                 suite_ctx.query = Some(pg.clone());
                 suite_ctx.datasets = Some(pg.clone());
-            } else if wh_kind == "bigquery" {
+            } else if wh_kind == rc::WarehouseKind::Bigquery {
                 let project = nonempty(&cfg.providers.warehouse.container);
                 let dataset = nonempty(&cfg.providers.warehouse.namespace);
                 let location = cfg
@@ -925,7 +926,7 @@ async fn main() {
             // - local: stream to a temp file under `<root>/<scope>/logs/` and rename once thread_id is known
             // - non-local: stream to a temp file and upload at end
             let run_logs = if terminal_enabled {
-                if cfg.storage.mode == "local" {
+                if cfg.storage.mode == rc::StorageMode::Local {
                     if let Some(root) = cfg.storage.path.as_ref() {
                         react::thread_logs::RunThreadLogs::new_local(
                             root.clone(),
@@ -959,7 +960,7 @@ async fn main() {
                 }
             }
 
-            let (storage, keyspace, suite_bucket) = if cfg.storage.mode == "local" {
+            let (storage, keyspace, suite_bucket) = if cfg.storage.mode == rc::StorageMode::Local {
                 let root = cfg
                     .storage
                     .path
@@ -1004,8 +1005,8 @@ async fn main() {
                 SuiteCtx::new(storage, secrets, llm, cfg.scope.clone(), keyspace.clone());
             suite_ctx.resolved_config = Some(Arc::new(cfg.clone()));
 
-            let wh_kind = cfg.providers.warehouse.kind.trim().to_ascii_lowercase();
-            if wh_kind == "athena" {
+            let wh_kind = cfg.providers.warehouse.kind;
+            if wh_kind == rc::WarehouseKind::Athena {
                 apply_aws_region_fallback_from_warehouse(&cfg.providers.warehouse.extras);
                 let athena = Arc::new(
                     AthenaQueryProvider::from_settings(resolve_athena_settings(&cfg)).await,
@@ -1013,7 +1014,7 @@ async fn main() {
                 suite_ctx.warehouse = athena.clone();
                 suite_ctx.query = Some(athena.clone());
                 suite_ctx.datasets = Some(athena.clone());
-            } else if wh_kind == "postgres" {
+            } else if wh_kind == rc::WarehouseKind::Postgres {
                 let dbname = nonempty(&cfg.providers.warehouse.container);
                 let default_schema = nonempty(&cfg.providers.warehouse.namespace);
                 let pg = Arc::new(PostgresProvider::from_settings(PostgresSettings {
@@ -1024,7 +1025,7 @@ async fn main() {
                 suite_ctx.warehouse = pg.clone();
                 suite_ctx.query = Some(pg.clone());
                 suite_ctx.datasets = Some(pg.clone());
-            } else if wh_kind == "bigquery" {
+            } else if wh_kind == rc::WarehouseKind::Bigquery {
                 let project = nonempty(&cfg.providers.warehouse.container);
                 let dataset = nonempty(&cfg.providers.warehouse.namespace);
                 let location = cfg

@@ -477,8 +477,8 @@ impl Tool for StagingModelTool {
             .map(active_provider_dialect)
             .unwrap_or_else(|| "Unknown SQL dialect".to_string());
         let provider_name = crate::config::resolved_config_from_ctx(ctx)
-            .map(|cfg| cfg.providers.warehouse.kind.as_str())
-            .unwrap_or("unknown");
+            .map(|cfg| cfg.providers.warehouse.kind.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
         let provider_prompt_rules = {
             let mut out = String::new();
             for rule in ctx.warehouse.sql_prompt_rules().into_iter() {
@@ -698,7 +698,7 @@ impl Tool for StagingModelTool {
                 .collect();
 
             let sys = build_staging_sys_prompt(
-                provider_name,
+                &provider_name,
                 &dialect,
                 &expected_db,
                 &expected_table,
@@ -792,7 +792,7 @@ impl Tool for StagingModelTool {
                     sys0.clone()
                 } else {
                     build_staging_sys_prompt(
-                        provider_name,
+                        &provider_name,
                         &dialect,
                         &expected_db,
                         &expected_table,
@@ -1167,12 +1167,12 @@ mod tests {
         };
         let cfg = Arc::new(crate::config::ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { mode: "local".to_string(), bucket: None, path: None },
+            storage: crate::config::StorageResolved { mode: react_core::resolved_config::StorageMode::Local, bucket: None, path: None },
             scope: scope.clone(),
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
                 warehouse: crate::config::WarehouseResolved {
-                    kind: "athena".to_string(),
+                    kind: react_core::resolved_config::WarehouseKind::Athena,
                     container: "AwsDataCatalog".to_string(),
                     namespace: "test_raw".to_string(),
                     extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
@@ -1410,12 +1410,12 @@ mod tests {
         };
         let cfg = Arc::new(crate::config::ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { mode: "local".to_string(), bucket: None, path: None },
+            storage: crate::config::StorageResolved { mode: react_core::resolved_config::StorageMode::Local, bucket: None, path: None },
             scope: scope.clone(),
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
                 warehouse: crate::config::WarehouseResolved {
-                    kind: "athena".to_string(),
+                    kind: react_core::resolved_config::WarehouseKind::Athena,
                     container: "AwsDataCatalog".to_string(),
                     namespace: "test_raw".to_string(),
                     extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),

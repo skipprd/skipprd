@@ -245,8 +245,8 @@ impl Tool for GoldModelTool {
             .map(active_provider_dialect)
             .unwrap_or_else(|| "Unknown SQL dialect".to_string());
         let provider_name = crate::config::resolved_config_from_ctx(ctx)
-            .map(|cfg| cfg.providers.warehouse.kind.as_str())
-            .unwrap_or("unknown");
+            .map(|cfg| cfg.providers.warehouse.kind.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
         let provider_prompt_rules = {
             let mut out = String::new();
             for rule in ctx.warehouse.sql_prompt_rules().into_iter() {
@@ -256,7 +256,7 @@ impl Tool for GoldModelTool {
             }
             out
         };
-        let sys = build_gold_sys_prompt(provider_name, &dialect, max_items, &provider_prompt_rules);
+        let sys = build_gold_sys_prompt(&provider_name, &dialect, max_items, &provider_prompt_rules);
 
         // Plan-first authoring: if there is an active model plan, use task invariants/notes as the
         // default authoring instructions (and merge with any explicit item.instructions overrides).
@@ -574,7 +574,7 @@ impl Tool for GoldModelTool {
                     sys.clone()
                 } else {
                     build_gold_sys_prompt(
-                        provider_name,
+                        &provider_name,
                         &dialect,
                         max_items,
                         &provider_prompt_rules,
@@ -845,7 +845,7 @@ mod tests {
     fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {
         Arc::new(crate::config::ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { mode: "local".to_string(), bucket: None, path: None },
+            storage: crate::config::StorageResolved { mode: react_core::resolved_config::StorageMode::Local, bucket: None, path: None },
             scope: RequestScope {
                 tenant: "t".to_string(),
                 workspace: "w".to_string(),
@@ -854,7 +854,7 @@ mod tests {
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
                 warehouse: crate::config::WarehouseResolved {
-                    kind: "athena".to_string(),
+                    kind: react_core::resolved_config::WarehouseKind::Athena,
                     container: "AwsDataCatalog".to_string(),
                     namespace: "test_raw".to_string(),
                     extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),

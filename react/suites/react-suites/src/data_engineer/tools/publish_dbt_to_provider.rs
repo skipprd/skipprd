@@ -440,7 +440,7 @@ mod tests {
     async fn check_existing_relations_is_conservative_without_query_provider() {
         let cfg = crate::config::ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { mode: "local".to_string(), bucket: None, path: None },
+            storage: crate::config::StorageResolved { mode: react_core::resolved_config::StorageMode::Local, bucket: None, path: None },
             scope: RequestScope {
                 tenant: "t".to_string(),
                 workspace: "w".to_string(),
@@ -449,7 +449,7 @@ mod tests {
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
                 warehouse: crate::config::WarehouseResolved {
-                    kind: "athena".to_string(),
+                    kind: react_core::resolved_config::WarehouseKind::Athena,
                     container: "AwsDataCatalog".to_string(),
                     namespace: "src".to_string(),
                     extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
@@ -569,12 +569,12 @@ mod tests {
 
         let cfg = Arc::new(crate::config::ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { mode: "local".to_string(), bucket: None, path: None },
+            storage: crate::config::StorageResolved { mode: react_core::resolved_config::StorageMode::Local, bucket: None, path: None },
             scope: scope.clone(),
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
                 warehouse: crate::config::WarehouseResolved {
-                    kind: "athena".to_string(),
+                    kind: react_core::resolved_config::WarehouseKind::Athena,
                     container: "AwsDataCatalog".to_string(),
                     namespace: "picnic".to_string(),
                     extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),

@@ -21,23 +21,13 @@ pub struct GeneratedProfiles {
 ///
 /// Today only Athena exists; the shape is designed to extend to other engines.
 pub fn active_warehouse(cfg: &ReactResolvedConfig) -> Result<ActiveWarehouse, String> {
-    match cfg
-        .providers
-        .warehouse
-        .kind
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "athena" => Ok(ActiveWarehouse::Athena),
-        "postgres" => Ok(ActiveWarehouse::Postgres),
-        "snowflake" => Ok(ActiveWarehouse::Snowflake),
-        "bigquery" => Ok(ActiveWarehouse::Bigquery),
-        "mssql" | "sqlserver" => Ok(ActiveWarehouse::Mssql),
-        _ => Err(format!(
-            "unsupported providers.warehouse.kind '{}' for profiles generation",
-            cfg.providers.warehouse.kind
-        )),
+    use react_core::resolved_config::WarehouseKind;
+    match cfg.providers.warehouse.kind {
+        WarehouseKind::Athena => Ok(ActiveWarehouse::Athena),
+        WarehouseKind::Postgres => Ok(ActiveWarehouse::Postgres),
+        WarehouseKind::Snowflake => Ok(ActiveWarehouse::Snowflake),
+        WarehouseKind::Bigquery => Ok(ActiveWarehouse::Bigquery),
+        WarehouseKind::Mssql => Ok(ActiveWarehouse::Mssql),
     }
 }
 
@@ -417,7 +407,7 @@ mod tests {
     fn generate_athena_profiles_requires_result_s3() {
         let cfg = ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { mode: "local".to_string(), bucket: None, path: None },
+            storage: crate::config::StorageResolved { mode: react_core::resolved_config::StorageMode::Local, bucket: None, path: None },
             scope: RequestScope {
                 tenant: "t".to_string(),
                 workspace: "w".to_string(),
@@ -426,7 +416,7 @@ mod tests {
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
                 warehouse: crate::config::WarehouseResolved {
-                    kind: "athena".to_string(),
+                    kind: react_core::resolved_config::WarehouseKind::Athena,
                     container: "AwsDataCatalog".to_string(),
                     namespace: "src".to_string(),
                     extras: serde_json::json!({}),

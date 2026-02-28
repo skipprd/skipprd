@@ -218,21 +218,13 @@ pub struct LlmRemediationDecision {
 }
 
 pub fn active_provider_dialect(cfg: &ReactResolvedConfig) -> String {
-    // Human-readable label, consumed by the LLM prompt. Keep it stable (used in logs/tool outputs).
-    match cfg
-        .providers
-        .warehouse
-        .kind
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "athena" => "Amazon Athena (engine v3 / Trino SQL)".to_string(),
-        "postgres" => "PostgreSQL".to_string(),
-        "mssql" | "sqlserver" => "Microsoft SQL Server (T-SQL)".to_string(),
-        "snowflake" => "Snowflake SQL".to_string(),
-        "bigquery" => "Google BigQuery (Standard SQL)".to_string(),
-        _ => "Unknown SQL dialect".to_string(),
+    use react_core::resolved_config::WarehouseKind;
+    match cfg.providers.warehouse.kind {
+        WarehouseKind::Athena => "Amazon Athena (engine v3 / Trino SQL)".to_string(),
+        WarehouseKind::Postgres => "PostgreSQL".to_string(),
+        WarehouseKind::Mssql => "Microsoft SQL Server (T-SQL)".to_string(),
+        WarehouseKind::Snowflake => "Snowflake SQL".to_string(),
+        WarehouseKind::Bigquery => "Google BigQuery (Standard SQL)".to_string(),
     }
 }
 
@@ -1697,7 +1689,7 @@ mod tests {
     fn minimal_cfg_athena() -> Arc<ReactResolvedConfig> {
         Arc::new(ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
-            storage: crate::config::StorageResolved { mode: "local".to_string(), bucket: None, path: None },
+            storage: crate::config::StorageResolved { mode: react_core::resolved_config::StorageMode::Local, bucket: None, path: None },
             scope: RequestScope {
                 tenant: "t".to_string(),
                 workspace: "w".to_string(),
@@ -1706,7 +1698,7 @@ mod tests {
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
                 warehouse: crate::config::WarehouseResolved {
-                    kind: "athena".to_string(),
+                    kind: react_core::resolved_config::WarehouseKind::Athena,
                     container: "AwsDataCatalog".to_string(),
                     namespace: "src".to_string(),
                     extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),

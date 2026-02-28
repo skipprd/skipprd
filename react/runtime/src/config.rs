@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use crate::providers::RequestScope;
 use react_core::providers::DEFAULT_WAREHOUSE_MAX_CONCURRENCY;
 use react_core::resolved_config as rc;
+use rc::{LlmProvider, StorageMode, WarehouseKind};
 
 /// # `react` configuration
 ///
@@ -287,16 +288,14 @@ pub fn resolve_config(file: ReactConfigFile, ov: ServeOverrides) -> Result<React
             .unwrap_or(8787);
 
         // Storage mode: CLI > env > YAML > default(local)
-        let mode = ov
+        let mode_str = ov
             .storage_mode
             .or_else(|| getenv_nonempty("REACT_STORAGE_MODE"))
             .or_else(|| file.storage.as_ref().and_then(|s| s.mode.clone()))
-            .unwrap_or_else(|| "local".to_string())
-            .trim()
-            .to_ascii_lowercase();
-        let mode = match mode.as_str() {
-            "local" => "local".to_string(),
-            "s3" => "s3".to_string(),
+            .unwrap_or_else(|| "local".to_string());
+        let mode = match mode_str.trim().to_ascii_lowercase().as_str() {
+            "local" => StorageMode::Local,
+            "s3" => StorageMode::S3,
             other => {
                 return Err(format!(
                     "unsupported storage.mode '{other}' (expected local|s3)"
@@ -318,7 +317,7 @@ pub fn resolve_config(file: ReactConfigFile, ov: ServeOverrides) -> Result<React
         }
 
         // Resolve storage fields based on mode.
-        let (bucket, path) = if mode == "s3" {
+        let (bucket, path) = if mode == StorageMode::S3 {
             // Bucket: CLI > env > YAML
             let b = ov
                 .bucket
@@ -367,7 +366,11 @@ pub fn resolve_config(file: ReactConfigFile, ov: ServeOverrides) -> Result<React
         // LLM env surface
         let llmf = file.llm.unwrap_or_default();
         let llm = LlmResolved {
-            provider: getenv_nonempty("LLM_PROVIDER").or(llmf.provider),
+            provider: LlmProvider::from_str_loose(
+                &getenv_nonempty("LLM_PROVIDER")
+                    .or(llmf.provider)
+                    .unwrap_or_default(),
+            ),
             base_url: getenv_nonempty("LLM_BASE_URL").or(llmf.base_url),
             chat_model: getenv_nonempty("LLM_CHAT_MODEL").or(llmf.chat_model),
             embed_model: getenv_nonempty("LLM_EMBED_MODEL").or(llmf.embed_model),
@@ -414,7 +417,7 @@ pub fn resolve_config(file: ReactConfigFile, ov: ServeOverrides) -> Result<React
                     schema,
                     discovery_cache_ttl_secs,
                 } => WarehouseResolved {
-                    kind: "athena".to_string(),
+                    kind: WarehouseKind::Athena,
                     container: catalog.unwrap_or_else(|| "AwsDataCatalog".to_string()),
                     namespace: schema.unwrap_or_default(),
                     extras: serde_json::json!({
@@ -426,13 +429,13 @@ pub fn resolve_config(file: ReactConfigFile, ov: ServeOverrides) -> Result<React
                     }),
                 },
                 WarehouseFile::Postgres { database, schema } => WarehouseResolved {
-                    kind: "postgres".to_string(),
+                    kind: WarehouseKind::Postgres,
                     container: database.unwrap_or_default(),
                     namespace: schema.unwrap_or_default(),
                     extras: serde_json::json!({}),
                 },
                 WarehouseFile::Mssql { database, schema } => WarehouseResolved {
-                    kind: "mssql".to_string(),
+                    kind: WarehouseKind::Mssql,
                     container: database.unwrap_or_default(),
                     namespace: schema.unwrap_or_default(),
                     extras: serde_json::json!({}),
@@ -443,7 +446,7 @@ pub fn resolve_config(file: ReactConfigFile, ov: ServeOverrides) -> Result<React
                     warehouse,
                     role,
                 } => WarehouseResolved {
-                    kind: "snowflake".to_string(),
+                    kind: WarehouseKind::Snowflake,
                     container: database.unwrap_or_default(),
                     namespace: schema.unwrap_or_default(),
                     extras: serde_json::json!({ "warehouse": warehouse, "role": role }),
@@ -455,7 +458,7 @@ pub fn resolve_config(file: ReactConfigFile, ov: ServeOverrides) -> Result<React
                     max_concurrency,
                     discovery_cache_ttl_secs,
                 } => WarehouseResolved {
-                    kind: "bigquery".to_string(),
+                    kind: WarehouseKind::Bigquery,
                     container: project.unwrap_or_default(),
                     namespace: dataset.unwrap_or_default(),
                     extras: serde_json::json!({
@@ -521,9 +524,7 @@ pub fn resolve_config(file: ReactConfigFile, ov: ServeOverrides) -> Result<React
 
         // Fill env defaults for subsystems that still read env internally.
         // IMPORTANT: we never overwrite an explicitly set env var.
-        if let Some(v) = cfg.llm.provider.as_ref() {
-            set_env_if_unset("LLM_PROVIDER", v);
-        }
+        set_env_if_unset("LLM_PROVIDER", &cfg.llm.provider.to_string());
         if let Some(v) = cfg.llm.base_url.as_ref() {
             set_env_if_unset("LLM_BASE_URL", v);
         }
@@ -633,7 +634,7 @@ mod tests {
         };
 
         let cfg = resolve_config(file, ov).expect("resolve");
-        assert_eq!(cfg.storage.mode, "s3");
+        assert_eq!(cfg.storage.mode, StorageMode::S3);
         assert_eq!(cfg.storage.bucket, Some("cli-bucket".to_string()));
 
         clear_env(&["SKIPPR_S3_BUCKET"]);
@@ -712,7 +713,7 @@ mod tests {
             ..Default::default()
         };
         let cfg = resolve_config(file, ServeOverrides::default()).expect("resolve");
-        assert_eq!(cfg.storage.mode, "local");
+        assert_eq!(cfg.storage.mode, StorageMode::Local);
         assert!(cfg.storage.bucket.is_none());
         assert!(cfg.storage.path.as_ref().is_some());
     }

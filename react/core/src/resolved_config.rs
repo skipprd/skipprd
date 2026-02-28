@@ -1,4 +1,101 @@
 use crate::scope::RequestScope;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+// ── Enums that replace stringly-typed dispatch ──────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageMode {
+    Local,
+    S3,
+}
+
+impl fmt::Display for StorageMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local => write!(f, "local"),
+            Self::S3 => write!(f, "s3"),
+        }
+    }
+}
+
+impl Default for StorageMode {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarehouseKind {
+    Athena,
+    Postgres,
+    Mssql,
+    Snowflake,
+    Bigquery,
+}
+
+impl fmt::Display for WarehouseKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Athena => write!(f, "athena"),
+            Self::Postgres => write!(f, "postgres"),
+            Self::Mssql => write!(f, "mssql"),
+            Self::Snowflake => write!(f, "snowflake"),
+            Self::Bigquery => write!(f, "bigquery"),
+        }
+    }
+}
+
+impl Default for WarehouseKind {
+    fn default() -> Self {
+        Self::Athena
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LlmProvider {
+    Null,
+    OpenaiCompat,
+    Openai,
+    Http,
+    LlamaCpp,
+}
+
+impl fmt::Display for LlmProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => write!(f, "null"),
+            Self::OpenaiCompat => write!(f, "OPENAI_COMPAT"),
+            Self::Openai => write!(f, "OPENAI"),
+            Self::Http => write!(f, "HTTP"),
+            Self::LlamaCpp => write!(f, "LLAMA_CPP"),
+        }
+    }
+}
+
+impl Default for LlmProvider {
+    fn default() -> Self {
+        Self::Null
+    }
+}
+
+impl LlmProvider {
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "OPENAI_COMPAT" => Self::OpenaiCompat,
+            "OPENAI" => Self::Openai,
+            "HTTP" => Self::Http,
+            "LLAMA_CPP" => Self::LlamaCpp,
+            "NULL" | "" => Self::Null,
+            _ => Self::OpenaiCompat,
+        }
+    }
+}
+
+// ── Resolved config structs ─────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct ReactResolvedConfig {
@@ -16,14 +113,14 @@ pub struct ServerResolved {
 
 #[derive(Clone, Debug)]
 pub struct StorageResolved {
-    pub mode: String,
+    pub mode: StorageMode,
     pub bucket: Option<String>,
     pub path: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct LlmResolved {
-    pub provider: Option<String>,
+    pub provider: LlmProvider,
     pub base_url: Option<String>,
     pub chat_model: Option<String>,
     pub embed_model: Option<String>,
@@ -43,12 +140,23 @@ pub struct ProvidersResolved {
     pub vector: VectorResolved,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct WarehouseResolved {
-    pub kind: String,
+    pub kind: WarehouseKind,
     pub container: String,
     pub namespace: String,
     pub extras: serde_json::Value,
+}
+
+impl Default for WarehouseResolved {
+    fn default() -> Self {
+        Self {
+            kind: WarehouseKind::default(),
+            container: String::new(),
+            namespace: String::new(),
+            extras: serde_json::Value::Null,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]

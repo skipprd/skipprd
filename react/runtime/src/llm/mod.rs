@@ -66,15 +66,10 @@ pub fn config_from_env() -> LlmConfig {
 ///
 /// Note: `LLM_API_KEY` remains env-driven and is intentionally not stored in YAML.
 pub fn config_from_resolved(cfg: &crate::config::ReactResolvedConfig) -> LlmConfig {
-    let prov = cfg
-        .llm
-        .provider
-        .clone()
-        .unwrap_or_else(|| crate::helpers::configuration::Config::llm_provider())
-        .to_uppercase();
-    let provider = match prov.as_str() {
-        "OPENAI" | "OPENAI_COMPAT" | "HTTP" => LlmProviderType::OpenAICompat,
-        _ => LlmProviderType::Local,
+    use react_core::resolved_config::LlmProvider;
+    let provider = match cfg.llm.provider {
+        LlmProvider::Openai | LlmProvider::OpenaiCompat | LlmProvider::Http => LlmProviderType::OpenAICompat,
+        LlmProvider::LlamaCpp | LlmProvider::Null => LlmProviderType::Local,
     };
     LlmConfig {
         provider,
