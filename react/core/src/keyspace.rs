@@ -97,7 +97,7 @@ impl Keyspace for DefaultKeyspace {
         Self::ensure_safe_segment(&scope.project_id)?;
         Self::ensure_safe_segment(thread_id)?;
         Ok(format!(
-            "{}/{}/{}/threads/{}.state.json",
+            "{}/{}/{}/state/{}/state.json",
             scope.tenant, scope.workspace, scope.project_id, thread_id
         ))
     }
@@ -392,7 +392,7 @@ mod tests {
             project_id: "p".into(),
         };
         let k = ks.thread_state_key(&scope, "123").unwrap();
-        assert_eq!(k, "t/w/p/threads/123.state.json");
+        assert_eq!(k, "t/w/p/state/123/state.json");
     }
 
     #[test]

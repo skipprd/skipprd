@@ -41,6 +41,24 @@ pub struct ThreadState {
     /// Opaque suite-owned control snapshot (authoritative control state).
     #[serde(default)]
     pub control_state: Option<Value>,
+    /// Thread-scoped bootstrap statuses (catalog/discovery readiness, etc).
+    #[serde(default)]
+    pub bootstrap: ThreadBootstrapState,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadBootstrapState {
+    #[serde(default)]
+    pub catalog: Option<CatalogBootstrapState>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogBootstrapState {
+    pub status: String,
+    pub metadata_complete: bool,
+    pub ts: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -915,7 +933,7 @@ impl ThreadStore {
     fn state_key(&self, thread_id: &str) -> String {
         self.keyspace
             .thread_state_key(&self.scope, thread_id)
-            .unwrap_or_else(|_| format!("invalid/thread/{}.state.json", thread_id))
+            .unwrap_or_else(|_| format!("invalid/state/{}/state.json", thread_id))
     }
 
     fn list_prefix(&self) -> String {
@@ -1007,8 +1025,40 @@ impl ThreadStore {
                 thread_id, state.thread_id
             ));
         }
+        // Non-destructive write: merge incoming patch with existing persisted state.
+        let mut merged = self
+            .get_thread_state(thread_id)
+            .await
+            .unwrap_or_else(|_| Self::new_thread_state(thread_id));
+        if let Some(v) = state.suite_id.clone() {
+            merged.suite_id = Some(v);
+        }
+        if let Some(v) = state.agent_type.clone() {
+            merged.agent_type = Some(v);
+        }
+        if let Some(v) = state.current_phase.clone() {
+            merged.current_phase = Some(v);
+        }
+        merged.last_materialized_step_count = merged
+            .last_materialized_step_count
+            .max(state.last_materialized_step_count);
+        merged.total_runtime_ms = merged.total_runtime_ms.max(state.total_runtime_ms);
+        for (k, v) in state.items.iter() {
+            merged.items.insert(k.clone(), v.clone());
+        }
+        if let Some(v) = state.suite_state.clone() {
+            merged.suite_state = Some(v);
+        }
+        if let Some(v) = state.control_state.clone() {
+            merged.control_state = Some(v);
+        }
+        if state.bootstrap.catalog.is_some() {
+            merged.bootstrap.catalog = state.bootstrap.catalog.clone();
+        }
+        merged.thread_state_schema_version = THREAD_STATE_SCHEMA_VERSION;
+        merged.thread_id = thread_id.to_string();
         let key = self.state_key(thread_id);
-        let v = serde_json::to_value(state).map_err(|e| e.to_string())?;
+        let v = serde_json::to_value(merged).map_err(|e| e.to_string())?;
         self.storage.put_json(&key, &v).await
     }
 
@@ -1098,8 +1148,7 @@ impl ThreadStore {
         let mut out: Vec<String> = Vec::new();
         if let Ok(keys) = self.storage.list_prefix(&prefix).await {
             for k in keys {
-                // Thread state snapshots live alongside logs under the same prefix.
-                // The list endpoint must return ONLY thread logs.
+                // Backward-compat defensive filter: return only thread logs.
                 if k.ends_with(".state.json") {
                     continue;
                 }
@@ -1208,6 +1257,7 @@ fn build_thread_state_from_log(thread_id: &str, log: &ThreadLog) -> ThreadState 
         items: BTreeMap::new(),
         suite_state: None,
         control_state: None,
+        bootstrap: ThreadBootstrapState::default(),
     };
 
     for (idx, step) in log.steps.iter().enumerate() {
@@ -1344,129 +1394,8 @@ fn apply_step_to_state(st: &mut ThreadState, _step_idx: usize, step: &ThreadStep
             ent.started_at.get_or_insert_with(|| ts.clone());
             st.current_phase = Some(ph);
         }
-        ThreadStep::ToolStart {
-            tool_id,
-            name,
-            clean_name,
-            args: _,
-            status: _,
-            payload,
-            ctx,
-            ts,
-            ..
-        } => {
-            let key = format!("tool:{}", tool_id);
-            let ent = st.items.entry(key).or_insert_with(|| ThreadItemState {
-                kind: ThreadItemKind::Tool,
-                status: ThreadItemStatus::Running,
-                started_at: Some(ts.clone()),
-                finished_at: None,
-                runtime_ms: None,
-                last_error: None,
-                outputs: None,
-            });
-            ent.kind = ThreadItemKind::Tool;
-            ent.status = ThreadItemStatus::Running;
-            ent.started_at.get_or_insert_with(|| ts.clone());
-            if let Some(p) = payload.clone() {
-                ent.outputs = Some(p);
-            }
-
-            let _ = (tool_id, name, clean_name, payload, ctx);
-        }
-        ThreadStep::ToolEnd {
-            tool_id,
-            name,
-            clean_name,
-            args: _,
-            status,
-            payload,
-            ctx,
-            observation,
-            ts,
-            ..
-        } => {
-            let key = format!("tool:{}", tool_id);
-            let (runtime_ms, payload_out, err_out) = {
-                let ent = st.items.entry(key).or_insert_with(|| ThreadItemState {
-                    kind: ThreadItemKind::Tool,
-                    status: if *status == ToolStepStatus::Failed {
-                        ThreadItemStatus::Failed
-                    } else {
-                        ThreadItemStatus::Ok
-                    },
-                    started_at: Some(ts.clone()),
-                    finished_at: None,
-                    runtime_ms: None,
-                    last_error: None,
-                    outputs: None,
-                });
-                ent.kind = ThreadItemKind::Tool;
-                ent.status = if *status == ToolStepStatus::Failed {
-                    ThreadItemStatus::Failed
-                } else {
-                    ThreadItemStatus::Ok
-                };
-                ent.started_at.get_or_insert_with(|| ts.clone());
-                ent.finished_at = Some(ts.clone());
-                if ent.runtime_ms.is_none() {
-                    if let (Some(ref started), Some(ref finished)) =
-                        (&ent.started_at, &ent.finished_at)
-                    {
-                        ent.runtime_ms = duration_ms(started, finished);
-                    }
-                }
-
-                // Prefer explicit payload (tool-owned) for outputs; otherwise keep a small generic subset.
-                if let Some(p) = payload.clone() {
-                    ent.outputs = Some(p);
-                } else {
-                    let mut outputs = serde_json::Map::new();
-                    for k in [
-                        "written_keys",
-                        "key",
-                        "uploaded_target_files",
-                        "runtime_failures",
-                    ] {
-                        if let Some(v) = observation.extra.get(k) {
-                            outputs.insert(k.to_string(), v.clone());
-                        }
-                    }
-                    if !outputs.is_empty() {
-                        ent.outputs = Some(Value::Object(outputs));
-                    }
-                }
-
-                if ent.status == ThreadItemStatus::Failed || !observation.ok {
-                    let summary = observation
-                        .first_error_or_context()
-                        .unwrap_or_else(|| "no error details were captured".to_string());
-                    ent.last_error = Some(ThreadItemError {
-                        summary,
-                        tool_step_idx: None,
-                        step_ts: Some(ts.clone()),
-                    });
-                }
-
-                let err_out = if observation.ok {
-                    None
-                } else {
-                    observation.first_error_or_context()
-                };
-                (ent.runtime_ms, ent.outputs.clone(), err_out)
-            };
-
-            let _ = (
-                tool_id,
-                name,
-                clean_name,
-                status,
-                runtime_ms,
-                payload_out,
-                err_out,
-                ctx,
-            );
-        }
+        ThreadStep::ToolStart { .. } => {}
+        ThreadStep::ToolEnd { .. } => {}
         ThreadStep::LlmStart { .. } => {}
         ThreadStep::LlmEnd { .. } => {}
         ThreadStep::Final {
@@ -2004,10 +1933,11 @@ mod tests {
             .expect("phase:model_plan present");
         assert_eq!(ph.runtime_ms, Some(5_000));
         assert!(st.total_runtime_ms >= 5_000);
-        // tool step should be materialized as failed
-        let tool_item = st.items.get("tool:t1").expect("tool:t1 present");
-        assert_eq!(tool_item.status, ThreadItemStatus::Failed);
-        assert!(tool_item.last_error.as_ref().map(|e| e.summary.as_str()) == Some("boom"));
+        // Tool timeline remains in thread log events only; state items are phase/task snapshots.
+        assert!(
+            st.items.get("tool:t1").is_none(),
+            "tool:* keys must not be materialized into thread_state.items"
+        );
     }
 
     #[tokio::test]
@@ -2137,6 +2067,50 @@ mod tests {
 
         let got = store.get_thread_state(tid).await;
         assert!(got.is_err(), "thread state should not be reconstructed from logs");
+    }
+
+    #[tokio::test]
+    async fn put_thread_state_merges_non_destructively() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let tid = "tid-merge";
+
+        let mut base = ThreadState {
+            thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
+            thread_id: tid.to_string(),
+            suite_id: Some("data_engineer".to_string()),
+            ..ThreadState::default()
+        };
+        base.control_state = Some(serde_json::json!({"checkpoint": 1}));
+        base.bootstrap.catalog = Some(CatalogBootstrapState {
+            status: "ready".to_string(),
+            metadata_complete: true,
+            ts: "2026-01-01T00:00:00Z".to_string(),
+        });
+        store.put_thread_state(tid, &base).await.unwrap();
+
+        let patch = ThreadState {
+            thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
+            thread_id: tid.to_string(),
+            current_phase: Some("model_author".to_string()),
+            ..ThreadState::default()
+        };
+        store.put_thread_state(tid, &patch).await.unwrap();
+
+        let got = store.get_thread_state(tid).await.unwrap();
+        assert_eq!(got.suite_id.as_deref(), Some("data_engineer"));
+        assert_eq!(got.current_phase.as_deref(), Some("model_author"));
+        assert_eq!(got.control_state, Some(serde_json::json!({"checkpoint": 1})));
+        assert_eq!(
+            got.bootstrap.catalog.as_ref().map(|c| c.status.as_str()),
+            Some("ready")
+        );
     }
 
     #[tokio::test]

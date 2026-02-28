@@ -13,7 +13,7 @@ use react_core::control_flow::{
     GuardBlockKind, PhaseReasonCode, ReviewDecision, ReviewDecisionMeta, ReviewTier,
 };
 use react_core::llm::LlmCallOptions;
-use react_core::session::{ThreadStore, ToolStepStatus};
+use react_core::session::{CatalogBootstrapState, ThreadBootstrapState, ThreadStore, ToolStepStatus};
 use react_core::tools::{Tool, ToolRegistry};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -1086,48 +1086,53 @@ impl DataEngineerSuite {
         })
     }
 
-    fn catalog_bootstrap_semaphore_key(sctx: &SuiteCtx, thread_id: &str) -> String {
-        let root = sctx
-            .keyspace
-            .threads_prefix(&sctx.scope)
-            .trim_end_matches("/threads")
-            .trim_end_matches('/')
-            .to_string();
-        format!("{}/state/{}/catalog_bootstrap.json", root, thread_id)
-    }
-
     async fn ensure_catalog_bootstrap_semaphored(
         thread_id: &str,
         sctx: &SuiteCtx,
     ) -> Result<(), String> {
-        let key = Self::catalog_bootstrap_semaphore_key(sctx, thread_id);
-        if let Ok(v) = sctx.storage.get_json(&key).await {
-            let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
-            if status == "ready" || status == "best_effort" {
-                tracing::info!(
-                    "data_engineer: catalog bootstrap semaphore hit status={} thread_id={}",
-                    status,
-                    thread_id
-                );
-                return Ok(());
+        let thread_store = ThreadStore::new(
+            sctx.storage.clone(),
+            sctx.scope.clone(),
+            sctx.keyspace.clone(),
+        );
+        if let Ok(st) = thread_store.get_thread_state(thread_id).await {
+            if let Some(catalog) = st.bootstrap.catalog.as_ref() {
+                if catalog.status == "ready" || catalog.status == "best_effort" {
+                    tracing::info!(
+                        "data_engineer: catalog bootstrap semaphore hit status={} thread_id={}",
+                        catalog.status,
+                        thread_id
+                    );
+                    return Ok(());
+                }
             }
         }
         let out = Self::ensure_catalog_bootstrap(sctx).await?;
         let status = if out.metadata_complete {
-            "ready"
+            "ready".to_string()
         } else {
-            "best_effort"
+            "best_effort".to_string()
         };
-        let sem_v = serde_json::json!({
-            "status": status,
-            "metadata_complete": out.metadata_complete,
-            "thread_id": thread_id,
-            "ts": chrono::Utc::now().to_rfc3339(),
-        });
-        if let Err(e) = sctx.storage.put_json(&key, &sem_v).await {
+        let ts = chrono::Utc::now().to_rfc3339();
+        let mut st = thread_store
+            .get_thread_state(thread_id)
+            .await
+            .unwrap_or_else(|_| react_core::session::ThreadState {
+                thread_state_schema_version: react_core::session::THREAD_STATE_SCHEMA_VERSION,
+                thread_id: thread_id.to_string(),
+                ..react_core::session::ThreadState::default()
+            });
+        st.bootstrap = ThreadBootstrapState {
+            catalog: Some(CatalogBootstrapState {
+                status,
+                metadata_complete: out.metadata_complete,
+                ts,
+            }),
+        };
+        if let Err(e) = thread_store.put_thread_state(thread_id, &st).await {
             tracing::warn!(
-                "data_engineer: failed to persist catalog bootstrap semaphore state key={} err={}",
-                key,
+                "data_engineer: failed to persist catalog bootstrap state thread_id={} err={}",
+                thread_id,
                 e
             );
         }
