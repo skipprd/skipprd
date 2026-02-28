@@ -52,14 +52,7 @@ pub async fn dispatch_phase_transition(
         .await
         .unwrap_or_else(ExecutionState::new);
     if let Some(from) = from_phase {
-        let is_backtrack =
-            is_cleanse_replan_backtrack(from, phase) || is_model_replan_backtrack(from, phase);
-        if is_backtrack {
-            st.replan_backtracks = st
-                .replan_backtracks
-                .saturating_add(1)
-                .min(replan_backtrack_counter_cap());
-        } else if phase == Phase::Done
+        let is_reset_reason = phase == Phase::Done
             || matches!(
                 reason_code,
                 Some(
@@ -69,9 +62,16 @@ pub async fn dispatch_phase_transition(
                         | PhaseReasonCode::PublishSuccess
                         | PhaseReasonCode::PublishConfirmedSuccess
                 )
-            )
-        {
+            );
+        let is_backtrack =
+            is_cleanse_replan_backtrack(from, phase) || is_model_replan_backtrack(from, phase);
+        if is_reset_reason {
             st.replan_backtracks = 0;
+        } else if is_backtrack {
+            st.replan_backtracks = st
+                .replan_backtracks
+                .saturating_add(1)
+                .min(replan_backtrack_counter_cap());
         }
     }
     st.current_phase = Some(phase);
@@ -79,4 +79,48 @@ pub async fn dispatch_phase_transition(
     st.save(store, thread_id).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use react_core::keyspace::DefaultKeyspace;
+    use react_core::scope::RequestScope;
+    use react_core::storage::InMemoryStorageAdapter;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn validate_pass_backtrack_resets_counter_instead_of_incrementing() {
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let tid = "tid-validate-pass-reset";
+
+        let mut st = ExecutionState::new();
+        st.replan_backtracks = 2;
+        st.save(&store, tid).await.expect("seed execution state");
+
+        dispatch_phase_transition(
+            &store,
+            tid,
+            Some("agent".to_string()),
+            Some(Phase::CleanseValidate),
+            Phase::CleanseAuthor,
+            Some(PhaseReasonCode::ValidatePass),
+            None,
+        )
+        .await
+        .expect("transition should succeed");
+
+        let got = ExecutionState::load(&store, tid).await.expect("state should load");
+        assert_eq!(
+            got.replan_backtracks, 0,
+            "validate_pass transitions must reset loopback counter"
+        );
+    }
 }

@@ -7838,10 +7838,16 @@ Apply these fixes in the output.",
                         // Mark the active plan completed only when validate passes AND checklist execution is complete.
                         let mut plan_incomplete_after_validate = false;
                         let mut active_plan_key: Option<String> = None;
+                        let latest_log = thread_store.get(thread_id).await.ok();
                         if phase == Phase::CleanseValidate {
                             if let Some(mut p) =
                                 crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
                             {
+                                if let Some(ref log) = latest_log {
+                                    crate::data_engineer::plan::update_cleanse_progress_from_log(
+                                        &mut p, log,
+                                    );
+                                }
                                 active_plan_key = Some(p.plan_key.clone());
                                 if crate::data_engineer::plan::cleanse_all_done(&p) {
                                     p.status = crate::data_engineer::plan::PlanStatus::Completed;
@@ -7856,6 +7862,11 @@ Apply these fixes in the output.",
                             if let Some(mut p) =
                                 crate::data_engineer::plan::load_model_plan_any(&actx).await
                             {
+                                if let Some(ref log) = latest_log {
+                                    crate::data_engineer::plan::update_model_progress_from_log(
+                                        &mut p, log,
+                                    );
+                                }
                                 active_plan_key = Some(p.plan_key.clone());
                                 if crate::data_engineer::plan::model_all_done(&p) {
                                     p.status = crate::data_engineer::plan::PlanStatus::Completed;
