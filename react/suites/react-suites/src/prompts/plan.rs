@@ -96,6 +96,7 @@ pub fn cleanse_plan_skeleton_system_prompt() -> String {
     "Return CLEANSE plan skeleton JSON only.\n\
 Use strict schema fields only: tasks[].dataset_id and batches.\n\
 Rules:\n\
+- tasks MUST be non-empty.\n\
 - tasks[].dataset_id MUST reference discovered RAW source tables only (catalog/database/table form).\n\
 - Do NOT emit silver/gold dataset identifiers in CLEANSE skeleton tasks.\n\
 - batches entries must be subset of tasks[].dataset_id values.\n\

@@ -15,6 +15,7 @@ pub struct CleansePlanSkeletonTaskV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CleansePlanSkeletonV1 {
+    #[schemars(length(min = 1))]
     pub tasks: Vec<CleansePlanSkeletonTaskV1>,
     pub batches: Vec<Vec<String>>,
 }

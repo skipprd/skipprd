@@ -19,6 +19,7 @@ pub mod resolved_config;
 pub mod schema_registry;
 pub mod scope;
 pub mod session;
+pub mod state;
 pub mod storage;
 pub mod suite;
 pub mod tools;

@@ -953,7 +953,7 @@ impl ThreadStore {
                 THREAD_SCHEMA_VERSION, log.schema_version
             ));
         }
-        log.steps.push(step);
+        log.steps.push(step.clone());
         let step_count = log.steps.len();
         let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
         self.storage.put_json(&key, &val).await?;
@@ -968,7 +968,10 @@ impl ThreadStore {
 
         // Keep thread_state strongly consistent with the persisted step sequence. We do not fail
         // append_step after the log write succeeds, but we must surface materialization failures.
-        if let Err(e) = self.materialize_thread_state(thread_id, step_count).await {
+        if let Err(e) = self
+            .materialize_thread_state_incremental(thread_id, step_count, &step)
+            .await
+        {
             tracing::warn!(
                 "thread_state_materialize_failed thread_id={} step_count={} error={}",
                 thread_id,
@@ -981,16 +984,16 @@ impl ThreadStore {
 
     pub async fn get_thread_state(&self, thread_id: &str) -> Result<ThreadState, String> {
         let key = self.state_key(thread_id);
-        if let Ok(v) = self.storage.get_json(&key).await {
-            if let Ok(s) = serde_json::from_value::<ThreadState>(v) {
-                if s.thread_state_schema_version == THREAD_STATE_SCHEMA_VERSION {
-                    return Ok(s);
-                }
-            }
+        let v = self.storage.get_json(&key).await?;
+        let s = serde_json::from_value::<ThreadState>(v)
+            .map_err(|e| format!("failed to parse thread state: {e}"))?;
+        if s.thread_state_schema_version != THREAD_STATE_SCHEMA_VERSION {
+            return Err(format!(
+                "thread_state schema_version mismatch: expected {}, got {}",
+                THREAD_STATE_SCHEMA_VERSION, s.thread_state_schema_version
+            ));
         }
-        // Fallback: build from thread log.
-        let log = self.get(thread_id).await?;
-        Ok(build_thread_state_from_log(thread_id, &log))
+        Ok(s)
     }
 
     pub async fn put_thread_state(
@@ -1022,20 +1025,92 @@ impl ThreadStore {
         self.storage.put_json(&key, value).await
     }
 
-    async fn materialize_thread_state(
+    pub async fn get_thread_artifact_typed<T>(
+        &self,
+        thread_id: &str,
+        artifact_id: &str,
+    ) -> Option<T>
+    where
+        T: crate::state::ThreadStateArtifact,
+    {
+        let v = self
+            .get_thread_artifact_json(thread_id, artifact_id)
+            .await
+            .ok()?;
+        let s = serde_json::from_value::<T>(v).ok()?;
+        if s.schema_version() != T::SCHEMA_VERSION {
+            return None;
+        }
+        Some(s)
+    }
+
+    pub async fn put_thread_artifact_typed<T>(
+        &self,
+        thread_id: &str,
+        artifact_id: &str,
+        value: &T,
+    ) -> Result<(), String>
+    where
+        T: crate::state::ThreadStateArtifact,
+    {
+        if value.schema_version() != T::SCHEMA_VERSION {
+            return Err(format!(
+                "artifact schema_version mismatch for '{}': expected {}, got {}",
+                artifact_id,
+                T::SCHEMA_VERSION,
+                value.schema_version()
+            ));
+        }
+        let v = serde_json::to_value(value).map_err(|e| e.to_string())?;
+        self.put_thread_artifact_json(thread_id, artifact_id, &v).await
+    }
+
+    fn new_thread_state(thread_id: &str) -> ThreadState {
+        ThreadState {
+            thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
+            thread_id: thread_id.to_string(),
+            ..ThreadState::default()
+        }
+    }
+
+    async fn materialize_thread_state_incremental(
         &self,
         thread_id: &str,
         want_step_count: usize,
+        step: &ThreadStep,
     ) -> Result<(), String> {
-        let log = self.get(thread_id).await?;
         let mut state = self
             .get_thread_state(thread_id)
             .await
-            .unwrap_or_else(|_| build_thread_state_from_log(thread_id, &log));
-
-        if state.last_materialized_step_count != want_step_count {
-            state = build_thread_state_from_log(thread_id, &log);
+            .unwrap_or_else(|_| Self::new_thread_state(thread_id));
+        if state.last_materialized_step_count > want_step_count.saturating_sub(1) {
+            return Err(format!(
+                "thread_state materialization mismatch: state_count={} want_step_count={}",
+                state.last_materialized_step_count, want_step_count
+            ));
         }
+        if state.last_materialized_step_count < want_step_count.saturating_sub(1) {
+            // Hard cutover: do not replay thread logs for state reconstruction.
+            // If a gap is detected, reset to an empty state snapshot and continue incrementally.
+            state = Self::new_thread_state(thread_id);
+        }
+        let mut paired: HashSet<String> = HashSet::new();
+        match step {
+            ThreadStep::ToolStart { tool_id, .. } | ThreadStep::ToolEnd { tool_id, .. } => {
+                paired.insert(tool_id.clone());
+            }
+            _ => {}
+        }
+        apply_step_to_state(&mut state, want_step_count.saturating_sub(1), step, &paired);
+        state.thread_state_schema_version = THREAD_STATE_SCHEMA_VERSION;
+        state.thread_id = thread_id.to_string();
+        state.last_materialized_step_count = want_step_count;
+        state.total_runtime_ms = state
+            .items
+            .values()
+            .filter(|it| it.kind == ThreadItemKind::Phase)
+            .filter_map(|it| it.runtime_ms)
+            .sum();
         self.put_thread_state(thread_id, &state).await?;
         Ok(())
     }
@@ -2059,5 +2134,35 @@ mod tests {
 
         let ids = store.list().await;
         assert_eq!(ids, vec![tid.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn get_thread_state_does_not_fallback_to_thread_log() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
+        let tid = "tid-no-state";
+
+        // Seed only a thread log object; no state snapshot.
+        let key = keyspace.thread_key(&scope, tid).unwrap();
+        let log = ThreadLog {
+            schema_version: THREAD_SCHEMA_VERSION,
+            steps: vec![],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        storage
+            .put_json(&key, &serde_json::to_value(log).unwrap())
+            .await
+            .unwrap();
+
+        let got = store.get_thread_state(tid).await;
+        assert!(got.is_err(), "thread state should not be reconstructed from logs");
     }
 }

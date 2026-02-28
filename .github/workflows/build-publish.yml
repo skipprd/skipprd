@@ -164,6 +164,9 @@ jobs:
       - name: Check OpenAPI generated artifact drift
         run: bash scripts/check-openapi-drift-core.sh && bash scripts/check-openapi-drift-suite-data-engineer.sh
 
+      - name: Enforce control-state log-read guardrails
+        run: python3 scripts/check-control-state-log-reads.py
+
       - name: Test react crate
         run: cargo test -p react --lib --tests
 

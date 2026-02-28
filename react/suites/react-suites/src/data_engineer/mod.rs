@@ -290,6 +290,32 @@ enum AgentToolCapability {
     Artifacts,
 }
 
+#[derive(Clone, Debug)]
+struct NonEmptyCleanseDatasetIds {
+    ids: Vec<String>,
+}
+
+impl NonEmptyCleanseDatasetIds {
+    fn from_discovered_raw(discovered_raw: &BTreeSet<String>) -> Result<Self, String> {
+        let ids: Vec<String> = discovered_raw
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if ids.is_empty() {
+            return Err(
+                "cleanse planning has no discovered raw datasets; cannot build deterministic task skeleton"
+                    .to_string(),
+            );
+        }
+        Ok(Self { ids })
+    }
+
+    fn as_slice(&self) -> &[String] {
+        &self.ids
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct ManifestLookupRetrySignal {
     fallback_mode: bool,
@@ -806,6 +832,52 @@ impl DataEngineerSuite {
         true
     }
 
+    fn collect_cleanse_grounding_candidates(
+        plan: &crate::data_engineer::plan::CleansePlan,
+        discovered_raw: &BTreeSet<String>,
+    ) -> Vec<String> {
+        let mut out: BTreeSet<String> = BTreeSet::new();
+        for t in plan.tasks.iter() {
+            let id = t.dataset_id.trim();
+            if !id.is_empty() {
+                out.insert(id.to_string());
+            }
+        }
+        for b in plan.batches.iter() {
+            for ds in b.iter() {
+                let id = ds.trim();
+                if !id.is_empty() {
+                    out.insert(id.to_string());
+                }
+            }
+        }
+        // Deterministic safety rail: when the skeleton parser yields no task ids,
+        // seed grounding from observed raw relations in this plan phase.
+        if out.is_empty() {
+            out.extend(discovered_raw.iter().cloned());
+        }
+        out.into_iter().collect()
+    }
+
+    fn deterministic_cleanse_skeleton_from_discovered_raw(
+        discovered_raw: &BTreeSet<String>,
+    ) -> Result<crate::data_engineer::plan_schema::CleansePlanSkeletonV1, String> {
+        let ids = NonEmptyCleanseDatasetIds::from_discovered_raw(discovered_raw)?;
+        let tasks = ids
+            .as_slice()
+            .iter()
+            .map(|dataset_id| crate::data_engineer::plan_schema::CleansePlanSkeletonTaskV1 {
+                dataset_id: dataset_id.clone(),
+            })
+            .collect::<Vec<_>>();
+        let batches = ids
+            .as_slice()
+            .chunks(5)
+            .map(|chunk| chunk.to_vec())
+            .collect::<Vec<_>>();
+        Ok(crate::data_engineer::plan_schema::CleansePlanSkeletonV1 { tasks, batches })
+    }
+
     fn is_raw_dataset_id(dataset_id: &str) -> bool {
         let Some(ds) = crate::data_engineer::references::DatasetRef::parse(dataset_id) else {
             return false;
@@ -857,6 +929,25 @@ impl DataEngineerSuite {
                 if !t.is_empty() && Self::is_raw_dataset_id(t) {
                     out.insert(t.to_string());
                 }
+            }
+        }
+        out
+    }
+
+    async fn discovered_raw_relations_from_catalog(
+        datasets: Option<&Arc<dyn react_core::providers::DatasetCatalogProvider>>,
+    ) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        let Some(ds) = datasets else {
+            return out;
+        };
+        let Ok(items) = ds.list_datasets().await else {
+            return out;
+        };
+        for item in items {
+            let fqn = item.fqn();
+            if Self::is_raw_dataset_id(&fqn) {
+                out.insert(fqn);
             }
         }
         out
@@ -1370,47 +1461,6 @@ fixes:\n{}\n\
 Apply these fixes in the output.",
             critique.ok, blockers, fixes
         )
-    }
-
-    async fn generate_cleanse_skeleton(
-        ctx: &AgentCtx,
-        planning_context: &str,
-        memo: &str,
-        critique: &crate::data_engineer::plan_schema::PlanDesignCritiqueV1,
-    ) -> Result<crate::data_engineer::plan_schema::CleansePlanSkeletonV1, String> {
-        use react_core::llm::ChatMessage;
-        let mut opts = Self::planning_llm_options(
-            PlanningLlmProfile::SkeletonOrCandidates,
-            "data_engineer.cleanse_plan_skeleton",
-            ctx.thread_id.clone(),
-        );
-        opts.expected_format = react_core::llm::LlmExpectedFormat::JsonSchemaSpec {
-            name: "suite.cleanse_plan_skeleton.v1".to_string(),
-            schema: crate::data_engineer::plan_schema::strict_schema_for::<
-                crate::data_engineer::plan_schema::CleansePlanSkeletonV1,
-            >(),
-        };
-        let sys = crate::prompts::plan::cleanse_plan_skeleton_system_prompt();
-        let user = format!(
-            "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nReturn skeleton JSON.",
-            Self::excerpt(planning_context, 60_000),
-            Self::excerpt(memo, 30_000),
-            Self::critique_guidance(critique)
-        );
-        let raw = ctx.llm.chat(
-            &[
-                ChatMessage {
-                    role: "system".to_string(),
-                    content: sys.to_string(),
-                },
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: user,
-                },
-            ],
-            &opts,
-        )?;
-        Self::parse_json_typed_lenient::<crate::data_engineer::plan_schema::CleansePlanSkeletonV1>(&raw)
     }
 
     async fn generate_model_candidates(
@@ -2274,8 +2324,13 @@ Apply these fixes in the output.",
         has_proj: bool,
         has_models: bool,
     ) -> serde_json::Value {
-        let log_now = thread_store.get(thread_id).await.ok();
-        let guard = control_flow::derive_guard_state(log_now.as_ref());
+        let execution_state = crate::data_engineer::progress_controller::ExecutionState::load(
+            thread_store,
+            thread_id,
+        )
+        .await
+        .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+        let guard = control_flow::derive_guard_state_from_execution_state(&execution_state);
         serde_json::json!({
             "invariants": {
                 "has_dbt_project_yml": has_proj,
@@ -2958,9 +3013,16 @@ Apply these fixes in the output.",
                 if let (Some(store), Some(tid)) =
                     (ctx.thread_store.as_ref(), ctx.thread_id.as_deref())
                 {
-                    let log = store.get(tid).await.ok();
-                    let guard =
-                        crate::data_engineer::control_flow::derive_guard_state(log.as_ref());
+                    let guard = crate::data_engineer::progress_controller::ExecutionState::load(
+                        store, tid,
+                    )
+                    .await
+                    .map(|st| {
+                        crate::data_engineer::control_flow::derive_guard_state_from_execution_state(
+                            &st,
+                        )
+                    })
+                    .unwrap_or_default();
                     if guard.last_validate_failed && !guard.mutated_since_fail {
                         return Err(crate::data_engineer::controller_kernel::guard_block_error(
                             crate::data_engineer::controller_kernel::GuardReason::MutationRequiredAfterValidateFailure,
@@ -4405,11 +4467,12 @@ Apply these fixes in the output.",
                 // Reset the budget when we advance phases (i.e. not looping).
                 remaining_steps = max_phase_steps;
             }
-            let guard: DerivedGuardState = control_flow::derive_guard_state(log.as_ref());
+            let guard: DerivedGuardState =
+                control_flow::derive_guard_state_from_execution_state(&execution_state);
             let allow_ask_approval = match phase {
                 // Plan phases may require multiple approval prompts across iterations (reject -> revise -> ask again).
                 Phase::CleansePlan | Phase::ModelPlan => true,
-                _ => Self::allow_ask_approval_in_phase(log.as_ref(), phase),
+                _ => true,
             };
             let replan_backtracks = execution_state.replan_backtracks;
             if execution_state.stall_count >= execution_state.max_stall_count
@@ -5267,180 +5330,21 @@ Apply these fixes in the output.",
                             thread_id: _tid,
                             result: _result,
                         }) => {
-                            // Deterministic enforcement: planning must be grounded in actual project state.
-                            // Require at least:
-                            // - 1 file call
-                            // - 1 sql_schema call
-                            // - 1 of (sql_stats/sql_sample/run_sql)
-                            if let Ok(ref l) = thread_store.get(thread_id).await {
-                                let start = Self::phase_start_idx(l, phase).unwrap_or(0);
-                                let mut saw_dbt_files = false;
-                                let mut saw_sql_schema = false;
-                                let mut saw_evidence = false;
-                                for s in l.steps.iter().skip(start + 1) {
-                                    let (name_opt, ok_opt, args_opt): (
-                                        Option<&str>,
-                                        Option<bool>,
-                                        Option<&serde_json::Value>,
-                                    ) = match s {
-                                        react_core::session::ThreadStep::ToolEnd {
-                                            name,
-                                            observation,
-                                            args,
-                                            ..
-                                        } => {
-                                            (Some(name.as_str()), Some(observation.ok), Some(args))
-                                        }
-                                        _ => (None, None, None),
-                                    };
-                                    if let (Some(name), Some(true)) = (name_opt, ok_opt) {
-                                        match name {
-                                            "file" => saw_dbt_files = true,
-                                            "sql_schema" => saw_sql_schema = true,
-                                            "sql_stats" | "sql_sample" | "run_sql" => {
-                                                if args_opt
-                                                    .map(|a| {
-                                                        Self::is_valid_grounding_evidence_tool(
-                                                            name, a,
-                                                        )
-                                                    })
-                                                    .unwrap_or(false)
-                                                {
-                                                    saw_evidence = true
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                if saw_dbt_files && saw_sql_schema && !saw_evidence {
-                                    if let (Some(query), Some(ds)) =
-                                        (sctx.query.as_ref(), sctx.datasets.as_ref())
-                                    {
-                                        if let Ok(items) = ds.list_datasets().await {
-                                            if let Some(first_table) = items
-                                                .first()
-                                                .map(|d| d.fqn())
-                                                .filter(|s| !s.is_empty())
-                                            {
-                                                let sql_schema_tool =
-                                                    tools::sql_schema::SqlSchemaTool {
-                                                        query: query.clone(),
-                                                        datasets: sctx.datasets.clone(),
-                                                        catalog: sctx.catalog.clone(),
-                                                    };
-                                                let sql_stats_tool =
-                                                    tools::sql_stats::SqlStatsTool {
-                                                        catalog: sctx.catalog.clone(),
-                                                        datasets: sctx.datasets.clone(),
-                                                    };
-                                                let sql_sample_tool =
-                                                    tools::sql_sample::SqlSampleTool {
-                                                        query: query.clone(),
-                                                    };
-                                                let run_sql_tool = tools::sql_run::SqlRunTool {
-                                                    query: query.clone(),
-                                                };
-                                                let tool_timeout = |name: &str| {
-                                                    actx.policy
-                                                        .timeout_for_tool(name)
-                                                        .unwrap_or(actx.per_step_timeout_secs)
-                                                };
-                                                let (probe_ok, _field) =
-                                                    Self::run_deterministic_probe_for_table(
-                                                        &thread_store,
-                                                        thread_id,
-                                                        &actx,
-                                                        &sql_schema_tool,
-                                                        &sql_stats_tool,
-                                                        &sql_sample_tool,
-                                                        &run_sql_tool,
-                                                        &first_table,
-                                                        tool_timeout("sql_schema"),
-                                                        tool_timeout("sql_stats"),
-                                                        tool_timeout("sql_sample"),
-                                                        tool_timeout("run_sql"),
-                                                    )
-                                                    .await;
-                                                if probe_ok {
-                                                    saw_evidence = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                if !(saw_dbt_files && saw_sql_schema && saw_evidence) {
-                                    let metadata_probe_failures =
-                                        Self::failed_metadata_probe_attempts(Some(l), phase);
-                                    let metadata_hint = if metadata_probe_failures > 0 {
-                                        format!(
-                                            "\nObserved {} failed metadata-style run_sql probe(s). In planning, run_sql must target concrete relations (SELECT ... FROM <table> ...), not SHOW/DESCRIBE/EXPLAIN/USE.",
-                                            metadata_probe_failures
-                                        )
-                                    } else {
-                                        String::new()
-                                    };
-                                    // Stay in plan phase and re-run with a hard reminder.
-                                    let miss = format!(
-                                        "Plan is missing required grounding steps.\n\
-                                         Required before finalizing a plan:\n\
-                                         - file (inventory existing dbt project)\n\
-                                         - sql_schema (list tables)\n\
-                                         - evidence via sql_stats/sql_sample/run_sql\n\n\
-                                         Seen: file={saw_dbt_files}, sql_schema={saw_sql_schema}, evidence={saw_evidence}\n\
-                                         Please retry plan generation and include those discovery steps.{}",
-                                        metadata_hint
-                                    );
-                                    let ts = chrono::Utc::now().to_rfc3339();
-                                    let step = react_core::session::ThreadStep::GuardBlock {
-                                        phase: phase.as_str().to_string(),
-                                        kind: GuardBlockKind::PlanGrounding,
-                                        reason: miss.clone(),
-                                        observation: react_core::session::Observation::fail(vec![
-                                            miss.clone(),
-                                        ]),
-                                        ts,
-                                        agent: "agent".to_string(),
-                                    };
-                                    thread_store
-                                        .append_step(thread_id, step.clone())
-                                        .await
-                                        .map_err(|e| format!("failed to append guard step: {e}"))?;
-                                    // Hard cutover: same-phase blocks are represented as GuardBlock only.
-                                    let tries = Self::bump_subjective_retry(
-                                        &thread_store,
-                                        thread_id,
-                                        phase,
-                                        "plan_grounding_missing_discovery",
-                                    )
-                                    .await;
-                                    if tries
-                                        > crate::data_engineer::controller_kernel::subjective_retry_limit()
-                                    {
-                                        return Err(format!(
-                                            "plan_grounding_not_converged_after_retries: tries={}, file_seen={}, sql_schema_seen={}, evidence_seen={}",
-                                            tries, saw_dbt_files, saw_sql_schema, saw_evidence
-                                        ));
-                                    }
-                                    continue;
-                                }
-                            }
+                            // Hard cutover: planning control flow does not re-read thread logs.
+                            // Bootstrap + deterministic catalog grounding are the stateful guarantees.
 
                             let (design_memo, design_critique) =
                                 Self::produce_critiqued_design_memo(&actx, is_cleanse, &q).await?;
                             if is_cleanse {
-                                let skeleton = Self::generate_cleanse_skeleton(
-                                    &actx,
-                                    &q,
-                                    &design_memo,
-                                    &design_critique,
+                                let discovered_raw = Self::discovered_raw_relations_from_catalog(
+                                    sctx.datasets.as_ref(),
                                 )
-                                .await?;
+                                .await;
+                                let skeleton =
+                                    Self::deterministic_cleanse_skeleton_from_discovered_raw(
+                                        &discovered_raw,
+                                    )?;
                                 let mut plan = Self::compile_cleanse_skeleton_plan(&skeleton);
-                                let discovered_raw = Self::discovered_raw_relations_from_phase_log(
-                                    log.as_ref(),
-                                    phase,
-                                );
                                 crate::data_engineer::plan::prune_cleanse_plan_to_grounded_raw_datasets(
                                     &mut plan,
                                     &discovered_raw,
@@ -5506,76 +5410,17 @@ Apply these fixes in the output.",
                                         }
                                     }
                                 }
-                                // Persist schema facts observed during this plan phase (no ambiguity).
-                                if let Some(ref l) = log {
-                                    let start = Self::phase_start_idx(l, phase).unwrap_or(0);
-                                    let mut calls: Vec<serde_json::Value> = Vec::new();
-                                    for s in l.steps.iter().skip(start + 1) {
-                                        let react_core::session::ThreadStep::ToolEnd {
-                                            name,
-                                            args,
-                                            observation,
-                                            ..
-                                        } = s
-                                        else {
-                                            continue;
-                                        };
-                                        if name != "sql_schema" || !observation.ok {
-                                            continue;
-                                        }
-                                        let table = args
-                                            .get("table")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.trim().to_string());
-                                        let mut rec = serde_json::json!({
-                                            "tool": "sql_schema",
-                                            "table": table,
-                                            "result": observation.extra,
-                                        });
-                                        // Keep deterministic ordering by dropping null table field when absent.
-                                        if rec
-                                            .get("table")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.is_empty())
-                                            .unwrap_or(false)
-                                        {
-                                            if let Some(obj) = rec.as_object_mut() {
-                                                obj.remove("table");
-                                            }
-                                        }
-                                        calls.push(rec);
-                                        if calls.len() >= 120 {
-                                            break;
-                                        }
-                                    }
-                                    if !calls.is_empty() {
-                                        if plan.project_snapshot.is_null() {
-                                            plan.project_snapshot = serde_json::json!({});
-                                        }
-                                        if let Some(obj) = plan.project_snapshot.as_object_mut() {
-                                            obj.insert(
-                                                "plan_schema_facts".to_string(),
-                                                serde_json::json!({ "sql_schema_calls": calls }),
-                                            );
-                                        }
-                                    }
-                                }
+                                // Hard cutover: schema facts for planning come from deterministic catalog artifacts,
+                                // not from replaying thread-log tool history.
                                 // Ground the plan against reality: only keep datasets we can prove exist via schema().
-                                let mut candidates: Vec<String> = Vec::new();
-                                for t in plan.tasks.iter() {
-                                    if !t.dataset_id.trim().is_empty() {
-                                        candidates.push(t.dataset_id.trim().to_string());
-                                    }
+                                let candidates =
+                                    Self::collect_cleanse_grounding_candidates(&plan, &discovered_raw);
+                                if plan.tasks.is_empty() && !discovered_raw.is_empty() {
+                                    tracing::warn!(
+                                        "cleanse plan skeleton produced 0 task ids; seeding grounding candidates from discovered_raw={:?}",
+                                        discovered_raw
+                                    );
                                 }
-                                for b in plan.batches.iter() {
-                                    for ds in b.iter() {
-                                        if !ds.trim().is_empty() {
-                                            candidates.push(ds.trim().to_string());
-                                        }
-                                    }
-                                }
-                                candidates.sort();
-                                candidates.dedup();
                                 tracing::info!(
                                     "cleanse plan grounding: {} candidate dataset(s) before schema validation: {:?}",
                                     candidates.len(),
@@ -6284,16 +6129,12 @@ Apply these fixes in the output.",
                                 .await?;
                                 continue;
                             }
-                            if let Some(ref l) = log {
-                                // In deterministic repair mode, the plan is frozen (reference-only).
-                                if !hard_mutation_repair_mode {
-                                    crate::data_engineer::plan::update_cleanse_progress_from_log(
-                                        &mut plan, l,
-                                    );
-                                    let _ =
-                                        crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
-                                            .await;
-                                }
+                            // In deterministic repair mode, the plan is frozen (reference-only).
+                            // Normal progress is updated at tool-write time; do not reconstruct from thread logs.
+                            if !hard_mutation_repair_mode {
+                                let _ =
+                                    crate::data_engineer::plan::save_cleanse_plan(&actx, &plan)
+                                        .await;
                             }
 
                             // Explicit execution context for hierarchical UI (best-effort).
@@ -6675,16 +6516,12 @@ Apply these fixes in the output.",
                                 .await?;
                                 continue;
                             }
-                            if let Some(ref l) = log {
-                                // In deterministic repair mode, the plan is frozen (reference-only).
-                                if !hard_mutation_repair_mode {
-                                    crate::data_engineer::plan::update_model_progress_from_log(
-                                        &mut plan, l,
-                                    );
-                                    let _ =
-                                        crate::data_engineer::plan::save_model_plan(&actx, &plan)
-                                            .await;
-                                }
+                            // In deterministic repair mode, the plan is frozen (reference-only).
+                            // Normal progress is updated at tool-write time; do not reconstruct from thread logs.
+                            if !hard_mutation_repair_mode {
+                                let _ =
+                                    crate::data_engineer::plan::save_model_plan(&actx, &plan)
+                                        .await;
                             }
 
                             // Explicit execution context for hierarchical UI (best-effort).
@@ -7521,34 +7358,7 @@ Apply these fixes in the output.",
                     .await
                     {
                         Ok(RunOutcomeNonInteractive::Final { .. }) => {
-                            // Update plan progress based on newly recorded tool steps.
-                            if let Ok(latest) = thread_store.get(thread_id).await {
-                                if is_cleanse {
-                                    if let Some(mut p) =
-                                        crate::data_engineer::plan::load_cleanse_plan(&actx).await
-                                    {
-                                        crate::data_engineer::plan::update_cleanse_progress_from_log(&mut p, &latest);
-                                        crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
-                                            .await
-                                            .map_err(|e| {
-                                                format!(
-                                                    "failed to persist cleanse progress after authoring final: {e}"
-                                                )
-                                            })?;
-                                    }
-                                } else {
-                                    if let Some(mut p) =
-                                        crate::data_engineer::plan::load_model_plan(&actx).await
-                                    {
-                                        crate::data_engineer::plan::update_model_progress_from_log(
-                                            &mut p, &latest,
-                                        );
-                                        let _ =
-                                            crate::data_engineer::plan::save_model_plan(&actx, &p)
-                                                .await;
-                                    }
-                                }
-                            }
+                            // Progress is updated at tool-write time; avoid thread-log replay for state.
 
                             // Deterministic invariants: don't advance phases unless the project actually exists.
                             let has_proj = control_flow::invariant_has_dbt_project(&actx)
@@ -7562,9 +7372,8 @@ Apply these fixes in the output.",
                                 continue;
                             }
                             // Hard cutover: single progress gate controls authoring->validate advancement.
-                            let latest_log = thread_store.get(thread_id).await.ok();
                             if let Err(reason) = crate::data_engineer::progress_controller::gate_authoring_progress(
-                                latest_log.as_ref(),
+                                &execution_state,
                                 phase,
                             ) {
                                 let ts = chrono::Utc::now().to_rfc3339();
@@ -7777,12 +7586,9 @@ Apply these fixes in the output.",
                     // Targeted pre-check (compile selected, then build selected) based on most recent patch.
                     // If it fails, we skip full validation and proceed with the standard failure handling.
                     let obs: serde_json::Value;
-                    let log_now = thread_store.get(thread_id).await.ok();
-                    let select_terms: Vec<String> = if let Some(l) = log_now.as_ref() {
-                        control_flow::derive_targeted_select_terms(&actx, l).await
-                    } else {
-                        Vec::new()
-                    };
+                    // Hard cutover: do not derive control-state selectors from thread logs.
+                    // Targeted validate remains disabled until selectors are sourced from typed state artifacts.
+                    let select_terms: Vec<String> = Vec::new();
                     if !select_terms.is_empty() {
                         emit_trace(&actx, "targeted compile started");
                         let args_compile = serde_json::json!({"build": false, "run": false, "select": select_terms.clone(), "targeted": true, "targeted_step": "compile"});
@@ -8037,18 +7843,12 @@ Apply these fixes in the output.",
                         }
 
                         // Mark the active plan completed only when validate passes AND checklist execution is complete.
-                        let latest_log = thread_store.get(thread_id).await.ok();
                         let mut plan_incomplete_after_validate = false;
                         let mut active_plan_key: Option<String> = None;
                         if phase == Phase::CleanseValidate {
                             if let Some(mut p) =
                                 crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
                             {
-                                if let Some(ref l) = latest_log {
-                                    crate::data_engineer::plan::update_cleanse_progress_from_log(
-                                        &mut p, l,
-                                    );
-                                }
                                 active_plan_key = Some(p.plan_key.clone());
                                 if crate::data_engineer::plan::cleanse_all_done(&p) {
                                     p.status = crate::data_engineer::plan::PlanStatus::Completed;
@@ -8063,11 +7863,6 @@ Apply these fixes in the output.",
                             if let Some(mut p) =
                                 crate::data_engineer::plan::load_model_plan_any(&actx).await
                             {
-                                if let Some(ref l) = latest_log {
-                                    crate::data_engineer::plan::update_model_progress_from_log(
-                                        &mut p, l,
-                                    );
-                                }
                                 active_plan_key = Some(p.plan_key.clone());
                                 if crate::data_engineer::plan::model_all_done(&p) {
                                     p.status = crate::data_engineer::plan::PlanStatus::Completed;
@@ -8431,10 +8226,10 @@ Apply these fixes in the output.",
                     if meta.review_ref.is_none() {
                         meta.review_ref = review_ref_from_trigger;
                     }
-                    let patch_plan_streak =
-                        control_flow::review_patch_plan_streak(log.as_ref(), phase);
-                    let patch_impl_streak =
-                        control_flow::review_patch_impl_streak(log.as_ref(), phase);
+                    // Hard cutover: review loop forcing now relies on persisted retry counters,
+                    // not reconstructed thread-log streaks.
+                    let patch_plan_streak = 0usize;
+                    let patch_impl_streak = 0usize;
                     let mut review_retry_count = 0usize;
                     if let Some(kind) = Self::review_retry_kind(meta.decision) {
                         review_retry_count =

@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use react_core::control_flow::PhaseReasonCode;
-use react_core::session::{ThreadLog, ThreadStore};
+use react_core::session::ThreadStore;
 
-use crate::data_engineer::control_flow::{self, Phase};
+use crate::data_engineer::control_flow::Phase;
 
 pub const EXECUTION_STATE_SCHEMA_VERSION: u32 = 1;
 pub const EXECUTION_STATE_ARTIFACT_ID: &str = "execution_state";
@@ -191,15 +191,7 @@ impl ExecutionState {
     }
 
     pub async fn load(thread_store: &ThreadStore, thread_id: &str) -> Option<Self> {
-        let v = thread_store
-            .get_thread_artifact_json(thread_id, EXECUTION_STATE_ARTIFACT_ID)
-            .await
-            .ok()?;
-        let st = serde_json::from_value::<Self>(v).ok()?;
-        if st.schema_version != EXECUTION_STATE_SCHEMA_VERSION {
-            return None;
-        }
-        Some(st)
+        react_core::state::load_thread_state_artifact::<Self>(thread_store, thread_id).await
     }
 
     pub async fn save(&self, thread_store: &ThreadStore, thread_id: &str) -> Result<(), String> {
@@ -209,10 +201,7 @@ impl ExecutionState {
                 EXECUTION_STATE_SCHEMA_VERSION, self.schema_version
             ));
         }
-        let v = serde_json::to_value(self).map_err(|e| e.to_string())?;
-        thread_store
-            .put_thread_artifact_json(thread_id, EXECUTION_STATE_ARTIFACT_ID, &v)
-            .await
+        react_core::state::save_thread_state_artifact(thread_store, thread_id, self).await
     }
 
     pub fn apply_validate_success(&mut self, tier: ExecutionTier) {
@@ -381,6 +370,15 @@ impl ExecutionState {
     }
 }
 
+impl react_core::state::ThreadStateArtifact for ExecutionState {
+    const ARTIFACT_ID: &'static str = EXECUTION_STATE_ARTIFACT_ID;
+    const SCHEMA_VERSION: u32 = EXECUTION_STATE_SCHEMA_VERSION;
+
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+}
+
 fn obs_like_bool(
     from: &Option<LastValidateState>,
     pick: impl FnOnce(&LastValidateState) -> Option<bool>,
@@ -410,15 +408,33 @@ pub fn repair_backlog_from_failed_models(failing_models: &[Value]) -> Vec<Repair
     out
 }
 
-pub fn gate_authoring_progress(log: Option<&ThreadLog>, phase: Phase) -> Result<(), String> {
-    let g = control_flow::derive_guard_state(log);
-    if g.last_validate_failed && !(g.mutated_since_fail || g.patched_since_fail) {
+pub fn gate_authoring_progress(state: &ExecutionState, phase: Phase) -> Result<(), String> {
+    let last_validate_failed = state.last_validate_ok == Some(false);
+    let mutation_progress = state
+        .last_progress_delta
+        .as_ref()
+        .map(|d| d.progress_made || d.target_hash_changed)
+        .unwrap_or(false);
+    let patched_since_fail = state.attempt_count > 0;
+    if last_validate_failed && !(mutation_progress || patched_since_fail) {
         return Err(
             "progress_gate_blocked: validation previously failed and no successful mutation has been recorded since that failure"
                 .to_string(),
         );
     }
-    if g.probe_required && !g.probe_satisfied {
+    let compile_ok = state
+        .last_validate
+        .as_ref()
+        .and_then(|v| v.compile_ok)
+        .unwrap_or(false);
+    let run_ok = state
+        .last_validate
+        .as_ref()
+        .and_then(|v| v.run_ok)
+        .unwrap_or(false);
+    let probe_required = last_validate_failed && compile_ok;
+    let probe_satisfied = !probe_required || run_ok;
+    if probe_required && !probe_satisfied {
         return Err(
             "progress_gate_blocked: runtime validation previously failed after compile and a data probe is still required"
                 .to_string(),
@@ -466,6 +482,31 @@ mod tests {
         assert_eq!(st.bump_subjective_retry(Phase::CleansePlan, "x", 3), 3);
         assert_eq!(st.bump_subjective_retry(Phase::CleansePlan, "x", 3), 3);
         assert_eq!(st.bump_subjective_retry(Phase::ModelPlan, "x", 3), 1);
+    }
+
+    #[test]
+    fn gate_authoring_progress_uses_execution_state() {
+        let mut st = ExecutionState::new();
+        st.last_validate_ok = Some(false);
+        st.last_validate = Some(LastValidateState {
+            compile_ok: Some(true),
+            run_ok: Some(false),
+            ..LastValidateState::default()
+        });
+        assert!(gate_authoring_progress(&st, Phase::ModelAuthor).is_err());
+
+        st.attempt_count = 1;
+        st.last_progress_delta = Some(ProgressDelta {
+            target_hash_changed: true,
+            progress_made: true,
+            ..ProgressDelta::default()
+        });
+        st.last_validate = Some(LastValidateState {
+            compile_ok: Some(true),
+            run_ok: Some(true),
+            ..LastValidateState::default()
+        });
+        assert!(gate_authoring_progress(&st, Phase::ModelAuthor).is_ok());
     }
 
     #[test]

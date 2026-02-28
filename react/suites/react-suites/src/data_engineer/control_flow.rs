@@ -174,13 +174,12 @@ pub async fn append_phase(
     agent: Option<String>,
     phase: Phase,
 ) -> Result<(), String> {
-    // Best-effort: infer the previous phase if one exists; otherwise use null.
-    let prev_phase = store.get(thread_id).await.ok().and_then(|log| {
-        log.steps.iter().rev().find_map(|s| match s {
-            ThreadStep::Phase { phase, .. } => Phase::from_str(phase),
-            _ => None,
-        })
-    });
+    // Hard cutover: previous phase comes from persisted execution state, not thread log replay.
+    let prev_phase = crate::data_engineer::progress_controller::ExecutionState::load(
+        store, thread_id,
+    )
+    .await
+    .and_then(|st| st.current_phase);
 
     append_phase_with_reason(
         store,
@@ -524,6 +523,38 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
         out.probe_required = false;
     }
     out
+}
+
+pub fn derive_guard_state_from_execution_state(
+    st: &crate::data_engineer::progress_controller::ExecutionState,
+) -> DerivedGuardState {
+    let last_validate_failed = st.last_validate_ok == Some(false);
+    let mutated_since_fail = st
+        .last_progress_delta
+        .as_ref()
+        .map(|d| d.target_hash_changed || d.progress_made)
+        .unwrap_or(false);
+    let patched_since_fail = st.attempt_count > 0;
+    let compile_ok = st
+        .last_validate
+        .as_ref()
+        .and_then(|v| v.compile_ok)
+        .unwrap_or(false);
+    let run_ok = st
+        .last_validate
+        .as_ref()
+        .and_then(|v| v.run_ok)
+        .unwrap_or(false);
+    let probe_required = last_validate_failed && compile_ok;
+    let probe_satisfied = !probe_required || run_ok;
+    DerivedGuardState {
+        last_validate_failed,
+        mutated_since_fail,
+        patched_since_fail,
+        mutation_failures_since_validate: st.consecutive_noop_patches,
+        probe_required,
+        probe_satisfied,
+    }
 }
 
 /// Derive dbt `--select` terms for a fast, targeted validation pre-check based on the most recent
