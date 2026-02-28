@@ -242,9 +242,8 @@ pub async fn run_headless(ctx: SuiteCtx, opts: RunOpts, registry: SuiteRegistry)
             .any(|it| it.status == ThreadItemStatus::Failed);
         if any_failed && plain_progress {
             let timeline_events = store
-                .get_thread_timeline(&thread_id)
+                .get_thread_events_from_log(&thread_id)
                 .await
-                .map(|t| t.events)
                 .unwrap_or_default();
             if let Some(line) = summarize_failure_state(&st, &timeline_events) {
                 println!("{}", line);

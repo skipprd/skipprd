@@ -12,9 +12,7 @@ use crate::scope::RequestScope;
 use crate::storage::StorageAdapter;
 
 pub const THREAD_SCHEMA_VERSION: u32 = 4;
-pub const THREAD_STATE_SCHEMA_VERSION: u32 = 1;
-pub const THREAD_TIMELINE_SCHEMA_VERSION: u32 = 1;
-pub const THREAD_TIMELINE_ARTIFACT_ID: &str = "thread_timeline";
+pub const THREAD_STATE_SCHEMA_VERSION: u32 = 2;
 
 /// Materialized, reloadable thread state (stable summary, not raw streaming events).
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -40,17 +38,9 @@ pub struct ThreadState {
     /// Opaque suite-owned state snapshot.
     #[serde(default)]
     pub suite_state: Option<Value>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ThreadTimeline {
-    pub thread_timeline_schema_version: u32,
-    pub thread_id: String,
+    /// Opaque suite-owned control snapshot (authoritative control state).
     #[serde(default)]
-    pub last_materialized_step_count: usize,
-    #[serde(default)]
-    pub events: Vec<ThreadEvent>,
+    pub control_state: Option<Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -928,12 +918,6 @@ impl ThreadStore {
             .unwrap_or_else(|_| format!("invalid/thread/{}.state.json", thread_id))
     }
 
-    fn artifact_key(&self, thread_id: &str, artifact_id: &str) -> String {
-        self.keyspace
-            .thread_artifact_key(&self.scope, thread_id, artifact_id)
-            .unwrap_or_else(|_| format!("invalid/thread/{}.{}.json", thread_id, artifact_id))
-    }
-
     fn list_prefix(&self) -> String {
         format!(
             "{}/",
@@ -989,17 +973,6 @@ impl ThreadStore {
                 e
             );
         }
-        if let Err(e) = self
-            .materialize_thread_timeline_incremental(thread_id, step_count, &step)
-            .await
-        {
-            tracing::warn!(
-                "thread_timeline_materialize_failed thread_id={} step_count={} error={}",
-                thread_id,
-                step_count,
-                e
-            );
-        }
         Ok(())
     }
 
@@ -1022,99 +995,26 @@ impl ThreadStore {
         thread_id: &str,
         state: &ThreadState,
     ) -> Result<(), String> {
+        if state.thread_state_schema_version != THREAD_STATE_SCHEMA_VERSION {
+            return Err(format!(
+                "thread_state schema_version mismatch: expected {}, got {}",
+                THREAD_STATE_SCHEMA_VERSION, state.thread_state_schema_version
+            ));
+        }
+        if state.thread_id != thread_id {
+            return Err(format!(
+                "thread_state thread_id mismatch: expected {}, got {}",
+                thread_id, state.thread_id
+            ));
+        }
         let key = self.state_key(thread_id);
         let v = serde_json::to_value(state).map_err(|e| e.to_string())?;
         self.storage.put_json(&key, &v).await
     }
 
-    pub async fn get_thread_timeline(&self, thread_id: &str) -> Result<ThreadTimeline, String> {
-        let v = self
-            .get_thread_artifact_json(thread_id, THREAD_TIMELINE_ARTIFACT_ID)
-            .await?;
-        let t = serde_json::from_value::<ThreadTimeline>(v)
-            .map_err(|e| format!("failed to parse thread timeline: {e}"))?;
-        if t.thread_timeline_schema_version != THREAD_TIMELINE_SCHEMA_VERSION {
-            return Err(format!(
-                "thread_timeline schema_version mismatch: expected {}, got {}",
-                THREAD_TIMELINE_SCHEMA_VERSION, t.thread_timeline_schema_version
-            ));
-        }
-        Ok(t)
-    }
-
-    pub async fn put_thread_timeline(
-        &self,
-        thread_id: &str,
-        timeline: &ThreadTimeline,
-    ) -> Result<(), String> {
-        if timeline.thread_timeline_schema_version != THREAD_TIMELINE_SCHEMA_VERSION {
-            return Err(format!(
-                "thread_timeline schema_version mismatch: expected {}, got {}",
-                THREAD_TIMELINE_SCHEMA_VERSION, timeline.thread_timeline_schema_version
-            ));
-        }
-        let v = serde_json::to_value(timeline).map_err(|e| e.to_string())?;
-        self.put_thread_artifact_json(thread_id, THREAD_TIMELINE_ARTIFACT_ID, &v)
-            .await
-    }
-
-    pub async fn get_thread_artifact_json(
-        &self,
-        thread_id: &str,
-        artifact_id: &str,
-    ) -> Result<Value, String> {
-        let key = self.artifact_key(thread_id, artifact_id);
-        self.storage.get_json(&key).await.map_err(|e| e.to_string())
-    }
-
-    pub async fn put_thread_artifact_json(
-        &self,
-        thread_id: &str,
-        artifact_id: &str,
-        value: &Value,
-    ) -> Result<(), String> {
-        let key = self.artifact_key(thread_id, artifact_id);
-        self.storage.put_json(&key, value).await
-    }
-
-    pub async fn get_thread_artifact_typed<T>(
-        &self,
-        thread_id: &str,
-        artifact_id: &str,
-    ) -> Option<T>
-    where
-        T: crate::state::ThreadStateArtifact,
-    {
-        let v = self
-            .get_thread_artifact_json(thread_id, artifact_id)
-            .await
-            .ok()?;
-        let s = serde_json::from_value::<T>(v).ok()?;
-        if s.schema_version() != T::SCHEMA_VERSION {
-            return None;
-        }
-        Some(s)
-    }
-
-    pub async fn put_thread_artifact_typed<T>(
-        &self,
-        thread_id: &str,
-        artifact_id: &str,
-        value: &T,
-    ) -> Result<(), String>
-    where
-        T: crate::state::ThreadStateArtifact,
-    {
-        if value.schema_version() != T::SCHEMA_VERSION {
-            return Err(format!(
-                "artifact schema_version mismatch for '{}': expected {}, got {}",
-                artifact_id,
-                T::SCHEMA_VERSION,
-                value.schema_version()
-            ));
-        }
-        let v = serde_json::to_value(value).map_err(|e| e.to_string())?;
-        self.put_thread_artifact_json(thread_id, artifact_id, &v).await
+    pub async fn get_thread_events_from_log(&self, thread_id: &str) -> Result<Vec<ThreadEvent>, String> {
+        let log = self.get(thread_id).await?;
+        Ok(build_thread_events_from_log(&log, 200))
     }
 
     fn new_thread_state(thread_id: &str) -> ThreadState {
@@ -1122,14 +1022,6 @@ impl ThreadStore {
             thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
             thread_id: thread_id.to_string(),
             ..ThreadState::default()
-        }
-    }
-
-    fn new_thread_timeline(thread_id: &str) -> ThreadTimeline {
-        ThreadTimeline {
-            thread_timeline_schema_version: THREAD_TIMELINE_SCHEMA_VERSION,
-            thread_id: thread_id.to_string(),
-            ..ThreadTimeline::default()
         }
     }
 
@@ -1168,49 +1060,6 @@ impl ThreadStore {
         Ok(())
     }
 
-    async fn materialize_thread_timeline_incremental(
-        &self,
-        thread_id: &str,
-        want_step_count: usize,
-        step: &ThreadStep,
-    ) -> Result<(), String> {
-        let mut timeline = self
-            .get_thread_timeline(thread_id)
-            .await
-            .unwrap_or_else(|_| Self::new_thread_timeline(thread_id));
-        if timeline.last_materialized_step_count > want_step_count.saturating_sub(1) {
-            return Err(format!(
-                "thread_timeline materialization mismatch: timeline_count={} want_step_count={}",
-                timeline.last_materialized_step_count, want_step_count
-            ));
-        }
-        if timeline.last_materialized_step_count < want_step_count.saturating_sub(1) {
-            timeline = Self::new_thread_timeline(thread_id);
-        }
-        let current_phase = self
-            .get_thread_state(thread_id)
-            .await
-            .ok()
-            .and_then(|s| s.current_phase)
-            .or_else(|| Some("preflight".to_string()));
-        if let Some(ev) = step_to_timeline_event(
-            want_step_count.saturating_sub(1),
-            step,
-            current_phase.as_deref(),
-        ) {
-            const MAX_EVENTS: usize = 200;
-            timeline.events.push(ev);
-            if timeline.events.len() > MAX_EVENTS {
-                let drop_n = timeline.events.len() - MAX_EVENTS;
-                timeline.events.drain(0..drop_n);
-            }
-        }
-        timeline.thread_timeline_schema_version = THREAD_TIMELINE_SCHEMA_VERSION;
-        timeline.thread_id = thread_id.to_string();
-        timeline.last_materialized_step_count = want_step_count;
-        self.put_thread_timeline(thread_id, &timeline).await?;
-        Ok(())
-    }
 
     pub async fn get(&self, thread_id: &str) -> Result<ThreadLog, String> {
         let key = self.key(thread_id);
@@ -1358,6 +1207,7 @@ fn build_thread_state_from_log(thread_id: &str, log: &ThreadLog) -> ThreadState 
         total_runtime_ms: 0,
         items: BTreeMap::new(),
         suite_state: None,
+        control_state: None,
     };
 
     for (idx, step) in log.steps.iter().enumerate() {
@@ -1375,9 +1225,7 @@ fn build_thread_state_from_log(thread_id: &str, log: &ThreadLog) -> ThreadState 
     st
 }
 
-#[cfg(test)]
-fn build_thread_timeline_from_log(thread_id: &str, log: &ThreadLog) -> ThreadTimeline {
-    const MAX_EVENTS: usize = 200;
+fn build_thread_events_from_log(log: &ThreadLog, max_events: usize) -> Vec<ThreadEvent> {
     let paired_tool_ids: std::collections::HashSet<String> = {
         let mut starts: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut ends: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1394,12 +1242,7 @@ fn build_thread_timeline_from_log(thread_id: &str, log: &ThreadLog) -> ThreadTim
         }
         starts.intersection(&ends).cloned().collect()
     };
-    let mut timeline = ThreadTimeline {
-        thread_timeline_schema_version: THREAD_TIMELINE_SCHEMA_VERSION,
-        thread_id: thread_id.to_string(),
-        last_materialized_step_count: log.steps.len(),
-        events: Vec::new(),
-    };
+    let mut events: Vec<ThreadEvent> = Vec::new();
     for (idx, step) in log.steps.iter().enumerate() {
         if let ThreadStep::ToolStart { tool_id, .. } | ThreadStep::ToolEnd { tool_id, .. } = step {
             if !paired_tool_ids.contains(tool_id) {
@@ -1408,22 +1251,21 @@ fn build_thread_timeline_from_log(thread_id: &str, log: &ThreadLog) -> ThreadTim
         }
         let current_phase = match step {
             ThreadStep::Phase { phase, .. } => Some(phase.as_str()),
-            _ => timeline
-                .events
+            _ => events
                 .iter()
                 .rev()
                 .find_map(|e| e.phase.as_deref())
                 .or(Some("preflight")),
         };
         if let Some(ev) = step_to_timeline_event(idx, step, current_phase) {
-            timeline.events.push(ev);
+            events.push(ev);
         }
     }
-    if timeline.events.len() > MAX_EVENTS {
-        let drop_n = timeline.events.len() - MAX_EVENTS;
-        timeline.events.drain(0..drop_n);
+    if events.len() > max_events {
+        let drop_n = events.len() - max_events;
+        events.drain(0..drop_n);
     }
-    timeline
+    events
 }
 
 fn duration_ms(start_ts: &str, end_ts: &str) -> Option<u64> {
@@ -1890,9 +1732,9 @@ mod tests {
             title: None,
             title_finalized: false,
         };
-        let timeline = build_thread_timeline_from_log("tid", &log);
+        let events = build_thread_events_from_log(&log, 200);
         assert!(
-            timeline.events.is_empty(),
+            events.is_empty(),
             "orphan tool_end should not appear in timeline events"
         );
     }
@@ -1916,9 +1758,9 @@ mod tests {
             title: None,
             title_finalized: false,
         };
-        let timeline = build_thread_timeline_from_log("tid", &log);
+        let events = build_thread_events_from_log(&log, 200);
         assert!(
-            timeline.events.is_empty(),
+            events.is_empty(),
             "orphan tool_start should not appear in timeline events"
         );
     }
@@ -1964,16 +1806,14 @@ mod tests {
             title: None,
             title_finalized: false,
         };
-        let timeline = build_thread_timeline_from_log("tid", &log);
+        let events = build_thread_events_from_log(&log, 200);
         assert!(
-            timeline
-                .events
+            events
                 .iter()
                 .any(|e| e.event_kind == ThreadEventKind::ToolStart),
             "expected tool_start event"
         );
-        let ev = timeline
-            .events
+        let ev = events
             .iter()
             .find(|e| e.event_kind == ThreadEventKind::ToolStart)
             .and_then(|e| e.ctx.as_ref())
@@ -2297,5 +2137,44 @@ mod tests {
 
         let got = store.get_thread_state(tid).await;
         assert!(got.is_err(), "thread state should not be reconstructed from logs");
+    }
+
+    #[tokio::test]
+    async fn put_thread_state_rejects_schema_version_mismatch() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let tid = "tid-schema-check";
+        let st = ThreadState {
+            thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION.saturating_add(1),
+            thread_id: tid.to_string(),
+            ..ThreadState::default()
+        };
+        let got = store.put_thread_state(tid, &st).await;
+        assert!(got.is_err(), "schema mismatches must fail");
+    }
+
+    #[tokio::test]
+    async fn put_thread_state_rejects_thread_id_mismatch() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let st = ThreadState {
+            thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
+            thread_id: "other-thread".to_string(),
+            ..ThreadState::default()
+        };
+        let got = store.put_thread_state("tid-id-check", &st).await;
+        assert!(got.is_err(), "thread_id mismatches must fail");
     }
 }

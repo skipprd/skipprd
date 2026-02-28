@@ -2,12 +2,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use react_core::control_flow::PhaseReasonCode;
-use react_core::session::ThreadStore;
+use react_core::session::{ThreadState, ThreadStore, THREAD_STATE_SCHEMA_VERSION};
 
 use crate::data_engineer::control_flow::Phase;
 
 pub const EXECUTION_STATE_SCHEMA_VERSION: u32 = 1;
-pub const EXECUTION_STATE_ARTIFACT_ID: &str = "execution_state";
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -191,7 +190,13 @@ impl ExecutionState {
     }
 
     pub async fn load(thread_store: &ThreadStore, thread_id: &str) -> Option<Self> {
-        react_core::state::load_thread_state_artifact::<Self>(thread_store, thread_id).await
+        let st = thread_store.get_thread_state(thread_id).await.ok()?;
+        let raw = st.control_state?;
+        let parsed = serde_json::from_value::<Self>(raw).ok()?;
+        if parsed.schema_version != EXECUTION_STATE_SCHEMA_VERSION {
+            return None;
+        }
+        Some(parsed)
     }
 
     pub async fn save(&self, thread_store: &ThreadStore, thread_id: &str) -> Result<(), String> {
@@ -201,7 +206,17 @@ impl ExecutionState {
                 EXECUTION_STATE_SCHEMA_VERSION, self.schema_version
             ));
         }
-        react_core::state::save_thread_state_artifact(thread_store, thread_id, self).await
+        let mut st = thread_store
+            .get_thread_state(thread_id)
+            .await
+            .unwrap_or_else(|_| ThreadState {
+                thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
+                thread_id: thread_id.to_string(),
+                ..ThreadState::default()
+            });
+        st.control_state = Some(serde_json::to_value(self).map_err(|e| e.to_string())?);
+        st.current_phase = self.current_phase.as_ref().map(|p| p.as_str().to_string());
+        thread_store.put_thread_state(thread_id, &st).await
     }
 
     pub fn apply_validate_success(&mut self, tier: ExecutionTier) {
@@ -367,15 +382,6 @@ impl ExecutionState {
     pub fn mark_failed(&mut self, brief: impl Into<String>) {
         self.mode = ExecutionMode::Failed;
         self.last_error_brief = Some(brief.into());
-    }
-}
-
-impl react_core::state::ThreadStateArtifact for ExecutionState {
-    const ARTIFACT_ID: &'static str = EXECUTION_STATE_ARTIFACT_ID;
-    const SCHEMA_VERSION: u32 = EXECUTION_STATE_SCHEMA_VERSION;
-
-    fn schema_version(&self) -> u32 {
-        self.schema_version
     }
 }
 

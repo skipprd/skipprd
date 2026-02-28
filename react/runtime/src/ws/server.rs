@@ -263,9 +263,8 @@ fn ws_thread_state_snapshot_from_core(
 
 async fn load_timeline_events(store: &ThreadStore, thread_id: &str) -> Vec<react_core::session::ThreadEvent> {
     store
-        .get_thread_timeline(thread_id)
+        .get_thread_events_from_log(thread_id)
         .await
-        .map(|t| t.events)
         .unwrap_or_default()
 }
 
@@ -3835,7 +3834,7 @@ mod tests {
     #[test]
     fn thread_state_snapshot_maps_ctx_from_core_event_field() {
         let mut core = CoreThreadState::default();
-        core.thread_state_schema_version = 1;
+        core.thread_state_schema_version = react_core::session::THREAD_STATE_SCHEMA_VERSION;
         core.thread_id = "tid".to_string();
         core.suite_id = Some("suite_x".to_string());
         core.agent_type = Some("agent".to_string());
