@@ -10,14 +10,33 @@ When making changes to this codebase, follow these principles in order of priori
 
 3. **DRY (Don't Repeat Yourself):** Extract shared logic into functions, traits, or shared modules. When the same pattern appears in multiple suites/providers/tools, lift it into `react-core` or a shared utility. Duplicated error messages, validation logic, or serialization patterns are bugs waiting to diverge.
 
+## Architecture
+
+```
+react-core        Interfaces: agent loop, Suite trait, SuiteCtx, SuiteRegistry,
+                  FlowFrame, provider traits, session, storage, resolved_config,
+                  enums (WarehouseKind, StorageMode, LlmProvider)
+react (runtime)   Framework + CLI binary: config, LLM impls, WS server, helpers
+react-suites      Plugin: data_engineer + kb suite implementations
+react/modules/*   Plugins: provider implementations (athena, postgres, bigquery,
+                  dbt, storage, lance)
+```
+
+Dependency direction is enforced by the compiler: core has zero deps on suites/providers/runtime. Suites and providers depend only on core. The react binary wires everything together.
+
+### Future compile-time improvements (documented, not yet implemented)
+
+- **ThreadId/SuiteId newtypes** — bare `String` IDs flow through ~100+ sites; newtypes would prevent mixing thread_id with suite_id or tool_id at the type level.
+- **DataEngineerCtx** — `SuiteCtx` has 6 `Option<Arc<dyn ...>>` provider fields that the data_engineer suite checks at ~20 call sites. A suite-scoped context with required fields would eliminate those runtime checks.
+
 ## Cursor Cloud specific instructions
 
 ### Overview
 
-This is **Skippr** — a Rust-based data ingestion, transformation, and AI-powered analytics platform. It is a Cargo workspace with two main binaries:
+This is **Skippr** — a Rust-based data ingestion, transformation, and AI-powered analytics platform. It is a Cargo workspace with:
 
-- **`skippr`** — Data pipeline CLI for ingesting data from S3, transforming it, and writing to a datalake/warehouse (S3 Parquet, AWS Athena/Glue).
-- **`react`** — WebSocket-based ReAct agent runtime. Hosts an AI agent server that routes client requests through suites (`data_engineer`, `kb`).
+- **`skippr`** — Data pipeline CLI (separate from react, CI disabled).
+- **`react`** — ReAct agent framework + CLI. Hosts a WebSocket server that routes client requests through suites (`data_engineer`, `kb`).
 
 ### System dependencies (already installed in snapshot)
 
