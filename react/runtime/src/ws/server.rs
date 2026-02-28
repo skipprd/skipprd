@@ -12,7 +12,7 @@ use chrono::Utc;
 use react_core::session::{
     Observation, ThreadItemError as CoreThreadItemError, ThreadItemKind as CoreThreadItemKind,
     ThreadItemState as CoreThreadItemState, ThreadItemStatus as CoreThreadItemStatus, ThreadLog,
-    ThreadState as CoreThreadState, ThreadStep, ThreadStore, ToolObservation,
+    ThreadState as CoreThreadState, ThreadStep, ThreadStore, ToolObservation, ToolStepStatus,
 };
 use react_core::suite::SuiteRegistry;
 use react_core::suite::SuiteCtx;
@@ -3140,11 +3140,10 @@ async fn run_agent_with_processing_suite(
                             }
                         }
                         ThreadStep::ToolStart { tool_id, name, clean_name, status, payload, ctx, .. } => {
-                            let st = match status.as_str() {
-                                "running" => api::ToolEventStatus::Running,
-                                "ok" => api::ToolEventStatus::Ok,
-                                "failed" => api::ToolEventStatus::Failed,
-                                _ => api::ToolEventStatus::Running,
+                            let st = match status {
+                                ToolStepStatus::Running => api::ToolEventStatus::Running,
+                                ToolStepStatus::Ok => api::ToolEventStatus::Ok,
+                                ToolStepStatus::Failed => api::ToolEventStatus::Failed,
                             };
                             let mut ev = api::ToolStartResponse::new(
                                 1,
@@ -3169,11 +3168,10 @@ async fn run_agent_with_processing_suite(
                             emit_ws(state, write, api::ServerMessage::ToolStart(ev)).await;
                         }
                         ThreadStep::ToolEnd { tool_id, name, clean_name, status, payload, ctx, observation, .. } => {
-                            let st = match status.as_str() {
-                                "running" => api::ToolEventStatus::Running,
-                                "ok" => api::ToolEventStatus::Ok,
-                                "failed" => api::ToolEventStatus::Failed,
-                                _ => {
+                            let st = match status {
+                                ToolStepStatus::Running => api::ToolEventStatus::Running,
+                                ToolStepStatus::Ok => api::ToolEventStatus::Ok,
+                                ToolStepStatus::Failed => {
                                     if observation.ok {
                                         api::ToolEventStatus::Ok
                                     } else {
