@@ -8056,7 +8056,7 @@ Apply these fixes in the output.",
                     let facts_bundle = crate::data_engineer::facts::build_validate_fail_facts(
                         &actx,
                         dialect,
-                        &obs.observation,
+                        &obs,
                         crate::data_engineer::facts::FactsScope::ValidateFail,
                         crate::data_engineer::facts::FactsLimits::for_scope(
                             crate::data_engineer::facts::FactsScope::ValidateFail,

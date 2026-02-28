@@ -31,9 +31,9 @@ fn extract_string_arg(args: &Value, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn resolve_dataset_ids(args: &Value) -> Result<Vec<String>, String> {
+fn resolve_dataset_ids(args: &Value) -> Result<Vec<DatasetRef>, String> {
     // Required shape: dataset_ids: [ ... ]
-    let mut out: Vec<String> = args
+    let raw_ids: Vec<String> = args
         .get("dataset_ids")
         .and_then(|x| x.as_array())
         .map(|arr| {
@@ -43,22 +43,23 @@ fn resolve_dataset_ids(args: &Value) -> Result<Vec<String>, String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let mut out: Vec<DatasetRef> = Vec::new();
+    for ds in raw_ids {
+        let parsed = DatasetRef::parse(&ds).ok_or_else(|| {
+            format!(
+                "invalid dataset_id '{ds}'. Expected <catalog>.<schema>.<table> (e.g. AwsDataCatalog.test_raw.raw_customers)."
+            )
+        })?;
+        out.push(parsed);
+    }
 
-    out.sort();
+    out.sort_by_key(|d| d.fqn());
     out.dedup();
     if out.is_empty() {
         return Err(
             "staging_model requires args.dataset_ids (string[]) where each item is <catalog>.<schema>.<table>. Refusing to default to all datasets."
                 .to_string(),
         );
-    }
-    // Validate format early to avoid silent no-ops.
-    for ds in out.iter() {
-        if DatasetRef::parse(ds).is_none() {
-            return Err(format!(
-                "invalid dataset_id '{ds}'. Expected <catalog>.<schema>.<table> (e.g. AwsDataCatalog.test_raw.raw_customers)."
-            ));
-        }
     }
     Ok(out)
 }
@@ -269,17 +270,22 @@ impl Tool for StagingModelTool {
             .ok_or_else(|| "dbt provider missing".to_string())?;
 
         // Resolve datasets explicitly; NEVER default to all datasets.
-        let mut dataset_ids = resolve_dataset_ids(&args)?;
+        let mut dataset_refs = resolve_dataset_ids(&args)?;
 
         // Hard cap per call to keep LLM+patch loops bounded (prevents timeouts and huge prompts).
         // If more are provided, we process the first batch and return the rest as deferred so the
         // calling agent can issue subsequent staging_model calls.
         const MAX_DATASETS_PER_CALL: usize = 5;
-        let deferred_dataset_ids: Vec<String> = if dataset_ids.len() > MAX_DATASETS_PER_CALL {
-            dataset_ids.split_off(MAX_DATASETS_PER_CALL)
+        let deferred_dataset_ids: Vec<String> = if dataset_refs.len() > MAX_DATASETS_PER_CALL {
+            dataset_refs
+                .split_off(MAX_DATASETS_PER_CALL)
+                .into_iter()
+                .map(|d| d.fqn())
+                .collect()
         } else {
             Vec::new()
         };
+        let dataset_ids: Vec<String> = dataset_refs.iter().map(|d| d.fqn()).collect();
 
         let user_instructions = resolve_instructions(&args);
 
@@ -310,16 +316,10 @@ impl Tool for StagingModelTool {
         let mut schema_cols_by_ds: std::collections::HashMap<String, Vec<(String, String)>> =
             std::collections::HashMap::new();
         let mut gating_errors: Vec<String> = Vec::new();
-        for ds in dataset_ids.iter() {
-            let Some(ds_ref) = DatasetRef::parse(ds) else {
-                gating_errors.push(format!(
-                    "{}: invalid dataset_id (expected <catalog>.<schema>.<table>)",
-                    ds
-                ));
-                continue;
-            };
-            let cat = ds_ref.catalog;
-            let db = ds_ref.schema;
+        for ds_ref in dataset_refs.iter() {
+            let ds = ds_ref.fqn();
+            let cat = ds_ref.catalog.clone();
+            let db = ds_ref.schema.clone();
             if cat != want_catalog {
                 gating_errors.push(format!(
                     "{}: dataset is not in configured target catalog (expected {})",
@@ -334,9 +334,9 @@ impl Tool for StagingModelTool {
                 ));
                 continue;
             }
-            match ctx.warehouse.schema(ds).await {
+            match ctx.warehouse.schema(&ds).await {
                 Ok(cols) => {
-                    schema_cols_by_ds.insert(ds.clone(), cols);
+                    schema_cols_by_ds.insert(ds, cols);
                 }
                 Err(e) => {
                     gating_errors.push(format!(
@@ -538,10 +538,8 @@ impl Tool for StagingModelTool {
             if dataset_ids.len() != 1 {
                 return Err("staging_model direct-write requires exactly one dataset (use a single-item args.dataset_ids).".to_string());
             }
-            let ds = &dataset_ids[0];
-            let ds_ref = DatasetRef::parse(ds).ok_or_else(|| {
-                format!("invalid dataset_id '{ds}' (expected <catalog>.<schema>.<table>)")
-            })?;
+            let ds_ref = dataset_refs[0].clone();
+            let ds = ds_ref.fqn();
             let expected_db = ds_ref.schema;
             let expected_table = ds_ref.table;
             let canonical_name = canonical_staging_model_name(&expected_db, &expected_table);
@@ -657,12 +655,10 @@ impl Tool for StagingModelTool {
             }));
         }
 
-        for ds in dataset_ids.iter() {
-            let ds_ref = DatasetRef::parse(ds).ok_or_else(|| {
-                format!("invalid dataset_id '{ds}' (expected <catalog>.<schema>.<table>)")
-            })?;
-            let expected_db = ds_ref.schema;
-            let expected_table = ds_ref.table;
+        for ds_ref in dataset_refs.iter() {
+            let ds = ds_ref.fqn();
+            let expected_db = ds_ref.schema.clone();
+            let expected_table = ds_ref.table.clone();
             let canonical_name = canonical_staging_model_name(&expected_db, &expected_table);
 
             let matches =
@@ -691,7 +687,7 @@ impl Tool for StagingModelTool {
             let key = format!("{}/{}", base, rel_path);
 
             // Use the pre-validated schema facts (guaranteed present by gating above).
-            let cols = schema_cols_by_ds.get(ds).cloned().unwrap_or_default();
+            let cols = schema_cols_by_ds.get(&ds).cloned().unwrap_or_default();
             let cols_json: Vec<Value> = cols
                 .iter()
                 .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
@@ -761,7 +757,7 @@ impl Tool for StagingModelTool {
             let max_tokens = sql_first::sql_first_max_output_tokens(6000);
             let max_attempts = sql_first::sql_first_max_repair_attempts(4);
             let mut repl = std::collections::HashMap::new();
-            let dsid = match ctx.warehouse.parse_dataset_fqn(ds) {
+            let dsid = match ctx.warehouse.parse_dataset_fqn(&ds) {
                 Ok(id) => id,
                 Err(e) => {
                     errors.push(format!("{ds}: invalid dataset fqn: {e}"));
@@ -849,7 +845,7 @@ impl Tool for StagingModelTool {
                     Err(err) => {
                         last_err = err.clone();
                         prev_sql = Some(d.sql.clone());
-                        if let Some(h) = athena_alias_reuse_hint(&err, &rel_path, ds) {
+                        if let Some(h) = athena_alias_reuse_hint(&err, &rel_path, &ds) {
                             remediation_hints.push(h);
                         }
                         if attempt >= max_attempts {
@@ -979,7 +975,10 @@ mod tests {
     fn resolve_dataset_ids_accepts_dataset_ids_array() {
         let args = serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders","AwsDataCatalog.test_raw.raw_orders"]});
         let got = resolve_dataset_ids(&args).expect("ok");
-        assert_eq!(got, vec!["AwsDataCatalog.test_raw.raw_orders".to_string()]);
+        assert_eq!(
+            got.into_iter().map(|d| d.fqn()).collect::<Vec<_>>(),
+            vec!["AwsDataCatalog.test_raw.raw_orders".to_string()]
+        );
     }
 
     #[test]

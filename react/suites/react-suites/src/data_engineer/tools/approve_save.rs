@@ -26,12 +26,18 @@ fn encode_key_component(s: &str) -> String {
     out
 }
 
-fn resolve_single_dataset_id_from_args(args: &Value) -> Result<Option<String>, String> {
+fn resolve_single_dataset_id_from_args(args: &Value) -> Result<Option<DatasetRef>, String> {
     // Hard cutover: accept explicit dataset_id only.
     if let Some(s) = args.get("dataset_id").and_then(|x| x.as_str()) {
         let t = s.trim();
         if !t.is_empty() {
-            return Ok(Some(t.to_string()));
+            return DatasetRef::parse(t)
+                .ok_or_else(|| {
+                    format!(
+                        "invalid dataset_id '{t}'. Expected <catalog>.<schema>.<table> (e.g. AwsDataCatalog.test_raw.raw_customers)."
+                    )
+                })
+                .map(Some);
         }
     }
     Ok(None)
@@ -75,61 +81,54 @@ impl Tool for ApproveAndSaveArtifactTool {
         let explicit_dataset_id = resolve_single_dataset_id_from_args(&args)?;
 
         // Hard cutover: require explicit dataset_id; do not infer from thread history.
-        let mut candidates: Vec<String> = Vec::new();
+        let mut candidates: Vec<DatasetRef> = Vec::new();
         if let Some(ref ds) = explicit_dataset_id {
             candidates.push(ds.clone());
         }
 
         let mut dataset_id: String = if let Some(ds) = explicit_dataset_id {
-            ds
+            ds.fqn()
+        } else if candidates.is_empty() {
+            return Err(
+                "No resolved datasets found. First, resolve dataset candidates via vect_query(scope:\"dataset\"), record them, then retry save."
+                    .to_string(),
+            );
+        } else if kind == "model" {
+            let lc = content.to_lowercase();
+            let mut referenced: Vec<DatasetRef> = Vec::new();
+            for ds in candidates.iter() {
+                let ds_lc = ds.fqn().to_lowercase();
+                let mut ok = lc.contains(&ds_lc);
+                if !ok {
+                    let db_table = format!("{}.{}", ds.schema, ds.table).to_lowercase();
+                    let src1 = format!("source('{}','{}')", ds.schema, ds.table);
+                    let src2 = format!("source(\"{}\",\"{}\")", ds.schema, ds.table);
+                    let src3 = format!("source('{}', '{}')", ds.schema, ds.table);
+                    let src4 = format!("source(\"{}\", \"{}\")", ds.schema, ds.table);
+                    ok = lc.contains(&db_table)
+                        || lc.contains(&src1)
+                        || lc.contains(&src2)
+                        || lc.contains(&src3)
+                        || lc.contains(&src4);
+                }
+                if ok {
+                    referenced.push(ds.clone());
+                }
+            }
+            if referenced.is_empty() {
+                let list = candidates
+                    .iter()
+                    .map(|d| d.fqn())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "Model SQL must reference at least one resolved dataset (FQN or dbt source). Use one of: {}",
+                    list
+                ));
+            }
+            referenced[0].fqn()
         } else {
-            if candidates.is_empty() {
-                return Err(
-                    "No resolved datasets found. First, resolve dataset candidates via vect_query(scope:\"dataset\"), record them, then retry save."
-                        .to_string(),
-                );
-            }
-            // Selection strategy:
-            // - For DBT models, require explicit dataset presence in SQL to avoid invented tables.
-            // - For MetricFlow YAML, anchor to the top preflight candidate.
-            if kind == "model" {
-                let lc = content.to_lowercase();
-                let mut referenced: Vec<String> = Vec::new();
-                for ds in candidates.iter() {
-                    let ds_lc = ds.to_lowercase();
-                    let mut ok = lc.contains(&ds_lc);
-                    if !ok {
-                        if let Some(ds_ref) = DatasetRef::parse(ds) {
-                            let db_table =
-                                format!("{}.{}", ds_ref.schema, ds_ref.table).to_lowercase();
-                            let db = ds_ref.schema;
-                            let table = ds_ref.table;
-                            let src1 = format!("source('{}','{}')", db, table);
-                            let src2 = format!("source(\"{}\",\"{}\")", db, table);
-                            let src3 = format!("source('{}', '{}')", db, table);
-                            let src4 = format!("source(\"{}\", \"{}\")", db, table);
-                            ok = lc.contains(&db_table)
-                                || lc.contains(&src1)
-                                || lc.contains(&src2)
-                                || lc.contains(&src3)
-                                || lc.contains(&src4);
-                        }
-                    }
-                    if ok {
-                        referenced.push(ds.clone());
-                    }
-                }
-                if referenced.is_empty() {
-                    let list = candidates.iter().cloned().collect::<Vec<_>>().join(", ");
-                    return Err(format!(
-                        "Model SQL must reference at least one resolved dataset (FQN or dbt source). Use one of: {}",
-                        list
-                    ));
-                }
-                referenced[0].clone()
-            } else {
-                candidates[0].clone()
-            }
+            candidates[0].fqn()
         };
 
         // For metrics, persist a top comment documenting the assumed dataset
@@ -411,8 +410,8 @@ mod tests {
         let args = serde_json::json!({"dataset_id":"AwsDataCatalog.test_raw.raw_customers"});
         let got = resolve_single_dataset_id_from_args(&args).expect("ok");
         assert_eq!(
-            got.as_deref(),
-            Some("AwsDataCatalog.test_raw.raw_customers")
+            got.map(|d| d.fqn()),
+            Some("AwsDataCatalog.test_raw.raw_customers".to_string())
         );
     }
 

@@ -417,10 +417,11 @@ async fn read_dbt_file_text(ctx: &AgentCtx, rel_path: &str, max_bytes: usize) ->
 pub async fn build_validate_fail_facts(
     ctx: &AgentCtx,
     dialect: String,
-    validate_obs: &Value,
+    validate_contract: &crate::data_engineer::controller_event::ValidateObservationContract,
     scope: FactsScope,
     limits: FactsLimits,
 ) -> FactsBundle {
+    let validate_obs = &validate_contract.observation;
     // Extract errors (array-of-strings shape).
     let errs: Vec<String> = validate_obs
         .get("errors")
@@ -752,10 +753,14 @@ mod tests {
                 }
             }
         });
+        let contract = crate::data_engineer::controller_event::validate_contract_from_observation(
+            validate_obs,
+        )
+        .expect("validate contract");
         let facts = build_validate_fail_facts(
             &ctx,
             "Amazon Athena (engine v3 / Trino SQL)".to_string(),
-            &validate_obs,
+            &contract,
             FactsScope::ValidateFail,
             FactsLimits::for_scope(FactsScope::ValidateFail),
         )

@@ -48,6 +48,21 @@ fn map_work_group_kind(k: de_plan::WorkGroupKind) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy)]
+enum WsPlanKind {
+    Cleanse,
+    Model,
+}
+
+impl WsPlanKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            WsPlanKind::Cleanse => "cleanse",
+            WsPlanKind::Model => "model",
+        }
+    }
+}
+
 fn checklist_item_to_value(it: de_plan::PlanChecklistItem) -> Value {
     let evidence = if it.evidence.is_empty() {
         None
@@ -91,8 +106,8 @@ fn work_group_to_value(wg: de_plan::PlanWorkGroup) -> Value {
     })
 }
 
-fn plan_parse_error_snapshot(plan_kind: &str, plan_key: String, err: String) -> Value {
-    let task = if plan_kind == "cleanse" {
+fn plan_parse_error_snapshot(plan_kind: WsPlanKind, plan_key: &str, err: &str) -> Value {
+    let task = if matches!(plan_kind, WsPlanKind::Cleanse) {
         json!({
             "taskKind": "cleanse",
             "taskId": "parse_error",
@@ -101,7 +116,7 @@ fn plan_parse_error_snapshot(plan_kind: &str, plan_key: String, err: String) -> 
             "checklist": [{
                 "checklistItemId": "parse_error",
                 "label": "Plan failed to deserialize",
-                "details": err,
+                "details": err.to_string(),
                 "status": "needs_update",
                 "origin": "initial"
             }]
@@ -115,19 +130,19 @@ fn plan_parse_error_snapshot(plan_kind: &str, plan_key: String, err: String) -> 
             "checklist": [{
                 "checklistItemId": "parse_error",
                 "label": "Plan failed to deserialize",
-                "details": err,
+                "details": err.to_string(),
                 "status": "needs_update",
                 "origin": "initial"
             }]
         })
     };
     json!({
-        "planKind": plan_kind,
+        "planKind": plan_kind.as_str(),
         "planKey": plan_key,
         "status": "cancelled",
         "tasks": [task],
         "workGroups": [],
-        "projectSnapshot": { "parse_error": err }
+        "projectSnapshot": { "parse_error": err.to_string() }
     })
 }
 
@@ -208,9 +223,9 @@ pub async fn load_latest_plans_ws(
                 }
                 Err(e) => {
                     cleanse_active = Some(plan_parse_error_snapshot(
-                        "cleanse",
-                        k.to_string(),
-                        format!("failed to parse cleanse plan JSON at {}: {}", k, e),
+                        WsPlanKind::Cleanse,
+                        k,
+                        &format!("failed to parse cleanse plan JSON at {}: {}", k, e),
                     ));
                     break;
                 }
@@ -242,9 +257,9 @@ pub async fn load_latest_plans_ws(
                 }
                 Err(e) => {
                     model_active = Some(plan_parse_error_snapshot(
-                        "model",
-                        k.to_string(),
-                        format!("failed to parse model plan JSON at {}: {}", k, e),
+                        WsPlanKind::Model,
+                        k,
+                        &format!("failed to parse model plan JSON at {}: {}", k, e),
                     ));
                     break;
                 }

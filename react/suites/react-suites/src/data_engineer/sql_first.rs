@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde::Deserialize;
 use std::collections::HashMap;
 
 use react_core::agent::AgentCtx;
@@ -31,8 +31,8 @@ pub fn sql_first_max_repair_attempts(default: usize) -> usize {
         .min(8)
 }
 
-fn parse_json_object_lenient(text: &str) -> Result<Value, String> {
-    if let Ok(v) = serde_json::from_str::<Value>(text) {
+fn parse_json_object_lenient<T: for<'de> Deserialize<'de>>(text: &str) -> Result<T, String> {
+    if let Ok(v) = serde_json::from_str::<T>(text) {
         return Ok(v);
     }
     let s = text.trim();
@@ -41,7 +41,14 @@ fn parse_json_object_lenient(text: &str) -> Result<Value, String> {
     if en <= st {
         return Err("invalid brace span".to_string());
     }
-    serde_json::from_str::<Value>(&s[st..=en]).map_err(|e| e.to_string())
+    serde_json::from_str::<T>(&s[st..=en]).map_err(|e| e.to_string())
+}
+
+#[derive(Deserialize)]
+struct SqlFirstDraftPayload {
+    sql: String,
+    #[serde(default)]
+    notes: Vec<String>,
 }
 
 pub fn reject_non_sql_surface(sql: &str) -> Result<(), String> {
@@ -193,27 +200,18 @@ pub async fn llm_draft_sql_json(
         reasoning_effort: None,
     };
     let raw = ctx.llm.chat(&messages, &opts).map_err(|e| e.to_string())?;
-    let v = parse_json_object_lenient(&raw)?;
-    let sql = v
-        .get("sql")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let payload: SqlFirstDraftPayload = parse_json_object_lenient(&raw)?;
+    let sql = payload.sql.trim().to_string();
     if sql.is_empty() {
         return Err("sql_first: missing required field 'sql'".to_string());
     }
-    let notes = v
-        .get("notes")
-        .and_then(|x| x.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty())
-                .take(40)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let notes = payload
+        .notes
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .take(40)
+        .collect::<Vec<_>>();
     Ok(SqlFirstDraft { sql, notes })
 }
 

@@ -6,6 +6,7 @@ use react_core::llm_observability::{self, PartInput};
 use react_core::providers::{DatasetCatalogProvider, DatasetId};
 use react_core::session::{Observation, ThreadStep};
 use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet as StdBTreeSet};
@@ -242,18 +243,16 @@ fn sha256_hex(s: &str) -> String {
     hex::encode(out)
 }
 
-fn parse_json_from_llm(text: &str) -> Result<Value, String> {
+fn parse_json_from_llm<T: DeserializeOwned>(text: &str) -> Result<T, String> {
     // The prompt instructs JSON-only, but be resilient to accidental wrappers.
-    if let Ok(v) = serde_json::from_str::<Value>(text) {
+    if let Ok(v) = serde_json::from_str::<T>(text) {
         return Ok(v);
     }
     let s = text.trim();
     let vals = extract_all_json_values(s, 8);
     for vtxt in vals.iter().rev() {
-        if let Ok(v) = serde_json::from_str::<Value>(vtxt) {
-            if v.is_object() {
-                return Ok(v);
-            }
+        if let Ok(v) = serde_json::from_str::<T>(vtxt) {
+            return Ok(v);
         }
     }
     Err("LLM response did not contain valid JSON object".to_string())
@@ -399,8 +398,7 @@ pub fn llm_should_remediate_sql(
             return Err(format!("llm should_remediate call failed: {}", e));
         }
     };
-    let v = parse_json_from_llm(&resp_text)?;
-    let mut parsed: LlmRemediationDecision = serde_json::from_value(v)
+    let mut parsed: LlmRemediationDecision = parse_json_from_llm(&resp_text)
         .map_err(|e| format!("failed to parse remediation decision JSON: {}", e))?;
     if !(0.0..=1.0).contains(&parsed.confidence) {
         // Be conservative on malformed values.
@@ -583,8 +581,7 @@ pub async fn remediate_dbt_sql_keys_with_llm(
             }
         };
 
-        let v = parse_json_from_llm(&resp_text)?;
-        let parsed: LlmRemediationResponse = serde_json::from_value(v)
+        let parsed: LlmRemediationResponse = parse_json_from_llm(&resp_text)
             .map_err(|e| format!("failed to parse remediation JSON: {}", e))?;
 
         for n in parsed.notes.iter() {
@@ -1123,8 +1120,7 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         }
     };
 
-    let v = parse_json_from_llm(&resp_text)?;
-    let parsed: GroundedRepairResponse = serde_json::from_value(v)
+    let parsed: GroundedRepairResponse = parse_json_from_llm(&resp_text)
         .map_err(|e| format!("failed to parse grounded repair JSON: {}", e))?;
 
     let mut report = RemediationReport {
@@ -1543,8 +1539,7 @@ pub async fn remediate_unresolved_columns_with_llm(
         }
     };
 
-    let v = parse_json_from_llm(&resp_text)?;
-    let parsed: LlmUnresolvedColumnsResponse = serde_json::from_value(v)
+    let parsed: LlmUnresolvedColumnsResponse = parse_json_from_llm(&resp_text)
         .map_err(|e| format!("failed to parse unresolved-columns remediation JSON: {}", e))?;
 
     let mut report = RemediationReport {

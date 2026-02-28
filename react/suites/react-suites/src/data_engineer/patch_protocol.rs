@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
@@ -136,17 +136,21 @@ fn format_with_line_numbers(s: &str, max_chars: usize) -> (String, bool, usize, 
     (out, truncated, line_count, had_trailing_newline)
 }
 
-fn parse_json_from_llm(text: &str) -> Result<Value, String> {
+fn parse_json_object_from_llm(text: &str) -> Result<Map<String, Value>, String> {
     // The prompt instructs JSON-only, but be resilient to accidental wrappers.
     if let Ok(v) = serde_json::from_str::<Value>(text) {
-        return Ok(v);
+        if let Some(obj) = v.as_object() {
+            return Ok(obj.clone());
+        }
     }
     let s = text.trim();
     let vals = extract_all_json_values(s, 8);
     for vtxt in vals.iter().rev() {
         if let Ok(v) = serde_json::from_str::<Value>(vtxt) {
             if v.is_object() {
-                return Ok(v);
+                if let Some(obj) = v.as_object() {
+                    return Ok(obj.clone());
+                }
             }
         }
     }
@@ -158,23 +162,27 @@ fn looks_like_patch_object(v: &Value) -> bool {
     m.contains_key("patch_text")
 }
 
-fn parse_patch_json_from_llm(text: &str) -> Result<Value, String> {
+fn parse_patch_json_from_llm(text: &str) -> Result<Map<String, Value>, String> {
     // Like parse_json_from_llm, but prefer the JSON object that actually contains patch primitives.
     if let Ok(v) = serde_json::from_str::<Value>(text) {
         if v.is_object() && looks_like_patch_object(&v) {
-            return Ok(v);
+            if let Some(obj) = v.as_object() {
+                return Ok(obj.clone());
+            }
         }
     }
     let s = text.trim();
     let vals = extract_all_json_values(s, 16);
-    let mut last_obj: Option<Value> = None;
+    let mut last_obj: Option<Map<String, Value>> = None;
     for vtxt in vals.iter().rev() {
         if let Ok(v) = serde_json::from_str::<Value>(vtxt) {
             if v.is_object() {
                 if looks_like_patch_object(&v) {
-                    return Ok(v);
+                    if let Some(obj) = v.as_object() {
+                        return Ok(obj.clone());
+                    }
                 }
-                last_obj = Some(v);
+                last_obj = v.as_object().cloned();
             }
         }
     }
@@ -256,7 +264,7 @@ fn parse_llm_patch_response(
     expected_rel_path: &str,
 ) -> Result<LlmSingleFilePatchResponse, String> {
     let v = parse_patch_json_from_llm(text)?;
-    let mut parsed: LlmSingleFilePatchResponse = serde_json::from_value(v)
+    let mut parsed: LlmSingleFilePatchResponse = serde_json::from_value(Value::Object(v))
         .map_err(|e| format!("failed to parse patch response JSON: {}", e))?;
     let rel = project_fs::normalize_rel_path(parsed.path.as_str())?;
     if rel != expected_rel_path {
@@ -312,7 +320,7 @@ pub async fn llm_patch_loop_single_file(
     ) = format_with_line_numbers(&existing, 200_000);
 
     // Always include the raw file content in the prompt payload.
-    let user_payload_value = parse_json_from_llm(&user_payload_json)?;
+    let user_payload_value = Value::Object(parse_json_object_from_llm(&user_payload_json)?);
     let initial_user = serde_json::json!({
         "expected_rel_path": expected_rel_path,
         "base_sha256": base_sha256,
