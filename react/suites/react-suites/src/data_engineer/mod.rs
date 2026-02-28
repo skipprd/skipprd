@@ -7585,7 +7585,7 @@ Apply these fixes in the output.",
 
                     // Targeted pre-check (compile selected, then build selected) based on most recent patch.
                     // If it fails, we skip full validation and proceed with the standard failure handling.
-                    let obs: serde_json::Value;
+                    let obs: crate::data_engineer::controller_event::ValidateObservationContract;
                     // Hard cutover: do not derive control-state selectors from thread logs.
                     // Targeted validate remains disabled until selectors are sourced from typed state artifacts.
                     let select_terms: Vec<String> = Vec::new();
@@ -7616,8 +7616,9 @@ Apply these fixes in the output.",
                             false,
                         )
                         .await?;
-                        let obs_compile_norm =
-                            react_core::session::ToolObservation::normalize(obs_compile.clone());
+                        let obs_compile_norm = react_core::session::ToolObservation::normalize(
+                            obs_compile.observation.clone(),
+                        );
                         let _ = thread_store
                             .append_step(
                                 thread_id,
@@ -7639,14 +7640,8 @@ Apply these fixes in the output.",
                                 },
                             )
                             .await;
-                        let ok = obs_compile
-                            .get("ok")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        let compile_ok = obs_compile
-                            .get("compile_ok")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
+                        let ok = obs_compile.outcome_v2.ok;
+                        let compile_ok = obs_compile.outcome_v2.compile_ok;
                         if !(ok && compile_ok) {
                             emit_trace(&actx, "targeted compile failed");
                             obs = obs_compile;
@@ -7679,8 +7674,9 @@ Apply these fixes in the output.",
                                     false,
                                 )
                                 .await?;
-                            let obs_build_norm =
-                                react_core::session::ToolObservation::normalize(obs_build.clone());
+                            let obs_build_norm = react_core::session::ToolObservation::normalize(
+                                obs_build.observation.clone(),
+                            );
                             let _ = thread_store
                                 .append_step(
                                     thread_id,
@@ -7702,18 +7698,9 @@ Apply these fixes in the output.",
                                     },
                                 )
                                 .await;
-                            let ok = obs_build
-                                .get("ok")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            let compile_ok = obs_build
-                                .get("compile_ok")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            let run_ok = obs_build
-                                .get("run_ok")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
+                            let ok = obs_build.outcome_v2.ok;
+                            let compile_ok = obs_build.outcome_v2.compile_ok;
+                            let run_ok = obs_build.outcome_v2.run_ok;
                             if !(ok && compile_ok && run_ok) {
                                 emit_trace(&actx, "targeted build failed");
                                 obs = obs_build;
@@ -7742,8 +7729,9 @@ Apply these fixes in the output.",
                                     &actx, true, false, None,
                                 )
                                 .await?;
-                                let obs_norm =
-                                    react_core::session::ToolObservation::normalize(obs.clone());
+                                let obs_norm = react_core::session::ToolObservation::normalize(
+                                    obs.observation.clone(),
+                                );
                                 let _ = thread_store
                                     .append_step(
                                         thread_id,
@@ -7791,7 +7779,9 @@ Apply these fixes in the output.",
                             &actx, true, false, None,
                         )
                         .await?;
-                        let obs_norm = react_core::session::ToolObservation::normalize(obs.clone());
+                        let obs_norm = react_core::session::ToolObservation::normalize(
+                            obs.observation.clone(),
+                        );
                         let _ = thread_store
                             .append_step(
                                 thread_id,
@@ -7816,9 +7806,7 @@ Apply these fixes in the output.",
                     }
 
                     let validate_event =
-                        crate::data_engineer::controller_event::validate_event_from_observation(
-                            &obs,
-                        );
+                        crate::data_engineer::controller_event::validate_event_from_contract(&obs);
                     if matches!(
                         validate_event,
                         crate::data_engineer::controller_event::ControllerEvent::ValidatePassed
@@ -7910,7 +7898,7 @@ Apply these fixes in the output.",
                                 Some(serde_json::json!({
                                     "signal": signal,
                                     "plan_key": active_plan_key,
-                                    "dbt_validate_observation": obs,
+                                    "dbt_validate_observation": obs.observation.clone(),
                                     "next_action": "resume_authoring_for_remaining_plan_work",
                                     "audit_acceptance": Self::churn_audit_acceptance_criteria(),
                                 })),
@@ -7937,7 +7925,7 @@ Apply these fixes in the output.",
                             to_phase,
                             Some(PhaseReasonCode::ValidatePass),
                             Some(serde_json::json!({
-                                "dbt_validate_observation": obs,
+                                "dbt_validate_observation": obs.observation.clone(),
                                 "dbt_validate_step_idx": trigger_step_idx,
                             })),
                         )
@@ -7986,6 +7974,7 @@ Apply these fixes in the output.",
                         ));
                     }
                     let errs: Vec<String> = obs
+                        .observation
                         .get("errors")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
@@ -8059,6 +8048,7 @@ Apply these fixes in the output.",
                     // Attach authoritative schema facts for the next authoring turn. This ensures the LLM
                     // never needs to guess relation columns after a deterministic validate failure.
                     let dialect = obs
+                        .observation
                         .get("dialect")
                         .and_then(|v| v.as_str())
                         .unwrap_or("Unknown SQL dialect")
@@ -8066,7 +8056,7 @@ Apply these fixes in the output.",
                     let facts_bundle = crate::data_engineer::facts::build_validate_fail_facts(
                         &actx,
                         dialect,
-                        &obs,
+                        &obs.observation,
                         crate::data_engineer::facts::FactsScope::ValidateFail,
                         crate::data_engineer::facts::FactsLimits::for_scope(
                             crate::data_engineer::facts::FactsScope::ValidateFail,
@@ -8142,7 +8132,7 @@ Apply these fixes in the output.",
                         to_phase,
                         Some(PhaseReasonCode::ValidateFail),
                         Some(serde_json::json!({
-                            "dbt_validate_observation": obs,
+                            "dbt_validate_observation": obs.observation.clone(),
                             "dbt_validate_step_idx": trigger_step_idx,
                             "errors": errs,
                             "facts_bundle": facts_bundle,

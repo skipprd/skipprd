@@ -1038,7 +1038,7 @@ impl DeterministicDbtValidateOnce {
         build: bool,
         run: bool,
         dataset_ids: Option<&[String]>,
-    ) -> Result<Value, String> {
+    ) -> Result<crate::data_engineer::controller_event::ValidateObservationContract, String> {
         let dbt = ctx
             .dbt
             .as_ref()
@@ -1120,7 +1120,7 @@ impl DeterministicDbtValidateOnce {
                 obj.insert("dataset_ids".to_string(), serde_json::json!(ds));
             }
         }
-        Ok(v)
+        crate::data_engineer::controller_event::validate_contract_from_observation(v)
     }
 }
 
@@ -1135,7 +1135,7 @@ impl DeterministicDbtValidateTargetedOnce {
         select_terms: &[String],
         build: bool,
         run: bool,
-    ) -> Result<Value, String> {
+    ) -> Result<crate::data_engineer::controller_event::ValidateObservationContract, String> {
         let dbt = ctx
             .dbt
             .as_ref()
@@ -1215,7 +1215,7 @@ impl DeterministicDbtValidateTargetedOnce {
                 }
             }
         }
-        Ok(v)
+        crate::data_engineer::controller_event::validate_contract_from_observation(v)
     }
 }
 

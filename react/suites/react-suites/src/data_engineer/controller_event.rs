@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ValidateFailureClass {
     WarehouseConfig,
     SqlOrRuntime,
@@ -24,19 +26,180 @@ pub enum ControllerEvent {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidateFailingTarget {
     pub node_id: String,
     pub canonical_path: String,
     pub error_code: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureSignature {
     pub class: ValidateFailureClass,
     pub node_id: String,
     pub canonical_path: String,
     pub error_code: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidateOutcomeV2 {
+    pub ok: bool,
+    pub compile_ok: bool,
+    pub run_ok: bool,
+    #[serde(default)]
+    pub failing_targets: Vec<ValidateFailingTarget>,
+    #[serde(default)]
+    pub failure_signature: Option<FailureSignature>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValidateObservationContract {
+    pub observation: Value,
+    pub outcome_v2: ValidateOutcomeV2,
+}
+
+impl ValidateObservationContract {
+    pub fn into_observation(self) -> Value {
+        self.observation
+    }
+}
+
+fn failure_class_from_errors(errors: &[String]) -> ValidateFailureClass {
+    match crate::data_engineer::dbt_error::classify(errors) {
+        crate::data_engineer::dbt_error::DbtErrorClass::WarehouseConfig => {
+            ValidateFailureClass::WarehouseConfig
+        }
+        crate::data_engineer::dbt_error::DbtErrorClass::SqlFailure
+        | crate::data_engineer::dbt_error::DbtErrorClass::SqlOrModel => {
+            ValidateFailureClass::SqlOrRuntime
+        }
+        _ => ValidateFailureClass::Unknown,
+    }
+}
+
+fn failure_class_key(class: ValidateFailureClass) -> &'static str {
+    match class {
+        ValidateFailureClass::WarehouseConfig => "warehouse_config",
+        ValidateFailureClass::SqlOrRuntime => "sql_or_runtime",
+        ValidateFailureClass::Unknown => "unknown",
+    }
+}
+
+fn build_failing_targets_from_logs(logs: &Value, failure_class: ValidateFailureClass) -> Vec<ValidateFailingTarget> {
+    let error_code = failure_class_key(failure_class).to_string();
+    let mut out: Vec<ValidateFailingTarget> = crate::data_engineer::dbt_error::extract_failed_models_from_logs(logs)
+        .into_iter()
+        .filter_map(|fm| {
+            let node_id = fm
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())?;
+            let canonical_path = fm
+                .get("file")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())?;
+            Some(ValidateFailingTarget {
+                node_id,
+                canonical_path,
+                error_code: error_code.clone(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.canonical_path.cmp(&b.canonical_path));
+    out.dedup_by(|a, b| a.canonical_path == b.canonical_path);
+    out
+}
+
+pub fn attach_validate_outcome_v2(obs: &mut Value) -> Result<ValidateOutcomeV2, String> {
+    let obj = obs
+        .as_object_mut()
+        .ok_or_else(|| "validate_outcome_v2_contract_error: observation_not_object".to_string())?;
+    let ok = obj.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let compile_ok = obj
+        .get("compile_ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let run_ok = obj.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let errors: Vec<String> = obj
+        .get("errors")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let logs = obj.get("logs").cloned().unwrap_or(Value::Null);
+    let class = failure_class_from_errors(&errors);
+    let failing_targets = if ok {
+        Vec::new()
+    } else {
+        build_failing_targets_from_logs(&logs, class)
+    };
+    if !ok && failing_targets.is_empty() {
+        return Err("validate_outcome_v2_contract_error: missing failing_targets for failed validate".to_string());
+    }
+    let failure_signature = failing_targets.first().map(|t| FailureSignature {
+        class,
+        node_id: t.node_id.clone(),
+        canonical_path: t.canonical_path.clone(),
+        error_code: t.error_code.clone(),
+    });
+    let outcome = ValidateOutcomeV2 {
+        ok,
+        compile_ok,
+        run_ok,
+        failing_targets,
+        failure_signature,
+    };
+    obj.insert(
+        "validate_outcome_v2".to_string(),
+        serde_json::to_value(&outcome).map_err(|e| e.to_string())?,
+    );
+    Ok(outcome)
+}
+
+pub fn validate_contract_from_observation(mut obs: Value) -> Result<ValidateObservationContract, String> {
+    let outcome_v2 = attach_validate_outcome_v2(&mut obs)?;
+    Ok(ValidateObservationContract {
+        observation: obs,
+        outcome_v2,
+    })
+}
+
+pub fn validate_event_from_contract(contract: &ValidateObservationContract) -> ControllerEvent {
+    let v2 = &contract.outcome_v2;
+    if v2.ok && v2.compile_ok && v2.run_ok {
+        return ControllerEvent::ValidatePassed;
+    }
+    let errs: Vec<String> = contract
+        .observation
+        .get("errors")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let brief = crate::data_engineer::dbt_error::compact_brief(&errs, 6, 1200);
+    if v2.failing_targets.is_empty() {
+        return ControllerEvent::ValidateContractError {
+            reason: "validate_outcome_v2_missing_failing_targets".to_string(),
+            brief,
+        };
+    }
+    let Some(signature) = v2.failure_signature.clone() else {
+        return ControllerEvent::ValidateContractError {
+            reason: "validate_outcome_v2_missing_failure_signature".to_string(),
+            brief,
+        };
+    };
+    ControllerEvent::ValidateFailed {
+        class: signature.class,
+        signature,
+        brief,
+        failing_targets: v2.failing_targets.clone(),
+        compile_ok: v2.compile_ok,
+        run_ok: v2.run_ok,
+    }
 }
 
 fn parse_failure_class(v: &Value) -> ValidateFailureClass {
@@ -267,5 +430,46 @@ mod tests {
             }
             other => panic!("expected ValidateContractError, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn validate_contract_attaches_outcome_for_success() {
+        let obs = serde_json::json!({
+            "ok": true,
+            "compile_ok": true,
+            "run_ok": true,
+            "errors": []
+        });
+        let contract = validate_contract_from_observation(obs).expect("contract");
+        assert!(contract.outcome_v2.ok);
+        assert!(contract.outcome_v2.compile_ok);
+        assert!(contract.outcome_v2.run_ok);
+        assert!(
+            contract
+                .observation
+                .get("validate_outcome_v2")
+                .is_some(),
+            "expected validate_outcome_v2 to be attached"
+        );
+        assert_eq!(
+            validate_event_from_contract(&contract),
+            ControllerEvent::ValidatePassed
+        );
+    }
+
+    #[test]
+    fn validate_contract_fails_closed_for_failed_validate_without_targets() {
+        let obs = serde_json::json!({
+            "ok": false,
+            "compile_ok": false,
+            "run_ok": false,
+            "errors": ["Compilation Error"],
+            "logs": {}
+        });
+        let err = validate_contract_from_observation(obs).unwrap_err();
+        assert!(
+            err.contains("missing failing_targets"),
+            "unexpected contract error: {err}"
+        );
     }
 }

@@ -68,54 +68,6 @@ fn key_matches_select_terms(key: &str, terms: &[String]) -> bool {
     })
 }
 
-fn failure_class_key_from_errors(errors: &[String]) -> &'static str {
-    match crate::data_engineer::dbt_error::classify(errors) {
-        crate::data_engineer::dbt_error::DbtErrorClass::WarehouseConfig => "warehouse_config",
-        crate::data_engineer::dbt_error::DbtErrorClass::SqlFailure
-        | crate::data_engineer::dbt_error::DbtErrorClass::SqlOrModel => "sql_or_runtime",
-        _ => "unknown",
-    }
-}
-
-fn build_failing_targets(logs: &Value, failure_class: &str) -> Vec<Value> {
-    let mut out: Vec<Value> = crate::data_engineer::dbt_error::extract_failed_models_from_logs(logs)
-        .into_iter()
-        .filter_map(|fm| {
-            let node_id = fm
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            let canonical_path = fm
-                .get("file")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())?;
-            Some(serde_json::json!({
-                "node_id": node_id,
-                "canonical_path": canonical_path,
-                "error_code": failure_class,
-            }))
-        })
-        .collect();
-    out.sort_by(|a, b| {
-        let ap = a
-            .get("canonical_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let bp = b
-            .get("canonical_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        ap.cmp(bp)
-    });
-    out.dedup_by(|a, b| {
-        a.get("canonical_path").and_then(|v| v.as_str())
-            == b.get("canonical_path").and_then(|v| v.as_str())
-    });
-    out
-}
-
 async fn probe_compiled_model_sql(
     ctx: &AgentCtx,
     _project_name: &str,
@@ -541,51 +493,7 @@ impl Tool for DbtValidateTool {
                 }
             }
 
-            let errors: Vec<String> = obj
-                .get("errors")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let compile_ok = obj
-                .get("compile_ok")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let run_ok = obj.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false);
-            let logs = obj.get("logs").cloned().unwrap_or(Value::Null);
-            let failure_class = failure_class_key_from_errors(&errors);
-            let failing_targets = if ok {
-                Vec::new()
-            } else {
-                build_failing_targets(&logs, failure_class)
-            };
-            if !ok && failing_targets.is_empty() {
-                return Err(
-                    "validate_outcome_v2_contract_error: missing failing_targets for failed validate"
-                        .to_string(),
-                );
-            }
-            let failure_signature = failing_targets.first().map(|t| {
-                serde_json::json!({
-                    "class": failure_class,
-                    "node_id": t.get("node_id").and_then(|v| v.as_str()),
-                    "canonical_path": t.get("canonical_path").and_then(|v| v.as_str()),
-                    "error_code": t.get("error_code").and_then(|v| v.as_str()),
-                })
-            });
-            obj.insert(
-                "validate_outcome_v2".to_string(),
-                serde_json::json!({
-                    "ok": ok,
-                    "compile_ok": compile_ok,
-                    "run_ok": run_ok,
-                    "failing_targets": failing_targets,
-                    "failure_signature": failure_signature,
-                }),
-            );
+            let _ = crate::data_engineer::controller_event::attach_validate_outcome_v2(&mut v)?;
         }
         Ok(v)
     }
