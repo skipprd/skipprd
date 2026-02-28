@@ -7309,7 +7309,12 @@ dependencies = [
  "once_cell",
  "rand 0.8.5",
  "react-core",
+ "react-module-provider-athena",
+ "react-module-provider-bigquery",
+ "react-module-provider-dbt",
+ "react-module-provider-postgres",
  "react-module-provider-vector-lance",
+ "react-module-storage",
  "react-suites",
  "regex",
  "serde",
@@ -7423,30 +7428,6 @@ dependencies = [
  "aws-sdk-s3",
  "react-core",
  "serde_json",
-]
-
-[[package]]
-name = "react-server"
-version = "0.0.0-git"
-dependencies = [
- "chrono",
- "clap",
- "crossterm",
- "react",
- "react-core",
- "react-module-provider-athena",
- "react-module-provider-bigquery",
- "react-module-provider-dbt",
- "react-module-provider-postgres",
- "react-module-provider-vector-lance",
- "react-module-storage",
- "react-suites",
- "serde_json",
- "serde_yaml",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
 ]
 
 [[package]]

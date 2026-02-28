@@ -33,7 +33,13 @@ hex = "0.4.3"
 ureq = { version = "2", features = ["json"] }
 crossterm = "0.27"
 react-core = { path = "../core" }
+react-suites = { path = "../suites/react-suites" }
 react-module-provider-vector-lance = { path = "../modules/provider-vector-lance" }
+react-module-storage = { path = "../modules/storage" }
+react-module-provider-postgres = { path = "../modules/provider-postgres" }
+react-module-provider-bigquery = { path = "../modules/provider-bigquery" }
+react-module-provider-athena = { path = "../modules/provider-athena" }
+react-module-provider-dbt = { path = "../modules/provider-dbt" }
 
 # Vector store + Arrow
 arrow = { version = "56.2.0", features = ["ipc_compression"] }
@@ -47,7 +53,6 @@ tungstenite = "0.21"
 
 [dev-dependencies]
 httpmock = "0.7"
-react-suites = { path = "../suites/react-suites" }
 
 [features]
 llama_cpp = []

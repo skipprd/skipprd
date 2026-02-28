@@ -21,6 +21,14 @@ pub use react_core::providers::{
 pub use react_core::scope::RequestScope;
 
 pub use keyspace::{DefaultKeyspace, Keyspace, LocalKeyspace};
+pub use react_module_provider_athena::{AthenaQueryProvider, AthenaSettings};
+pub use react_module_provider_bigquery::{BigQueryProvider, BigQuerySettings};
+pub use react_module_provider_dbt::{DbtProjectProvider, DbtRunnerConfig};
+pub use react_module_provider_postgres::{PostgresProvider, PostgresSettings};
 pub use secrets::EnvSecretsProvider;
 pub use type_parse::FlattenedField;
 pub use vector::LanceVectorStore;
+
+pub mod dbt {
+    pub use react_module_provider_dbt::{DbtProjectProvider, DbtRunnerConfig};
+}
