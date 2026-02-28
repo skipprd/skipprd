@@ -137,6 +137,7 @@ fn map_exec_ctx(c: &react_core::session::ExecutionContext) -> api::ExecutionCont
 
 fn ws_thread_state_snapshot_from_core(
     st: &CoreThreadState,
+    timeline_events: &[react_core::session::ThreadEvent],
     reg: &SuiteRegistry,
 ) -> api::ThreadStateSnapshot {
     fn elapsed_ms_since(start_ts: &str) -> Option<i64> {
@@ -208,8 +209,7 @@ fn ws_thread_state_snapshot_from_core(
     let completed_phases = derive_completed_phases(&phases, &current_phase, &st.items);
 
     // Durable, bounded timeline events (post reconnect tool timeline).
-    let events: Vec<api::ThreadEvent> = st
-        .events
+    let events: Vec<api::ThreadEvent> = timeline_events
         .iter()
         .map(|ev| {
             let kind = map_thread_event_kind(ev.event_kind);
@@ -259,6 +259,14 @@ fn ws_thread_state_snapshot_from_core(
         }
     }
     snap
+}
+
+async fn load_timeline_events(store: &ThreadStore, thread_id: &str) -> Vec<react_core::session::ThreadEvent> {
+    store
+        .get_thread_timeline(thread_id)
+        .await
+        .map(|t| t.events)
+        .unwrap_or_default()
 }
 
 async fn upsert_thread_state_from_plans(
@@ -1511,7 +1519,8 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 
             let store = state.thread_store();
             let st = store.get_thread_state(&thread_id).await?;
-            let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+            let timeline_events = load_timeline_events(&store, &thread_id).await;
+            let snap = ws_thread_state_snapshot_from_core(&st, &timeline_events, state.reg.as_ref());
             if let Some(t) = state.term() {
                 t.emit(TerminalEvent::ThreadState(snap.clone()));
             }
@@ -2376,7 +2385,8 @@ async fn process_open(
         .await;
         upsert_thread_state_from_plans(&store, &thread_id, &plans).await;
         if let Ok(st) = store.get_thread_state(&thread_id).await {
-            let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+            let timeline_events = load_timeline_events(&store, &thread_id).await;
+            let snap = ws_thread_state_snapshot_from_core(&st, &timeline_events, state.reg.as_ref());
             let mut resp = api::ThreadStateResponse::new(
                 1,
                 m::thread_state_response::Type::ThreadState,
@@ -3123,7 +3133,8 @@ async fn run_agent_with_processing_suite(
                             // Force ThreadState emission after phase transitions so terminal
                             // reflects the new current_phase immediately when returning to phases.
                             if let Ok(st) = store.get_thread_state(thread_id).await {
-                                let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+                                let timeline_events = load_timeline_events(&store, thread_id).await;
+                                let snap = ws_thread_state_snapshot_from_core(&st, &timeline_events, state.reg.as_ref());
                                 if let Some(t) = state.term() {
                                     t.emit(TerminalEvent::ThreadState(snap.clone()));
                                 }
@@ -3287,7 +3298,8 @@ async fn run_agent_with_processing_suite(
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+                let timeline_events = load_timeline_events(&store, thread_id).await;
+                let snap = ws_thread_state_snapshot_from_core(&st, &timeline_events, state.reg.as_ref());
                 let phase_changed = snap.current_phase.as_ref() != last_sent_phase.as_ref();
                 let step_count_changed = Some(snap.last_materialized_step_count) != last_sent_step_count;
                 let snapshot_changed = last_state_sent.as_ref() != Some(&snap);
@@ -3359,7 +3371,8 @@ async fn run_agent_with_processing_suite(
                             {
                                 let store = state.thread_store();
                                 if let Ok(st) = store.get_thread_state(thread_id).await {
-                                    let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+                                    let timeline_events = load_timeline_events(&store, thread_id).await;
+                                    let snap = ws_thread_state_snapshot_from_core(&st, &timeline_events, state.reg.as_ref());
                                     if let Some(t) = state.term() {
                                         t.emit(TerminalEvent::ThreadState(snap.clone()));
                                     }
@@ -3421,7 +3434,8 @@ async fn run_agent_with_processing_suite(
                             {
                                 let store = state.thread_store();
                                 if let Ok(st) = store.get_thread_state(thread_id).await {
-                                    let snap = ws_thread_state_snapshot_from_core(&st, state.reg.as_ref());
+                                    let timeline_events = load_timeline_events(&store, thread_id).await;
+                                    let snap = ws_thread_state_snapshot_from_core(&st, &timeline_events, state.reg.as_ref());
                                     if let Some(t) = state.term() {
                                         t.emit(TerminalEvent::ThreadState(snap.clone()));
                                     }
@@ -3826,7 +3840,7 @@ mod tests {
         core.suite_id = Some("suite_x".to_string());
         core.agent_type = Some("agent".to_string());
         core.current_phase = Some("preflight".to_string());
-        core.events = vec![react_core::session::ThreadEvent {
+        let timeline_events = vec![react_core::session::ThreadEvent {
             step_idx: 0,
             event_kind: react_core::session::ThreadEventKind::ToolStart,
             ts: "t".to_string(),
@@ -3843,7 +3857,7 @@ mod tests {
             ..Default::default()
         }];
         let reg = react_core::suite::SuiteRegistry::new();
-        let snap = ws_thread_state_snapshot_from_core(&core, &reg);
+        let snap = ws_thread_state_snapshot_from_core(&core, &timeline_events, &reg);
         let ctx = snap.events[0].ctx.as_ref().expect("ctx");
         assert_eq!(ctx.plan_kind, Some("cleanse".to_string()));
         assert_eq!(ctx.plan_key.as_deref(), Some("p1"));

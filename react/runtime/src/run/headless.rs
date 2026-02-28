@@ -2,7 +2,7 @@
 //!
 //! Design goal: subscribe to the same typed events as WS without using a socket.
 
-use react_core::session::{ThreadEventStatus, ThreadItemStatus, ThreadStore};
+use react_core::session::{ThreadEvent, ThreadEventStatus, ThreadItemStatus, ThreadStore};
 use react_core::suite::{SuiteCtx, SuiteRegistry};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -30,9 +30,11 @@ fn classify_error(summary: &str) -> &'static str {
     }
 }
 
-fn summarize_failure_state(st: &react_core::session::ThreadState) -> Option<String> {
-    let last_failed_event = st
-        .events
+fn summarize_failure_state(
+    st: &react_core::session::ThreadState,
+    events: &[ThreadEvent],
+) -> Option<String> {
+    let last_failed_event = events
         .iter()
         .rev()
         .find(|e| e.status == Some(ThreadEventStatus::Failed));
@@ -239,7 +241,12 @@ pub async fn run_headless(ctx: SuiteCtx, opts: RunOpts, registry: SuiteRegistry)
             .values()
             .any(|it| it.status == ThreadItemStatus::Failed);
         if any_failed && plain_progress {
-            if let Some(line) = summarize_failure_state(&st) {
+            let timeline_events = store
+                .get_thread_timeline(&thread_id)
+                .await
+                .map(|t| t.events)
+                .unwrap_or_default();
+            if let Some(line) = summarize_failure_state(&st, &timeline_events) {
                 println!("{}", line);
             }
         }

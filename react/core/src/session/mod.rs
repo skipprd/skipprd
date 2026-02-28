@@ -2,7 +2,7 @@ use dashmap::DashMap;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -13,6 +13,8 @@ use crate::storage::StorageAdapter;
 
 pub const THREAD_SCHEMA_VERSION: u32 = 4;
 pub const THREAD_STATE_SCHEMA_VERSION: u32 = 1;
+pub const THREAD_TIMELINE_SCHEMA_VERSION: u32 = 1;
+pub const THREAD_TIMELINE_ARTIFACT_ID: &str = "thread_timeline";
 
 /// Materialized, reloadable thread state (stable summary, not raw streaming events).
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -35,12 +37,20 @@ pub struct ThreadState {
     /// Per-item semaphore/state keyed by stable item ids.
     #[serde(default)]
     pub items: BTreeMap<String, ThreadItemState>,
-    /// Recent, bounded timeline events (tool_start/tool_end) for "post reconnect" UIs.
-    #[serde(default)]
-    pub events: Vec<ThreadEvent>,
     /// Opaque suite-owned state snapshot.
     #[serde(default)]
     pub suite_state: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadTimeline {
+    pub thread_timeline_schema_version: u32,
+    pub thread_id: String,
+    #[serde(default)]
+    pub last_materialized_step_count: usize,
+    #[serde(default)]
+    pub events: Vec<ThreadEvent>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -979,6 +989,17 @@ impl ThreadStore {
                 e
             );
         }
+        if let Err(e) = self
+            .materialize_thread_timeline_incremental(thread_id, step_count, &step)
+            .await
+        {
+            tracing::warn!(
+                "thread_timeline_materialize_failed thread_id={} step_count={} error={}",
+                thread_id,
+                step_count,
+                e
+            );
+        }
         Ok(())
     }
 
@@ -1004,6 +1025,37 @@ impl ThreadStore {
         let key = self.state_key(thread_id);
         let v = serde_json::to_value(state).map_err(|e| e.to_string())?;
         self.storage.put_json(&key, &v).await
+    }
+
+    pub async fn get_thread_timeline(&self, thread_id: &str) -> Result<ThreadTimeline, String> {
+        let v = self
+            .get_thread_artifact_json(thread_id, THREAD_TIMELINE_ARTIFACT_ID)
+            .await?;
+        let t = serde_json::from_value::<ThreadTimeline>(v)
+            .map_err(|e| format!("failed to parse thread timeline: {e}"))?;
+        if t.thread_timeline_schema_version != THREAD_TIMELINE_SCHEMA_VERSION {
+            return Err(format!(
+                "thread_timeline schema_version mismatch: expected {}, got {}",
+                THREAD_TIMELINE_SCHEMA_VERSION, t.thread_timeline_schema_version
+            ));
+        }
+        Ok(t)
+    }
+
+    pub async fn put_thread_timeline(
+        &self,
+        thread_id: &str,
+        timeline: &ThreadTimeline,
+    ) -> Result<(), String> {
+        if timeline.thread_timeline_schema_version != THREAD_TIMELINE_SCHEMA_VERSION {
+            return Err(format!(
+                "thread_timeline schema_version mismatch: expected {}, got {}",
+                THREAD_TIMELINE_SCHEMA_VERSION, timeline.thread_timeline_schema_version
+            ));
+        }
+        let v = serde_json::to_value(timeline).map_err(|e| e.to_string())?;
+        self.put_thread_artifact_json(thread_id, THREAD_TIMELINE_ARTIFACT_ID, &v)
+            .await
     }
 
     pub async fn get_thread_artifact_json(
@@ -1073,6 +1125,14 @@ impl ThreadStore {
         }
     }
 
+    fn new_thread_timeline(thread_id: &str) -> ThreadTimeline {
+        ThreadTimeline {
+            thread_timeline_schema_version: THREAD_TIMELINE_SCHEMA_VERSION,
+            thread_id: thread_id.to_string(),
+            ..ThreadTimeline::default()
+        }
+    }
+
     async fn materialize_thread_state_incremental(
         &self,
         thread_id: &str,
@@ -1094,14 +1154,7 @@ impl ThreadStore {
             // If a gap is detected, reset to an empty state snapshot and continue incrementally.
             state = Self::new_thread_state(thread_id);
         }
-        let mut paired: HashSet<String> = HashSet::new();
-        match step {
-            ThreadStep::ToolStart { tool_id, .. } | ThreadStep::ToolEnd { tool_id, .. } => {
-                paired.insert(tool_id.clone());
-            }
-            _ => {}
-        }
-        apply_step_to_state(&mut state, want_step_count.saturating_sub(1), step, &paired);
+        apply_step_to_state(&mut state, want_step_count.saturating_sub(1), step);
         state.thread_state_schema_version = THREAD_STATE_SCHEMA_VERSION;
         state.thread_id = thread_id.to_string();
         state.last_materialized_step_count = want_step_count;
@@ -1112,6 +1165,50 @@ impl ThreadStore {
             .filter_map(|it| it.runtime_ms)
             .sum();
         self.put_thread_state(thread_id, &state).await?;
+        Ok(())
+    }
+
+    async fn materialize_thread_timeline_incremental(
+        &self,
+        thread_id: &str,
+        want_step_count: usize,
+        step: &ThreadStep,
+    ) -> Result<(), String> {
+        let mut timeline = self
+            .get_thread_timeline(thread_id)
+            .await
+            .unwrap_or_else(|_| Self::new_thread_timeline(thread_id));
+        if timeline.last_materialized_step_count > want_step_count.saturating_sub(1) {
+            return Err(format!(
+                "thread_timeline materialization mismatch: timeline_count={} want_step_count={}",
+                timeline.last_materialized_step_count, want_step_count
+            ));
+        }
+        if timeline.last_materialized_step_count < want_step_count.saturating_sub(1) {
+            timeline = Self::new_thread_timeline(thread_id);
+        }
+        let current_phase = self
+            .get_thread_state(thread_id)
+            .await
+            .ok()
+            .and_then(|s| s.current_phase)
+            .or_else(|| Some("preflight".to_string()));
+        if let Some(ev) = step_to_timeline_event(
+            want_step_count.saturating_sub(1),
+            step,
+            current_phase.as_deref(),
+        ) {
+            const MAX_EVENTS: usize = 200;
+            timeline.events.push(ev);
+            if timeline.events.len() > MAX_EVENTS {
+                let drop_n = timeline.events.len() - MAX_EVENTS;
+                timeline.events.drain(0..drop_n);
+            }
+        }
+        timeline.thread_timeline_schema_version = THREAD_TIMELINE_SCHEMA_VERSION;
+        timeline.thread_id = thread_id.to_string();
+        timeline.last_materialized_step_count = want_step_count;
+        self.put_thread_timeline(thread_id, &timeline).await?;
         Ok(())
     }
 
@@ -1249,26 +1346,8 @@ impl ThreadStore {
     }
 }
 
+#[cfg(test)]
 fn build_thread_state_from_log(thread_id: &str, log: &ThreadLog) -> ThreadState {
-    // For UI timelines, only emit tool events that have both a start+end in the persisted log.
-    // This prevents orphan spans when the store drops one side of the pair.
-    let paired_tool_ids: HashSet<String> = {
-        let mut starts: HashSet<String> = HashSet::new();
-        let mut ends: HashSet<String> = HashSet::new();
-        for s in log.steps.iter() {
-            match s {
-                ThreadStep::ToolStart { tool_id, .. } => {
-                    starts.insert(tool_id.clone());
-                }
-                ThreadStep::ToolEnd { tool_id, .. } => {
-                    ends.insert(tool_id.clone());
-                }
-                _ => {}
-            }
-        }
-        starts.intersection(&ends).cloned().collect()
-    };
-
     let mut st = ThreadState {
         thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
         thread_id: thread_id.to_string(),
@@ -1278,12 +1357,11 @@ fn build_thread_state_from_log(thread_id: &str, log: &ThreadLog) -> ThreadState 
         last_materialized_step_count: 0,
         total_runtime_ms: 0,
         items: BTreeMap::new(),
-        events: Vec::new(),
         suite_state: None,
     };
 
     for (idx, step) in log.steps.iter().enumerate() {
-        apply_step_to_state(&mut st, idx, step, &paired_tool_ids);
+        apply_step_to_state(&mut st, idx, step);
         st.last_materialized_step_count = idx + 1;
     }
 
@@ -1297,6 +1375,57 @@ fn build_thread_state_from_log(thread_id: &str, log: &ThreadLog) -> ThreadState 
     st
 }
 
+#[cfg(test)]
+fn build_thread_timeline_from_log(thread_id: &str, log: &ThreadLog) -> ThreadTimeline {
+    const MAX_EVENTS: usize = 200;
+    let paired_tool_ids: std::collections::HashSet<String> = {
+        let mut starts: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut ends: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for s in log.steps.iter() {
+            match s {
+                ThreadStep::ToolStart { tool_id, .. } => {
+                    starts.insert(tool_id.clone());
+                }
+                ThreadStep::ToolEnd { tool_id, .. } => {
+                    ends.insert(tool_id.clone());
+                }
+                _ => {}
+            }
+        }
+        starts.intersection(&ends).cloned().collect()
+    };
+    let mut timeline = ThreadTimeline {
+        thread_timeline_schema_version: THREAD_TIMELINE_SCHEMA_VERSION,
+        thread_id: thread_id.to_string(),
+        last_materialized_step_count: log.steps.len(),
+        events: Vec::new(),
+    };
+    for (idx, step) in log.steps.iter().enumerate() {
+        if let ThreadStep::ToolStart { tool_id, .. } | ThreadStep::ToolEnd { tool_id, .. } = step {
+            if !paired_tool_ids.contains(tool_id) {
+                continue;
+            }
+        }
+        let current_phase = match step {
+            ThreadStep::Phase { phase, .. } => Some(phase.as_str()),
+            _ => timeline
+                .events
+                .iter()
+                .rev()
+                .find_map(|e| e.phase.as_deref())
+                .or(Some("preflight")),
+        };
+        if let Some(ev) = step_to_timeline_event(idx, step, current_phase) {
+            timeline.events.push(ev);
+        }
+    }
+    if timeline.events.len() > MAX_EVENTS {
+        let drop_n = timeline.events.len() - MAX_EVENTS;
+        timeline.events.drain(0..drop_n);
+    }
+    timeline
+}
+
 fn duration_ms(start_ts: &str, end_ts: &str) -> Option<u64> {
     let start = chrono::DateTime::parse_from_rfc3339(start_ts).ok()?;
     let end = chrono::DateTime::parse_from_rfc3339(end_ts).ok()?;
@@ -1308,21 +1437,7 @@ fn duration_ms(start_ts: &str, end_ts: &str) -> Option<u64> {
     Some(ms as u64)
 }
 
-fn apply_step_to_state(
-    st: &mut ThreadState,
-    step_idx: usize,
-    step: &ThreadStep,
-    paired_tool_ids: &HashSet<String>,
-) {
-    fn push_event(st: &mut ThreadState, ev: ThreadEvent) {
-        const MAX_EVENTS: usize = 200;
-        st.events.push(ev);
-        if st.events.len() > MAX_EVENTS {
-            let drop_n = st.events.len() - MAX_EVENTS;
-            st.events.drain(0..drop_n);
-        }
-    }
-
+fn apply_step_to_state(st: &mut ThreadState, _step_idx: usize, step: &ThreadStep) {
     match step {
         ThreadStep::SwitchSuite { to, .. } => {
             if !to.trim().is_empty() {
@@ -1415,31 +1530,7 @@ fn apply_step_to_state(
                 ent.outputs = Some(p);
             }
 
-            // Only emit timeline events when we have a complete span in the log.
-            if paired_tool_ids.contains(tool_id) {
-                push_event(
-                    st,
-                    ThreadEvent {
-                        step_idx,
-                        event_kind: ThreadEventKind::ToolStart,
-                        ts: ts.clone(),
-                        tool_id: Some(tool_id.clone()),
-                        name: Some(name.clone()),
-                        clean_name: Some(clean_name.clone()),
-                        status: Some(ThreadEventStatus::Running),
-                        runtime_ms: None,
-                        payload: payload.clone(),
-                        error: None,
-                        call_id: None,
-                        model: None,
-                        phase: st
-                            .current_phase
-                            .clone()
-                            .or_else(|| Some("preflight".to_string())),
-                        ctx: ctx.clone(),
-                    },
-                );
-            }
+            let _ = (tool_id, name, clean_name, payload, ctx);
         }
         ThreadStep::ToolEnd {
             tool_id,
@@ -1523,98 +1614,19 @@ fn apply_step_to_state(
                 (ent.runtime_ms, ent.outputs.clone(), err_out)
             };
 
-            // Only emit timeline events when we have a complete span in the log.
-            if paired_tool_ids.contains(tool_id) {
-                push_event(
-                    st,
-                    ThreadEvent {
-                        step_idx,
-                        event_kind: ThreadEventKind::ToolEnd,
-                        ts: ts.clone(),
-                        tool_id: Some(tool_id.clone()),
-                        name: Some(name.clone()),
-                        clean_name: Some(clean_name.clone()),
-                        status: Some(if *status == ToolStepStatus::Failed {
-                            ThreadEventStatus::Failed
-                        } else {
-                            ThreadEventStatus::Ok
-                        }),
-                        runtime_ms,
-                        payload: payload_out,
-                        error: err_out,
-                        call_id: None,
-                        model: None,
-                        phase: st
-                            .current_phase
-                            .clone()
-                            .or_else(|| Some("preflight".to_string())),
-                        ctx: ctx.clone(),
-                    },
-                );
-            }
-        }
-        ThreadStep::LlmStart {
-            call_id,
-            model,
-            phase,
-            ctx,
-            ts,
-            ..
-        } => {
-            push_event(
-                st,
-                ThreadEvent {
-                    step_idx,
-                    event_kind: ThreadEventKind::LlmStart,
-                    ts: ts.clone(),
-                    tool_id: None,
-                    name: None,
-                    clean_name: None,
-                    status: Some(ThreadEventStatus::Running),
-                    runtime_ms: None,
-                    payload: None,
-                    error: None,
-                    call_id: Some(*call_id),
-                    model: model.clone(),
-                    phase: Some(phase.clone()),
-                    ctx: ctx.clone(),
-                },
+            let _ = (
+                tool_id,
+                name,
+                clean_name,
+                status,
+                runtime_ms,
+                payload_out,
+                err_out,
+                ctx,
             );
         }
-        ThreadStep::LlmEnd {
-            call_id,
-            model,
-            phase,
-            status,
-            error,
-            ctx,
-            ts,
-            ..
-        } => {
-            push_event(
-                st,
-                ThreadEvent {
-                    step_idx,
-                    event_kind: ThreadEventKind::LlmEnd,
-                    ts: ts.clone(),
-                    tool_id: None,
-                    name: None,
-                    clean_name: None,
-                    status: Some(if *status == LlmStepStatus::Failed {
-                        ThreadEventStatus::Failed
-                    } else {
-                        ThreadEventStatus::Ok
-                    }),
-                    runtime_ms: None,
-                    payload: None,
-                    error: error.clone(),
-                    call_id: Some(*call_id),
-                    model: model.clone(),
-                    phase: Some(phase.clone()),
-                    ctx: ctx.clone(),
-                },
-            );
-        }
+        ThreadStep::LlmStart { .. } => {}
+        ThreadStep::LlmEnd { .. } => {}
         ThreadStep::Final {
             ts, observation, ..
         } => {
@@ -1663,6 +1675,126 @@ fn apply_step_to_state(
             block_current_phase(st, reason, ts);
         }
         _ => {}
+    }
+}
+
+fn step_to_timeline_event(
+    step_idx: usize,
+    step: &ThreadStep,
+    current_phase: Option<&str>,
+) -> Option<ThreadEvent> {
+    match step {
+        ThreadStep::ToolStart {
+            tool_id,
+            name,
+            clean_name,
+            payload,
+            ctx,
+            ts,
+            ..
+        } => Some(ThreadEvent {
+            step_idx,
+            event_kind: ThreadEventKind::ToolStart,
+            ts: ts.clone(),
+            tool_id: Some(tool_id.clone()),
+            name: Some(name.clone()),
+            clean_name: Some(clean_name.clone()),
+            status: Some(ThreadEventStatus::Running),
+            runtime_ms: None,
+            payload: payload.clone(),
+            error: None,
+            call_id: None,
+            model: None,
+            phase: Some(current_phase.unwrap_or("preflight").to_string()),
+            ctx: ctx.clone(),
+        }),
+        ThreadStep::ToolEnd {
+            tool_id,
+            name,
+            clean_name,
+            status,
+            payload,
+            ctx,
+            observation,
+            ts,
+            ..
+        } => Some(ThreadEvent {
+            step_idx,
+            event_kind: ThreadEventKind::ToolEnd,
+            ts: ts.clone(),
+            tool_id: Some(tool_id.clone()),
+            name: Some(name.clone()),
+            clean_name: Some(clean_name.clone()),
+            status: Some(if *status == ToolStepStatus::Failed {
+                ThreadEventStatus::Failed
+            } else {
+                ThreadEventStatus::Ok
+            }),
+            runtime_ms: None,
+            payload: payload.clone(),
+            error: if observation.ok {
+                None
+            } else {
+                observation.first_error_or_context()
+            },
+            call_id: None,
+            model: None,
+            phase: Some(current_phase.unwrap_or("preflight").to_string()),
+            ctx: ctx.clone(),
+        }),
+        ThreadStep::LlmStart {
+            call_id,
+            model,
+            phase,
+            ctx,
+            ts,
+            ..
+        } => Some(ThreadEvent {
+            step_idx,
+            event_kind: ThreadEventKind::LlmStart,
+            ts: ts.clone(),
+            tool_id: None,
+            name: None,
+            clean_name: None,
+            status: Some(ThreadEventStatus::Running),
+            runtime_ms: None,
+            payload: None,
+            error: None,
+            call_id: Some(*call_id),
+            model: model.clone(),
+            phase: Some(phase.clone()),
+            ctx: ctx.clone(),
+        }),
+        ThreadStep::LlmEnd {
+            call_id,
+            model,
+            phase,
+            status,
+            error,
+            ctx,
+            ts,
+            ..
+        } => Some(ThreadEvent {
+            step_idx,
+            event_kind: ThreadEventKind::LlmEnd,
+            ts: ts.clone(),
+            tool_id: None,
+            name: None,
+            clean_name: None,
+            status: Some(if *status == LlmStepStatus::Failed {
+                ThreadEventStatus::Failed
+            } else {
+                ThreadEventStatus::Ok
+            }),
+            runtime_ms: None,
+            payload: None,
+            error: error.clone(),
+            call_id: Some(*call_id),
+            model: model.clone(),
+            phase: Some(phase.clone()),
+            ctx: ctx.clone(),
+        }),
+        _ => None,
     }
 }
 
@@ -1758,9 +1890,9 @@ mod tests {
             title: None,
             title_finalized: false,
         };
-        let st = build_thread_state_from_log("tid", &log);
+        let timeline = build_thread_timeline_from_log("tid", &log);
         assert!(
-            st.events.is_empty(),
+            timeline.events.is_empty(),
             "orphan tool_end should not appear in timeline events"
         );
     }
@@ -1784,9 +1916,9 @@ mod tests {
             title: None,
             title_finalized: false,
         };
-        let st = build_thread_state_from_log("tid", &log);
+        let timeline = build_thread_timeline_from_log("tid", &log);
         assert!(
-            st.events.is_empty(),
+            timeline.events.is_empty(),
             "orphan tool_start should not appear in timeline events"
         );
     }
@@ -1832,14 +1964,15 @@ mod tests {
             title: None,
             title_finalized: false,
         };
-        let st = build_thread_state_from_log("tid", &log);
+        let timeline = build_thread_timeline_from_log("tid", &log);
         assert!(
-            st.events
+            timeline
+                .events
                 .iter()
                 .any(|e| e.event_kind == ThreadEventKind::ToolStart),
             "expected tool_start event"
         );
-        let ev = st
+        let ev = timeline
             .events
             .iter()
             .find(|e| e.event_kind == ThreadEventKind::ToolStart)
