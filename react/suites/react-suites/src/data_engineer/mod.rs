@@ -2216,12 +2216,13 @@ Apply these fixes in the output.",
                 .await
                 .map_err(|e| format!("failed to persist pruned-empty cleanse plan: {e}"))?;
             // Stay in plan phase; the next iteration will generate a new plan.
-            control_flow::append_phase_with_reason(
+            control_flow::append_phase_with_intent(
                 thread_store,
                 thread_id,
                 Some("agent".to_string()),
                 Some(phase),
                 phase,
+                control_flow::TransitionIntent::Annotation,
                 Some(PhaseReasonCode::PlanPrunedEmpty),
                 Some(serde_json::json!({ "plan_key": p.plan_key })),
             )
@@ -2239,12 +2240,13 @@ Apply these fixes in the output.",
             crate::data_engineer::plan::save_cleanse_plan(actx, &p)
                 .await
                 .map_err(|e| format!("failed to persist semantically-invalid cleanse plan: {e}"))?;
-            control_flow::append_phase_with_reason(
+            control_flow::append_phase_with_intent(
                 thread_store,
                 thread_id,
                 Some("agent".to_string()),
                 Some(phase),
                 phase,
+                control_flow::TransitionIntent::Annotation,
                 Some(PhaseReasonCode::PlanSemanticInvalid),
                 Some(serde_json::json!({ "plan_key": p.plan_key, "errors": v.errors })),
             )
@@ -2259,12 +2261,13 @@ Apply these fixes in the output.",
             .await
             .map_err(|e| format!("failed to persist approved cleanse plan: {e}"))?;
 
-        control_flow::append_phase_with_reason(
+        control_flow::append_phase_with_intent(
             thread_store,
             thread_id,
             Some("agent".to_string()),
             Some(phase),
             control_flow::Phase::CleanseAuthor,
+            control_flow::TransitionIntent::Forward,
             Some(transition_reason_code),
             Some(transition_reason_detail),
         )
@@ -2301,12 +2304,13 @@ Apply these fixes in the output.",
                 .await
                 .map_err(|e| format!("failed to persist pruned-empty model plan: {e}"))?;
             // Stay in plan phase; the next iteration will generate a new plan.
-            control_flow::append_phase_with_reason(
+            control_flow::append_phase_with_intent(
                 thread_store,
                 thread_id,
                 Some("agent".to_string()),
                 Some(phase),
                 phase,
+                control_flow::TransitionIntent::Annotation,
                 Some(PhaseReasonCode::PlanPrunedEmpty),
                 Some(serde_json::json!({ "plan_key": p.plan_key })),
             )
@@ -2326,12 +2330,13 @@ Apply these fixes in the output.",
             crate::data_engineer::plan::save_model_plan(actx, &p)
                 .await
                 .map_err(|e| format!("failed to persist semantically-invalid model plan: {e}"))?;
-            control_flow::append_phase_with_reason(
+            control_flow::append_phase_with_intent(
                 thread_store,
                 thread_id,
                 Some("agent".to_string()),
                 Some(phase),
                 phase,
+                control_flow::TransitionIntent::Annotation,
                 Some(PhaseReasonCode::PlanSemanticInvalid),
                 Some(serde_json::json!({ "plan_key": p.plan_key, "errors": v.errors })),
             )
@@ -2345,12 +2350,13 @@ Apply these fixes in the output.",
             .await
             .map_err(|e| format!("failed to persist approved model plan: {e}"))?;
 
-        control_flow::append_phase_with_reason(
+        control_flow::append_phase_with_intent(
             thread_store,
             thread_id,
             Some("agent".to_string()),
             Some(phase),
             control_flow::Phase::ModelAuthor,
+            control_flow::TransitionIntent::Forward,
             Some(transition_reason_code),
             Some(transition_reason_detail),
         )
@@ -4623,12 +4629,13 @@ Apply these fixes in the output.",
                         }
                     }
                     // Persist transition.
-                    control_flow::append_phase_with_reason(
+                    control_flow::append_phase_with_intent(
                         &thread_store,
                         thread_id,
                         Some("agent".to_string()),
                         Some(Phase::Preflight),
                         Phase::CleansePlan,
+                        control_flow::TransitionIntent::Forward,
                         Some(PhaseReasonCode::PreflightOk),
                         Some(serde_json::json!({
                             "dbt_project_key": key,
@@ -4692,12 +4699,13 @@ Apply these fixes in the output.",
                                             continue;
                                         }
                                         // Idempotent: if we didn't advance (e.g. plan already approved), still proceed.
-                                        control_flow::append_phase_with_reason(
+                                        control_flow::append_phase_with_intent(
                                             &thread_store,
                                             thread_id,
                                             Some("agent".to_string()),
                                             Some(phase),
                                             Phase::CleanseAuthor,
+                                            control_flow::TransitionIntent::Forward,
                                             Some(PhaseReasonCode::PlanApproved),
                                             Some(serde_json::json!({ "user_step": last_user })),
                                         )
@@ -4717,12 +4725,13 @@ Apply these fixes in the output.",
                                         if advanced {
                                             continue;
                                         }
-                                        control_flow::append_phase_with_reason(
+                                        control_flow::append_phase_with_intent(
                                             &thread_store,
                                             thread_id,
                                             Some("agent".to_string()),
                                             Some(phase),
                                             Phase::ModelAuthor,
+                                            control_flow::TransitionIntent::Forward,
                                             Some(PhaseReasonCode::PlanApproved),
                                             Some(serde_json::json!({ "user_step": last_user })),
                                         )
@@ -4787,12 +4796,13 @@ Apply these fixes in the output.",
                                     let _ =
                                         crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
                                             .await;
-                                    let _ = control_flow::append_phase_with_reason(
+                                    let _ = control_flow::append_phase_with_intent(
                                         &thread_store,
                                         thread_id,
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
+                                        control_flow::TransitionIntent::Annotation,
                                         Some(PhaseReasonCode::PlanInvalidEmpty),
                                         Some(serde_json::json!({
                                             "plan_key": plan_key,
@@ -4804,12 +4814,13 @@ Apply these fixes in the output.",
                                     .await?;
                                     continue;
                                 }
-                                control_flow::append_phase_with_reason(
+                                control_flow::append_phase_with_intent(
                                     &thread_store,
                                     thread_id,
                                     Some("agent".to_string()),
                                     Some(phase),
                                     Phase::CleanseAuthor,
+                                    control_flow::TransitionIntent::Forward,
                                     Some(PhaseReasonCode::PlanAlreadyApproved),
                                     Some(
                                         serde_json::json!({ "status": format!("{:?}", p.status) }),
@@ -4839,12 +4850,13 @@ Apply these fixes in the output.",
                                                 "failed to persist cancelled invalid-empty model plan: {e}"
                                             )
                                         })?;
-                                    let _ = control_flow::append_phase_with_reason(
+                                    let _ = control_flow::append_phase_with_intent(
                                         &thread_store,
                                         thread_id,
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
+                                        control_flow::TransitionIntent::Annotation,
                                         Some(PhaseReasonCode::PlanInvalidEmpty),
                                         Some(serde_json::json!({
                                             "plan_key": plan_key,
@@ -4856,12 +4868,13 @@ Apply these fixes in the output.",
                                     .await?;
                                     continue;
                                 }
-                                control_flow::append_phase_with_reason(
+                                control_flow::append_phase_with_intent(
                                     &thread_store,
                                     thread_id,
                                     Some("agent".to_string()),
                                     Some(phase),
                                     Phase::ModelAuthor,
+                                    control_flow::TransitionIntent::Forward,
                                     Some(PhaseReasonCode::PlanAlreadyApproved),
                                     Some(
                                         serde_json::json!({ "status": format!("{:?}", p.status) }),
@@ -4891,12 +4904,13 @@ Apply these fixes in the output.",
                                     let _ =
                                         crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
                                             .await;
-                                    let _ = control_flow::append_phase_with_reason(
+                                    let _ = control_flow::append_phase_with_intent(
                                         &thread_store,
                                         thread_id,
                                         Some("agent".to_string()),
                                         Some(phase),
                                         phase,
+                                        control_flow::TransitionIntent::Annotation,
                                         Some(PhaseReasonCode::PlanInvalidEmpty),
                                         Some(serde_json::json!({
                                             "plan_key": plan_key,
@@ -6098,12 +6112,13 @@ Apply these fixes in the output.",
                                 None => {
                                     // Recovery: authoring was entered, but no plan exists (e.g. restart/resume drift).
                                     // Bounce back to planning so the thread can rehydrate deterministically.
-                                    control_flow::append_phase_with_reason(
+                                    control_flow::append_phase_with_intent(
                                         &thread_store,
                                         thread_id,
                                         Some("agent".to_string()),
                                         Some(phase),
                                         Phase::CleansePlan,
+                                        control_flow::TransitionIntent::Loopback,
                                         Some(PhaseReasonCode::PlanMissing),
                                         Some(serde_json::json!({
                                             "plan_kind": "cleanse",
@@ -6140,12 +6155,13 @@ Apply these fixes in the output.",
                                     .append_step(thread_id, step)
                                     .await
                                     .map_err(|e| format!("failed to append guard step: {e}"))?;
-                                control_flow::append_phase_with_reason(
+                                control_flow::append_phase_with_intent(
                                     &thread_store,
                                     thread_id,
                                     Some("agent".to_string()),
                                     Some(phase),
                                     Phase::CleansePlan,
+                                    control_flow::TransitionIntent::Loopback,
                                     Some(PhaseReasonCode::PlanSemanticInvalid),
                                     Some(serde_json::json!({
                                         "plan_key": plan_key,
@@ -6223,12 +6239,13 @@ Apply these fixes in the output.",
                             if plan.status != crate::data_engineer::plan::PlanStatus::Approved
                                 && plan.status != crate::data_engineer::plan::PlanStatus::Completed
                             {
-                                control_flow::append_phase_with_reason(
+                                control_flow::append_phase_with_intent(
                                 &thread_store,
                                 thread_id,
                                 Some("agent".to_string()),
                                 Some(phase),
                                 Phase::CleansePlan,
+                                control_flow::TransitionIntent::Loopback,
                                 Some(PhaseReasonCode::PlanNotApproved),
                                 Some(serde_json::json!({ "status": format!("{:?}", plan.status) })),
                             )
@@ -6384,12 +6401,13 @@ Apply these fixes in the output.",
                                         &next_action,
                                         crate::data_engineer::plan::AuthoringNextAction::Validate
                                     ) {
-                                        control_flow::append_phase_with_reason(
+                                        control_flow::append_phase_with_intent(
                                             &thread_store,
                                             thread_id,
                                             Some("agent".to_string()),
                                             Some(phase),
                                             Phase::CleanseValidate,
+                                            control_flow::TransitionIntent::Forward,
                                             Some(PhaseReasonCode::WorkGroupValidate),
                                             Some(serde_json::json!({ "plan_key": plan.plan_key })),
                                         )
@@ -6429,13 +6447,14 @@ Apply these fixes in the output.",
                                             ctx,
                                             None, // allow freeform file patching for targeted repair
                                         )
-                                    } else if crate::data_engineer::plan::cleanse_all_done(&plan) {
-                                        control_flow::append_phase_with_reason(
+                                    } else if crate::data_engineer::plan::snapshot_cleanse_completion(&plan).all_done {
+                                        control_flow::append_phase_with_intent(
                                             &thread_store,
                                             thread_id,
                                             Some("agent".to_string()),
                                             Some(phase),
                                             Phase::CleanseValidate,
+                                            control_flow::TransitionIntent::Forward,
                                             Some(PhaseReasonCode::PlanTasksDone),
                                             Some(serde_json::json!({ "plan_key": plan.plan_key })),
                                         )
@@ -6457,12 +6476,13 @@ Apply these fixes in the output.",
                                             .append_step(thread_id, step)
                                             .await
                                             .map_err(|e| format!("failed to append guard step: {e}"))?;
-                                        control_flow::append_phase_with_reason(
+                                        control_flow::append_phase_with_intent(
                                             &thread_store,
                                             thread_id,
                                             Some("agent".to_string()),
                                             Some(phase),
                                             Phase::CleansePlan,
+                                            control_flow::TransitionIntent::Loopback,
                                             Some(PhaseReasonCode::PlanSemanticInvalid),
                                             Some(serde_json::json!({ "plan_key": plan.plan_key, "reason": reason })),
                                         )
@@ -6490,12 +6510,13 @@ Apply these fixes in the output.",
                                 None => {
                                     // Recovery: authoring was entered, but no plan exists (e.g. restart/resume drift).
                                     // Bounce back to planning so the thread can rehydrate deterministically.
-                                    control_flow::append_phase_with_reason(
+                                    control_flow::append_phase_with_intent(
                                         &thread_store,
                                         thread_id,
                                         Some("agent".to_string()),
                                         Some(phase),
                                         Phase::ModelPlan,
+                                        control_flow::TransitionIntent::Loopback,
                                         Some(PhaseReasonCode::PlanMissing),
                                         Some(serde_json::json!({
                                             "plan_kind": "model",
@@ -6527,12 +6548,13 @@ Apply these fixes in the output.",
                                     .append_step(thread_id, step)
                                     .await
                                     .map_err(|e| format!("failed to append guard step: {e}"))?;
-                                control_flow::append_phase_with_reason(
+                                control_flow::append_phase_with_intent(
                                     &thread_store,
                                     thread_id,
                                     Some("agent".to_string()),
                                     Some(phase),
                                     Phase::ModelPlan,
+                                    control_flow::TransitionIntent::Loopback,
                                     Some(PhaseReasonCode::PlanSemanticInvalid),
                                     Some(serde_json::json!({
                                         "plan_key": plan_key,
@@ -6608,12 +6630,13 @@ Apply these fixes in the output.",
                             if plan.status != crate::data_engineer::plan::PlanStatus::Approved
                                 && plan.status != crate::data_engineer::plan::PlanStatus::Completed
                             {
-                                control_flow::append_phase_with_reason(
+                                control_flow::append_phase_with_intent(
                                 &thread_store,
                                 thread_id,
                                 Some("agent".to_string()),
                                 Some(phase),
                                 Phase::ModelPlan,
+                                control_flow::TransitionIntent::Loopback,
                                 Some(PhaseReasonCode::PlanNotApproved),
                                 Some(serde_json::json!({ "status": format!("{:?}", plan.status) })),
                             )
@@ -6840,12 +6863,13 @@ Apply these fixes in the output.",
                                         &next_action,
                                         crate::data_engineer::plan::AuthoringNextAction::Validate
                                     ) {
-                                        control_flow::append_phase_with_reason(
+                                        control_flow::append_phase_with_intent(
                                             &thread_store,
                                             thread_id,
                                             Some("agent".to_string()),
                                             Some(phase),
                                             Phase::ModelValidate,
+                                            control_flow::TransitionIntent::Forward,
                                             Some(PhaseReasonCode::WorkGroupValidate),
                                             Some(serde_json::json!({ "plan_key": plan.plan_key })),
                                         )
@@ -6881,13 +6905,14 @@ Apply these fixes in the output.",
                                             ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
                                         }
                                         (ctx, None)
-                                    } else if crate::data_engineer::plan::model_all_done(&plan) {
-                                        control_flow::append_phase_with_reason(
+                                    } else if crate::data_engineer::plan::snapshot_model_completion(&plan).all_done {
+                                        control_flow::append_phase_with_intent(
                                             &thread_store,
                                             thread_id,
                                             Some("agent".to_string()),
                                             Some(phase),
                                             Phase::ModelValidate,
+                                            control_flow::TransitionIntent::Forward,
                                             Some(PhaseReasonCode::PlanTasksDone),
                                             Some(serde_json::json!({ "plan_key": plan.plan_key })),
                                         )
@@ -6909,12 +6934,13 @@ Apply these fixes in the output.",
                                             .append_step(thread_id, step)
                                             .await
                                             .map_err(|e| format!("failed to append guard step: {e}"))?;
-                                        control_flow::append_phase_with_reason(
+                                        control_flow::append_phase_with_intent(
                                         &thread_store,
                                         thread_id,
                                         Some("agent".to_string()),
                                         Some(phase),
                                         Phase::ModelPlan,
+                                        control_flow::TransitionIntent::Loopback,
                                         Some(PhaseReasonCode::PlanSemanticInvalid),
                                         Some(serde_json::json!({ "plan_key": plan.plan_key, "reason": reason })),
                                     )
@@ -7461,7 +7487,9 @@ Apply these fixes in the output.",
                                 if let Some(p) =
                                     crate::data_engineer::plan::load_cleanse_plan(&actx).await
                                 {
-                                    if !crate::data_engineer::plan::cleanse_all_done(&p) {
+                                    if !crate::data_engineer::plan::snapshot_cleanse_completion(&p)
+                                        .all_done
+                                    {
                                         continue;
                                     }
                                 }
@@ -7469,7 +7497,9 @@ Apply these fixes in the output.",
                                 if let Some(p) =
                                     crate::data_engineer::plan::load_model_plan(&actx).await
                                 {
-                                    if !crate::data_engineer::plan::model_all_done(&p) {
+                                    if !crate::data_engineer::plan::snapshot_model_completion(&p)
+                                        .all_done
+                                    {
                                         continue;
                                     }
                                 }
@@ -7487,12 +7517,13 @@ Apply these fixes in the output.",
                                 has_models,
                             )
                             .await;
-                            control_flow::append_phase_with_reason(
+                            control_flow::append_phase_with_intent(
                                 &thread_store,
                                 thread_id,
                                 Some("agent".to_string()),
                                 Some(phase),
                                 to_phase,
+                                control_flow::TransitionIntent::Forward,
                                 Some(PhaseReasonCode::AuthoringComplete),
                                 Some(reason_detail),
                             )
@@ -7566,12 +7597,13 @@ Apply these fixes in the output.",
                         } else {
                             Phase::ModelAuthor
                         };
-                        let _ = control_flow::append_phase_with_reason(
+                        let _ = control_flow::append_phase_with_intent(
                             &thread_store,
                             thread_id,
                             Some("agent".to_string()),
                             Some(phase),
                             to_phase,
+                            control_flow::TransitionIntent::Loopback,
                             Some(PhaseReasonCode::PrecheckFailed),
                             Some(serde_json::json!({ "error": e })),
                         )
@@ -7606,12 +7638,13 @@ Apply these fixes in the output.",
                         } else {
                             Phase::ModelAuthor
                         };
-                        let _ = control_flow::append_phase_with_reason(
+                        let _ = control_flow::append_phase_with_intent(
                             &thread_store,
                             thread_id,
                             Some("agent".to_string()),
                             Some(phase),
                             to_phase,
+                            control_flow::TransitionIntent::Loopback,
                             Some(PhaseReasonCode::PrecheckFailed),
                             Some(serde_json::json!({ "error": e })),
                         )
@@ -7867,22 +7900,26 @@ Apply these fixes in the output.",
                         }
 
                         // Mark the active plan completed only when validate passes AND checklist execution is complete.
-                        let mut plan_incomplete_after_validate = false;
+                        let mut completion_snapshot: Option<
+                            crate::data_engineer::plan::PlanCompletionSnapshot,
+                        > = None;
                         let mut active_plan_key: Option<String> = None;
                         if phase == Phase::CleanseValidate {
                             if let Some(mut p) =
                                 crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
                             {
-                                // State-first completion update: successful validate marks
-                                // validate checklist items done for the active plan.
-                                crate::data_engineer::plan::cleanse_mark_validate_done(&mut p);
+                                crate::data_engineer::plan::apply_cleanse_progress_event(
+                                    &mut p,
+                                    crate::data_engineer::plan::PlanProgressEvent::CleanseValidateDone,
+                                );
+                                let snap = crate::data_engineer::plan::snapshot_cleanse_completion(&p);
                                 active_plan_key = Some(p.plan_key.clone());
-                                if crate::data_engineer::plan::cleanse_all_done(&p) {
+                                if snap.all_done {
                                     p.status = crate::data_engineer::plan::PlanStatus::Completed;
                                 } else {
-                                    plan_incomplete_after_validate = true;
                                     p.status = crate::data_engineer::plan::PlanStatus::Approved;
                                 }
+                                completion_snapshot = Some(snap);
                                 let _ =
                                     crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
                             }
@@ -7890,22 +7927,28 @@ Apply these fixes in the output.",
                             if let Some(mut p) =
                                 crate::data_engineer::plan::load_model_plan_any(&actx).await
                             {
-                                // State-first completion update: successful validate marks
-                                // validate checklist items done for the active plan.
-                                crate::data_engineer::plan::model_mark_validate_done(&mut p);
+                                crate::data_engineer::plan::apply_model_progress_event(
+                                    &mut p,
+                                    crate::data_engineer::plan::PlanProgressEvent::ModelValidateDone,
+                                );
+                                let snap = crate::data_engineer::plan::snapshot_model_completion(&p);
                                 active_plan_key = Some(p.plan_key.clone());
-                                if crate::data_engineer::plan::model_all_done(&p) {
+                                if snap.all_done {
                                     p.status = crate::data_engineer::plan::PlanStatus::Completed;
                                 } else {
-                                    plan_incomplete_after_validate = true;
                                     p.status = crate::data_engineer::plan::PlanStatus::Approved;
                                 }
+                                completion_snapshot = Some(snap);
                                 let _ =
                                     crate::data_engineer::plan::save_model_plan(&actx, &p).await;
                             }
                         }
 
-                        if plan_incomplete_after_validate {
+                        if completion_snapshot
+                            .as_ref()
+                            .map(|snap| !snap.all_done)
+                            .unwrap_or(false)
+                        {
                             let signal = "ValidatePassPlanIncomplete";
                             let reason = format!(
                                 "{}: dbt_validate succeeded but plan checklist work is still pending; returning to authoring",
@@ -7941,6 +7984,8 @@ Apply these fixes in the output.",
                                 Some(serde_json::json!({
                                     "signal": signal,
                                     "plan_key": active_plan_key,
+                                    "pending_count": completion_snapshot.as_ref().map(|snap| snap.pending_count).unwrap_or(0),
+                                    "pending_refs": completion_snapshot.as_ref().map(|snap| snap.pending_refs.clone()).unwrap_or_default(),
                                     "dbt_validate_observation": obs.observation.clone(),
                                     "next_action": "resume_authoring_for_remaining_plan_work",
                                     "audit_acceptance": Self::churn_audit_acceptance_criteria(),

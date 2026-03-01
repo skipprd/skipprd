@@ -4,6 +4,7 @@ use serde_json::Value;
 use crate::data_engineer::naming;
 use crate::data_engineer::references::DatasetRef;
 use react_core::agent::AgentCtx;
+#[cfg(test)]
 use react_core::session::{ThreadLog, ThreadStep};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1578,6 +1579,45 @@ pub const CHECKLIST_SQL_MODEL: &str = "sql_model";
 pub const CHECKLIST_SCHEMA_CONTRACT: &str = "schema_contract";
 pub const CHECKLIST_VALIDATE: &str = "validate";
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "plan_kind", rename_all = "snake_case")]
+pub enum PlanPendingRef {
+    Cleanse {
+        dataset_id: String,
+        checklist_item_id: String,
+    },
+    Model {
+        item_name: String,
+        checklist_item_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanCompletionSnapshot {
+    pub all_done: bool,
+    pub pending_count: usize,
+    pub pending_refs: Vec<PlanPendingRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlanProgressEvent {
+    CleanseSqlInProgress { dataset_id: String },
+    CleanseSqlDone { dataset_id: String },
+    CleanseSqlNeedsUpdate { dataset_id: String },
+    CleanseSchemaInProgress { dataset_id: String },
+    CleanseSchemaDone { dataset_id: String },
+    CleanseSchemaNeedsUpdate { dataset_id: String },
+    CleanseValidateDone,
+    ModelSqlInProgress { item_name: String },
+    ModelSqlDone { item_name: String },
+    ModelSqlNeedsUpdate { item_name: String },
+    ModelSchemaInProgress { item_name: String },
+    ModelSchemaDone { item_name: String },
+    ModelSchemaNeedsUpdate { item_name: String },
+    ModelValidateDone,
+}
+
 fn required_checklist_item_ids() -> [&'static str; 3] {
     [
         CHECKLIST_SQL_MODEL,
@@ -2463,23 +2503,106 @@ pub fn model_mark_validate_done(plan: &mut ModelPlan) {
 }
 
 pub fn cleanse_all_done(plan: &CleansePlan) -> bool {
-    !plan.tasks.is_empty()
-        && plan.tasks.iter().all(|t| {
-            required_checklist_item_ids()
-                .into_iter()
-                .all(|id| checklist_status(&t.checklist, id) == ChecklistItemStatus::Done)
-        })
+    snapshot_cleanse_completion(plan).all_done
 }
 
 pub fn model_all_done(plan: &ModelPlan) -> bool {
-    !plan.tasks.is_empty()
-        && plan.tasks.iter().all(|t| {
-            required_checklist_item_ids()
-                .into_iter()
-                .all(|id| checklist_status(&t.checklist, id) == ChecklistItemStatus::Done)
-        })
+    snapshot_model_completion(plan).all_done
 }
 
+pub fn apply_cleanse_progress_event(plan: &mut CleansePlan, event: PlanProgressEvent) {
+    match event {
+        PlanProgressEvent::CleanseSqlInProgress { dataset_id } => {
+            cleanse_mark_in_progress(plan, &dataset_id);
+        }
+        PlanProgressEvent::CleanseSqlDone { dataset_id } => {
+            cleanse_mark_done(plan, &dataset_id);
+        }
+        PlanProgressEvent::CleanseSqlNeedsUpdate { dataset_id } => {
+            cleanse_mark_needs_update(plan, &dataset_id);
+        }
+        PlanProgressEvent::CleanseSchemaInProgress { dataset_id } => {
+            cleanse_schema_contract_mark_in_progress(plan, &dataset_id);
+        }
+        PlanProgressEvent::CleanseSchemaDone { dataset_id } => {
+            cleanse_schema_contract_mark_done(plan, &dataset_id);
+        }
+        PlanProgressEvent::CleanseSchemaNeedsUpdate { dataset_id } => {
+            cleanse_schema_contract_mark_needs_update(plan, &dataset_id);
+        }
+        PlanProgressEvent::CleanseValidateDone => {
+            cleanse_mark_validate_done(plan);
+        }
+        _ => {}
+    }
+}
+
+pub fn apply_model_progress_event(plan: &mut ModelPlan, event: PlanProgressEvent) {
+    match event {
+        PlanProgressEvent::ModelSqlInProgress { item_name } => {
+            model_mark_in_progress(plan, &item_name);
+        }
+        PlanProgressEvent::ModelSqlDone { item_name } => {
+            model_mark_done(plan, &item_name);
+        }
+        PlanProgressEvent::ModelSqlNeedsUpdate { item_name } => {
+            model_mark_needs_update(plan, &item_name);
+        }
+        PlanProgressEvent::ModelSchemaInProgress { item_name } => {
+            model_schema_contract_mark_in_progress(plan, &item_name);
+        }
+        PlanProgressEvent::ModelSchemaDone { item_name } => {
+            model_schema_contract_mark_done(plan, &item_name);
+        }
+        PlanProgressEvent::ModelSchemaNeedsUpdate { item_name } => {
+            model_schema_contract_mark_needs_update(plan, &item_name);
+        }
+        PlanProgressEvent::ModelValidateDone => {
+            model_mark_validate_done(plan);
+        }
+        _ => {}
+    }
+}
+
+pub fn snapshot_cleanse_completion(plan: &CleansePlan) -> PlanCompletionSnapshot {
+    let mut pending_refs: Vec<PlanPendingRef> = Vec::new();
+    for t in plan.tasks.iter() {
+        for checklist_item_id in required_checklist_item_ids() {
+            if checklist_status(&t.checklist, checklist_item_id) != ChecklistItemStatus::Done {
+                pending_refs.push(PlanPendingRef::Cleanse {
+                    dataset_id: t.dataset_id.clone(),
+                    checklist_item_id: checklist_item_id.to_string(),
+                });
+            }
+        }
+    }
+    PlanCompletionSnapshot {
+        all_done: !plan.tasks.is_empty() && pending_refs.is_empty(),
+        pending_count: pending_refs.len(),
+        pending_refs,
+    }
+}
+
+pub fn snapshot_model_completion(plan: &ModelPlan) -> PlanCompletionSnapshot {
+    let mut pending_refs: Vec<PlanPendingRef> = Vec::new();
+    for t in plan.tasks.iter() {
+        for checklist_item_id in required_checklist_item_ids() {
+            if checklist_status(&t.checklist, checklist_item_id) != ChecklistItemStatus::Done {
+                pending_refs.push(PlanPendingRef::Model {
+                    item_name: t.name.clone(),
+                    checklist_item_id: checklist_item_id.to_string(),
+                });
+            }
+        }
+    }
+    PlanCompletionSnapshot {
+        all_done: !plan.tasks.is_empty() && pending_refs.is_empty(),
+        pending_count: pending_refs.len(),
+        pending_refs,
+    }
+}
+
+#[cfg(test)]
 pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog) {
     let start = plan.progress.last_applied_step_idx.min(log.steps.len());
     for (idx, step) in log.steps.iter().enumerate().skip(start) {
@@ -3028,6 +3151,7 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
     }
 }
 
+#[cfg(test)]
 pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
     let start = plan.progress.last_applied_step_idx.min(log.steps.len());
     for (idx, step) in log.steps.iter().enumerate().skip(start) {
@@ -4829,5 +4953,72 @@ mod tests {
             status_of(&plan.tasks[1].checklist, CHECKLIST_VALIDATE),
             ChecklistItemStatus::Pending
         );
+    }
+
+    #[test]
+    fn apply_validate_done_event_updates_snapshot_for_cleanse() {
+        let mut plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![CleanseTask {
+                dataset_id: "AwsDataCatalog.test_raw.raw_orders".to_string(),
+                expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: dummy_cleanse_spec(),
+                status: TaskStatus::Pending,
+                checklist: std_checklist("Author staging SQL"),
+            }],
+            batches: vec![vec!["AwsDataCatalog.test_raw.raw_orders".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+
+        apply_cleanse_progress_event(&mut plan, PlanProgressEvent::CleanseValidateDone);
+        let snapshot = snapshot_cleanse_completion(&plan);
+        assert!(!snapshot.all_done);
+        assert_eq!(snapshot.pending_count, 2);
+        assert!(snapshot.pending_refs.iter().all(|r| match r {
+            PlanPendingRef::Cleanse {
+                checklist_item_id, ..
+            } => checklist_item_id != CHECKLIST_VALIDATE,
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn apply_validate_done_event_updates_snapshot_for_model() {
+        let mut plan = ModelPlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![ModelTask {
+                name: "dim_orders".to_string(),
+                folder: "marts".to_string(),
+                goal: "x".to_string(),
+                inputs: vec![],
+                expected_model_path: Some("models/marts/dim_orders.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: dummy_model_spec(),
+                status: TaskStatus::Pending,
+                checklist: std_checklist("Author gold SQL"),
+            }],
+            batches: vec![vec!["dim_orders".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+
+        apply_model_progress_event(&mut plan, PlanProgressEvent::ModelValidateDone);
+        let snapshot = snapshot_model_completion(&plan);
+        assert!(!snapshot.all_done);
+        assert_eq!(snapshot.pending_count, 2);
+        assert!(snapshot.pending_refs.iter().all(|r| match r {
+            PlanPendingRef::Model {
+                checklist_item_id, ..
+            } => checklist_item_id != CHECKLIST_VALIDATE,
+            _ => false,
+        }));
     }
 }
