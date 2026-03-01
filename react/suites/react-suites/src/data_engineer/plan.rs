@@ -796,6 +796,82 @@ pub async fn save_model_plan_grounded(
 pub struct PlanSemanticValidation {
     pub ok: bool,
     pub errors: Vec<String>,
+    pub issues: Vec<PlanSemanticIssue>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanSemanticIssueCode {
+    MissingPlanKey,
+    MissingTasks,
+    DuplicateTaskId,
+    InvalidBatch,
+    MissingImplementationSpec,
+    MissingChecklistItems,
+    UnknownTaskReference,
+    MissingWorkGroups,
+    MissingWorkGroupCoverage,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanSemanticIssue {
+    pub code: PlanSemanticIssueCode,
+    pub task_id: Option<String>,
+    pub message: String,
+}
+
+impl PlanSemanticValidation {
+    pub fn messages(&self) -> Vec<String> {
+        if !self.errors.is_empty() {
+            return self.errors.clone();
+        }
+        self.issues.iter().map(|i| i.message.clone()).collect()
+    }
+}
+
+fn classify_semantic_issue(err: &str) -> PlanSemanticIssue {
+    let msg = err.trim().to_string();
+    let task_id = err
+        .split_once(':')
+        .map(|(h, _)| h.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "task" && s != "work_group");
+    let lower = msg.to_ascii_lowercase();
+    let code = if lower.contains("plan_key") {
+        PlanSemanticIssueCode::MissingPlanKey
+    } else if lower.contains("tasks is empty") {
+        PlanSemanticIssueCode::MissingTasks
+    } else if lower.contains("duplicate task.") {
+        PlanSemanticIssueCode::DuplicateTaskId
+    } else if lower.contains("batches[") || lower.contains("batch") {
+        PlanSemanticIssueCode::InvalidBatch
+    } else if lower.contains("implementation_spec")
+        || lower.contains("expected_model_path")
+        || lower.contains("goal is empty")
+        || lower.contains("inputs is empty")
+    {
+        PlanSemanticIssueCode::MissingImplementationSpec
+    } else if lower.contains("missing required checklist")
+        || lower.contains("missing checklist_item_id")
+    {
+        PlanSemanticIssueCode::MissingChecklistItems
+    } else if lower.contains("references unknown") || lower.contains("not present in tasks") {
+        PlanSemanticIssueCode::UnknownTaskReference
+    } else if lower.contains("work_groups is empty") {
+        PlanSemanticIssueCode::MissingWorkGroups
+    } else if lower.contains("not scheduled in work_groups") {
+        PlanSemanticIssueCode::MissingWorkGroupCoverage
+    } else {
+        PlanSemanticIssueCode::Other
+    };
+    PlanSemanticIssue {
+        code,
+        task_id,
+        message: msg,
+    }
+}
+
+fn issues_from_errors(errors: &[String]) -> Vec<PlanSemanticIssue> {
+    errors.iter().map(|e| classify_semantic_issue(e)).collect()
 }
 
 fn duplicate_values(values: &[String]) -> Vec<String> {
@@ -988,7 +1064,8 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
     }
     PlanSemanticValidation {
         ok: errors.is_empty(),
-        errors,
+        errors: errors.clone(),
+        issues: issues_from_errors(&errors),
     }
 }
 
@@ -1222,7 +1299,8 @@ pub fn validate_model_plan_semantics(
     }
     PlanSemanticValidation {
         ok: errors.is_empty(),
-        errors,
+        errors: errors.clone(),
+        issues: issues_from_errors(&errors),
     }
 }
 
@@ -1327,7 +1405,7 @@ impl TryFrom<CleansePlan> for GroundedCleansePlan {
         normalize_cleanse_plan_defaults(&mut value);
         let mut errors = strict_cleanse_grounding_errors(&value);
         let sem = validate_cleanse_plan_semantics(&value);
-        errors.extend(sem.errors);
+        errors.extend(sem.messages());
         if !errors.is_empty() {
             errors.sort();
             errors.dedup();
@@ -1373,7 +1451,7 @@ impl TryFrom<ModelPlan> for GroundedModelPlan {
         ensure_expected_model_paths_model(&mut value);
         let mut errors = strict_model_grounding_errors(&value, None);
         let sem = validate_model_plan_semantics(&value, None);
-        errors.extend(sem.errors);
+        errors.extend(sem.messages());
         if !errors.is_empty() {
             errors.sort();
             errors.dedup();

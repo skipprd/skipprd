@@ -126,6 +126,23 @@ pub struct ProgressDelta {
     pub progress_made: bool,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectiveRetryKind {
+    PlanSemanticInvalid,
+    PlanGroundingEmptyAfterPrune,
+    ReviewPatchPlan,
+    ReviewPatchImpl,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SubjectiveRetryState {
+    pub phase: Phase,
+    pub kind: SubjectiveRetryKind,
+    pub count: usize,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionState {
@@ -173,11 +190,7 @@ pub struct ExecutionState {
     #[serde(default)]
     pub last_failed_models: Vec<Value>,
     #[serde(default)]
-    pub subjective_retry_phase: String,
-    #[serde(default)]
-    pub subjective_retry_kind: String,
-    #[serde(default)]
-    pub subjective_retry_count: usize,
+    pub subjective_retry: Option<SubjectiveRetryState>,
 }
 
 impl ExecutionState {
@@ -197,6 +210,28 @@ impl ExecutionState {
             return None;
         }
         Some(parsed)
+    }
+
+    pub async fn load_strict(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+    ) -> Result<Option<Self>, String> {
+        let st = thread_store
+            .get_thread_state(thread_id)
+            .await
+            .map_err(|e| format!("failed to load thread_state for execution_state: {e}"))?;
+        let Some(raw) = st.control_state else {
+            return Ok(None);
+        };
+        let parsed = serde_json::from_value::<Self>(raw)
+            .map_err(|e| format!("failed to parse execution_state control_state payload: {e}"))?;
+        if parsed.schema_version != EXECUTION_STATE_SCHEMA_VERSION {
+            return Err(format!(
+                "execution_state schema_version mismatch: expected {}, got {}",
+                EXECUTION_STATE_SCHEMA_VERSION, parsed.schema_version
+            ));
+        }
+        Ok(Some(parsed))
     }
 
     pub async fn save(&self, thread_store: &ThreadStore, thread_id: &str) -> Result<(), String> {
@@ -246,9 +281,7 @@ impl ExecutionState {
         self.last_error_class = None;
         self.last_failed_models.clear();
         self.last_error_brief = None;
-        self.subjective_retry_count = 0;
-        self.subjective_retry_kind.clear();
-        self.subjective_retry_phase.clear();
+        self.subjective_retry = None;
     }
 
     pub fn apply_validate_failure(
@@ -354,24 +387,29 @@ impl ExecutionState {
         });
     }
 
-    pub fn bump_subjective_retry(&mut self, phase: Phase, kind: &str, cap: usize) -> usize {
+    pub fn bump_subjective_retry(
+        &mut self,
+        phase: Phase,
+        kind: SubjectiveRetryKind,
+        cap: usize,
+    ) -> usize {
         let capped = cap.max(1);
-        let phase_name = phase.as_str().to_string();
-        let kind_name = kind.to_string();
-        if self.subjective_retry_phase == phase_name && self.subjective_retry_kind == kind_name {
-            self.subjective_retry_count = self.subjective_retry_count.saturating_add(1).min(capped);
-        } else {
-            self.subjective_retry_phase = phase_name;
-            self.subjective_retry_kind = kind_name;
-            self.subjective_retry_count = 1.min(capped);
-        }
-        self.subjective_retry_count
+        let next_count = match self.subjective_retry.as_ref() {
+            Some(cur) if cur.phase == phase && cur.kind == kind => {
+                cur.count.saturating_add(1).min(capped)
+            }
+            _ => 1.min(capped),
+        };
+        self.subjective_retry = Some(SubjectiveRetryState {
+            phase,
+            kind,
+            count: next_count,
+        });
+        next_count
     }
 
     pub fn reset_subjective_retry(&mut self) {
-        self.subjective_retry_count = 0;
-        self.subjective_retry_phase.clear();
-        self.subjective_retry_kind.clear();
+        self.subjective_retry = None;
     }
 
     pub fn enter_validate_mode(&mut self, tier: ExecutionTier) {
@@ -457,6 +495,11 @@ pub fn gate_authoring_progress(state: &ExecutionState, phase: Phase) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use react_core::keyspace::DefaultKeyspace;
+    use react_core::scope::RequestScope;
+    use react_core::session::ThreadStore;
+    use react_core::storage::InMemoryStorageAdapter;
+    use std::sync::Arc;
 
     #[test]
     fn state_has_compile_time_defaults() {
@@ -469,25 +512,45 @@ mod tests {
     fn validate_success_resets_repair_and_retry_state() {
         let mut st = ExecutionState::new();
         st.hard_mutation_repair_mode = true;
-        st.subjective_retry_phase = "model_plan".to_string();
-        st.subjective_retry_kind = "plan_json_invalid".to_string();
-        st.subjective_retry_count = 3;
+        st.subjective_retry = Some(SubjectiveRetryState {
+            phase: Phase::ModelPlan,
+            kind: SubjectiveRetryKind::PlanSemanticInvalid,
+            count: 3,
+        });
         st.apply_validate_success(ExecutionTier::Model);
         assert_eq!(st.current_tier, ExecutionTier::Model);
         assert_eq!(st.mode, ExecutionMode::Done);
         assert!(!st.hard_mutation_repair_mode);
-        assert_eq!(st.subjective_retry_count, 0);
-        assert!(st.subjective_retry_phase.is_empty());
+        assert!(st.subjective_retry.is_none());
     }
 
     #[test]
     fn subjective_retry_is_single_state_and_bounded() {
         let mut st = ExecutionState::new();
-        assert_eq!(st.bump_subjective_retry(Phase::CleansePlan, "x", 3), 1);
-        assert_eq!(st.bump_subjective_retry(Phase::CleansePlan, "x", 3), 2);
-        assert_eq!(st.bump_subjective_retry(Phase::CleansePlan, "x", 3), 3);
-        assert_eq!(st.bump_subjective_retry(Phase::CleansePlan, "x", 3), 3);
-        assert_eq!(st.bump_subjective_retry(Phase::ModelPlan, "x", 3), 1);
+        assert_eq!(
+            st.bump_subjective_retry(Phase::CleansePlan, SubjectiveRetryKind::PlanSemanticInvalid, 3),
+            1
+        );
+        assert_eq!(
+            st.bump_subjective_retry(Phase::CleansePlan, SubjectiveRetryKind::PlanSemanticInvalid, 3),
+            2
+        );
+        assert_eq!(
+            st.bump_subjective_retry(Phase::CleansePlan, SubjectiveRetryKind::PlanSemanticInvalid, 3),
+            3
+        );
+        assert_eq!(
+            st.bump_subjective_retry(Phase::CleansePlan, SubjectiveRetryKind::PlanSemanticInvalid, 3),
+            3
+        );
+        assert_eq!(
+            st.bump_subjective_retry(
+                Phase::ModelPlan,
+                SubjectiveRetryKind::PlanGroundingEmptyAfterPrune,
+                3
+            ),
+            1
+        );
     }
 
     #[test]
@@ -610,5 +673,32 @@ mod tests {
         let delta = st.last_progress_delta.expect("delta");
         assert!(delta.progress_made);
         assert_eq!(delta.failed_target_count_delta, -1);
+    }
+
+    #[tokio::test]
+    async fn load_strict_rejects_malformed_control_state() {
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let tid = "tid-malformed-control-state";
+
+        let mut st = react_core::session::ThreadState {
+            thread_state_schema_version: react_core::session::THREAD_STATE_SCHEMA_VERSION,
+            thread_id: tid.to_string(),
+            ..react_core::session::ThreadState::default()
+        };
+        st.control_state = Some(serde_json::json!({"schema_version":"bad"}));
+        store
+            .put_thread_state(tid, &st)
+            .await
+            .expect("seed thread state");
+
+        let got = ExecutionState::load_strict(&store, tid).await;
+        assert!(got.is_err(), "malformed control_state must fail loudly");
     }
 }

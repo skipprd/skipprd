@@ -77,7 +77,8 @@ pub enum PhaseReasonCode {
     // Authoring / validate
     AuthoringComplete,
     PrecheckFailed,
-    ValidatePass,
+    ValidatePassToReview,
+    ValidatePassToAuthoring,
     ValidateFail,
 
     // Review decisions
@@ -120,7 +121,8 @@ impl PhaseReasonCode {
             PhaseReasonCode::NoWorkAllDone => "no_work_all_done",
             PhaseReasonCode::AuthoringComplete => "authoring_complete",
             PhaseReasonCode::PrecheckFailed => "precheck_failed",
-            PhaseReasonCode::ValidatePass => "validate_pass",
+            PhaseReasonCode::ValidatePassToReview => "validate_pass_to_review",
+            PhaseReasonCode::ValidatePassToAuthoring => "validate_pass_to_authoring",
             PhaseReasonCode::ValidateFail => "validate_fail",
             PhaseReasonCode::ReviewProceed => "review_proceed",
             PhaseReasonCode::ReviewPatchPlan => "review_patch_plan",

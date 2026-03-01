@@ -428,7 +428,7 @@ impl DataEngineerSuite {
         thread_store: &ThreadStore,
         thread_id: &str,
         phase: control_flow::Phase,
-        kind: &str,
+        kind: crate::data_engineer::progress_controller::SubjectiveRetryKind,
     ) -> usize {
         let cap = crate::data_engineer::controller_kernel::subjective_retry_state_cap();
         let mut st = crate::data_engineer::progress_controller::ExecutionState::load(
@@ -720,41 +720,6 @@ impl DataEngineerSuite {
             || q.starts_with("set ")
     }
 
-    fn failed_metadata_probe_attempts(
-        log: Option<&react_core::session::ThreadLog>,
-        phase: control_flow::Phase,
-    ) -> usize {
-        let Some(l) = log else {
-            return 0;
-        };
-        let Some(start) = Self::phase_start_idx(l, phase) else {
-            return 0;
-        };
-        l.steps
-            .iter()
-            .skip(start + 1)
-            .filter_map(|s| {
-                let react_core::session::ThreadStep::ToolEnd {
-                    name,
-                    args,
-                    observation,
-                    ..
-                } = s
-                else {
-                    return None;
-                };
-                if name != "run_sql" || observation.ok {
-                    return None;
-                }
-                let sql = args.get("sql").and_then(|v| v.as_str())?;
-                if Self::is_metadata_probe_sql(sql) {
-                    Some(())
-                } else {
-                    None
-                }
-            })
-            .count()
-    }
 
     fn is_valid_grounding_evidence_tool(name: &str, args: &serde_json::Value) -> bool {
         match name {
@@ -887,52 +852,6 @@ impl DataEngineerSuite {
         schema.contains("raw") || table.starts_with("raw_")
     }
 
-    fn discovered_raw_relations_from_phase_log(
-        log: Option<&react_core::session::ThreadLog>,
-        phase: control_flow::Phase,
-    ) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        let Some(l) = log else {
-            return out;
-        };
-        let start = Self::phase_start_idx(l, phase).unwrap_or(0);
-        for s in l.steps.iter().skip(start + 1) {
-            let react_core::session::ThreadStep::ToolEnd {
-                name,
-                args,
-                observation,
-                ..
-            } = s
-            else {
-                continue;
-            };
-            if name != "sql_schema" || !observation.ok {
-                continue;
-            }
-            if args
-                .as_object()
-                .map(|o| !o.is_empty() && o.get("table").is_none())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            if let Some(arr) = observation.extra.get("tables").and_then(|v| v.as_array()) {
-                for t in arr.iter().filter_map(|v| v.as_str()) {
-                    let t = t.trim();
-                    if !t.is_empty() && Self::is_raw_dataset_id(t) {
-                        out.insert(t.to_string());
-                    }
-                }
-            }
-            if let Some(t) = args.get("table").and_then(|v| v.as_str()) {
-                let t = t.trim();
-                if !t.is_empty() && Self::is_raw_dataset_id(t) {
-                    out.insert(t.to_string());
-                }
-            }
-        }
-        out
-    }
 
     async fn discovered_raw_relations_from_catalog(
         datasets: Option<&Arc<dyn react_core::providers::DatasetCatalogProvider>>,
@@ -951,46 +870,6 @@ impl DataEngineerSuite {
             }
         }
         out
-    }
-
-    fn harden_cleanse_payload_to_raw(
-        payload: &mut serde_json::Value,
-        discovered_raw: &BTreeSet<String>,
-    ) {
-        if discovered_raw.is_empty() {
-            return;
-        }
-        let Some(obj) = payload.as_object_mut() else {
-            return;
-        };
-        let Some(tasks) = obj.get_mut("tasks").and_then(|v| v.as_array_mut()) else {
-            return;
-        };
-
-        tasks.retain(|t| {
-            t.get("dataset_id")
-                .and_then(|v| v.as_str())
-                .map(|ds| discovered_raw.contains(ds.trim()))
-                .unwrap_or(false)
-        });
-
-        if tasks.is_empty() {
-            tasks.extend(
-                discovered_raw
-                    .iter()
-                    .take(5)
-                    .map(|ds| serde_json::json!({ "dataset_id": ds })),
-            );
-        }
-
-        let ids: Vec<String> = tasks
-            .iter()
-            .filter_map(|t| t.get("dataset_id").and_then(|v| v.as_str()))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let batches: Vec<Vec<String>> = ids.chunks(5).map(|c| c.to_vec()).collect();
-        obj.insert("batches".to_string(), serde_json::json!(batches));
     }
 
     async fn run_deterministic_probe_for_table(
@@ -1070,10 +949,16 @@ impl DataEngineerSuite {
         )
     }
 
-    fn review_retry_kind(decision: ReviewDecision) -> Option<&'static str> {
+    fn review_retry_kind(
+        decision: ReviewDecision,
+    ) -> Option<crate::data_engineer::progress_controller::SubjectiveRetryKind> {
         match decision {
-            ReviewDecision::PatchPlan => Some("review_patch_plan"),
-            ReviewDecision::PatchImpl => Some("review_patch_impl"),
+            ReviewDecision::PatchPlan => Some(
+                crate::data_engineer::progress_controller::SubjectiveRetryKind::ReviewPatchPlan,
+            ),
+            ReviewDecision::PatchImpl => Some(
+                crate::data_engineer::progress_controller::SubjectiveRetryKind::ReviewPatchImpl,
+            ),
             ReviewDecision::Proceed => None,
         }
     }
@@ -1443,7 +1328,19 @@ impl DataEngineerSuite {
                 .blockers
                 .iter()
                 .take(6)
-                .map(|b| format!("- {}", b.trim()))
+                .map(|b| {
+                    let target = b
+                        .target_id
+                        .as_deref()
+                        .map(|s| format!(" target={}", s))
+                        .unwrap_or_default();
+                    let detail = b
+                        .detail
+                        .as_deref()
+                        .map(|s| format!(" detail={}", s.trim()))
+                        .unwrap_or_default();
+                    format!("- {:?}{}{}", b.code, target, detail)
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -1454,7 +1351,23 @@ impl DataEngineerSuite {
                 .fixes
                 .iter()
                 .take(6)
-                .map(|f| format!("- {}", f.trim()))
+                .map(|f| {
+                    let blocker = f
+                        .blocker_code
+                        .map(|c| format!(" blocker={:?}", c))
+                        .unwrap_or_default();
+                    let target = f
+                        .target_id
+                        .as_deref()
+                        .map(|s| format!(" target={}", s))
+                        .unwrap_or_default();
+                    let detail = f
+                        .detail
+                        .as_deref()
+                        .map(|s| format!(" detail={}", s.trim()))
+                        .unwrap_or_default();
+                    format!("- {:?}{}{}{}", f.action, blocker, target, detail)
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -1774,6 +1687,50 @@ Apply these fixes in the output.",
         (failed, failure_errors)
     }
 
+    fn build_enrichment_prompt_envelope(
+        phase: control_flow::Phase,
+        directive: crate::data_engineer::prompt_packets::TurnDirective,
+        plan_kind: crate::data_engineer::plan_kind::PlanKind,
+        plan_key: &str,
+        planning_context: &str,
+        memo: &str,
+        critique: &crate::data_engineer::plan_schema::PlanDesignCritiqueV1,
+        plan_summary: &str,
+        task_ids: &[String],
+        new_evidence_refs: &[String],
+    ) -> String {
+        let context_text = format!(
+            "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nCurrent plan summary:\n{}",
+            Self::excerpt(planning_context, 20_000),
+            Self::excerpt(memo, 12_000),
+            Self::critique_guidance(critique),
+            plan_summary
+        );
+        let envelope = crate::data_engineer::prompt_packets::PromptEnvelope {
+            phase: phase.as_str().to_string(),
+            goal: "Produce implementation_spec content for target tasks".to_string(),
+            directive,
+            plan: Some(crate::data_engineer::prompt_packets::PlanContextPacket {
+                plan_kind: Some(plan_kind),
+                plan_key: Some(plan_key.to_string()),
+                context_text: Some(context_text),
+                unresolved_ids: task_ids.to_vec(),
+                new_evidence_refs: new_evidence_refs.to_vec(),
+            }),
+            ..crate::data_engineer::prompt_packets::PromptEnvelope::default()
+        };
+        crate::data_engineer::prompt_packets::render_envelope(&envelope)
+            .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    fn compile_prompt_from_reason(reason_memo: &str, base_user: &str) -> String {
+        format!(
+            "Reason memo:\n{}\n\n{}",
+            Self::excerpt(reason_memo, 8_000),
+            base_user
+        )
+    }
+
     async fn enrich_cleanse_tasks(
         ctx: &AgentCtx,
         planning_context: &str,
@@ -1787,16 +1744,35 @@ Apply these fixes in the output.",
             let chunk_vec = chunk.to_vec();
             let summary = crate::data_engineer::plan::summarize_cleanse_plan(plan, 50);
             let base_user = format!(
-                "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nReturn schema-valid enrichment JSON.",
-                Self::excerpt(planning_context, 20_000),
-                Self::excerpt(memo, 12_000),
-                Self::critique_guidance(critique),
-                summary,
+                "{}\n\nTarget task_ids:\n{}\n\nReturn schema-valid enrichment JSON.",
+                Self::build_enrichment_prompt_envelope(
+                    control_flow::Phase::CleansePlan,
+                    crate::data_engineer::prompt_packets::TurnDirective::Compile,
+                    crate::data_engineer::plan_kind::PlanKind::Cleanse,
+                    &plan.plan_key,
+                    planning_context,
+                    memo,
+                    critique,
+                    &summary,
+                    &chunk_vec,
+                    &[],
+                ),
                 serde_json::to_string_pretty(&chunk_vec).unwrap_or_else(|_| "[]".to_string())
             );
             let reason_user = format!(
                 "Think through the enrichment strategy for these task_ids. Return plain text only, no JSON.\n\n{}",
-                base_user
+                Self::build_enrichment_prompt_envelope(
+                    control_flow::Phase::CleansePlan,
+                    crate::data_engineer::prompt_packets::TurnDirective::Reason,
+                    crate::data_engineer::plan_kind::PlanKind::Cleanse,
+                    &plan.plan_key,
+                    planning_context,
+                    memo,
+                    critique,
+                    &summary,
+                    &chunk_vec,
+                    &[],
+                )
             );
             let reason_memo = ctx.llm.chat(
                 &[
@@ -1815,11 +1791,7 @@ Apply these fixes in the output.",
                     ctx.thread_id.clone(),
                 ),
             )?;
-            let compile_user = format!(
-                "Reason memo:\n{}\n\n{}",
-                Self::excerpt(&reason_memo, 8_000),
-                base_user
-            );
+            let compile_user = Self::compile_prompt_from_reason(&reason_memo, &base_user);
             let mut opts = Self::planning_llm_options(
                 PlanningLlmProfile::EnrichmentCompile,
                 "data_engineer.cleanse_plan_enrich",
@@ -1855,11 +1827,19 @@ Apply these fixes in the output.",
                     failure_errors.join("\n")
                 );
                 let retry_user = format!(
-                    "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nSTRICT RETRY REQUIREMENTS:\n{}\n\nReturn schema-valid enrichment JSON.",
-                    Self::excerpt(planning_context, 20_000),
-                    Self::excerpt(memo, 12_000),
-                    Self::critique_guidance(critique),
-                    crate::data_engineer::plan::summarize_cleanse_plan(plan, 50),
+                    "{}\n\nTarget task_ids:\n{}\n\nSTRICT RETRY REQUIREMENTS:\n{}\n\nReturn schema-valid enrichment JSON.",
+                    Self::build_enrichment_prompt_envelope(
+                        control_flow::Phase::CleansePlan,
+                        crate::data_engineer::prompt_packets::TurnDirective::Verify,
+                        crate::data_engineer::plan_kind::PlanKind::Cleanse,
+                        &plan.plan_key,
+                        planning_context,
+                        memo,
+                        critique,
+                        &crate::data_engineer::plan::summarize_cleanse_plan(plan, 50),
+                        &failed,
+                        &failure_errors,
+                    ),
                     serde_json::to_string_pretty(&failed).unwrap_or_else(|_| "[]".to_string()),
                     retry_hint
                 );
@@ -1927,16 +1907,35 @@ Apply these fixes in the output.",
             let chunk_vec = chunk.to_vec();
             let summary = crate::data_engineer::plan::summarize_model_plan(plan, 50);
             let base_user = format!(
-                "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nReturn schema-valid enrichment JSON.",
-                Self::excerpt(planning_context, 20_000),
-                Self::excerpt(memo, 12_000),
-                Self::critique_guidance(critique),
-                summary,
+                "{}\n\nTarget task_ids:\n{}\n\nReturn schema-valid enrichment JSON.",
+                Self::build_enrichment_prompt_envelope(
+                    control_flow::Phase::ModelPlan,
+                    crate::data_engineer::prompt_packets::TurnDirective::Compile,
+                    crate::data_engineer::plan_kind::PlanKind::Model,
+                    &plan.plan_key,
+                    planning_context,
+                    memo,
+                    critique,
+                    &summary,
+                    &chunk_vec,
+                    &[],
+                ),
                 serde_json::to_string_pretty(&chunk_vec).unwrap_or_else(|_| "[]".to_string())
             );
             let reason_user = format!(
                 "Think through the enrichment strategy for these task_ids. Return plain text only, no JSON.\n\n{}",
-                base_user
+                Self::build_enrichment_prompt_envelope(
+                    control_flow::Phase::ModelPlan,
+                    crate::data_engineer::prompt_packets::TurnDirective::Reason,
+                    crate::data_engineer::plan_kind::PlanKind::Model,
+                    &plan.plan_key,
+                    planning_context,
+                    memo,
+                    critique,
+                    &summary,
+                    &chunk_vec,
+                    &[],
+                )
             );
             let reason_memo = ctx.llm.chat(
                 &[
@@ -1955,11 +1954,7 @@ Apply these fixes in the output.",
                     ctx.thread_id.clone(),
                 ),
             )?;
-            let compile_user = format!(
-                "Reason memo:\n{}\n\n{}",
-                Self::excerpt(&reason_memo, 8_000),
-                base_user
-            );
+            let compile_user = Self::compile_prompt_from_reason(&reason_memo, &base_user);
             let mut opts = Self::planning_llm_options(
                 PlanningLlmProfile::EnrichmentCompile,
                 "data_engineer.model_plan_enrich",
@@ -1995,11 +1990,19 @@ Apply these fixes in the output.",
                     failure_errors.join("\n")
                 );
                 let retry_user = format!(
-                    "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nCurrent plan summary:\n{}\n\nTarget task_ids:\n{}\n\nSTRICT RETRY REQUIREMENTS:\n{}\n\nReturn schema-valid enrichment JSON.",
-                    Self::excerpt(planning_context, 20_000),
-                    Self::excerpt(memo, 12_000),
-                    Self::critique_guidance(critique),
-                    crate::data_engineer::plan::summarize_model_plan(plan, 50),
+                    "{}\n\nTarget task_ids:\n{}\n\nSTRICT RETRY REQUIREMENTS:\n{}\n\nReturn schema-valid enrichment JSON.",
+                    Self::build_enrichment_prompt_envelope(
+                        control_flow::Phase::ModelPlan,
+                        crate::data_engineer::prompt_packets::TurnDirective::Verify,
+                        crate::data_engineer::plan_kind::PlanKind::Model,
+                        &plan.plan_key,
+                        planning_context,
+                        memo,
+                        critique,
+                        &crate::data_engineer::plan::summarize_model_plan(plan, 50),
+                        &failed,
+                        &failure_errors,
+                    ),
                     serde_json::to_string_pretty(&failed).unwrap_or_else(|_| "[]".to_string()),
                     retry_hint
                 );
@@ -2054,11 +2057,14 @@ Apply these fixes in the output.",
         Ok(())
     }
 
-    fn collect_targeted_semantic_tasks(errors: &[String], candidates: &[String]) -> Vec<String> {
+    fn collect_targeted_semantic_tasks(
+        issues: &[crate::data_engineer::plan::PlanSemanticIssue],
+        candidates: &[String],
+    ) -> Vec<String> {
         let mut out = Vec::new();
-        for e in errors {
-            if let Some((head, _)) = e.split_once(':') {
-                let key = head.trim();
+        for issue in issues {
+            if let Some(task_id) = issue.task_id.as_ref() {
+                let key = task_id.trim();
                 if !key.is_empty() && candidates.iter().any(|c| c == key) {
                     out.push(key.to_string());
                 }
@@ -4407,21 +4413,6 @@ Apply these fixes in the output.",
             .unwrap_or(3)
             .max(2)
             .min(20);
-        let max_review_patch_impl_streak: usize =
-            std::env::var("AGENT_MAX_REVIEW_PATCH_IMPL_STREAK")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(3)
-                .max(1)
-                .min(12);
-        let max_review_patch_plan_streak: usize =
-            std::env::var("AGENT_MAX_REVIEW_PATCH_PLAN_STREAK")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(2)
-                .max(1)
-                .min(12);
-
         let phase_index = |p: Phase| -> usize {
             match p {
                 Phase::Preflight => 0,
@@ -4456,11 +4447,11 @@ Apply these fixes in the output.",
             total_steps += 1;
             remaining_steps = remaining_steps.saturating_sub(1);
 
-            let execution_state = crate::data_engineer::progress_controller::ExecutionState::load(
+            let execution_state = crate::data_engineer::progress_controller::ExecutionState::load_strict(
                 &thread_store,
                 thread_id,
             )
-            .await
+            .await?
             .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
             let phase = execution_state
                 .current_phase
@@ -5522,7 +5513,7 @@ Apply these fixes in the output.",
                                     let candidates: Vec<String> =
                                         plan.tasks.iter().map(|t| t.dataset_id.clone()).collect();
                                     let targeted = Self::collect_targeted_semantic_tasks(
-                                        &sem.errors,
+                                        &sem.issues,
                                         &candidates,
                                     );
                                     if !targeted.is_empty() {
@@ -5558,9 +5549,10 @@ Apply these fixes in the output.",
                                         )
                                     })?;
                                 if !sem.ok {
+                                    let sem_errors = sem.messages();
                                     let reason = format!(
                                         "Plan failed semantic validation (design-first). Errors:\n- {}",
-                                        sem.errors.join("\n- ")
+                                        sem_errors.join("\n- ")
                                     );
                                     let ts = chrono::Utc::now().to_rfc3339();
                                     let step = react_core::session::ThreadStep::GuardBlock {
@@ -5582,7 +5574,7 @@ Apply these fixes in the output.",
                                         &thread_store,
                                         thread_id,
                                         phase,
-                                        "plan_semantic_invalid",
+                                        crate::data_engineer::progress_controller::SubjectiveRetryKind::PlanSemanticInvalid,
                                     )
                                     .await;
                                     if tries
@@ -5591,7 +5583,7 @@ Apply these fixes in the output.",
                                         return Err(format!(
                                             "plan_semantic_validation_not_converged_after_retries: tries={}, errors={}",
                                             tries,
-                                            sem.errors.join(" | ")
+                                            sem.messages().join(" | ")
                                         ));
                                     }
                                     continue;
@@ -5796,7 +5788,7 @@ Apply these fixes in the output.",
                                         &thread_store,
                                         thread_id,
                                         phase,
-                                        "plan_grounding_empty_after_prune",
+                                        crate::data_engineer::progress_controller::SubjectiveRetryKind::PlanGroundingEmptyAfterPrune,
                                     )
                                     .await;
                                     if tries
@@ -5849,7 +5841,7 @@ Apply these fixes in the output.",
                                     let candidates: Vec<String> =
                                         plan.tasks.iter().map(|t| t.name.clone()).collect();
                                     let targeted = Self::collect_targeted_semantic_tasks(
-                                        &sem.errors,
+                                        &sem.issues,
                                         &candidates,
                                     );
                                     if !targeted.is_empty() {
@@ -5886,9 +5878,10 @@ Apply these fixes in the output.",
                                     )
                                 })?;
                                 if !sem.ok {
+                                    let sem_errors = sem.messages();
                                     let reason = format!(
                                         "Plan failed semantic validation (design-first). Errors:\n- {}",
-                                        sem.errors.join("\n- ")
+                                        sem_errors.join("\n- ")
                                     );
                                     let ts = chrono::Utc::now().to_rfc3339();
                                     let step = react_core::session::ThreadStep::GuardBlock {
@@ -5910,7 +5903,7 @@ Apply these fixes in the output.",
                                         &thread_store,
                                         thread_id,
                                         phase,
-                                        "plan_semantic_invalid",
+                                        crate::data_engineer::progress_controller::SubjectiveRetryKind::PlanSemanticInvalid,
                                     )
                                     .await;
                                     if tries
@@ -5919,7 +5912,7 @@ Apply these fixes in the output.",
                                         return Err(format!(
                                             "plan_semantic_validation_not_converged_after_retries: tries={}, errors={}",
                                             tries,
-                                            sem.errors.join(" | ")
+                                            sem.messages().join(" | ")
                                         ));
                                     }
                                     continue;
@@ -7280,6 +7273,7 @@ Apply these fixes in the output.",
                         let envelope = crate::data_engineer::prompt_packets::PromptEnvelope {
                             phase: phase.as_str().to_string(),
                             goal: question.trim().to_string(),
+                            directive: crate::data_engineer::prompt_packets::TurnDirective::Repair,
                             plan: None,
                             batch: None,
                             repair: Some(crate::data_engineer::prompt_packets::RepairPacket {
@@ -7377,8 +7371,16 @@ Apply these fixes in the output.",
                                 continue;
                             }
                             // Hard cutover: single progress gate controls authoring->validate advancement.
+                            // Refresh control-state after tool run; tool-side writes in this turn
+                            // must be visible before we decide whether authoring can advance.
+                            let gate_state = crate::data_engineer::progress_controller::ExecutionState::load_strict(
+                                &thread_store,
+                                thread_id,
+                            )
+                            .await?
+                            .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
                             if let Err(reason) = crate::data_engineer::progress_controller::gate_authoring_progress(
-                                &execution_state,
+                                &gate_state,
                                 phase,
                             ) {
                                 let ts = chrono::Utc::now().to_rfc3339();
@@ -7838,16 +7840,10 @@ Apply these fixes in the output.",
                         // Mark the active plan completed only when validate passes AND checklist execution is complete.
                         let mut plan_incomplete_after_validate = false;
                         let mut active_plan_key: Option<String> = None;
-                        let latest_log = thread_store.get(thread_id).await.ok();
                         if phase == Phase::CleanseValidate {
                             if let Some(mut p) =
                                 crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
                             {
-                                if let Some(ref log) = latest_log {
-                                    crate::data_engineer::plan::update_cleanse_progress_from_log(
-                                        &mut p, log,
-                                    );
-                                }
                                 active_plan_key = Some(p.plan_key.clone());
                                 if crate::data_engineer::plan::cleanse_all_done(&p) {
                                     p.status = crate::data_engineer::plan::PlanStatus::Completed;
@@ -7862,11 +7858,6 @@ Apply these fixes in the output.",
                             if let Some(mut p) =
                                 crate::data_engineer::plan::load_model_plan_any(&actx).await
                             {
-                                if let Some(ref log) = latest_log {
-                                    crate::data_engineer::plan::update_model_progress_from_log(
-                                        &mut p, log,
-                                    );
-                                }
                                 active_plan_key = Some(p.plan_key.clone());
                                 if crate::data_engineer::plan::model_all_done(&p) {
                                     p.status = crate::data_engineer::plan::PlanStatus::Completed;
@@ -7904,13 +7895,14 @@ Apply these fixes in the output.",
                             } else {
                                 Phase::ModelAuthor
                             };
-                            control_flow::append_phase_with_reason(
+                            control_flow::append_phase_with_intent(
                                 &thread_store,
                                 thread_id,
                                 Some("agent".to_string()),
                                 Some(phase),
                                 to_phase,
-                                Some(PhaseReasonCode::ValidatePass),
+                                control_flow::TransitionIntent::Loopback,
+                                Some(PhaseReasonCode::ValidatePassToAuthoring),
                                 Some(serde_json::json!({
                                     "signal": signal,
                                     "plan_key": active_plan_key,
@@ -7933,13 +7925,14 @@ Apply these fixes in the output.",
                         } else {
                             Phase::ModelReview
                         };
-                        control_flow::append_phase_with_reason(
+                        control_flow::append_phase_with_intent(
                             &thread_store,
                             thread_id,
                             Some("agent".to_string()),
                             Some(phase),
                             to_phase,
-                            Some(PhaseReasonCode::ValidatePass),
+                            control_flow::TransitionIntent::Forward,
+                            Some(PhaseReasonCode::ValidatePassToReview),
                             Some(serde_json::json!({
                                 "dbt_validate_observation": obs.observation.clone(),
                                 "dbt_validate_step_idx": trigger_step_idx,
@@ -8232,10 +8225,6 @@ Apply these fixes in the output.",
                     if meta.review_ref.is_none() {
                         meta.review_ref = review_ref_from_trigger;
                     }
-                    // Hard cutover: review loop forcing now relies on persisted retry counters,
-                    // not reconstructed thread-log streaks.
-                    let patch_plan_streak = 0usize;
-                    let patch_impl_streak = 0usize;
                     let mut review_retry_count = 0usize;
                     if let Some(kind) = Self::review_retry_kind(meta.decision) {
                         review_retry_count =
@@ -8244,37 +8233,16 @@ Apply these fixes in the output.",
                     } else {
                         Self::reset_subjective_retry(&thread_store, thread_id).await;
                     }
-                    let forced_by_patch_plan_streak =
-                        matches!(meta.decision, ReviewDecision::PatchPlan)
-                            && patch_plan_streak >= max_review_patch_plan_streak;
-                    let forced_by_patch_impl_streak =
-                        matches!(meta.decision, ReviewDecision::PatchImpl)
-                            && !guard.last_validate_failed
-                            && patch_impl_streak >= max_review_patch_impl_streak;
                     let forced_by_subjective_retry = Self::review_retry_kind(meta.decision)
                         .is_some()
                         && review_retry_count
                             > crate::data_engineer::controller_kernel::subjective_retry_limit();
-                    let forced_progress = forced_by_patch_plan_streak
-                        || forced_by_patch_impl_streak
-                        || forced_by_subjective_retry;
+                    let forced_progress = forced_by_subjective_retry;
                     if forced_progress {
-                        let reason = if forced_by_subjective_retry {
-                            format!(
-                                "subjective review retry limit reached ({})",
-                                review_retry_count
-                            )
-                        } else if forced_by_patch_plan_streak {
-                            format!(
-                                "patch_plan streak reached {} (threshold {})",
-                                patch_plan_streak, max_review_patch_plan_streak
-                            )
-                        } else {
-                            format!(
-                                "patch_impl streak reached {} (threshold {})",
-                                patch_impl_streak, max_review_patch_impl_streak
-                            )
-                        };
+                        let reason = format!(
+                            "subjective review retry limit reached ({})",
+                            review_retry_count
+                        );
                         tracing::warn!(
                             "data_engineer: forcing review proceed phase={} reason={}",
                             phase.as_str(),
@@ -8282,10 +8250,8 @@ Apply these fixes in the output.",
                         );
                         meta.decision = ReviewDecision::Proceed;
                         answer.push_str(&format!(
-                            "\n\nProgress guard: review remained subjective without convergence (retry_count={}, patch_plan_streak={}, patch_impl_streak={}). Proceeding to next phase to avoid non-convergent review loops.",
+                            "\n\nProgress guard: review remained subjective without convergence (retry_count={}). Proceeding to next phase to avoid non-convergent review loops.",
                             review_retry_count,
-                            patch_plan_streak,
-                            patch_impl_streak
                         ));
                         Self::reset_subjective_retry(&thread_store, thread_id).await;
                     }
@@ -8300,11 +8266,7 @@ Apply these fixes in the output.",
                         "answer": answer,
                         "forced_progress_guard": forced_progress,
                         "forced_progress_by_subjective_retry": forced_by_subjective_retry,
-                        "forced_progress_by_patch_plan_streak": forced_by_patch_plan_streak,
-                        "forced_progress_by_patch_impl_streak": forced_by_patch_impl_streak,
                         "review_subjective_retry_count": review_retry_count,
-                        "review_patch_plan_streak": patch_plan_streak,
-                        "review_patch_impl_streak": patch_impl_streak,
                         "trigger_step_idx": trigger_step_idx,
                         "trigger_step": trigger_step,
                     });
@@ -9954,7 +9916,9 @@ mod tests {
                 ThreadStep::Phase {
                     phase: "cleanse_review".to_string(),
                     from_phase: Some("cleanse_validate".to_string()),
-                    reason_code: Some(react_core::control_flow::PhaseReasonCode::ValidatePass),
+                    reason_code: Some(
+                        react_core::control_flow::PhaseReasonCode::ValidatePassToReview
+                    ),
                     reason_detail: Some(serde_json::json!({"dbt_validate_step_idx": 1})),
                     observation: react_core::session::Observation::ok(),
                     ts: "t".to_string(),
@@ -9985,7 +9949,10 @@ mod tests {
             q.contains("staging_model"),
             "should mention mutation action"
         );
-        assert!(q.contains("validate_pass"), "should include entry reason");
+        assert!(
+            q.contains("validate_pass_to_review"),
+            "should include entry reason"
+        );
         assert!(
             q.contains("Original goal"),
             "should retain original goal section"

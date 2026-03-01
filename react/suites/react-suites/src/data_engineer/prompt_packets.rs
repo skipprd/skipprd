@@ -3,6 +3,22 @@ use serde::{Deserialize, Serialize};
 use crate::data_engineer::plan_kind::PlanKind;
 use crate::data_engineer::progress_controller::RepairLadderStep;
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnDirective {
+    Reason,
+    Compile,
+    Verify,
+    Repair,
+    Advance,
+}
+
+impl Default for TurnDirective {
+    fn default() -> Self {
+        Self::Reason
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PlanContextPacket {
@@ -13,6 +29,11 @@ pub struct PlanContextPacket {
     /// Rendered, human-readable context (bounded by the builder).
     #[serde(default)]
     pub context_text: Option<String>,
+    /// Optional stable identifiers for delta retries.
+    #[serde(default)]
+    pub unresolved_ids: Vec<String>,
+    #[serde(default)]
+    pub new_evidence_refs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -44,6 +65,7 @@ pub struct RepairPacket {
 pub struct PromptEnvelope {
     pub phase: String,
     pub goal: String,
+    pub directive: TurnDirective,
     #[serde(default)]
     pub plan: Option<PlanContextPacket>,
     #[serde(default)]
@@ -109,6 +131,7 @@ mod tests {
         let envelope = PromptEnvelope {
             phase: "model_author".to_string(),
             goal: "apply the next deterministic step".to_string(),
+            directive: TurnDirective::Advance,
             ..PromptEnvelope::default()
         };
         assert!(render_envelope(&envelope).is_err());
@@ -119,6 +142,7 @@ mod tests {
         let envelope = PromptEnvelope {
             phase: "cleanse_author".to_string(),
             goal: "repair the failing model".to_string(),
+            directive: TurnDirective::Repair,
             plan: Some(PlanContextPacket::default()),
             repair: Some(RepairPacket {
                 target_path: "".to_string(),

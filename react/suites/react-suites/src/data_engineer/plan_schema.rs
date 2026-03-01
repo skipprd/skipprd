@@ -147,8 +147,54 @@ pub struct ModelPlanCandidatesV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct PlanDesignBlockerV1 {
+    pub code: PlanDesignBlockerCodeV1,
+    #[serde(default)]
+    pub target_id: Option<String>,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDesignFixV1 {
+    pub action: PlanDesignFixActionV1,
+    #[serde(default)]
+    pub blocker_code: Option<PlanDesignBlockerCodeV1>,
+    #[serde(default)]
+    pub target_id: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanDesignBlockerCodeV1 {
+    MissingGroundedTasks,
+    MissingTaskSpecs,
+    MissingWorkGroupCoverage,
+    InvalidChecklistProgress,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanDesignFixActionV1 {
+    RegenerateTasks,
+    EnrichTaskSpecs,
+    RepairWorkGroups,
+    RepairChecklistCoverage,
+    Other,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PlanDesignCritiqueV1 {
     pub ok: bool,
-    pub blockers: Vec<String>,
-    pub fixes: Vec<String>,
+    #[serde(default)]
+    pub blockers: Vec<PlanDesignBlockerV1>,
+    #[serde(default)]
+    pub fixes: Vec<PlanDesignFixV1>,
 }

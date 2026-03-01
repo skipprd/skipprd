@@ -1057,8 +1057,28 @@ impl ThreadStore {
         }
         merged.thread_state_schema_version = THREAD_STATE_SCHEMA_VERSION;
         merged.thread_id = thread_id.to_string();
+        self.put_thread_state_replace(thread_id, &merged).await
+    }
+
+    pub async fn put_thread_state_replace(
+        &self,
+        thread_id: &str,
+        state: &ThreadState,
+    ) -> Result<(), String> {
+        if state.thread_state_schema_version != THREAD_STATE_SCHEMA_VERSION {
+            return Err(format!(
+                "thread_state schema_version mismatch: expected {}, got {}",
+                THREAD_STATE_SCHEMA_VERSION, state.thread_state_schema_version
+            ));
+        }
+        if state.thread_id != thread_id {
+            return Err(format!(
+                "thread_state thread_id mismatch: expected {}, got {}",
+                thread_id, state.thread_id
+            ));
+        }
         let key = self.state_key(thread_id);
-        let v = serde_json::to_value(merged).map_err(|e| e.to_string())?;
+        let v = serde_json::to_value(state).map_err(|e| e.to_string())?;
         self.storage.put_json(&key, &v).await
     }
 
@@ -1085,6 +1105,7 @@ impl ThreadStore {
             .get_thread_state(thread_id)
             .await
             .unwrap_or_else(|_| Self::new_thread_state(thread_id));
+        let mut reset_snapshot = false;
         if state.last_materialized_step_count > want_step_count.saturating_sub(1) {
             return Err(format!(
                 "thread_state materialization mismatch: state_count={} want_step_count={}",
@@ -1095,6 +1116,7 @@ impl ThreadStore {
             // Hard cutover: do not replay thread logs for state reconstruction.
             // If a gap is detected, reset to an empty state snapshot and continue incrementally.
             state = Self::new_thread_state(thread_id);
+            reset_snapshot = true;
         }
         apply_step_to_state(&mut state, want_step_count.saturating_sub(1), step);
         state.thread_state_schema_version = THREAD_STATE_SCHEMA_VERSION;
@@ -1106,7 +1128,11 @@ impl ThreadStore {
             .filter(|it| it.kind == ThreadItemKind::Phase)
             .filter_map(|it| it.runtime_ms)
             .sum();
-        self.put_thread_state(thread_id, &state).await?;
+        if reset_snapshot {
+            self.put_thread_state_replace(thread_id, &state).await?;
+        } else {
+            self.put_thread_state(thread_id, &state).await?;
+        }
         Ok(())
     }
 
@@ -2150,5 +2176,59 @@ mod tests {
         };
         let got = store.put_thread_state("tid-id-check", &st).await;
         assert!(got.is_err(), "thread_id mismatches must fail");
+    }
+
+    #[tokio::test]
+    async fn materialization_gap_reset_clears_stale_state_items() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let tid = "tid-gap-reset";
+
+        let mut stale = ThreadState {
+            thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
+            thread_id: tid.to_string(),
+            last_materialized_step_count: 1,
+            ..ThreadState::default()
+        };
+        stale.items.insert(
+            "phase:stale".to_string(),
+            ThreadItemState {
+                kind: ThreadItemKind::Phase,
+                status: ThreadItemStatus::Ok,
+                started_at: Some("2026-01-01T00:00:00Z".to_string()),
+                finished_at: Some("2026-01-01T00:00:01Z".to_string()),
+                runtime_ms: Some(1_000),
+                last_error: None,
+                outputs: None,
+            },
+        );
+        store
+            .put_thread_state_replace(tid, &stale)
+            .await
+            .expect("seed stale state");
+
+        let step = ThreadStep::User {
+            text: "next".to_string(),
+            observation: Observation::ok(),
+            ts: "2026-01-01T00:00:02Z".to_string(),
+            agent: "test".to_string(),
+        };
+        store
+            .materialize_thread_state_incremental(tid, 3, &step)
+            .await
+            .expect("materialize reset");
+
+        let got = store.get_thread_state(tid).await.expect("load reset state");
+        assert!(
+            !got.items.contains_key("phase:stale"),
+            "reset path must fully replace stale items"
+        );
+        assert_eq!(got.last_materialized_step_count, 3);
     }
 }
