@@ -290,22 +290,6 @@ pub struct DerivedGuardState {
     pub probe_satisfied: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FileMutationOp {
-    Patch,
-    Rm,
-    Mv,
-}
-
-fn parse_file_mutation_op(args: &serde_json::Value) -> Option<FileMutationOp> {
-    match args.get("op").and_then(|v| v.as_str()) {
-        Some("patch") => Some(FileMutationOp::Patch),
-        Some("rm") => Some(FileMutationOp::Rm),
-        Some("mv") => Some(FileMutationOp::Mv),
-        _ => None,
-    }
-}
-
 fn is_mutation_step(step: &ThreadStep) -> bool {
     match step {
         ThreadStep::ToolEnd { name, args, .. } => match name.as_str() {
@@ -318,9 +302,7 @@ fn is_mutation_step(step: &ThreadStep) -> bool {
             | "apply_next_cleanse_schema_batch"
             | "apply_next_model_batch"
             | "apply_next_model_schema_batch" => true,
-            "file" => {
-                parse_file_mutation_op(args).is_some()
-            }
+            "file" => crate::data_engineer::tool_ops::is_file_mutation_op(args),
             _ => false,
         },
         _ => false,
@@ -541,7 +523,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
                 } = step
                 {
                     if name == "file" && observation.ok {
-                        if parse_file_mutation_op(args).is_some() {
+                        if crate::data_engineer::tool_ops::is_file_mutation_op(args) {
                             out.patched_since_fail = true;
                         }
                     }
@@ -637,10 +619,14 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
         if name != "file" || !observation.ok {
             continue;
         }
-        let op = parse_file_mutation_op(args);
+        let op = crate::data_engineer::tool_ops::classify_file_op(args);
         // Consider patch and mv as sources of new/updated model paths.
         // (rm removes paths; targeting removed paths is usually unhelpful.)
-        if !matches!(op, Some(FileMutationOp::Patch | FileMutationOp::Mv)) {
+        if !matches!(
+            op,
+            crate::data_engineer::tool_ops::FileOpKind::Patch
+                | crate::data_engineer::tool_ops::FileOpKind::Mv
+        ) {
             continue;
         }
 
@@ -658,7 +644,7 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
         // If tool didn't return results[] for some reason, fall back to args.path (single-file).
         if patched_paths.is_empty() {
             match op {
-                Some(FileMutationOp::Patch) => {
+                crate::data_engineer::tool_ops::FileOpKind::Patch => {
                     if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
                         let p = p.trim();
                         if !p.is_empty() {
@@ -666,7 +652,7 @@ pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Ve
                         }
                     }
                 }
-                Some(FileMutationOp::Mv) => {
+                crate::data_engineer::tool_ops::FileOpKind::Mv => {
                     if let Some(p) = args.get("to").and_then(|v| v.as_str()) {
                         let p = p.trim();
                         if !p.is_empty() {
@@ -1814,6 +1800,60 @@ mod tests {
         assert!(g.last_validate_failed);
         assert!(!g.mutated_since_fail);
         assert_eq!(g.mutation_failures_since_validate, 0);
+    }
+
+    #[test]
+    fn guard_does_not_treat_file_get_as_mutation() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "dbt_validate",
+                    serde_json::json!({"build": true}),
+                    serde_json::json!({"ok": false, "compile_ok": false, "run_ok": false, "errors":["x"]}),
+                ),
+                step(
+                    "file",
+                    serde_json::json!({"op":"get","path":"models/a.sql"}),
+                    serde_json::json!({"ok": true, "path":"models/a.sql","text":"select 1"}),
+                ),
+            ],
+            ..Default::default()
+        };
+        let g = derive_guard_state(Some(&log));
+        assert!(g.last_validate_failed);
+        assert!(!g.mutated_since_fail);
+        assert!(!g.patched_since_fail);
+        match gate_authoring_to_validate(Some(&log)) {
+            AuthoringGate::Block { .. } => {}
+            other => panic!("expected Block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn guard_does_not_treat_file_list_as_mutation() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "dbt_validate",
+                    serde_json::json!({"build": true}),
+                    serde_json::json!({"ok": false, "compile_ok": false, "run_ok": false, "errors":["x"]}),
+                ),
+                step(
+                    "file",
+                    serde_json::json!({"op":"list","prefix":"models/","limit":10}),
+                    serde_json::json!({"ok": true, "items":[{"path":"models/a.sql"}]}),
+                ),
+            ],
+            ..Default::default()
+        };
+        let g = derive_guard_state(Some(&log));
+        assert!(g.last_validate_failed);
+        assert!(!g.mutated_since_fail);
+        assert!(!g.patched_since_fail);
+        match gate_authoring_to_validate(Some(&log)) {
+            AuthoringGate::Block { .. } => {}
+            other => panic!("expected Block, got {:?}", other),
+        }
     }
 
     #[test]

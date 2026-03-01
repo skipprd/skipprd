@@ -53,6 +53,7 @@ mod review_batched;
 pub mod retry_budget;
 pub mod schema_policy;
 pub mod sql_first;
+pub mod tool_ops;
 pub mod transition_dispatcher;
 pub mod tools;
 
@@ -2767,11 +2768,6 @@ Apply these fixes in the output.",
             File,
             Other,
         }
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        enum FileOpKind {
-            Put,
-            Other,
-        }
         fn parse_review_mutation_tool(name: &str) -> ReviewMutationTool {
             match name {
                 "approve_and_save_artifact" => ReviewMutationTool::ApproveAndSaveArtifact,
@@ -2781,13 +2777,6 @@ Apply these fixes in the output.",
                 _ => ReviewMutationTool::Other,
             }
         }
-        fn parse_file_op_kind(args: &serde_json::Value) -> Option<FileOpKind> {
-            match args.get("op").and_then(|v| v.as_str()) {
-                Some("put") => Some(FileOpKind::Put),
-                Some(_) => Some(FileOpKind::Other),
-                None => None,
-            }
-        }
         match step {
             react_core::session::ThreadStep::ArtifactSaved { .. } => true,
             react_core::session::ThreadStep::ToolEnd { name, args, .. } => {
@@ -2795,9 +2784,7 @@ Apply these fixes in the output.",
                     ReviewMutationTool::ApproveAndSaveArtifact
                     | ReviewMutationTool::ApproveAndSaveArtifactBatch
                     | ReviewMutationTool::StagingModel => true,
-                    ReviewMutationTool::File => {
-                        matches!(parse_file_op_kind(args), Some(FileOpKind::Put))
-                    }
+                    ReviewMutationTool::File => crate::data_engineer::tool_ops::is_file_mutation_op(args),
                     ReviewMutationTool::Other => false,
                 }
             }
@@ -3127,8 +3114,7 @@ Apply these fixes in the output.",
                 args: serde_json::Value,
                 ctx: &react_core::agent::AgentCtx,
             ) -> Result<serde_json::Value, String> {
-                let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                if matches!(op, "patch" | "rm" | "mv") {
+                if !crate::data_engineer::tool_ops::is_file_read_op(&args) {
                     return Err(
                         "file is read-only for review; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string(),
                     );
@@ -3351,8 +3337,7 @@ Apply these fixes in the output.",
                         args: serde_json::Value,
                         ctx: &react_core::agent::AgentCtx,
                     ) -> Result<serde_json::Value, String> {
-                        let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                        if matches!(op, "patch" | "rm" | "mv") {
+                        if !crate::data_engineer::tool_ops::is_file_read_op(&args) {
                             return Err(
                                 "file is read-only in plan phases; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string(),
                             );
@@ -3415,11 +3400,13 @@ Apply these fixes in the output.",
                             ctx: &react_core::agent::AgentCtx,
                         ) -> Result<serde_json::Value, String> {
                             let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                            if self.single_target_path.is_some() && !matches!(op, "patch" | "rm" | "mv") {
+                            let is_repair_mutation =
+                                crate::data_engineer::tool_ops::is_file_repair_mutation_op(&args);
+                            if self.single_target_path.is_some() && !is_repair_mutation {
                                 return Err("file is in deterministic single-target repair mode; only op='patch'|'rm'|'mv' is allowed.".to_string());
                             }
                             if self.single_target_path.is_none()
-                                && !matches!(op, "patch" | "rm" | "mv")
+                                && !is_repair_mutation
                             {
                                 return Err("file is mutation-only right now (a mutating fix is required before any further validation). Allowed ops: patch/rm/mv.".to_string());
                             }
@@ -3463,7 +3450,7 @@ Apply these fixes in the output.",
                                 ctx.thread_id.as_deref(),
                                 self.single_target_path.as_ref(),
                             ) {
-                                if matches!(op, "patch" | "rm" | "mv") {
+                                if is_repair_mutation {
                                     let es = crate::data_engineer::progress_controller::ExecutionState::load(
                                         store, thread_id,
                                     )
@@ -3515,7 +3502,7 @@ Apply these fixes in the output.",
                                 ctx.thread_id.as_deref(),
                                 self.single_target_path.as_ref(),
                             ) {
-                                if matches!(op, "patch" | "rm" | "mv") {
+                                if is_repair_mutation {
                                     let mut es =
                                         crate::data_engineer::progress_controller::ExecutionState::load(
                                             store, thread_id,
@@ -3565,11 +3552,13 @@ Apply these fixes in the output.",
                         query: query.clone(),
                     });
 
-                    // Even in hard_mutation_only, schema batch tools are safe to expose because they are
-                    // inherently mutating and can resolve common "YAML contract" failures without manual
-                    // file tool patching.
+                    // In hard_mutation_only mode, only expose schema-batch tools when we are in
+                    // schema repair mode (single_target_repair_path is absent). SQL-target repair
+                    // mode must stay file-targeted to avoid schema-tool no-op loops.
                     let mut tool_lines: Vec<String> = Vec::new();
-                    if phase == control_flow::Phase::CleanseAuthor {
+                    if phase == control_flow::Phase::CleanseAuthor
+                        && single_target_repair_path.is_none()
+                    {
                         reg.register(
                             tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
                                 datasets: sctx.datasets.clone(),
@@ -3580,7 +3569,9 @@ Apply these fixes in the output.",
                                 .to_string(),
                         );
                     }
-                    if phase == control_flow::Phase::ModelAuthor {
+                    if phase == control_flow::Phase::ModelAuthor
+                        && single_target_repair_path.is_none()
+                    {
                         reg.register(
                             tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
                                 datasets: sctx.datasets.clone(),
@@ -3801,8 +3792,7 @@ Apply these fixes in the output.",
                         args: serde_json::Value,
                         ctx: &react_core::agent::AgentCtx,
                     ) -> Result<serde_json::Value, String> {
-                        let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                        if matches!(op, "patch" | "rm" | "mv") {
+                        if !crate::data_engineer::tool_ops::is_file_read_op(&args) {
                             return Err("file is read-only in review phases; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string());
                         }
                         self.inner.call(args, ctx).await
@@ -6062,13 +6052,11 @@ Apply these fixes in the output.",
                         phase_guard.mutated_since_fail = false;
                     }
                     let hard_mutation_repair_mode = execution_state.hard_mutation_repair_mode;
-                    let prefer_schema_repairs = entered_from_precheck_failed
-                        || matches!(
-                            execution_state.last_error_class,
-                            Some(
-                                crate::data_engineer::progress_controller::FailureClass::SchemaOrPrecheck
-                            )
-                        );
+                    let mut repair_type = execution_state.repair_type;
+                    if entered_from_precheck_failed {
+                        // Precheck-driven re-entry is always a schema repair path.
+                        repair_type = crate::data_engineer::progress_controller::RepairType::Schema;
+                    }
                     let sys = crate::util::time_context::with_time_context(if is_cleanse {
                         prompts::cleanse_system_prompt()
                     } else {
@@ -6261,7 +6249,13 @@ Apply these fixes in the output.",
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_cleanse_batch; force repair-mode guidance.
-                            if hard_mutation_repair_mode && !prefer_schema_repairs {
+                            if hard_mutation_repair_mode
+                                && matches!(
+                                    repair_type,
+                                    crate::data_engineer::progress_controller::RepairType::SqlTarget
+                                        | crate::data_engineer::progress_controller::RepairType::Unknown
+                                )
+                            {
                                 // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
                                 // Even if schema checklist work remains, fix failing SQL targets first.
                                 let mut ctx = format!(
@@ -6652,7 +6646,13 @@ Apply these fixes in the output.",
                             // IMPORTANT: If validation failed and we have not successfully mutated since,
                             // the authoring tool registry will be patch-only (hard_mutation_only).
                             // In that state, do NOT instruct apply_next_model_batch; force repair-mode guidance.
-                            if hard_mutation_repair_mode && !prefer_schema_repairs {
+                            if hard_mutation_repair_mode
+                                && matches!(
+                                    repair_type,
+                                    crate::data_engineer::progress_controller::RepairType::SqlTarget
+                                        | crate::data_engineer::progress_controller::RepairType::Unknown
+                                )
+                            {
                                 // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
                                 // Even if schema checklist work remains, fix failing SQL targets first.
                                 let mut ctx = format!(
@@ -6976,14 +6976,18 @@ Apply these fixes in the output.",
                             }
                         };
 
-                    let single_target_repair_path = if hard_mutation_repair_mode
-                        && !prefer_schema_repairs
-                    {
-                        execution_state
-                            .single_target_repair_path
-                            .clone()
-                            .filter(|s| !s.trim().is_empty())
-                            .or_else(|| primary_failed_model_file(&last_validate_failed_models))
+                    let single_target_repair_path = if hard_mutation_repair_mode {
+                        match repair_type {
+                            crate::data_engineer::progress_controller::RepairType::Schema => None,
+                            crate::data_engineer::progress_controller::RepairType::SqlTarget
+                            | crate::data_engineer::progress_controller::RepairType::Unknown => {
+                                execution_state
+                                    .single_target_repair_path
+                                    .clone()
+                                    .filter(|s| !s.trim().is_empty())
+                                    .or_else(|| primary_failed_model_file(&last_validate_failed_models))
+                            }
+                        }
                     } else {
                         None
                     };
@@ -7287,7 +7291,11 @@ Apply these fixes in the output.",
                     // accumulated authoring prompt (plan context, immutable facts, review text, etc).
                     // Instead, provide a minimal packet: target file + failure brief + strict allowed operation.
                     if hard_mutation_repair_mode
-                        && !prefer_schema_repairs
+                        && matches!(
+                            repair_type,
+                            crate::data_engineer::progress_controller::RepairType::SqlTarget
+                                | crate::data_engineer::progress_controller::RepairType::Unknown
+                        )
                         && single_target_repair_path.as_ref().is_some()
                     {
                         let target = single_target_repair_path
@@ -9444,6 +9452,49 @@ mod tests {
 
         let err = reg
             .call("apply_next_cleanse_batch", serde_json::json!({}), &actx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn hard_mutation_single_target_hides_schema_batch_tools() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+
+        let guard = crate::data_engineer::control_flow::DerivedGuardState {
+            last_validate_failed: true,
+            mutated_since_fail: false,
+            patched_since_fail: false,
+            mutation_failures_since_validate: 0,
+            probe_required: false,
+            probe_satisfied: false,
+        };
+
+        let (reg, card) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::CleanseAuthor,
+            &guard,
+            true,
+            &sctx,
+            Some(super::AllowedBatch::CleanseSchemaDatasetIds(vec![
+                "AwsDataCatalog.db.t1".to_string(),
+            ])),
+            Some("models/staging/stg_test_raw_raw_order_items.sql".to_string()),
+            false,
+        )
+        .expect("build_tools_for_phase should succeed");
+
+        assert!(
+            !card.contains("apply_next_cleanse_schema_batch"),
+            "single-target SQL repair mode must not expose schema batch tools"
+        );
+        let err = reg
+            .call(
+                "apply_next_cleanse_schema_batch",
+                serde_json::json!({}),
+                &actx,
+            )
             .await
             .unwrap_err();
         assert!(err.contains("unknown tool"));

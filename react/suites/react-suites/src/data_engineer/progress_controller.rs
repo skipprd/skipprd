@@ -73,6 +73,20 @@ impl Default for RepairLadderStep {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairType {
+    Unknown,
+    Schema,
+    SqlTarget,
+}
+
+impl Default for RepairType {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RepairTarget {
@@ -197,6 +211,8 @@ pub struct ExecutionState {
     #[serde(default)]
     pub hard_mutation_repair_mode: bool,
     #[serde(default)]
+    pub repair_type: RepairType,
+    #[serde(default)]
     pub single_target_repair_path: Option<String>,
     #[serde(default)]
     pub target_path: Option<String>,
@@ -301,6 +317,7 @@ impl ExecutionState {
         self.last_failure_signature = None;
         self.repair_backlog.clear();
         self.hard_mutation_repair_mode = false;
+        self.repair_type = RepairType::Unknown;
         self.single_target_repair_path = None;
         self.target_path = None;
         self.ladder_step = RepairLadderStep::PatchTarget;
@@ -356,6 +373,12 @@ impl ExecutionState {
         self.last_failure_signature = Some(failure_signature.clone());
         self.repair_backlog = backlog;
         self.hard_mutation_repair_mode = true;
+        self.repair_type = match failure_class {
+            FailureClass::SchemaOrPrecheck => RepairType::Schema,
+            FailureClass::SqlOrRuntime | FailureClass::WarehouseConfig | FailureClass::Unknown => {
+                RepairType::SqlTarget
+            }
+        };
         self.single_target_repair_path = self
             .repair_backlog
             .iter()
@@ -595,6 +618,7 @@ mod tests {
     fn validate_success_resets_repair_and_retry_state() {
         let mut st = ExecutionState::new();
         st.hard_mutation_repair_mode = true;
+        st.repair_type = RepairType::SqlTarget;
         st.subjective_retry = Some(SubjectiveRetryState {
             phase: Phase::ModelPlan,
             kind: SubjectiveRetryKind::PlanSemanticInvalid,
@@ -604,7 +628,38 @@ mod tests {
         assert_eq!(st.current_tier, ExecutionTier::Model);
         assert_eq!(st.mode, ExecutionMode::Done);
         assert!(!st.hard_mutation_repair_mode);
+        assert_eq!(st.repair_type, RepairType::Unknown);
         assert!(st.subjective_retry.is_none());
+    }
+
+    #[test]
+    fn validate_failure_sets_typed_repair_type() {
+        let mut st = ExecutionState::new();
+        let sig = FailureSignature {
+            class: FailureClass::SchemaOrPrecheck,
+            ..FailureSignature::default()
+        };
+        st.apply_validate_failure(
+            ExecutionTier::Cleanse,
+            FailureClass::SchemaOrPrecheck,
+            sig,
+            Vec::new(),
+            Some("schema fail".to_string()),
+        );
+        assert_eq!(st.repair_type, RepairType::Schema);
+
+        let sig2 = FailureSignature {
+            class: FailureClass::SqlOrRuntime,
+            ..FailureSignature::default()
+        };
+        st.apply_validate_failure(
+            ExecutionTier::Cleanse,
+            FailureClass::SqlOrRuntime,
+            sig2,
+            Vec::new(),
+            Some("sql fail".to_string()),
+        );
+        assert_eq!(st.repair_type, RepairType::SqlTarget);
     }
 
     #[test]
