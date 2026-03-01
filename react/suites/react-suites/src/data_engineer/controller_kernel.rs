@@ -130,6 +130,15 @@ pub fn subjective_retry_state_cap() -> usize {
     retry_budget::subjective_retry_state_cap()
 }
 
+pub fn publish_retry_limit() -> usize {
+    std::env::var("AGENT_MAX_PUBLISH_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(3)
+        .max(1)
+        .min(12)
+}
+
 pub fn batch_budget(progress: &plan::PlanProgress) -> RetryBudget {
     retry_budget::batch_budget(progress)
 }

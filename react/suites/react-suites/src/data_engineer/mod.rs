@@ -2113,6 +2113,35 @@ Apply these fixes in the output.",
         }
     }
 
+    async fn capture_publish_approval_from_question(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+        question: &str,
+    ) -> Result<Option<UserDecision>, String> {
+        let decision = Self::parse_user_decision(question);
+        let Some(decision) = decision else {
+            return Ok(None);
+        };
+        let mut st = crate::data_engineer::progress_controller::ExecutionState::load_strict(
+            thread_store,
+            thread_id,
+        )
+        .await?
+        .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+        match decision {
+            UserDecision::Approve => st.set_publish_approval(
+                crate::data_engineer::progress_controller::PublishApprovalDecision::Approved,
+            ),
+            UserDecision::Reject => st.set_publish_approval(
+                crate::data_engineer::progress_controller::PublishApprovalDecision::Rejected,
+            ),
+        }
+        st.save(thread_store, thread_id).await.map_err(|e| {
+            format!("failed to persist publish approval decision in execution state: {e}")
+        })?;
+        Ok(Some(decision))
+    }
+
     fn actionable_review_entry_step_idx(
         log: Option<&react_core::session::ThreadLog>,
         phase: control_flow::Phase,
@@ -8133,12 +8162,13 @@ Apply these fixes in the output.",
                                 })?;
                         }
                     }
-                    control_flow::append_phase_with_reason(
+                    control_flow::append_phase_with_intent(
                         &thread_store,
                         thread_id,
                         Some("agent".to_string()),
                         Some(phase),
                         to_phase,
+                        control_flow::TransitionIntent::Loopback,
                         Some(PhaseReasonCode::ValidateFail),
                         Some(serde_json::json!({
                             "dbt_validate_observation": obs.observation.clone(),
@@ -8280,12 +8310,13 @@ Apply these fixes in the output.",
                                 Phase::PostPublishReview => Phase::Done,
                                 _ => Phase::Done,
                             };
-                            control_flow::append_phase_with_reason(
+                            control_flow::append_phase_with_intent(
                                 &thread_store,
                                 thread_id,
                                 Some("agent".to_string()),
                                 Some(phase),
                                 next,
+                                control_flow::TransitionIntent::Forward,
                                 Some(PhaseReasonCode::ReviewProceed),
                                 Some(reason_detail),
                             )
@@ -8298,12 +8329,13 @@ Apply these fixes in the output.",
                                 ReviewTier::Gold => Phase::ModelPlan,
                                 ReviewTier::Unknown => Phase::ModelPlan,
                             };
-                            control_flow::append_phase_with_reason(
+                            control_flow::append_phase_with_intent(
                                 &thread_store,
                                 thread_id,
                                 Some("agent".to_string()),
                                 Some(phase),
                                 back,
+                                control_flow::TransitionIntent::Loopback,
                                 Some(PhaseReasonCode::ReviewPatchPlan),
                                 Some(reason_detail),
                             )
@@ -8317,12 +8349,13 @@ Apply these fixes in the output.",
                                 ReviewTier::Gold => Phase::ModelAuthor,
                                 ReviewTier::Unknown => Phase::ModelAuthor,
                             };
-                            control_flow::append_phase_with_reason(
+                            control_flow::append_phase_with_intent(
                                 &thread_store,
                                 thread_id,
                                 Some("agent".to_string()),
                                 Some(phase),
                                 back,
+                                control_flow::TransitionIntent::Loopback,
                                 Some(PhaseReasonCode::ReviewPatchImpl),
                                 Some(reason_detail),
                             )
@@ -8333,39 +8366,58 @@ Apply these fixes in the output.",
                 }
 
                 Phase::PublishAwaitApproval => {
-                    // If the most recent persisted user action is "reject", stop and ask for guidance.
-                    if let Some(ref l) = log {
-                        if let Some(last_user) = l
-                            .steps
-                            .iter()
-                            .rev()
-                            .find(|s| matches!(s, react_core::session::ThreadStep::User { .. }))
-                        {
-                            let decision = match last_user {
-                                react_core::session::ThreadStep::User { text, .. } => {
-                                    Self::parse_user_decision(text)
-                                }
-                                _ => None,
-                            };
-                            if decision == Some(UserDecision::Reject) {
-                                return Err("publish was rejected; provide updated guidance and rerun the agent".to_string());
-                            }
-                            if decision == Some(UserDecision::Approve) {
-                                control_flow::append_phase_with_reason(
-                                    &thread_store,
-                                    thread_id,
-                                    Some("agent".to_string()),
-                                    Some(Phase::PublishAwaitApproval),
-                                    Phase::Publish,
-                                    Some(PhaseReasonCode::UserApprovedPublish),
-                                    Some(serde_json::json!({
-                                        "last_user_step": last_user,
-                                    })),
-                                )
-                                .await?;
-                                continue;
-                            }
-                        }
+                    let _ = Self::capture_publish_approval_from_question(
+                        &thread_store,
+                        thread_id,
+                        question,
+                    )
+                    .await?;
+                    let mut es = crate::data_engineer::progress_controller::ExecutionState::load_strict(
+                        &thread_store,
+                        thread_id,
+                    )
+                    .await?
+                    .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+                    if es
+                        .publish_approval
+                        .as_ref()
+                        .map(|s| {
+                            s.decision
+                                == crate::data_engineer::progress_controller::PublishApprovalDecision::Rejected
+                        })
+                        .unwrap_or(false)
+                    {
+                        return Err(
+                            "publish was rejected; provide updated guidance and rerun the agent"
+                                .to_string(),
+                        );
+                    }
+                    if crate::data_engineer::progress_controller::gate_publish_progress(
+                        &es,
+                        Phase::PublishAwaitApproval,
+                    )
+                    .is_ok()
+                    {
+                        es.reset_publish_retry(
+                            crate::data_engineer::progress_controller::PublishRetryKind::AwaitApprovalLoop,
+                        );
+                        es.save(&thread_store, thread_id).await.map_err(|e| {
+                            format!("failed to persist publish approval consumption state: {e}")
+                        })?;
+                        control_flow::append_phase_with_intent(
+                            &thread_store,
+                            thread_id,
+                            Some("agent".to_string()),
+                            Some(Phase::PublishAwaitApproval),
+                            Phase::Publish,
+                            control_flow::TransitionIntent::Forward,
+                            Some(PhaseReasonCode::UserApprovedPublish),
+                            Some(serde_json::json!({
+                                "approval_state": es.publish_approval,
+                            })),
+                        )
+                        .await?;
+                        continue;
                     }
 
                     let actx = Self::agent_tool_ctx(thread_id, sctx);
@@ -8386,12 +8438,18 @@ Apply these fixes in the output.",
                     let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     let stage = obs.get("stage").and_then(|v| v.as_str()).unwrap_or("");
                     if ok && (stage == "published" || stage == "no_change") {
-                        control_flow::append_phase_with_reason(
+                        es.clear_publish_approval();
+                        es.reset_publish_retries();
+                        es.save(&thread_store, thread_id).await.map_err(|e| {
+                            format!("failed to persist publish success state: {e}")
+                        })?;
+                        control_flow::append_phase_with_intent(
                             &thread_store,
                             thread_id,
                             Some("agent".to_string()),
                             Some(Phase::PublishAwaitApproval),
                             Phase::PostPublishReview,
+                            control_flow::TransitionIntent::Forward,
                             Some(PhaseReasonCode::PublishSuccess),
                             Some(serde_json::json!({
                                 "publish_observation": obs,
@@ -8401,6 +8459,22 @@ Apply these fixes in the output.",
                         continue;
                     }
                     if ok && stage == "await_approval" {
+                        let retry_limit = crate::data_engineer::controller_kernel::publish_retry_limit();
+                        let retry_count = es.bump_publish_retry(
+                            crate::data_engineer::progress_controller::PublishRetryKind::AwaitApprovalLoop,
+                            retry_limit,
+                        );
+                        es.set_publish_approval(
+                            crate::data_engineer::progress_controller::PublishApprovalDecision::AwaitingUserApproval,
+                        );
+                        es.save(&thread_store, thread_id).await.map_err(|e| {
+                            format!("failed to persist publish await-approval state: {e}")
+                        })?;
+                        if retry_count > retry_limit {
+                            return Err(format!(
+                                "publish_await_approval_not_converged_after_retries: retries={retry_count}"
+                            ));
+                        }
                         let prompt = obs
                             .get("prompt")
                             .and_then(|v| v.as_str())
@@ -8409,15 +8483,31 @@ Apply these fixes in the output.",
                         return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
                     }
                     // Publish failed: send back to model authoring to fix.
-                    control_flow::append_phase_with_reason(
+                    let retry_limit = crate::data_engineer::controller_kernel::publish_retry_limit();
+                    let retry_count = es.bump_publish_retry(
+                        crate::data_engineer::progress_controller::PublishRetryKind::PublishFailureLoop,
+                        retry_limit,
+                    );
+                    es.clear_publish_approval();
+                    es.save(&thread_store, thread_id).await.map_err(|e| {
+                        format!("failed to persist publish failure state: {e}")
+                    })?;
+                    if retry_count > retry_limit {
+                        return Err(format!(
+                            "publish_failure_not_converged_after_retries: retries={retry_count}"
+                        ));
+                    }
+                    control_flow::append_phase_with_intent(
                         &thread_store,
                         thread_id,
                         Some("agent".to_string()),
                         Some(Phase::PublishAwaitApproval),
                         Phase::ModelAuthor,
+                        control_flow::TransitionIntent::Loopback,
                         Some(PhaseReasonCode::PublishFail),
                         Some(serde_json::json!({
                             "publish_observation": obs,
+                            "publish_failure_retry_count": retry_count,
                         })),
                     )
                     .await?;
@@ -8425,26 +8515,42 @@ Apply these fixes in the output.",
                 }
 
                 Phase::Publish => {
-                    // Only proceed if the last user action is "approve".
-                    if let Some(ref l) = log {
-                        if let Some(last_user) = l
-                            .steps
-                            .iter()
-                            .rev()
-                            .find(|s| matches!(s, react_core::session::ThreadStep::User { .. }))
-                        {
-                            let decision = match last_user {
-                                react_core::session::ThreadStep::User { text, .. } => {
-                                    Self::parse_user_decision(text)
-                                }
-                                _ => None,
-                            };
-                            if decision != Some(UserDecision::Approve) {
-                                return Ok(vec![FlowFrame::AwaitApproval {
-                                    prompt: "Publish requires explicit approval. Click Approve to continue.".to_string(),
-                                }]);
-                            }
-                        }
+                    let _ = Self::capture_publish_approval_from_question(
+                        &thread_store,
+                        thread_id,
+                        question,
+                    )
+                    .await?;
+                    let mut es = crate::data_engineer::progress_controller::ExecutionState::load_strict(
+                        &thread_store,
+                        thread_id,
+                    )
+                    .await?
+                    .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+                    if es
+                        .publish_approval
+                        .as_ref()
+                        .map(|s| {
+                            s.decision
+                                == crate::data_engineer::progress_controller::PublishApprovalDecision::Rejected
+                        })
+                        .unwrap_or(false)
+                    {
+                        return Err(
+                            "publish was rejected; provide updated guidance and rerun the agent"
+                                .to_string(),
+                        );
+                    }
+                    if let Err(_reason) =
+                        crate::data_engineer::progress_controller::gate_publish_progress(
+                            &es,
+                            Phase::Publish,
+                        )
+                    {
+                        return Ok(vec![FlowFrame::AwaitApproval {
+                            prompt: "Publish requires explicit approval. Reply \"approve\" to continue."
+                                .to_string(),
+                        }]);
                     }
                     let actx = Self::agent_tool_ctx(thread_id, sctx);
                     let tool = tools::publish_dbt_to_provider::PublishDbtToProviderTool {
@@ -8464,12 +8570,18 @@ Apply these fixes in the output.",
                     let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     let stage = obs.get("stage").and_then(|v| v.as_str()).unwrap_or("");
                     if ok && (stage == "published" || stage == "no_change") {
-                        control_flow::append_phase_with_reason(
+                        es.clear_publish_approval();
+                        es.reset_publish_retries();
+                        es.save(&thread_store, thread_id).await.map_err(|e| {
+                            format!("failed to persist publish confirmed-success state: {e}")
+                        })?;
+                        control_flow::append_phase_with_intent(
                             &thread_store,
                             thread_id,
                             Some("agent".to_string()),
                             Some(Phase::Publish),
                             Phase::PostPublishReview,
+                            control_flow::TransitionIntent::Forward,
                             Some(PhaseReasonCode::PublishConfirmedSuccess),
                             Some(serde_json::json!({
                                 "publish_observation": obs,
@@ -8479,15 +8591,31 @@ Apply these fixes in the output.",
                         continue;
                     }
                     // Failed publish -> back to model authoring.
-                    control_flow::append_phase_with_reason(
+                    let retry_limit = crate::data_engineer::controller_kernel::publish_retry_limit();
+                    let retry_count = es.bump_publish_retry(
+                        crate::data_engineer::progress_controller::PublishRetryKind::PublishFailureLoop,
+                        retry_limit,
+                    );
+                    es.clear_publish_approval();
+                    es.save(&thread_store, thread_id).await.map_err(|e| {
+                        format!("failed to persist publish confirmed-failure state: {e}")
+                    })?;
+                    if retry_count > retry_limit {
+                        return Err(format!(
+                            "publish_confirmed_failure_not_converged_after_retries: retries={retry_count}"
+                        ));
+                    }
+                    control_flow::append_phase_with_intent(
                         &thread_store,
                         thread_id,
                         Some("agent".to_string()),
                         Some(Phase::Publish),
                         Phase::ModelAuthor,
+                        control_flow::TransitionIntent::Loopback,
                         Some(PhaseReasonCode::PublishConfirmedFail),
                         Some(serde_json::json!({
                             "publish_observation": obs,
+                            "publish_failure_retry_count": retry_count,
                         })),
                     )
                     .await?;

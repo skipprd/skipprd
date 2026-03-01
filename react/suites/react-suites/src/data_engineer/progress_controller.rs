@@ -135,6 +135,35 @@ pub enum SubjectiveRetryKind {
     ReviewPatchImpl,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishApprovalDecision {
+    AwaitingUserApproval,
+    Approved,
+    Rejected,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PublishApprovalState {
+    pub decision: PublishApprovalDecision,
+    pub ts: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishRetryKind {
+    AwaitApprovalLoop,
+    PublishFailureLoop,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PublishRetryState {
+    pub kind: PublishRetryKind,
+    pub count: usize,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SubjectiveRetryState {
@@ -191,6 +220,10 @@ pub struct ExecutionState {
     pub last_failed_models: Vec<Value>,
     #[serde(default)]
     pub subjective_retry: Option<SubjectiveRetryState>,
+    #[serde(default)]
+    pub publish_approval: Option<PublishApprovalState>,
+    #[serde(default)]
+    pub publish_retries: Vec<PublishRetryState>,
 }
 
 impl ExecutionState {
@@ -282,6 +315,8 @@ impl ExecutionState {
         self.last_failed_models.clear();
         self.last_error_brief = None;
         self.subjective_retry = None;
+        self.clear_publish_approval();
+        self.reset_publish_retries();
     }
 
     pub fn apply_validate_failure(
@@ -342,6 +377,7 @@ impl ExecutionState {
                 })
             })
             .collect();
+        self.clear_publish_approval();
 
         let failed_target_count_delta = self.repair_backlog.len() as i64 - prev_count;
         let failure_signature_changed = prev_signature != Some(failure_signature);
@@ -410,6 +446,42 @@ impl ExecutionState {
 
     pub fn reset_subjective_retry(&mut self) {
         self.subjective_retry = None;
+    }
+
+    pub fn set_publish_approval(&mut self, decision: PublishApprovalDecision) {
+        self.publish_approval = Some(PublishApprovalState {
+            decision,
+            ts: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+
+    pub fn clear_publish_approval(&mut self) {
+        self.publish_approval = None;
+    }
+
+    pub fn is_publish_approved(&self) -> bool {
+        self.publish_approval
+            .as_ref()
+            .map(|s| s.decision == PublishApprovalDecision::Approved)
+            .unwrap_or(false)
+    }
+
+    pub fn bump_publish_retry(&mut self, kind: PublishRetryKind, cap: usize) -> usize {
+        let capped = cap.max(1);
+        if let Some(existing) = self.publish_retries.iter_mut().find(|r| r.kind == kind) {
+            existing.count = existing.count.saturating_add(1).min(capped);
+            return existing.count;
+        }
+        self.publish_retries.push(PublishRetryState { kind, count: 1 });
+        1
+    }
+
+    pub fn reset_publish_retry(&mut self, kind: PublishRetryKind) {
+        self.publish_retries.retain(|r| r.kind != kind);
+    }
+
+    pub fn reset_publish_retries(&mut self) {
+        self.publish_retries.clear();
     }
 
     pub fn enter_validate_mode(&mut self, tier: ExecutionTier) {
@@ -490,6 +562,17 @@ pub fn gate_authoring_progress(state: &ExecutionState, phase: Phase) -> Result<(
         _ => return Ok(()),
     }
     Ok(())
+}
+
+pub fn gate_publish_progress(state: &ExecutionState, phase: Phase) -> Result<(), String> {
+    match phase {
+        Phase::PublishAwaitApproval | Phase::Publish => {}
+        _ => return Ok(()),
+    }
+    if state.is_publish_approved() {
+        return Ok(());
+    }
+    Err("publish_gate_blocked: publish requires explicit persisted approval state".to_string())
 }
 
 #[cfg(test)]
@@ -587,6 +670,42 @@ mod tests {
         st.mark_failed("x");
         assert_eq!(st.mode, ExecutionMode::Failed);
         assert_eq!(st.last_error_brief.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn publish_gate_requires_explicit_approval() {
+        let mut st = ExecutionState::new();
+        assert!(gate_publish_progress(&st, Phase::Publish).is_err());
+        st.set_publish_approval(PublishApprovalDecision::Approved);
+        assert!(gate_publish_progress(&st, Phase::PublishAwaitApproval).is_ok());
+        assert!(gate_publish_progress(&st, Phase::Publish).is_ok());
+        st.set_publish_approval(PublishApprovalDecision::Rejected);
+        assert!(gate_publish_progress(&st, Phase::Publish).is_err());
+    }
+
+    #[test]
+    fn publish_retry_budget_is_tracked_by_typed_kind() {
+        let mut st = ExecutionState::new();
+        assert_eq!(
+            st.bump_publish_retry(PublishRetryKind::AwaitApprovalLoop, 3),
+            1
+        );
+        assert_eq!(
+            st.bump_publish_retry(PublishRetryKind::AwaitApprovalLoop, 3),
+            2
+        );
+        assert_eq!(
+            st.bump_publish_retry(PublishRetryKind::PublishFailureLoop, 3),
+            1
+        );
+        st.reset_publish_retry(PublishRetryKind::AwaitApprovalLoop);
+        assert_eq!(
+            st.publish_retries
+                .iter()
+                .find(|r| r.kind == PublishRetryKind::AwaitApprovalLoop)
+                .map(|r| r.count),
+            None
+        );
     }
 
     #[test]
