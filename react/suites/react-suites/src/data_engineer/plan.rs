@@ -2438,6 +2438,30 @@ pub fn model_mark_in_progress(plan: &mut ModelPlan, name: &str) {
     }
 }
 
+/// Mark validate checklist item as done for all active cleanse tasks.
+///
+/// Hard cutover behavior: validate completion is driven by deterministic controller events,
+/// not replaying thread logs.
+pub fn cleanse_mark_validate_done(plan: &mut CleansePlan) {
+    for t in plan.tasks.iter_mut() {
+        let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_VALIDATE, "Validate");
+        set_checklist_status(it, ChecklistItemStatus::Done, None);
+        recompute_cleanse_task_status(t);
+    }
+}
+
+/// Mark validate checklist item as done for all active model tasks.
+///
+/// Hard cutover behavior: validate completion is driven by deterministic controller events,
+/// not replaying thread logs.
+pub fn model_mark_validate_done(plan: &mut ModelPlan) {
+    for t in plan.tasks.iter_mut() {
+        let it = ensure_checklist_item(&mut t.checklist, CHECKLIST_VALIDATE, "Validate DBT");
+        set_checklist_status(it, ChecklistItemStatus::Done, None);
+        recompute_model_task_status(t);
+    }
+}
+
 pub fn cleanse_all_done(plan: &CleansePlan) -> bool {
     !plan.tasks.is_empty()
         && plan.tasks.iter().all(|t| {

@@ -7873,6 +7873,9 @@ Apply these fixes in the output.",
                             if let Some(mut p) =
                                 crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
                             {
+                                // State-first completion update: successful validate marks
+                                // validate checklist items done for the active plan.
+                                crate::data_engineer::plan::cleanse_mark_validate_done(&mut p);
                                 active_plan_key = Some(p.plan_key.clone());
                                 if crate::data_engineer::plan::cleanse_all_done(&p) {
                                     p.status = crate::data_engineer::plan::PlanStatus::Completed;
@@ -7887,6 +7890,9 @@ Apply these fixes in the output.",
                             if let Some(mut p) =
                                 crate::data_engineer::plan::load_model_plan_any(&actx).await
                             {
+                                // State-first completion update: successful validate marks
+                                // validate checklist items done for the active plan.
+                                crate::data_engineer::plan::model_mark_validate_done(&mut p);
                                 active_plan_key = Some(p.plan_key.clone());
                                 if crate::data_engineer::plan::model_all_done(&p) {
                                     p.status = crate::data_engineer::plan::PlanStatus::Completed;
