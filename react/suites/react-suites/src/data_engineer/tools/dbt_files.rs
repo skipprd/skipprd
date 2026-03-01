@@ -10,9 +10,9 @@ use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
 use crate::data_engineer::patch_contract::{normalize_hunks_only_patch_text, SingleFilePatchArgs};
-use crate::data_engineer::project_fs;
+use crate::data_engineer::files_store;
 
-pub struct DbtFilesTool {
+pub struct FilesTool {
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
 }
 
@@ -608,7 +608,7 @@ fn yaml_collect_where_strings(v: &serde_yaml::Value, out: &mut Vec<String>) {
 
 pub(crate) async fn validate_staging_schema_ymls(
     ctx: &AgentCtx,
-    outcomes: &[project_fs::PatchOutcome],
+    outcomes: &[files_store::PatchOutcome],
 ) -> Result<(), String> {
     // Build a rel_path -> new content map so we validate against the content that will be written.
     let mut new_by_rel: HashMap<String, String> = HashMap::new();
@@ -692,7 +692,7 @@ pub(crate) async fn validate_staging_schema_ymls(
                 s.clone()
             } else {
                 // Fall back to existing staging SQL in storage.
-                let key = project_fs::join_storage_key(ctx, &sql_rel);
+                let key = files_store::join_storage_key(ctx, &sql_rel);
                 let bytes = ctx.storage.get_bytes(&key).await.map_err(|_| {
                     format!(
                         "cannot validate {}: missing staging model SQL {} (for model '{}')",
@@ -903,7 +903,7 @@ struct MoveFileArgs {
 }
 
 #[async_trait]
-impl Tool for DbtFilesTool {
+impl Tool for FilesTool {
     fn name(&self) -> &'static str {
         "file"
     }
@@ -922,7 +922,7 @@ impl Tool for DbtFilesTool {
                     .and_then(|x| x.as_u64())
                     .unwrap_or(200)
                     .min(2000) as usize;
-                project_fs::list_files(ctx, prefix, limit).await
+                files_store::list_files(ctx, prefix, limit).await
             }
             "get" => {
                 let path = args
@@ -931,7 +931,7 @@ impl Tool for DbtFilesTool {
                     .ok_or_else(|| "path required".to_string())?;
                 let max_chars =
                     args.get("max_chars").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                project_fs::get_file(ctx, path, max_chars).await
+                files_store::get_file(ctx, path, max_chars).await
             }
             "rm" => {
                 let parsed = serde_json::from_value::<RemoveFileArgs>(args.clone()).map_err(|e| {
@@ -940,7 +940,7 @@ impl Tool for DbtFilesTool {
                         e
                     )
                 })?;
-                project_fs::remove_file(ctx, &parsed.path, parsed.expected_sha256.as_deref()).await
+                files_store::remove_file(ctx, &parsed.path, parsed.expected_sha256.as_deref()).await
             }
             "mv" => {
                 let parsed = serde_json::from_value::<MoveFileArgs>(args.clone()).map_err(|e| {
@@ -949,7 +949,7 @@ impl Tool for DbtFilesTool {
                         e
                     )
                 })?;
-                project_fs::move_file(
+                files_store::move_file(
                     ctx,
                     &parsed.from,
                     &parsed.to,
@@ -990,7 +990,7 @@ impl Tool for DbtFilesTool {
                         e
                     )
                 })?;
-                let want0 = project_fs::normalize_rel_path(parsed.path.as_str())?;
+                let want0 = files_store::normalize_rel_path(parsed.path.as_str())?;
                 let (want_rel, from_opt) = canonicalize_silver_folder_alias(&want0);
                 let mut path_rewrites: Vec<(String, String)> = Vec::new();
                 if let Some(from) = from_opt {
@@ -1006,16 +1006,20 @@ impl Tool for DbtFilesTool {
 
                 validate_sql_model_folder_policy(&want_rel)?;
 
-                let outcome = project_fs::apply_patch(
-                    ctx,
-                    self.datasets.as_ref(),
-                    &want_rel,
-                    patch_in.as_str(),
-                    None,
-                    None,
-                    project_fs::PatchApplyKind::UnifiedDiff,
-                )
-                .await?;
+                let base_state =
+                    crate::data_engineer::files_patch_repair::read_patch_base_state(
+                        ctx, &want_rel,
+                    )
+                    .await;
+                let outcome =
+                    crate::data_engineer::files_patch_repair::apply_single_file_patch_with_base(
+                        ctx,
+                        self.datasets.as_ref(),
+                        &want_rel,
+                        patch_in.as_str(),
+                        &base_state,
+                    )
+                    .await?;
 
                 if outcome.base_sha256 == outcome.new_sha256
                     && (outcome.lines_added + outcome.lines_removed) == 0
@@ -1039,7 +1043,7 @@ impl Tool for DbtFilesTool {
                 for (from, to) in path_rewrites.iter() {
                     rewrites_json.push(serde_json::json!({ "from": from, "to": to }));
                     if from != to {
-                        let old_key = project_fs::join_storage_key(ctx, from);
+                        let old_key = files_store::join_storage_key(ctx, from);
                         let _ = ctx.storage.delete_object(&old_key).await;
                     }
                 }
@@ -1080,11 +1084,13 @@ impl Tool for DbtFilesTool {
 mod tests {
     use super::*;
     use crate::config;
+    use crate::data_engineer::files_store as project_fs;
     use react_core::agent::DefaultPolicy;
     use react_core::keyspace::{DefaultKeyspace, Keyspace};
     use react_core::llm::NullModel;
     use react_core::scope::RequestScope;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
+    type DbtFilesTool = FilesTool;
 
     fn minimal_cfg() -> Arc<config::ReactResolvedConfig> {
         Arc::new(config::ReactResolvedConfig {

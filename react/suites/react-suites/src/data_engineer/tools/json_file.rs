@@ -32,8 +32,8 @@ async fn get_item(args: Value, ctx: &AgentCtx) -> Result<Value, String> {
         .ok_or_else(|| "path required".to_string())?;
     let pointer = args.get("pointer").and_then(|x| x.as_str());
 
-    let rel = crate::data_engineer::project_fs::normalize_rel_path(path)?;
-    let key = crate::data_engineer::project_fs::join_storage_key(ctx, &rel);
+    let rel = crate::data_engineer::files_store::normalize_rel_path(path)?;
+    let key = crate::data_engineer::files_store::join_storage_key(ctx, &rel);
     let bytes = match ctx.storage.get_bytes(&key).await {
         Ok(b) => b,
         Err(e) => {
@@ -87,8 +87,8 @@ async fn query(args: Value, ctx: &AgentCtx) -> Result<Value, String> {
         .unwrap_or(20)
         .min(200) as usize;
 
-    let rel = crate::data_engineer::project_fs::normalize_rel_path(path)?;
-    let key = crate::data_engineer::project_fs::join_storage_key(ctx, &rel);
+    let rel = crate::data_engineer::files_store::normalize_rel_path(path)?;
+    let key = crate::data_engineer::files_store::join_storage_key(ctx, &rel);
     let bytes = match ctx.storage.get_bytes(&key).await {
         Ok(b) => b,
         Err(e) => {

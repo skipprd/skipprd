@@ -10,7 +10,7 @@ use crate::data_engineer::dbt_repair::remediate::active_provider_dialect;
 use crate::data_engineer::naming::{canonical_staging_model_name, contains_expected_source_call};
 use crate::data_engineer::plan;
 use crate::data_engineer::project_files;
-use crate::data_engineer::project_fs;
+use crate::data_engineer::files_store;
 use crate::data_engineer::references::DatasetRef;
 use crate::data_engineer::sql_first;
 use react_core::agent::AgentCtx;
@@ -375,15 +375,15 @@ impl Tool for StagingModelTool {
         };
         if existing_schema.is_none() {
             let seed = "version: 2\n".to_string();
-            let patch_text = project_fs::hunks_only_full_replace_patch("", &seed);
-            let outcome = match project_fs::apply_patch(
+            let patch_text = files_store::hunks_only_full_replace_patch("", &seed);
+            let outcome = match files_store::apply_patch(
                 ctx,
                 self.datasets.as_ref(),
                 &schema_rel,
                 &patch_text,
                 None,
                 None,
-                project_fs::PatchApplyKind::UnifiedDiff,
+                files_store::PatchApplyKind::UnifiedDiff,
             )
             .await
             {
@@ -416,7 +416,7 @@ impl Tool for StagingModelTool {
         } else if let Some(existing) = existing_schema.as_deref() {
             // Canonicalize schema.yml deterministically and only apply/write if it actually changes.
             let canonical =
-                match project_fs::canonicalize_schema_yml(ctx, self.datasets.as_ref(), existing)
+                match files_store::canonicalize_schema_yml(ctx, self.datasets.as_ref(), existing)
                     .await
                 {
                     Ok(v) => v,
@@ -432,15 +432,15 @@ impl Tool for StagingModelTool {
                     }
                 };
             if canonical != existing {
-                let patch_text = project_fs::hunks_only_full_replace_patch(existing, &canonical);
-                let outcome = match project_fs::apply_patch(
+                let patch_text = files_store::hunks_only_full_replace_patch(existing, &canonical);
+                let outcome = match files_store::apply_patch(
                     ctx,
                     self.datasets.as_ref(),
                     &schema_rel,
                     &patch_text,
                     None,
                     None,
-                    project_fs::PatchApplyKind::UnifiedDiff,
+                    files_store::PatchApplyKind::UnifiedDiff,
                 )
                 .await
                 {
@@ -614,15 +614,15 @@ impl Tool for StagingModelTool {
                 .ok()
                 .map(|b| String::from_utf8_lossy(&b).to_string());
             let old_text = existing_opt.unwrap_or_default();
-            let patch_text = project_fs::hunks_only_full_replace_patch(&old_text, &sql_out);
-            let outcome = project_fs::apply_patch(
+            let patch_text = files_store::hunks_only_full_replace_patch(&old_text, &sql_out);
+            let outcome = files_store::apply_patch(
                 ctx,
                 None,
                 &rel_path,
                 &patch_text,
                 None,
                 None,
-                project_fs::PatchApplyKind::UnifiedDiff,
+                files_store::PatchApplyKind::UnifiedDiff,
             )
             .await?;
             if let Err(e) = ctx
@@ -887,15 +887,15 @@ impl Tool for StagingModelTool {
             } else {
                 Some(sha256_hex(&existing_sql))
             };
-            let patch_text = project_fs::hunks_only_full_replace_patch(&existing_sql, &dbt_sql);
-            let outcome = match project_fs::apply_patch(
+            let patch_text = files_store::hunks_only_full_replace_patch(&existing_sql, &dbt_sql);
+            let outcome = match files_store::apply_patch(
                 ctx,
                 None,
                 &rel_path,
                 &patch_text,
                 base_sha256.as_deref(),
                 Some(!existing_sql.is_empty()),
-                project_fs::PatchApplyKind::UnifiedDiff,
+                files_store::PatchApplyKind::UnifiedDiff,
             )
             .await
             {

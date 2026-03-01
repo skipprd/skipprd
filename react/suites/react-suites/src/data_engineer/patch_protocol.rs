@@ -11,7 +11,7 @@ use react_core::session::{Observation, ThreadStep};
 use crate::data_engineer::patch_contract::{
     normalize_hunks_only_patch_text, LlmSingleFilePatchResponse,
 };
-use crate::data_engineer::project_fs;
+use crate::data_engineer::files_store;
 
 fn sha256_hex(s: &str) -> String {
     use sha2::Digest;
@@ -50,6 +50,58 @@ pub fn default_patch_loop_max_output_tokens() -> u32 {
         .and_then(|v| v.trim().parse::<u32>().ok())
         .filter(|v| *v >= 512)
         .unwrap_or(3200)
+}
+
+#[derive(Clone, Debug)]
+pub struct PatchBaseState {
+    pub base_exists: bool,
+    pub base_sha256: String,
+}
+
+pub async fn read_patch_base_state(ctx: &AgentCtx, rel_path: &str) -> PatchBaseState {
+    let key = files_store::join_storage_key(ctx, rel_path);
+    let existing_opt = ctx
+        .storage
+        .get_bytes(&key)
+        .await
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).to_string());
+    let base_exists = existing_opt.is_some();
+    let existing = existing_opt.unwrap_or_default();
+    PatchBaseState {
+        base_exists,
+        base_sha256: sha256_hex(&existing),
+    }
+}
+
+fn normalize_patch_apply_error(err: String) -> String {
+    if err.contains("patch_hunk_context_miss") {
+        return format!(
+            "{}\n\nPatch apply guidance: ensure patch_text contains real hunk edits with '-' and/or '+' lines under '@@ ... @@' for the exact target path.",
+            err
+        );
+    }
+    err
+}
+
+pub async fn apply_single_file_patch_with_base(
+    ctx: &AgentCtx,
+    datasets: Option<&Arc<dyn DatasetCatalogProvider>>,
+    rel_path: &str,
+    patch_text: &str,
+    base: &PatchBaseState,
+) -> Result<files_store::PatchOutcome, String> {
+    files_store::apply_patch(
+        ctx,
+        datasets,
+        rel_path,
+        patch_text,
+        Some(base.base_sha256.as_str()),
+        Some(base.base_exists),
+        files_store::PatchApplyKind::UnifiedDiff,
+    )
+    .await
+    .map_err(normalize_patch_apply_error)
 }
 
 fn has_required_analyst_notes(notes: &[String]) -> Result<(), String> {
@@ -266,7 +318,7 @@ fn parse_llm_patch_response(
     let v = parse_patch_json_from_llm(text)?;
     let mut parsed: LlmSingleFilePatchResponse = serde_json::from_value(Value::Object(v))
         .map_err(|e| format!("failed to parse patch response JSON: {}", e))?;
-    let rel = project_fs::normalize_rel_path(parsed.path.as_str())?;
+    let rel = files_store::normalize_rel_path(parsed.path.as_str())?;
     if rel != expected_rel_path {
         return Err(format!(
             "path '{}' did not match expected_rel_path '{}'",
@@ -291,7 +343,7 @@ pub async fn llm_patch_loop_single_file(
     expected_rel_path: &str,
     max_iters: usize,
     llm_options: Option<LlmCallOptions>,
-) -> Result<(project_fs::PatchOutcome, Vec<String>), String> {
+) -> Result<(files_store::PatchOutcome, Vec<String>), String> {
     let max_iters = max_iters.max(1).min(10);
     let enforce_analyst_notes_contract = sys_prompt.contains("ANALYST_NOTES_CONTRACT_V1");
 
@@ -310,6 +362,10 @@ pub async fn llm_patch_loop_single_file(
     let existed = existing_opt.is_some();
     let existing = existing_opt.unwrap_or_default();
     let base_sha256 = sha256_hex(&existing);
+    let base_state = PatchBaseState {
+        base_exists: existed,
+        base_sha256: base_sha256.clone(),
+    };
     // Prompt facts used to help the LLM produce stable hunks.
     // We cap numbered content to avoid doubling prompt size for large files.
     let (
@@ -348,7 +404,7 @@ pub async fn llm_patch_loop_single_file(
 
     let mut call_opts = llm_options.unwrap_or_else(|| {
         react_core::llm::LlmCallOptions::new(
-            "data_engineer.patch_protocol.llm_patch_loop",
+            "data_engineer.files_patch_repair.llm_patch_loop",
             react_core::llm::LlmExpectedFormat::JsonObject,
         )
     });
@@ -398,8 +454,10 @@ pub async fn llm_patch_loop_single_file(
                         } else {
                             None
                         };
-                        let phase =
-                            format!("patch_protocol:{}:attempt_{}", expected_rel_path, attempt);
+                        let phase = format!(
+                            "files_patch_repair:{}:attempt_{}",
+                            expected_rel_path, attempt
+                        );
                         tracing::debug!(
                             "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_hash={} response_hash={}",
                             thread_id,
@@ -504,7 +562,10 @@ pub async fn llm_patch_loop_single_file(
                 } else {
                     None
                 };
-                let phase = format!("patch_protocol:{}:attempt_{}", expected_rel_path, attempt);
+                let phase = format!(
+                    "files_patch_repair:{}:attempt_{}",
+                    expected_rel_path, attempt
+                );
                 tracing::debug!(
                     "LLM_CALL thread_id={} call_id={} agent={} phase={} model={} prompt_hash={} response_hash={}",
                     thread_id,
@@ -647,17 +708,14 @@ pub async fn llm_patch_loop_single_file(
             ));
         }
 
-        match project_fs::apply_patch(
+        match apply_single_file_patch_with_base(
             ctx,
             datasets,
             expected_rel_path,
             parsed.patch_text.as_str(),
-            Some(base_sha256.as_str()),
-            Some(existed),
-            project_fs::PatchApplyKind::UnifiedDiff,
+            &base_state,
         )
-        .await
-        {
+        .await {
             Ok(outcome) => {
                 if outcome.base_sha256 == outcome.new_sha256 {
                     no_op_failures = no_op_failures.saturating_add(1);

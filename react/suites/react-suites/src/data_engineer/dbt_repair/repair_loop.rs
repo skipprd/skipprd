@@ -93,20 +93,20 @@ async fn ensure_dbt_utils_package(ctx: &AgentCtx) -> Result<Option<RemediationDi
 
     let new_content =
         serde_yaml::to_string(&YamlValue::Mapping(root)).map_err(|e| e.to_string())?;
-    let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
+    let patch_text = crate::data_engineer::files_store::create_git_patch_text(
         &existing,
         &new_content,
         "packages.yml",
         existed,
     )?;
-    let outcome = crate::data_engineer::project_fs::apply_patch(
+    let outcome = crate::data_engineer::files_store::apply_patch(
         ctx,
         None,
         "packages.yml",
         &patch_text,
         None,
         Some(existed),
-        crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
+        crate::data_engineer::files_store::PatchApplyKind::UnifiedDiff,
     )
     .await?;
     ctx.storage
@@ -241,7 +241,7 @@ pub async fn run_repair_loop(
         let catalog_refreshed = false;
 
         // Deterministic packages auto-repair for common missing-macro cases (e.g. dbt_utils).
-        // This is safe because packages.yml is normalized/deduped by project_fs postprocess.
+        // This is safe because packages.yml is normalized/deduped by files_store postprocess.
         if errors_look_like_missing_dbt_utils(&res.errors) {
             let diff = ensure_dbt_utils_package(ctx).await.ok().flatten();
             let mutated = diff.is_some();

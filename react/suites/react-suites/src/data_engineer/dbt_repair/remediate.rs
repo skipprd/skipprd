@@ -634,7 +634,7 @@ pub async fn remediate_dbt_sql_keys_with_llm(
             .to_string();
 
             let (outcome, _notes) =
-                crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
+                crate::data_engineer::files_patch_repair::llm_patch_loop_single_file(
                     ctx,
                     None,
                     sys_prompt,
@@ -1173,7 +1173,7 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         })
         .to_string();
 
-        let (outcome, _notes) = crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
+        let (outcome, _notes) = crate::data_engineer::files_patch_repair::llm_patch_loop_single_file(
             ctx,
             None,
             sys_prompt,
@@ -1598,7 +1598,7 @@ pub async fn remediate_unresolved_columns_with_llm(
         })
         .to_string();
 
-        let (outcome, _notes) = crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
+        let (outcome, _notes) = crate::data_engineer::files_patch_repair::llm_patch_loop_single_file(
             ctx,
             None,
             sys_prompt,

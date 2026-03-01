@@ -33,7 +33,8 @@ pub mod facts;
 pub mod failure_classifier;
 pub mod naming;
 pub mod patch_contract;
-pub mod patch_protocol;
+#[path = "patch_protocol.rs"]
+pub mod files_patch_repair;
 pub mod plan;
 pub mod ws_plans;
 pub mod plan_kind;
@@ -41,7 +42,8 @@ pub mod plan_schema;
 pub mod probe_target;
 pub mod progress_controller;
 pub mod project_files;
-pub mod project_fs;
+#[path = "project_fs/mod.rs"]
+pub mod files_store;
 pub mod prompt_packets;
 pub mod prompts;
 pub mod authoring_ir;
@@ -3033,7 +3035,7 @@ Apply these fixes in the output.",
 
     fn build_tools(agent_mode: AgentMode, sctx: &SuiteCtx) -> Result<ToolRegistry, String> {
         use crate::data_engineer::tools::{
-            artifacts::ArtifactsTool, dbt_files::DbtFilesTool, sql_run::SqlRunTool,
+            artifacts::ArtifactsTool, files_tool::FilesTool, sql_run::SqlRunTool,
             sql_sample::SqlSampleTool, sql_schema::SqlSchemaTool, sql_stats::SqlStatsTool,
             vect_query::VectQueryTool,
         };
@@ -3112,11 +3114,11 @@ Apply these fixes in the output.",
 
         // Allow review to read the current dbt project state (manifest/schema/models)
         // without permitting writes.
-        struct ReadOnlyDbtFilesTool {
-            inner: DbtFilesTool,
+        struct ReadOnlyFilesTool {
+            inner: FilesTool,
         }
         #[async_trait::async_trait]
-        impl react_core::tools::Tool for ReadOnlyDbtFilesTool {
+        impl react_core::tools::Tool for ReadOnlyFilesTool {
             fn name(&self) -> &'static str {
                 "file"
             }
@@ -3136,13 +3138,13 @@ Apply these fixes in the output.",
         }
 
         if caps.contains(&AgentToolCapability::ReadOnlyFile) {
-            registry.register(ReadOnlyDbtFilesTool {
-                inner: DbtFilesTool {
+            registry.register(ReadOnlyFilesTool {
+                inner: FilesTool {
                     datasets: sctx.datasets.clone(),
                 },
             });
         } else if caps.contains(&AgentToolCapability::MutableFile) {
-            registry.register(DbtFilesTool {
+            registry.register(FilesTool {
                 datasets: sctx.datasets.clone(),
             });
         }
@@ -3294,7 +3296,7 @@ Apply these fixes in the output.",
         suppress_manifest_json_in_plan: bool,
     ) -> Result<(ToolRegistry, String), String> {
         use crate::data_engineer::tools::{
-            artifacts::ArtifactsTool, dbt_files::DbtFilesTool, json_file::JsonFileTool,
+            artifacts::ArtifactsTool, files_tool::FilesTool, json_file::JsonFileTool,
             sql_run::SqlRunTool, sql_sample::SqlSampleTool, sql_schema::SqlSchemaTool,
             sql_stats::SqlStatsTool, vect_query::VectQueryTool,
         };
@@ -3336,11 +3338,11 @@ Apply these fixes in the output.",
                 reg.register(tools::dbt_examples::SearchDbtExamplesTool);
 
                 // Read-only file tool (no patch).
-                struct ReadOnlyDbtFilesTool {
-                    inner: DbtFilesTool,
+                struct ReadOnlyFilesTool {
+                    inner: FilesTool,
                 }
                 #[async_trait::async_trait]
-                impl react_core::tools::Tool for ReadOnlyDbtFilesTool {
+                impl react_core::tools::Tool for ReadOnlyFilesTool {
                     fn name(&self) -> &'static str {
                         "file"
                     }
@@ -3358,8 +3360,8 @@ Apply these fixes in the output.",
                         self.inner.call(args, ctx).await
                     }
                 }
-                reg.register(ReadOnlyDbtFilesTool {
-                    inner: DbtFilesTool {
+                reg.register(ReadOnlyFilesTool {
+                    inner: FilesTool {
                         datasets: sctx.datasets.clone(),
                     },
                 });
@@ -3398,12 +3400,12 @@ Apply these fixes in the output.",
 
                 if hard_mutation_only {
                     // Mutation-only file tool to avoid "read-only thrash" when we require a mutation next.
-                    struct PutOnlyDbtFilesTool {
-                        inner: DbtFilesTool,
+                    struct PutOnlyFilesTool {
+                        inner: FilesTool,
                         single_target_path: Option<String>,
                     }
                     #[async_trait::async_trait]
-                    impl react_core::tools::Tool for PutOnlyDbtFilesTool {
+                    impl react_core::tools::Tool for PutOnlyFilesTool {
                         fn name(&self) -> &'static str {
                             "file"
                         }
@@ -3550,8 +3552,8 @@ Apply these fixes in the output.",
                             res
                         }
                     }
-                    reg.register(PutOnlyDbtFilesTool {
-                        inner: DbtFilesTool {
+                    reg.register(PutOnlyFilesTool {
+                        inner: FilesTool {
                             datasets: sctx.datasets.clone(),
                         },
                         single_target_path: single_target_repair_path.clone(),
@@ -3666,7 +3668,7 @@ Apply these fixes in the output.",
                         query: query.clone(),
                     });
                     reg.register(tools::dbt_examples::SearchDbtExamplesTool);
-                    reg.register(DbtFilesTool {
+                    reg.register(FilesTool {
                         datasets: sctx.datasets.clone(),
                     });
                     reg.register(JsonFileTool);
@@ -3786,11 +3788,11 @@ Apply these fixes in the output.",
             | control_flow::Phase::ModelReview
             | control_flow::Phase::PostPublishReview => {
                 // Review phases: keep read-only; do not allow arbitrary SQL execution.
-                struct ReadOnlyDbtFilesTool {
-                    inner: DbtFilesTool,
+                struct ReadOnlyFilesTool {
+                    inner: FilesTool,
                 }
                 #[async_trait::async_trait]
-                impl react_core::tools::Tool for ReadOnlyDbtFilesTool {
+                impl react_core::tools::Tool for ReadOnlyFilesTool {
                     fn name(&self) -> &'static str {
                         "file"
                     }
@@ -3806,8 +3808,8 @@ Apply these fixes in the output.",
                         self.inner.call(args, ctx).await
                     }
                 }
-                reg.register(ReadOnlyDbtFilesTool {
-                    inner: DbtFilesTool {
+                reg.register(ReadOnlyFilesTool {
+                    inner: FilesTool {
                         datasets: sctx.datasets.clone(),
                     },
                 });
@@ -5023,7 +5025,7 @@ Apply these fixes in the output.",
                     let mut bootstrap_summary: Option<String> = None;
                     if let Some(ref l) = log {
                         let start = Self::phase_start_idx(l, phase).unwrap_or(0);
-                        let mut saw_dbt_files = false;
+                        let mut saw_files_tool = false;
                         let mut saw_sql_schema = false;
                         let mut saw_evidence = false;
                         for s in l.steps.iter().skip(start + 1) {
@@ -5042,7 +5044,7 @@ Apply these fixes in the output.",
                             };
                             if let (Some(name), Some(true)) = (name_opt, ok_opt) {
                                 match name {
-                                    "file" => saw_dbt_files = true,
+                                    "file" => saw_files_tool = true,
                                     "sql_schema" => saw_sql_schema = true,
                                     "sql_stats" | "sql_sample" | "run_sql" => {
                                         if args_opt
@@ -5058,7 +5060,7 @@ Apply these fixes in the output.",
                                 }
                             }
                         }
-                        if !(saw_dbt_files && saw_sql_schema && saw_evidence) {
+                        if !(saw_files_tool && saw_sql_schema && saw_evidence) {
                             // Bootstrap calls are intentionally conservative: list models (may be empty),
                             // read core config files, list datasets, and run a minimal probe on one table.
                             let query = sctx
@@ -5066,7 +5068,7 @@ Apply these fixes in the output.",
                                 .as_ref()
                                 .ok_or_else(|| "query provider missing".to_string())?
                                 .clone();
-                            let dbt_files_tool = tools::dbt_files::DbtFilesTool {
+                            let files_tool = tools::files_tool::FilesTool {
                                 datasets: sctx.datasets.clone(),
                             };
                             let sql_schema_tool = tools::sql_schema::SqlSchemaTool {
@@ -5090,7 +5092,7 @@ Apply these fixes in the output.",
                                     .timeout_for_tool(name)
                                     .unwrap_or(actx.per_step_timeout_secs)
                             };
-                            let dbt_files_timeout = tool_timeout("file");
+                            let files_tool_timeout = tool_timeout("file");
                             let sql_schema_timeout = tool_timeout("sql_schema");
                             let sql_stats_timeout = tool_timeout("sql_stats");
                             let sql_sample_timeout = tool_timeout("sql_sample");
@@ -5100,40 +5102,40 @@ Apply these fixes in the output.",
                                 &thread_store,
                                 thread_id,
                                 Some("agent".to_string()),
-                                &dbt_files_tool,
+                                &files_tool,
                                 serde_json::json!({"op":"list","prefix":"models/","limit":500}),
                                 &actx,
-                                dbt_files_timeout,
+                                files_tool_timeout,
                             )
                             .await;
                             let _dbt_project = control_flow::call_and_record_tool(
                                 &thread_store,
                                 thread_id,
                                 Some("agent".to_string()),
-                                &dbt_files_tool,
+                                &files_tool,
                                 serde_json::json!({"op":"get","path":"dbt_project.yml","max_chars":4000}),
                                 &actx,
-                                dbt_files_timeout,
+                                files_tool_timeout,
                             )
                             .await;
                             let _packages = control_flow::call_and_record_tool(
                                 &thread_store,
                                 thread_id,
                                 Some("agent".to_string()),
-                                &dbt_files_tool,
+                                &files_tool,
                                 serde_json::json!({"op":"get","path":"packages.yml","max_chars":4000}),
                                 &actx,
-                                dbt_files_timeout,
+                                files_tool_timeout,
                             )
                             .await;
                             let _schema_yml = control_flow::call_and_record_tool(
                                 &thread_store,
                                 thread_id,
                                 Some("agent".to_string()),
-                                &dbt_files_tool,
+                                &files_tool,
                                 serde_json::json!({"op":"get","path":"models/schema.yml","max_chars":6000}),
                                 &actx,
-                                dbt_files_timeout,
+                                files_tool_timeout,
                             )
                             .await;
 
@@ -6753,7 +6755,7 @@ Apply these fixes in the output.",
                                     // for these pending items, mark schema_contract done and re-run planning for the
                                     // next action instead of thrashing the same file.
                                     {
-                                        let key = crate::data_engineer::project_fs::join_storage_key(
+                                        let key = crate::data_engineer::files_store::join_storage_key(
                                             &actx,
                                             crate::data_engineer::project_files::MODELS_SCHEMA_YML,
                                         );

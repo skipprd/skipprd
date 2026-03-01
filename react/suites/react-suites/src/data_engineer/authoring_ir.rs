@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::data_engineer::tools::dbt_files;
+use crate::data_engineer::tools::files_tool;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelIntent {
@@ -36,7 +36,7 @@ pub fn compile_sql_first_draft(sql: &str, notes: &[String]) -> Result<ModelInten
         let low = normalized_sql.to_ascii_lowercase();
         low.contains("select *") || low.contains(".* from")
     };
-    let cols = match dbt_files::extract_final_select_output_columns(normalized_sql) {
+    let cols = match files_tool::extract_final_select_output_columns(normalized_sql) {
         Ok(v) => v,
         Err(e) => {
             // `extract_final_select_output_columns` expects `FROM` to start on its own line.
@@ -50,7 +50,7 @@ pub fn compile_sql_first_draft(sql: &str, notes: &[String]) -> Result<ModelInten
                     s
                 })
                 .unwrap_or_else(|| normalized_sql.to_string());
-            match dbt_files::extract_final_select_output_columns(&patched) {
+            match files_tool::extract_final_select_output_columns(&patched) {
                 Ok(v) => v,
                 Err(e2) => {
                     if has_wildcard_projection {

@@ -10,7 +10,8 @@ mod approve_save_batch;
 pub mod artifacts;
 pub mod catalog_note;
 pub mod dbt_examples;
-pub mod dbt_files;
+#[path = "dbt_files.rs"]
+pub mod files_tool;
 pub mod dbt_validate;
 pub mod gold_model;
 pub mod json_file;

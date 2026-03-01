@@ -12,10 +12,10 @@ use crate::data_engineer::naming;
 use crate::data_engineer::plan;
 use crate::data_engineer::controller_kernel;
 use crate::data_engineer::project_files;
-use crate::data_engineer::project_fs;
+use crate::data_engineer::files_store;
 use crate::data_engineer::references::DatasetRef;
 use crate::data_engineer::schema_policy;
-use crate::data_engineer::tools::dbt_files;
+use crate::data_engineer::tools::files_tool;
 
 fn escape_yaml_doc_preamble(s: String) -> String {
     // serde_yaml may emit a leading `---\n`; keep stored files clean and consistent.
@@ -319,7 +319,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             let sql_rel = naming::canonical_staging_rel_path(&schema, &table);
             let yml_rel = format!("models/staging/{}.yml", model_name);
 
-            let sql_key = project_fs::join_storage_key(ctx, &sql_rel);
+            let sql_key = files_store::join_storage_key(ctx, &sql_rel);
             let sql_text = match ctx.storage.get_bytes(&sql_key).await {
                 Ok(b) => String::from_utf8_lossy(&b).to_string(),
                 Err(_) => {
@@ -328,7 +328,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                     continue;
                 }
             };
-            let allowed_cols = match dbt_files::extract_final_select_output_columns(&sql_text) {
+            let allowed_cols = match files_tool::extract_final_select_output_columns(&sql_text) {
                 Ok(s) => s.into_iter().collect::<Vec<_>>(),
                 Err(e) => {
                     // High-signal fallback for SELECT * loops:
@@ -395,7 +395,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             })
             .to_string();
 
-            let (outcome, _notes) = match crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
+            let (outcome, _notes) = match crate::data_engineer::files_patch_repair::llm_patch_loop_single_file(
                 ctx,
                 self.datasets.as_ref(),
                 schema_yml_sys_prompt_staging(),
@@ -409,7 +409,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                     temperature: Some(0.05),
                     top_p: Some(1.0),
                     max_output_tokens: Some(
-                        crate::data_engineer::patch_protocol::default_patch_loop_max_output_tokens(),
+                        crate::data_engineer::files_patch_repair::default_patch_loop_max_output_tokens(),
                     ),
                     reasoning_effort: None,
                 }),
@@ -443,14 +443,14 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
 
             // Validate schema contract against sibling SQL output columns.
             if let Err(e) =
-                dbt_files::validate_staging_schema_ymls(ctx, std::slice::from_ref(&outcome)).await
+                files_tool::validate_staging_schema_ymls(ctx, std::slice::from_ref(&outcome)).await
             {
                 failed.push(ds.clone());
                 errors.push(format!("{ds}: invalid staging schema yml: {e}"));
                 continue;
             }
 
-            let yml_key = project_fs::join_storage_key(ctx, &yml_rel);
+            let yml_key = files_store::join_storage_key(ctx, &yml_rel);
             if let Err(e) = ctx
                 .storage
                 .put_bytes(&yml_key, outcome.content.as_bytes(), "text/yaml")
@@ -636,11 +636,11 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 // Derive allowed columns from the model SQL output projection (best-effort).
                 let mut allowed = schema_policy::ModelAllowedColumns::default();
                 if let Some(ref rel) = t.expected_model_path {
-                    let key_sql = project_fs::join_storage_key(ctx, rel);
+                    let key_sql = files_store::join_storage_key(ctx, rel);
                     match ctx.storage.get_bytes(&key_sql).await {
                         Ok(b) => {
                             let sql_text = String::from_utf8_lossy(&b).to_string();
-                            match dbt_files::extract_final_select_output_columns(&sql_text) {
+                            match files_tool::extract_final_select_output_columns(&sql_text) {
                                 Ok(cols) => {
                                     allowed.allowed_columns =
                                         cols.into_iter().collect::<std::collections::HashSet<_>>();
@@ -680,7 +680,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
         .to_string();
 
         let (outcome, _notes) =
-            match crate::data_engineer::patch_protocol::llm_patch_loop_single_file(
+            match crate::data_engineer::files_patch_repair::llm_patch_loop_single_file(
                 ctx,
                 self.datasets.as_ref(),
                 schema_yml_sys_prompt_models_schema_yml(),
@@ -694,7 +694,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                     temperature: Some(0.05),
                     top_p: Some(1.0),
                     max_output_tokens: Some(
-                        crate::data_engineer::patch_protocol::default_patch_loop_max_output_tokens(
+                        crate::data_engineer::files_patch_repair::default_patch_loop_max_output_tokens(
                         ),
                     ),
                     reasoning_effort: None,
@@ -776,7 +776,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             }
         };
 
-        let key = project_fs::join_storage_key(ctx, expected_rel);
+        let key = files_store::join_storage_key(ctx, expected_rel);
         if let Err(e) = ctx
             .storage
             .put_bytes(&key, sanitized_text.as_bytes(), "text/yaml")
@@ -902,7 +902,7 @@ mod tests {
             messages: &[ChatMessage],
             _options: &react_core::llm::LlmCallOptions,
         ) -> Result<String, String> {
-            // Find the last user message (patch_protocol sends JSON payload as user content).
+            // Find the last user message (files_patch_repair sends JSON payload as user content).
             let user = messages
                 .iter()
                 .rev()
@@ -1080,7 +1080,7 @@ mod tests {
         // Seed staging SQL with wildcard final projection so the tool exercises deterministic
         // wildcard auto-heal before writing schema YAML.
         let sql_rel = "models/staging/stg_test_raw_raw_customers.sql";
-        let sql_key = project_fs::join_storage_key(&ctx, sql_rel);
+        let sql_key = files_store::join_storage_key(&ctx, sql_rel);
         let sql = "with source as (\n  select * from {{ source('test_raw','raw_customers') }}\n)\nselect * from source\n";
         ctx.storage
             .put_bytes(&sql_key, sql.as_bytes(), "text/sql")
@@ -1096,7 +1096,7 @@ mod tests {
         );
 
         let yml_rel = "models/staging/stg_test_raw_raw_customers.yml";
-        let yml_key = project_fs::join_storage_key(&ctx, yml_rel);
+        let yml_key = files_store::join_storage_key(&ctx, yml_rel);
         let got = ctx.storage.get_bytes(&yml_key).await.unwrap();
         let got = String::from_utf8_lossy(&got).to_string();
         assert!(got.contains("stg_test_raw_raw_customers"));
@@ -1304,7 +1304,7 @@ mod tests {
 
         // Seed canonical staging SQL with explicit final SELECT list (no '*').
         let sql_rel = "models/staging/stg_test_raw_raw_customers.sql";
-        let sql_key = project_fs::join_storage_key(&ctx, sql_rel);
+        let sql_key = files_store::join_storage_key(&ctx, sql_rel);
         let sql = "with source as (\n  select * from {{ source('test_raw','raw_customers') }}\n)\nselect\n  customer_id_raw,\n  email_raw\nfrom source\n";
         ctx.storage
             .put_bytes(&sql_key, sql.as_bytes(), "text/sql")
@@ -1430,7 +1430,7 @@ mod tests {
             res
         );
 
-        let key = project_fs::join_storage_key(&ctx, project_files::MODELS_SCHEMA_YML);
+        let key = files_store::join_storage_key(&ctx, project_files::MODELS_SCHEMA_YML);
         let got = ctx.storage.get_bytes(&key).await.unwrap();
         let got = String::from_utf8_lossy(&got).to_string();
         assert!(got.contains("dim_customers"));
@@ -1582,7 +1582,7 @@ mod tests {
 
         // Seed model SQL so allowed_columns can be derived (best-effort).
         let sql_rel = "models/marts/dim_customers.sql";
-        let sql_key = project_fs::join_storage_key(&ctx, sql_rel);
+        let sql_key = files_store::join_storage_key(&ctx, sql_rel);
         let sql = "with t as (\n  select 1 as customer_id, 'a@b.com' as email\n)\nselect\n  customer_id,\n  email\nfrom t\n";
         ctx.storage
             .put_bytes(&sql_key, sql.as_bytes(), "text/sql")
@@ -1701,7 +1701,7 @@ mod tests {
 
         // Seed model SQL so allowed_columns can be derived.
         let sql_rel = "models/marts/dim_customers.sql";
-        let sql_key = project_fs::join_storage_key(&ctx, sql_rel);
+        let sql_key = files_store::join_storage_key(&ctx, sql_rel);
         let sql = "with t as (\n  select 1 as customer_id, 'a@b.com' as email\n)\nselect\n  customer_id,\n  email\nfrom t\n";
         ctx.storage
             .put_bytes(&sql_key, sql.as_bytes(), "text/sql")
@@ -1865,7 +1865,7 @@ mod tests {
             res
         );
 
-        let key = project_fs::join_storage_key(&ctx, project_files::MODELS_SCHEMA_YML);
+        let key = files_store::join_storage_key(&ctx, project_files::MODELS_SCHEMA_YML);
         let got = ctx.storage.get_bytes(&key).await.unwrap();
         let got = String::from_utf8_lossy(&got).to_string();
         assert!(!got.contains("stg_test_raw_raw_customers"));

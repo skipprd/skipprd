@@ -11,7 +11,7 @@ use react_core::agent::AgentCtx;
 use react_core::tools::Tool;
 
 use crate::data_engineer::dbt_repair::remediate::active_provider_dialect;
-use crate::data_engineer::{naming, plan, project_fs, sql_first};
+use crate::data_engineer::{files_store, naming, plan, sql_first};
 
 fn emit_trace(ctx: &AgentCtx, line: impl Into<String>) {
     if let Some(tx) = ctx.trace_tx.as_ref() {
@@ -669,15 +669,15 @@ impl Tool for GoldModelTool {
             } else {
                 Some(sha256_hex(&existing_sql))
             };
-            let patch_text = project_fs::hunks_only_full_replace_patch(&existing_sql, &dbt_sql);
-            let outcome = match project_fs::apply_patch(
+            let patch_text = files_store::hunks_only_full_replace_patch(&existing_sql, &dbt_sql);
+            let outcome = match files_store::apply_patch(
                 ctx,
                 None,
                 &rel_path,
                 &patch_text,
                 base_sha256.as_deref(),
                 Some(!existing_sql.is_empty()),
-                project_fs::PatchApplyKind::UnifiedDiff,
+                files_store::PatchApplyKind::UnifiedDiff,
             )
             .await
             {

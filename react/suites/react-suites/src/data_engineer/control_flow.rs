@@ -13,7 +13,7 @@ use react_core::tools::Tool;
 use react_core::session::Observation;
 
 use crate::config;
-use crate::data_engineer::tools::dbt_files::DbtFilesTool;
+use crate::data_engineer::tools::files_tool::FilesTool;
 use crate::dbt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1460,7 +1460,7 @@ pub async fn call_and_record_tool(
 
 /// Deterministic authoring invariant: ensure there is at least one model SQL file in `models/`.
 pub async fn invariant_has_any_models(ctx: &AgentCtx) -> Result<bool, String> {
-    let tool = DbtFilesTool { datasets: None };
+    let tool = FilesTool { datasets: None };
     let obs = tool
         .call(
             serde_json::json!({"op":"list","prefix":"models/","limit":500}),
@@ -1491,7 +1491,7 @@ pub async fn invariant_has_any_models(ctx: &AgentCtx) -> Result<bool, String> {
 
 /// Deterministic invariant: dbt_project.yml exists in the scoped dbt project.
 pub async fn invariant_has_dbt_project(ctx: &AgentCtx) -> Result<bool, String> {
-    let tool = DbtFilesTool { datasets: None };
+    let tool = FilesTool { datasets: None };
     let obs = tool
         .call(
             serde_json::json!({"op":"get","path":"dbt_project.yml","max_chars":2000}),

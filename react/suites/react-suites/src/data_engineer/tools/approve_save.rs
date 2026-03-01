@@ -233,18 +233,18 @@ impl Tool for ApproveAndSaveArtifactTool {
             .unwrap_or(&current_key)
             .to_string();
         let old_text = existing.clone().unwrap_or_default();
-        let patch_text = crate::data_engineer::project_fs::hunks_only_full_replace_patch(
+        let patch_text = crate::data_engineer::files_store::hunks_only_full_replace_patch(
             &old_text,
             &content_final,
         );
-        let outcome = crate::data_engineer::project_fs::apply_patch(
+        let outcome = crate::data_engineer::files_store::apply_patch(
             ctx,
             None,
             &rel_path,
             &patch_text,
             None,
             None,
-            crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
+            crate::data_engineer::files_store::PatchApplyKind::UnifiedDiff,
         )
         .await?;
         let status = if outcome.existed {

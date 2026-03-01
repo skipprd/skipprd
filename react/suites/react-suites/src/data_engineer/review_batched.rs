@@ -14,7 +14,7 @@ use crate::suite::SuiteCtx;
 use super::control_flow::Phase;
 use super::plan_kind::PlanKind;
 use super::plan as de_plan;
-use super::tools::dbt_files::DbtFilesTool;
+use super::tools::files_tool::FilesTool;
 use super::tools::json_file::JsonFileTool;
 use super::tools::sql_schema::SqlSchemaTool;
 use crate::data_engineer::{facts, naming};
@@ -142,7 +142,7 @@ fn escape_control_chars_in_json_strings(s: &str) -> String {
 }
 
 async fn read_project_file(actx: &AgentCtx, path: &str, max_chars: usize) -> Option<ProjectFile> {
-    let tool = DbtFilesTool { datasets: None };
+    let tool = FilesTool { datasets: None };
     let obs = tool
         .call(
             serde_json::json!({"op":"get","path": path, "max_chars": 0}),
@@ -165,7 +165,7 @@ async fn read_project_file(actx: &AgentCtx, path: &str, max_chars: usize) -> Opt
 }
 
 async fn list_model_files(actx: &AgentCtx, prefix: &str, limit: usize) -> Vec<String> {
-    let tool = DbtFilesTool { datasets: None };
+    let tool = FilesTool { datasets: None };
     let obs = tool
         .call(
             serde_json::json!({"op":"list","prefix": prefix, "limit": (limit as u64).min(2000)}),
