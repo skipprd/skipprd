@@ -3548,8 +3548,70 @@ Apply these fixes in the output.",
 
                     // Keep targeted probes available: probe requirements can be asserted after runtime failures,
                     // and those probes must be satisfiable even when the next step must be a mutation.
-                    reg.register(SqlRunTool {
-                        query: query.clone(),
+                    struct ProbeAwareRunSqlTool {
+                        inner: SqlRunTool,
+                    }
+                    #[async_trait::async_trait]
+                    impl react_core::tools::Tool for ProbeAwareRunSqlTool {
+                        fn name(&self) -> &'static str {
+                            "run_sql"
+                        }
+                        async fn call(
+                            &self,
+                            args: serde_json::Value,
+                            ctx: &react_core::agent::AgentCtx,
+                        ) -> Result<serde_json::Value, String> {
+                            let sql = args
+                                .get("sql")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if let (Some(store), Some(thread_id)) =
+                                (ctx.thread_store.as_ref(), ctx.thread_id.as_deref())
+                            {
+                                let mut es = crate::data_engineer::progress_controller::ExecutionState::load(
+                                    store, thread_id,
+                                )
+                                .await
+                                .unwrap_or_else(
+                                    crate::data_engineer::progress_controller::ExecutionState::new,
+                                );
+                                if matches!(
+                                    es.probe_requirement_status(),
+                                    crate::data_engineer::progress_controller::ProbeRequirementStatus::ExhaustedRequireMutation
+                                ) {
+                                    return Err("run_sql probe loop exhausted for this validate-failure cycle; apply a mutating file fix before probing again.".to_string());
+                                }
+                                let res = self.inner.call(args, ctx).await;
+                                if es.last_validate_ok == Some(false) && es.hard_mutation_repair_mode {
+                                    match &res {
+                                        Ok(v) => {
+                                            let ok =
+                                                v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                                            let sig = crate::data_engineer::progress_controller::ProbeSignature::from_run_sql(
+                                                &sql, v,
+                                            );
+                                            let _ = es.note_probe_attempt(&sql, ok, sig);
+                                        }
+                                        Err(_) => {
+                                            let sig = crate::data_engineer::progress_controller::ProbeSignature::from_run_sql(
+                                                &sql,
+                                                &serde_json::json!({}),
+                                            );
+                                            let _ = es.note_probe_attempt(&sql, false, sig);
+                                        }
+                                    }
+                                    es.save(store, thread_id).await?;
+                                }
+                                return res;
+                            }
+                            self.inner.call(args, ctx).await
+                        }
+                    }
+                    reg.register(ProbeAwareRunSqlTool {
+                        inner: SqlRunTool {
+                            query: query.clone(),
+                        },
                     });
 
                     // In hard_mutation_only mode, only expose schema-batch tools when we are in
@@ -3587,7 +3649,7 @@ Apply these fixes in the output.",
                         "  - op=patch args: {path:string, patch_text:string} (Cursor/Aider hunks-only; patch_text starts with '@@' and MUST NOT include ---/+++ or diff --git)".to_string(),
                         "  - op=rm args: {path:string, expected_sha256?:string}".to_string(),
                         "  - op=mv args: {from:string, to:string, expected_sha256?:string}".to_string(),
-                        "- run_sql(args:{sql:string}) (targeted probes; required after runtime failures)".to_string(),
+                        "- run_sql(args:{sql:string}) (targeted probes; several are allowed if they add new signal; repeated same/no-signal probes force mutation)".to_string(),
                     ]);
                     if single_target_repair_path.is_some() {
                         tool_lines.push("Deterministic single-target repair mode is active: only file op=patch/rm/mv targeting the current failing model file is allowed.".to_string());
@@ -7275,7 +7337,7 @@ Apply these fixes in the output.",
                         q.push_str("\n\nConstraint: your next steps must APPLY A MUTATING FIX before attempting dbt_validate again.");
                     }
                     if phase_guard.probe_required && !phase_guard.probe_satisfied {
-                        q.push_str("\n\nConstraint: runtime validation failed after compile; you MUST run meaningful run_sql probes (not SELECT 1) to diagnose data before re-validating.");
+                        q.push_str("\n\nConstraint: runtime validation failed after compile; run meaningful run_sql probes (not SELECT 1) to diagnose data before re-validating. Multiple probes are allowed while they add new signal; repeated same/no-signal probes require you to switch to a mutating file fix.");
                     }
 
                     // Deterministic invariant: do not allow leaving authoring without any models.
@@ -9416,6 +9478,107 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn hard_mutation_run_sql_records_probe_attempts_to_execution_state() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("probe-thread", &sctx);
+        let store = actx.thread_store.as_ref().expect("thread_store");
+
+        let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
+        st.last_validate_ok = Some(false);
+        st.hard_mutation_repair_mode = true;
+        st.probe_state.required = true;
+        st.save(store, "probe-thread").await.expect("save state");
+
+        let guard = crate::data_engineer::control_flow::DerivedGuardState {
+            last_validate_failed: true,
+            mutated_since_fail: false,
+            patched_since_fail: false,
+            mutation_failures_since_validate: 0,
+            probe_required: false,
+            probe_satisfied: false,
+        };
+        let (reg, _) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::ModelAuthor,
+            &guard,
+            true,
+            &sctx,
+            None,
+            None,
+            false,
+        )
+        .expect("build_tools_for_phase should succeed");
+
+        let _ = reg
+            .call(
+                "run_sql",
+                serde_json::json!({"sql":"SELECT count(*) FROM some_table"}),
+                &actx,
+            )
+            .await
+            .expect("run_sql should execute");
+
+        let updated = crate::data_engineer::progress_controller::ExecutionState::load(store, "probe-thread")
+            .await
+            .expect("state should load");
+        assert_eq!(updated.probe_state.attempts_total, 1);
+        assert_eq!(updated.probe_state.meaningful_attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn hard_mutation_run_sql_is_blocked_after_probe_exhaustion() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("probe-exhausted-thread", &sctx);
+        let store = actx.thread_store.as_ref().expect("thread_store");
+
+        let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
+        st.last_validate_ok = Some(false);
+        st.hard_mutation_repair_mode = true;
+        st.probe_state.required = true;
+        let sig = crate::data_engineer::progress_controller::ProbeSignature::from_run_sql(
+            "select * from t limit 10",
+            &serde_json::json!({"ok":true}),
+        );
+        let _ = st.note_probe_attempt("select * from t limit 10", true, sig.clone());
+        let _ = st.note_probe_attempt("select * from t limit 10", true, sig.clone());
+        let _ = st.note_probe_attempt("select * from t limit 10", true, sig.clone());
+        let _ = st.note_probe_attempt("select * from t limit 10", true, sig);
+        st.save(store, "probe-exhausted-thread")
+            .await
+            .expect("save state");
+
+        let guard = crate::data_engineer::control_flow::DerivedGuardState {
+            last_validate_failed: true,
+            mutated_since_fail: false,
+            patched_since_fail: false,
+            mutation_failures_since_validate: 0,
+            probe_required: false,
+            probe_satisfied: false,
+        };
+        let (reg, _) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::ModelAuthor,
+            &guard,
+            true,
+            &sctx,
+            None,
+            None,
+            false,
+        )
+        .expect("build_tools_for_phase should succeed");
+
+        let err = reg
+            .call(
+                "run_sql",
+                serde_json::json!({"sql":"SELECT count(*) FROM some_table"}),
+                &actx,
+            )
+            .await
+            .expect_err("run_sql should be blocked after exhaustion");
+        assert!(err.contains("probe loop exhausted"));
     }
 
     #[tokio::test]

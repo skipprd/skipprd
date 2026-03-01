@@ -87,6 +87,121 @@ impl Default for RepairType {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeOutcomeKind {
+    MeaningfulNewSignal,
+    MeaningfulSameSignal,
+    NonMeaningful,
+    Failed,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeRequirementStatus {
+    NotRequired,
+    Required,
+    Allowed,
+    ExhaustedRequireMutation,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeSignature {
+    #[serde(default)]
+    pub normalized_sql: String,
+    #[serde(default)]
+    pub row_count: usize,
+    #[serde(default)]
+    pub header_count: usize,
+    #[serde(default)]
+    pub first_row_fingerprint: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeState {
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub attempts_total: usize,
+    #[serde(default)]
+    pub meaningful_attempts: usize,
+    #[serde(default)]
+    pub repeated_signature_streak: usize,
+    #[serde(default)]
+    pub non_meaningful_attempts: usize,
+    #[serde(default)]
+    pub failed_attempts: usize,
+    #[serde(default)]
+    pub last_signature: Option<ProbeSignature>,
+}
+
+impl ProbeSignature {
+    pub fn from_run_sql(sql: &str, observation: &Value) -> Self {
+        if let Some(p) = observation.get("probe") {
+            let normalized_sql = p
+                .get("normalized_sql")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    sql.split_whitespace()
+                        .collect::<Vec<&str>>()
+                        .join(" ")
+                        .to_ascii_lowercase()
+                });
+            let row_count = p
+                .get("row_count")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+                .unwrap_or(0);
+            let header_count = p
+                .get("header_count")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+                .unwrap_or(0);
+            let first_row_fingerprint = p
+                .get("first_row_fingerprint")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            return Self {
+                normalized_sql,
+                row_count,
+                header_count,
+                first_row_fingerprint,
+            };
+        }
+        let normalized_sql = sql
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        let header_count = observation
+            .get("header")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let rows = observation
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let row_count = rows.len();
+        let first_row_fingerprint = rows.first().and_then(|row| {
+            row.as_array().map(|arr| {
+                let preview: Vec<&Value> = arr.iter().take(6).collect();
+                serde_json::to_string(&preview).unwrap_or_default()
+            })
+        });
+        Self {
+            normalized_sql,
+            row_count,
+            header_count,
+            first_row_fingerprint,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RepairTarget {
@@ -240,6 +355,8 @@ pub struct ExecutionState {
     pub publish_approval: Option<PublishApprovalState>,
     #[serde(default)]
     pub publish_retries: Vec<PublishRetryState>,
+    #[serde(default)]
+    pub probe_state: ProbeState,
 }
 
 impl ExecutionState {
@@ -334,6 +451,7 @@ impl ExecutionState {
         self.subjective_retry = None;
         self.clear_publish_approval();
         self.reset_publish_retries();
+        self.reset_probe_state_on_validate(false);
     }
 
     pub fn apply_validate_failure(
@@ -401,6 +519,14 @@ impl ExecutionState {
             })
             .collect();
         self.clear_publish_approval();
+        self.reset_probe_state_on_validate(true);
+        let compile_ok = self
+            .last_validate
+            .as_ref()
+            .and_then(|v| v.compile_ok)
+            .unwrap_or(false);
+        self.probe_state.required =
+            matches!(failure_class, FailureClass::SqlOrRuntime) && compile_ok;
 
         let failed_target_count_delta = self.repair_backlog.len() as i64 - prev_count;
         let failure_signature_changed = prev_signature != Some(failure_signature);
@@ -430,6 +556,9 @@ impl ExecutionState {
                 progress_made: true,
                 ..ProgressDelta::default()
             });
+            // A successful mutation closes the current probe requirement cycle.
+            self.probe_state.required = false;
+            self.probe_state.repeated_signature_streak = 0;
             return;
         }
         self.consecutive_noop_patches = self.consecutive_noop_patches.saturating_add(1);
@@ -444,6 +573,62 @@ impl ExecutionState {
             progress_made: false,
             ..ProgressDelta::default()
         });
+    }
+
+    pub fn reset_probe_state_on_validate(&mut self, is_failure: bool) {
+        self.probe_state = ProbeState::default();
+        self.probe_state.required = is_failure;
+    }
+
+    pub fn note_probe_attempt(
+        &mut self,
+        sql: &str,
+        ok: bool,
+        signature: ProbeSignature,
+    ) -> ProbeOutcomeKind {
+        self.probe_state.attempts_total = self.probe_state.attempts_total.saturating_add(1);
+        let meaningful_sql = is_meaningful_probe_sql(sql);
+        let outcome = if !ok {
+            self.probe_state.failed_attempts = self.probe_state.failed_attempts.saturating_add(1);
+            self.probe_state.repeated_signature_streak =
+                self.probe_state.repeated_signature_streak.saturating_add(1);
+            ProbeOutcomeKind::Failed
+        } else if !meaningful_sql {
+            self.probe_state.non_meaningful_attempts =
+                self.probe_state.non_meaningful_attempts.saturating_add(1);
+            self.probe_state.repeated_signature_streak =
+                self.probe_state.repeated_signature_streak.saturating_add(1);
+            ProbeOutcomeKind::NonMeaningful
+        } else if self.probe_state.last_signature.as_ref() == Some(&signature) {
+            self.probe_state.meaningful_attempts =
+                self.probe_state.meaningful_attempts.saturating_add(1);
+            self.probe_state.repeated_signature_streak =
+                self.probe_state.repeated_signature_streak.saturating_add(1);
+            ProbeOutcomeKind::MeaningfulSameSignal
+        } else {
+            self.probe_state.meaningful_attempts =
+                self.probe_state.meaningful_attempts.saturating_add(1);
+            self.probe_state.repeated_signature_streak = 0;
+            ProbeOutcomeKind::MeaningfulNewSignal
+        };
+        self.probe_state.last_signature = Some(signature);
+        outcome
+    }
+
+    pub fn probe_requirement_status(&self) -> ProbeRequirementStatus {
+        if self.last_validate_ok != Some(false) || !self.probe_state.required {
+            return ProbeRequirementStatus::NotRequired;
+        }
+        if self.probe_state.meaningful_attempts == 0 {
+            return ProbeRequirementStatus::Required;
+        }
+        if self.probe_state.repeated_signature_streak >= 3
+            || self.probe_state.non_meaningful_attempts >= 3
+            || self.probe_state.failed_attempts >= 3
+        {
+            return ProbeRequirementStatus::ExhaustedRequireMutation;
+        }
+        ProbeRequirementStatus::Allowed
     }
 
     pub fn bump_subjective_retry(
@@ -561,23 +746,20 @@ pub fn gate_authoring_progress(state: &ExecutionState, phase: Phase) -> Result<(
                 .to_string(),
         );
     }
-    let compile_ok = state
-        .last_validate
-        .as_ref()
-        .and_then(|v| v.compile_ok)
-        .unwrap_or(false);
-    let run_ok = state
-        .last_validate
-        .as_ref()
-        .and_then(|v| v.run_ok)
-        .unwrap_or(false);
-    let probe_required = last_validate_failed && compile_ok;
-    let probe_satisfied = !probe_required || run_ok;
-    if probe_required && !probe_satisfied {
-        return Err(
-            "progress_gate_blocked: runtime validation previously failed after compile and a data probe is still required"
-                .to_string(),
-        );
+    match state.probe_requirement_status() {
+        ProbeRequirementStatus::Required => {
+            return Err(
+                "progress_gate_blocked: runtime validation previously failed after compile and a meaningful data probe is still required"
+                    .to_string(),
+            );
+        }
+        ProbeRequirementStatus::ExhaustedRequireMutation => {
+            return Err(
+                "progress_gate_blocked: probe loop exhausted (repeated/no-new-signal probes); apply a mutating fix before validating"
+                    .to_string(),
+            );
+        }
+        ProbeRequirementStatus::NotRequired | ProbeRequirementStatus::Allowed => {}
     }
     // Keep existing unresolved mutation-failure behavior, but as a deterministic progress gate.
     match phase {
@@ -585,6 +767,21 @@ pub fn gate_authoring_progress(state: &ExecutionState, phase: Phase) -> Result<(
         _ => return Ok(()),
     }
     Ok(())
+}
+
+pub fn is_meaningful_probe_sql(sql: &str) -> bool {
+    let s = sql.trim().trim_end_matches(';').trim().to_lowercase();
+    if s.is_empty() {
+        return false;
+    }
+    let toks: Vec<&str> = s.split_whitespace().collect();
+    if toks == ["select", "1"] {
+        return false;
+    }
+    if toks.len() == 4 && toks[0] == "select" && toks[1] == "1" && toks[2] == "as" {
+        return false;
+    }
+    toks.iter().any(|t| *t == "from")
 }
 
 pub fn gate_publish_progress(state: &ExecutionState, phase: Phase) -> Result<(), String> {
@@ -700,6 +897,7 @@ mod tests {
             run_ok: Some(false),
             ..LastValidateState::default()
         });
+        st.probe_state.required = true;
         assert!(gate_authoring_progress(&st, Phase::ModelAuthor).is_err());
 
         st.attempt_count = 1;
@@ -713,7 +911,49 @@ mod tests {
             run_ok: Some(true),
             ..LastValidateState::default()
         });
+        st.probe_state.required = false;
         assert!(gate_authoring_progress(&st, Phase::ModelAuthor).is_ok());
+    }
+
+    #[test]
+    fn probe_status_allows_multiple_meaningful_probes_and_exhausts_on_repeats() {
+        let mut st = ExecutionState::new();
+        st.last_validate_ok = Some(false);
+        st.probe_state.required = true;
+
+        let sig1 =
+            ProbeSignature::from_run_sql("select * from x limit 10", &serde_json::json!({"ok":true}));
+        let out1 = st.note_probe_attempt("select * from x limit 10", true, sig1.clone());
+        assert_eq!(out1, ProbeOutcomeKind::MeaningfulNewSignal);
+        assert_eq!(st.probe_requirement_status(), ProbeRequirementStatus::Allowed);
+
+        let sig2 =
+            ProbeSignature::from_run_sql("select * from y limit 10", &serde_json::json!({"ok":true}));
+        let out2 = st.note_probe_attempt("select * from y limit 10", true, sig2);
+        assert_eq!(out2, ProbeOutcomeKind::MeaningfulNewSignal);
+        assert_eq!(st.probe_requirement_status(), ProbeRequirementStatus::Allowed);
+
+        let _ = st.note_probe_attempt("select * from x limit 10", true, sig1.clone());
+        let _ = st.note_probe_attempt("select * from x limit 10", true, sig1.clone());
+        let _ = st.note_probe_attempt("select * from x limit 10", true, sig1);
+        let _ = st.note_probe_attempt(
+            "select * from x limit 10",
+            true,
+            ProbeSignature::from_run_sql("select * from x limit 10", &serde_json::json!({"ok":true})),
+        );
+        assert_eq!(
+            st.probe_requirement_status(),
+            ProbeRequirementStatus::ExhaustedRequireMutation
+        );
+    }
+
+    #[test]
+    fn successful_mutation_resets_probe_requirement_cycle() {
+        let mut st = ExecutionState::new();
+        st.last_validate_ok = Some(false);
+        st.probe_state.required = true;
+        st.note_patch_attempt(true, true);
+        assert_eq!(st.probe_requirement_status(), ProbeRequirementStatus::NotRequired);
     }
 
     #[test]

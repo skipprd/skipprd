@@ -408,20 +408,7 @@ fn is_effective_mutation_step(step: &ThreadStep) -> bool {
 }
 
 fn looks_like_data_probe_sql(sql: &str) -> bool {
-    let s = sql.trim().trim_end_matches(';').trim().to_lowercase();
-    if s.is_empty() {
-        return false;
-    }
-    // trivial validation queries should not satisfy probes
-    let toks: Vec<&str> = s.split_whitespace().collect();
-    if toks == ["select", "1"] {
-        return false;
-    }
-    // allow SELECT 1 AS ok
-    if toks.len() == 4 && toks[0] == "select" && toks[1] == "1" && toks[2] == "as" {
-        return false;
-    }
-    toks.iter().any(|t| *t == "from")
+    crate::data_engineer::progress_controller::is_meaningful_probe_sql(sql)
 }
 
 #[cfg(test)]
@@ -573,18 +560,21 @@ pub fn derive_guard_state_from_execution_state(
         .map(|d| d.target_hash_changed || d.progress_made)
         .unwrap_or(false);
     let patched_since_fail = st.attempt_count > 0;
-    let compile_ok = st
-        .last_validate
-        .as_ref()
-        .and_then(|v| v.compile_ok)
-        .unwrap_or(false);
-    let run_ok = st
-        .last_validate
-        .as_ref()
-        .and_then(|v| v.run_ok)
-        .unwrap_or(false);
-    let probe_required = last_validate_failed && compile_ok;
-    let probe_satisfied = !probe_required || run_ok;
+    let probe_status = st.probe_requirement_status();
+    let (probe_required, probe_satisfied) = match probe_status {
+        crate::data_engineer::progress_controller::ProbeRequirementStatus::NotRequired => {
+            (false, true)
+        }
+        crate::data_engineer::progress_controller::ProbeRequirementStatus::Required => {
+            (true, false)
+        }
+        crate::data_engineer::progress_controller::ProbeRequirementStatus::Allowed => {
+            (true, true)
+        }
+        crate::data_engineer::progress_controller::ProbeRequirementStatus::ExhaustedRequireMutation => {
+            (false, true)
+        }
+    };
     DerivedGuardState {
         last_validate_failed,
         mutated_since_fail,
@@ -2168,6 +2158,31 @@ mod tests {
             "probe_required should be cleared once satisfied"
         );
         assert!(g.probe_satisfied);
+    }
+
+    #[test]
+    fn execution_state_guard_uses_probe_state_required_and_exhausted() {
+        let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
+        st.last_validate_ok = Some(false);
+        st.probe_state.required = true;
+        let g = derive_guard_state_from_execution_state(&st);
+        assert!(g.probe_required);
+        assert!(!g.probe_satisfied);
+
+        let sig = crate::data_engineer::progress_controller::ProbeSignature::from_run_sql(
+            "select * from x limit 10",
+            &serde_json::json!({"ok": true}),
+        );
+        let _ = st.note_probe_attempt("select * from x limit 10", true, sig.clone());
+        let _ = st.note_probe_attempt("select * from x limit 10", true, sig.clone());
+        let _ = st.note_probe_attempt("select * from x limit 10", true, sig.clone());
+        let _ = st.note_probe_attempt("select * from x limit 10", true, sig);
+
+        let g2 = derive_guard_state_from_execution_state(&st);
+        assert!(
+            !g2.probe_required && g2.probe_satisfied,
+            "exhausted probe loops should not keep requesting more probes"
+        );
     }
 
     #[tokio::test]

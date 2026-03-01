@@ -28,10 +28,32 @@ impl Tool for SqlRunTool {
         if (starts_with_select || starts_with_with) && !has_limit {
             forced.push_str(" LIMIT 50");
         }
+        let normalized_sql = forced
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ")
+            .to_ascii_lowercase();
         match self.query.query(&forced).await {
-            Ok(qr) => Ok(
-                serde_json::json!({"ok": true, "header": qr.header, "rows": qr.rows, "meta": qr.meta}),
-            ),
+            Ok(qr) => {
+                let row_count = qr.rows.len();
+                let header_count = qr.header.len();
+                let first_row_fingerprint = qr
+                    .rows
+                    .first()
+                    .and_then(|row| serde_json::to_string(row).ok());
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "header": qr.header,
+                    "rows": qr.rows,
+                    "meta": qr.meta,
+                    "probe": {
+                        "normalized_sql": normalized_sql,
+                        "row_count": row_count,
+                        "header_count": header_count,
+                        "first_row_fingerprint": first_row_fingerprint
+                    }
+                }))
+            }
             Err(e) => Ok(serde_json::json!({"ok": false, "error": e})),
         }
     }
