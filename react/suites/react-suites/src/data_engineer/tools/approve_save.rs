@@ -7,6 +7,8 @@ use react_core::agent::AgentCtx;
 use react_core::session::ToolStepStatus;
 use react_core::tools::Tool;
 use crate::data_engineer::references::DatasetRef;
+use crate::data_engineer::progress_controller::ExecutionState;
+use crate::data_engineer::state_manager;
 
 // NOTE: Engine-agnostic ReAct: no DataFusion/SessionContext usage here.
 pub struct ApproveAndSaveArtifactTool;
@@ -138,44 +140,31 @@ impl Tool for ApproveAndSaveArtifactTool {
             content.clone()
         };
 
-        // Update-in-place: if a focused artifact exists in the thread, enforce writing to that exact key
+        // Update-in-place: if a focused artifact exists in typed execution state, enforce writing to that exact key.
         let mut name_final = name.clone();
         if let Some(tid) = ctx.thread_id.as_ref() {
-            let store = ctx
-                .thread_store
-                .as_ref()
-                .ok_or_else(|| "thread_store not configured".to_string())?;
-            if let Ok(log) = store.get(tid).await {
-                for step in log.steps.iter().rev() {
-                    if let react_core::session::ThreadStep::ArtifactFocus {
-                        kind: fk,
-                        name: fname,
-                        dataset_id: fds,
-                        exists,
-                        ..
-                    } = step
-                    {
-                        if *exists {
-                            if fk.as_str() != kind {
-                                return Err(format!(
-                                    "Focused artifact kind is '{}'; cannot save kind '{}'. Update the focused artifact in place.",
-                                    fk.as_str(),
-                                    kind
-                                ));
-                            }
-                            let Some(fds) = fds.as_ref() else { break };
-                            if fname.trim().is_empty() {
-                                break;
-                            }
-                            // Override target to focused artifact
+            if let Some(store) = ctx.thread_store.as_ref() {
+                let es = state_manager::load_execution_state(store, tid)
+                    .await
+                    .unwrap_or_else(ExecutionState::new);
+                if let Some(focus) = es.artifact_focus.as_ref() {
+                    if focus.exists {
+                        let fk = focus.kind.as_deref().unwrap_or("");
+                        if fk != kind {
+                            return Err(format!(
+                                "Focused artifact kind is '{}'; cannot save kind '{}'. Update the focused artifact in place.",
+                                fk, kind
+                            ));
+                        }
+                        let fname = focus.name.as_deref().unwrap_or("").trim();
+                        let fds = focus.dataset_id.as_deref().unwrap_or("").trim();
+                        if !fname.is_empty() && !fds.is_empty() {
                             name_final = fname.to_string();
                             dataset_id = fds.to_string();
-                            // Ensure metric YAML comment reflects focused dataset if metric
                             if kind == "metric" {
                                 content_final = ensure_dataset_comment(&content_final, &dataset_id);
                             }
                         }
-                        break;
                     }
                 }
             }
@@ -204,12 +193,6 @@ impl Tool for ApproveAndSaveArtifactTool {
             }
         };
 
-        // Fetch existing (if any)
-        let existing: Option<String> = match ctx.storage.get_bytes(&current_key).await {
-            Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
-            Err(_) => None,
-        };
-
         // Ensure minimal dbt project scaffolding exists before first save
         let dbt = ctx
             .dbt
@@ -232,19 +215,13 @@ impl Tool for ApproveAndSaveArtifactTool {
             )
             .unwrap_or(&current_key)
             .to_string();
-        let old_text = existing.clone().unwrap_or_default();
-        let patch_text = crate::data_engineer::files_store::hunks_only_full_replace_patch(
-            &old_text,
-            &content_final,
-        );
-        let outcome = crate::data_engineer::files_store::apply_patch(
+        let outcome = crate::data_engineer::mutation_gateway::replace_file_content(
             ctx,
             None,
             &rel_path,
-            &patch_text,
-            None,
-            None,
-            crate::data_engineer::files_store::PatchApplyKind::UnifiedDiff,
+            &content_final,
+            crate::data_engineer::mutation_gateway::ExpectedBase::Any,
+            content_type,
         )
         .await?;
         let status = if outcome.existed {
@@ -252,11 +229,6 @@ impl Tool for ApproveAndSaveArtifactTool {
         } else {
             react_core::session::ArtifactSaveStatus::Added
         };
-
-        // Save patched content (single canonical path)
-        ctx.storage
-            .put_bytes(&current_key, outcome.content.as_bytes(), content_type)
-            .await?;
 
         info!("Artifact saved: kind={} key={}", kind, current_key);
 
@@ -325,6 +297,17 @@ impl Tool for ApproveAndSaveArtifactTool {
                     },
                 )
                 .await;
+
+            // Persist typed artifact focus for deterministic subsequent updates.
+            let _ = state_manager::mutate_execution_state(store, tid, |es| {
+                es.set_artifact_focus(
+                    Some(kind.to_string()),
+                    Some(name_final.clone()),
+                    Some(dataset_id.clone()),
+                    true,
+                );
+            })
+            .await;
 
             // Immediately validate the DBT project and refresh compiled views to guarantee consistency
             let s3_prefix = ctx.keyspace.dbt_prefix(&ctx.scope);

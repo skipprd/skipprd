@@ -16,6 +16,57 @@ pub struct FilesTool {
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
 }
 
+fn select_terms_from_paths(paths: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in paths {
+        let t = p.trim();
+        if t.is_empty() {
+            continue;
+        }
+        out.push(format!("path:{}", t));
+        if t.ends_with(".sql") {
+            if let Some(name) = t.rsplit('/').next().and_then(|f| f.strip_suffix(".sql")) {
+                if !name.trim().is_empty() {
+                    out.push(name.trim().to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+async fn was_recently_removed_in_repair(ctx: &AgentCtx, rel_path: &str) -> bool {
+    let (Some(store), Some(thread_id)) = (ctx.thread_store.as_ref(), ctx.thread_id.as_deref()) else {
+        return false;
+    };
+    let want = files_store::normalize_rel_path(rel_path)
+        .ok()
+        .unwrap_or_else(|| rel_path.trim().to_string());
+    crate::data_engineer::state_manager::load_execution_state(store, thread_id)
+        .await
+        .and_then(|st| {
+            if !st.hard_mutation_repair_mode {
+                return None;
+            }
+            st.last_mutation_summary.and_then(|m| {
+                let op = m.op.unwrap_or_default();
+                if op != "rm" {
+                    return None;
+                }
+                let matched = m.affected_paths.into_iter().any(|p| {
+                    files_store::normalize_rel_path(&p)
+                        .ok()
+                        .map(|n| n == want)
+                        .unwrap_or_else(|| p.trim() == want)
+                });
+                Some(matched)
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn deserialize_opt_nonempty_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -929,6 +980,12 @@ impl Tool for FilesTool {
                     .get("path")
                     .and_then(|x| x.as_str())
                     .ok_or_else(|| "path required".to_string())?;
+                if was_recently_removed_in_repair(ctx, path).await {
+                    return Err(format!(
+                        "file op=get for '{}' is blocked: this path was removed in hard mutation repair mode; apply a mutating fix (patch/mv/rm) on the target model path instead of re-reading the removed file",
+                        path.trim()
+                    ));
+                }
                 let max_chars =
                     args.get("max_chars").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
                 files_store::get_file(ctx, path, max_chars).await
@@ -940,7 +997,22 @@ impl Tool for FilesTool {
                         e
                     )
                 })?;
-                files_store::remove_file(ctx, &parsed.path, parsed.expected_sha256.as_deref()).await
+                let out =
+                    files_store::remove_file(ctx, &parsed.path, parsed.expected_sha256.as_deref())
+                        .await?;
+                if let (Some(store), Some(thread_id)) =
+                    (ctx.thread_store.as_ref(), ctx.thread_id.as_deref())
+                {
+                    let paths = vec![parsed.path.clone()];
+                    let select_terms = select_terms_from_paths(&paths);
+                    let _ = crate::data_engineer::state_manager::mutate_execution_state(
+                        store,
+                        thread_id,
+                        |es| es.set_last_mutation_summary("rm", paths.clone(), select_terms.clone()),
+                    )
+                    .await;
+                }
+                Ok(out)
             }
             "mv" => {
                 let parsed = serde_json::from_value::<MoveFileArgs>(args.clone()).map_err(|e| {
@@ -949,13 +1021,26 @@ impl Tool for FilesTool {
                         e
                     )
                 })?;
-                files_store::move_file(
+                let out = files_store::move_file(
                     ctx,
                     &parsed.from,
                     &parsed.to,
                     parsed.expected_sha256.as_deref(),
                 )
-                .await
+                .await?;
+                if let (Some(store), Some(thread_id)) =
+                    (ctx.thread_store.as_ref(), ctx.thread_id.as_deref())
+                {
+                    let paths = vec![parsed.to.clone()];
+                    let select_terms = select_terms_from_paths(&paths);
+                    let _ = crate::data_engineer::state_manager::mutate_execution_state(
+                        store,
+                        thread_id,
+                        |es| es.set_last_mutation_summary("mv", paths.clone(), select_terms.clone()),
+                    )
+                    .await;
+                }
+                Ok(out)
             }
             "patch" => {
                 // Hard cutover: ONE patch input shape.
@@ -1048,7 +1133,7 @@ impl Tool for FilesTool {
                     }
                 }
 
-                Ok(serde_json::json!({
+                let response = serde_json::json!({
                     "ok": true,
                     "mutated": outcome.base_sha256 != outcome.new_sha256,
                     "applied_patch_text": outcome.git_patch.trim_end().to_string(),
@@ -1073,7 +1158,26 @@ impl Tool for FilesTool {
                         "apply_result_code": outcome.apply_result_code,
                         "apply_repairs": outcome.apply_repairs
                     }]
-                }))
+                });
+                if let (Some(store), Some(thread_id)) =
+                    (ctx.thread_store.as_ref(), ctx.thread_id.as_deref())
+                {
+                    let paths = vec![outcome.rel_path.clone()];
+                    let select_terms = select_terms_from_paths(&paths);
+                    let _ = crate::data_engineer::state_manager::mutate_execution_state(
+                        store,
+                        thread_id,
+                        |es| {
+                            es.set_last_mutation_summary(
+                                "patch",
+                                paths.clone(),
+                                select_terms.clone(),
+                            )
+                        },
+                    )
+                    .await;
+                }
+                Ok(response)
             }
             _ => Err("unsupported op; use 'list', 'get', 'patch', 'rm', or 'mv'".to_string()),
         }
@@ -1085,10 +1189,13 @@ mod tests {
     use super::*;
     use crate::config;
     use crate::data_engineer::files_store as project_fs;
+    use crate::data_engineer::progress_controller::ExecutionState;
+    use crate::data_engineer::state_manager;
     use react_core::agent::DefaultPolicy;
     use react_core::keyspace::{DefaultKeyspace, Keyspace};
     use react_core::llm::NullModel;
     use react_core::scope::RequestScope;
+    use react_core::session::ThreadStore;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
     type DbtFilesTool = FilesTool;
 
@@ -1271,6 +1378,77 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_lowercase().contains("contract violation"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_get_blocked_for_recently_removed_path_in_hard_mutation_repair_mode() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let mut ctx = make_ctx(storage.clone());
+        let store = ThreadStore::new(
+            storage,
+            ctx.scope.clone(),
+            Arc::new(DefaultKeyspace::new("b".to_string())),
+        );
+        let tid = "tid-hard-mutation-files-get-blocked".to_string();
+        let mut es = ExecutionState::new();
+        es.hard_mutation_repair_mode = true;
+        es.set_last_mutation_summary(
+            "rm",
+            vec!["models/staging/m.sql".to_string()],
+            vec!["path:models/staging/m.sql".to_string()],
+        );
+        state_manager::save_execution_state(&store, &tid, &es)
+            .await
+            .expect("seed execution state");
+        ctx.thread_store = Some(store);
+        ctx.thread_id = Some(tid);
+
+        let tool = DbtFilesTool { datasets: None };
+        let err = tool
+            .call(
+                serde_json::json!({"op":"get","path":"models/staging/m.sql","max_chars":200}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("was removed in hard mutation repair mode"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dbt_files_list_allowed_in_hard_mutation_repair_mode() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let mut ctx = make_ctx(storage.clone());
+        let store = ThreadStore::new(
+            storage,
+            ctx.scope.clone(),
+            Arc::new(DefaultKeyspace::new("b".to_string())),
+        );
+        let tid = "tid-hard-mutation-files-list-allowed".to_string();
+        let mut es = ExecutionState::new();
+        es.hard_mutation_repair_mode = true;
+        es.set_last_mutation_summary(
+            "rm",
+            vec!["models/staging/m.sql".to_string()],
+            vec!["path:models/staging/m.sql".to_string()],
+        );
+        state_manager::save_execution_state(&store, &tid, &es)
+            .await
+            .expect("seed execution state");
+        ctx.thread_store = Some(store);
+        ctx.thread_id = Some(tid);
+
+        let tool = DbtFilesTool { datasets: None };
+        let out = tool
+            .call(
+                serde_json::json!({"op":"list","prefix":"models/","limit":10}),
+                &ctx,
+            )
+            .await
+            .expect("list should be allowed");
+        assert_eq!(out.get("ok").and_then(|v| v.as_bool()), Some(true));
     }
 
     #[tokio::test]

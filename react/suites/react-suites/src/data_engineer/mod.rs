@@ -32,6 +32,7 @@ pub mod dbt_repair;
 pub mod facts;
 pub mod failure_classifier;
 pub mod naming;
+pub mod mutation_gateway;
 pub mod patch_contract;
 #[path = "patch_protocol.rs"]
 pub mod files_patch_repair;
@@ -53,15 +54,17 @@ mod review_batched;
 pub mod retry_budget;
 pub mod schema_policy;
 pub mod sql_first;
+pub mod state_manager;
 pub mod tool_ops;
 pub mod transition_dispatcher;
 pub mod tools;
 
-fn primary_failed_model_file(last_validate_failed_models: &[serde_json::Value]) -> Option<String> {
+fn primary_failed_model_file(
+    last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
+) -> Option<String> {
     last_validate_failed_models
         .iter()
-        .filter_map(|fm| fm.get("file").and_then(|v| v.as_str()))
-        .map(|s| s.trim().to_string())
+        .map(|fm| fm.file.trim().to_string())
         .find(|s| !s.is_empty() && s != "(unknown file)")
 }
 
@@ -235,13 +238,6 @@ enum PlanningLlmProfile {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum ManifestLookupPathKind {
-    CanonicalTarget,
-    Ambiguous,
-    NonCanonical,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum AgentMode {
     Ask,
     Model,
@@ -317,16 +313,6 @@ impl NonEmptyCleanseDatasetIds {
     fn as_slice(&self) -> &[String] {
         &self.ids
     }
-}
-
-#[derive(Clone, Debug, Default)]
-struct ManifestLookupRetrySignal {
-    fallback_mode: bool,
-    retry_suppressed: bool,
-    failure_signature: Option<String>,
-    repeated_failure_count: usize,
-    canonical_success_count: usize,
-    noncanonical_attempt_count: usize,
 }
 
 impl DataEngineerSuite {
@@ -614,140 +600,6 @@ impl DataEngineerSuite {
                         .filter(|s| !s.is_empty())
                 })
             })
-    }
-
-    fn normalize_manifest_path(path: &str) -> String {
-        path.trim().trim_matches('/').replace('\\', "/")
-    }
-
-    fn classify_manifest_lookup_path(path: &str) -> Option<ManifestLookupPathKind> {
-        let norm = Self::normalize_manifest_path(path);
-        if norm.is_empty() {
-            return None;
-        }
-        if norm == "target/manifest.json" {
-            return Some(ManifestLookupPathKind::CanonicalTarget);
-        }
-        if norm.ends_with("target/manifest.json") {
-            return Some(ManifestLookupPathKind::NonCanonical);
-        }
-        if norm.ends_with("manifest.json") {
-            return Some(ManifestLookupPathKind::Ambiguous);
-        }
-        None
-    }
-
-    fn classify_manifest_lookup_failure(errors: &[String]) -> Option<&'static str> {
-        let joined = errors.join("\n").to_ascii_lowercase();
-        if joined.contains("nosuchkey")
-            || joined.contains("not found or failed to fetch")
-            || joined.contains("the specified key does not exist")
-        {
-            return Some("NoSuchKey");
-        }
-        if joined.contains("pointer not found") {
-            return Some("PointerNotFound");
-        }
-        None
-    }
-
-    fn model_plan_manifest_retry_signal(
-        log: Option<&react_core::session::ThreadLog>,
-    ) -> ManifestLookupRetrySignal {
-        let mut out = ManifestLookupRetrySignal::default();
-        let Some(l) = log else {
-            return out;
-        };
-        let Some(start) = Self::phase_start_idx(l, control_flow::Phase::ModelPlan) else {
-            return out;
-        };
-        let mut failure_counts: HashMap<String, usize> = HashMap::new();
-        for s in l.steps.iter().skip(start + 1) {
-            let react_core::session::ThreadStep::ToolEnd {
-                name,
-                args,
-                observation,
-                ..
-            } = s
-            else {
-                continue;
-            };
-            if name != "json_file" {
-                continue;
-            }
-            let path = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim())
-                .unwrap_or("");
-            let Some(path_kind) = Self::classify_manifest_lookup_path(path) else {
-                continue;
-            };
-            if matches!(
-                path_kind,
-                ManifestLookupPathKind::Ambiguous | ManifestLookupPathKind::NonCanonical
-            ) {
-                out.noncanonical_attempt_count = out.noncanonical_attempt_count.saturating_add(1);
-            }
-            if observation.ok {
-                if path_kind == ManifestLookupPathKind::CanonicalTarget {
-                    out.canonical_success_count = out.canonical_success_count.saturating_add(1);
-                }
-                continue;
-            }
-            if let Some(kind) = Self::classify_manifest_lookup_failure(&observation.errors) {
-                let signature = format!("{kind}:{path_kind:?}");
-                let n = failure_counts.entry(signature.clone()).or_insert(0usize);
-                *n = n.saturating_add(1);
-                if *n > out.repeated_failure_count {
-                    out.repeated_failure_count = *n;
-                    out.failure_signature = Some(signature);
-                }
-            }
-        }
-        // Deterministic suppression only when failures repeat and canonical manifest lookup has
-        // not succeeded in this model-plan phase iteration.
-        let threshold = 2usize;
-        out.retry_suppressed =
-            out.repeated_failure_count >= threshold && out.canonical_success_count == 0;
-        out.fallback_mode = out.retry_suppressed;
-        out
-    }
-
-    fn is_metadata_probe_sql(sql: &str) -> bool {
-        let q = sql.trim().to_ascii_lowercase();
-        q.starts_with("show ")
-            || q.starts_with("describe ")
-            || q.starts_with("explain ")
-            || q.starts_with("use ")
-            || q.starts_with("set ")
-    }
-
-
-    fn is_valid_grounding_evidence_tool(name: &str, args: &serde_json::Value) -> bool {
-        match name {
-            "sql_stats" | "sql_sample" => {
-                args.get("table")
-                    .and_then(|v| v.as_str())
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false)
-                    && args
-                        .get("field")
-                        .and_then(|v| v.as_str())
-                        .map(|s| !s.trim().is_empty())
-                        .unwrap_or(false)
-            }
-            "run_sql" => args
-                .get("sql")
-                .and_then(|v| v.as_str())
-                .map(|sql| {
-                    let q = sql.to_ascii_lowercase();
-                    (q.contains("count(") || q.contains(" limit "))
-                        && !Self::is_metadata_probe_sql(sql)
-                })
-                .unwrap_or(false),
-            _ => false,
-        }
     }
 
     fn enforce_cleanse_plan_raw_only(plan: &mut crate::data_engineer::plan::CleansePlan) -> usize {
@@ -2145,32 +1997,6 @@ Apply these fixes in the output.",
         Ok(Some(decision))
     }
 
-    fn actionable_review_entry_step_idx(
-        log: Option<&react_core::session::ThreadLog>,
-        phase: control_flow::Phase,
-    ) -> Option<usize> {
-        let Some(l) = log else {
-            return None;
-        };
-        // Inspect the most recent Phase step for this phase to determine entry reason and step index.
-        let Some((idx, step)) = l.steps.iter().enumerate().rev().find(|(_i, s)| match s {
-            react_core::session::ThreadStep::Phase { phase: p, .. } => p == phase.as_str(),
-            _ => false,
-        }) else {
-            return None;
-        };
-        match step {
-            react_core::session::ThreadStep::Phase { reason_code, .. } => {
-                if *reason_code == Some(PhaseReasonCode::ReviewPatchPlan) {
-                    Some(idx)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
     async fn approve_cleanse_plan_draft_and_advance(
         thread_store: &ThreadStore,
         thread_id: &str,
@@ -2395,45 +2221,6 @@ Apply these fixes in the output.",
             }
         })
     }
-    fn phase_start_idx(
-        log: &react_core::session::ThreadLog,
-        phase: control_flow::Phase,
-    ) -> Option<usize> {
-        for (i, step) in log.steps.iter().enumerate().rev() {
-            if let react_core::session::ThreadStep::Phase { phase: p, .. } = step {
-                if p == phase.as_str() {
-                    return Some(i);
-                }
-            }
-        }
-        None
-    }
-
-    /// Agent-mode hardening: allow at most one `ask_approval` per authoring phase.
-    ///
-    /// Rationale: once the user has approved the table set/plan for the phase, repeated approval prompts
-    /// can trap the authoring loop. In agent mode we want the model to proceed to scaffolding.
-    fn allow_ask_approval_in_phase(
-        log: Option<&react_core::session::ThreadLog>,
-        phase: control_flow::Phase,
-    ) -> bool {
-        let Some(log) = log else { return true };
-        let Some(start) = Self::phase_start_idx(log, phase) else {
-            return true;
-        };
-        // Monotonic: once approval/reject is seen within this phase, never allow ask_approval again
-        // (even if later user messages are "continue", "ok", etc).
-        for step in log.steps.iter().skip(start + 1) {
-            let react_core::session::ThreadStep::User { text, .. } = step else {
-                continue;
-            };
-            if Self::parse_user_decision(text).is_some() {
-                return false;
-            }
-        }
-        true
-    }
-
     async fn has_any_gold_model_sql(actx: &AgentCtx) -> bool {
         let base = actx
             .keyspace
@@ -2759,128 +2546,10 @@ Apply these fixes in the output.",
         })
     }
 
-    fn is_mutation_step_for_review(step: &react_core::session::ThreadStep) -> bool {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        enum ReviewMutationTool {
-            ApproveAndSaveArtifact,
-            ApproveAndSaveArtifactBatch,
-            StagingModel,
-            File,
-            Other,
-        }
-        fn parse_review_mutation_tool(name: &str) -> ReviewMutationTool {
-            match name {
-                "approve_and_save_artifact" => ReviewMutationTool::ApproveAndSaveArtifact,
-                "approve_and_save_artifact_batch" => ReviewMutationTool::ApproveAndSaveArtifactBatch,
-                "staging_model" => ReviewMutationTool::StagingModel,
-                "file" => ReviewMutationTool::File,
-                _ => ReviewMutationTool::Other,
-            }
-        }
-        match step {
-            react_core::session::ThreadStep::ArtifactSaved { .. } => true,
-            react_core::session::ThreadStep::ToolEnd { name, args, .. } => {
-                match parse_review_mutation_tool(name.as_str()) {
-                    ReviewMutationTool::ApproveAndSaveArtifact
-                    | ReviewMutationTool::ApproveAndSaveArtifactBatch
-                    | ReviewMutationTool::StagingModel => true,
-                    ReviewMutationTool::File => crate::data_engineer::tool_ops::is_file_mutation_op(args),
-                    ReviewMutationTool::Other => false,
-                }
-            }
-            _ => false,
-        }
-    }
-
-    fn compact_mutation_summary(step: &react_core::session::ThreadStep) -> serde_json::Value {
-        let (action, ok, args_v) = match step {
-            react_core::session::ThreadStep::ArtifactSaved {
-                kind,
-                name,
-                dataset_id,
-                key,
-                status,
-                lines_added,
-                lines_removed,
-                observation,
-                ..
-            } => (
-                "artifact_saved".to_string(),
-                observation.ok,
-                serde_json::json!({
-                    "kind": kind,
-                    "name": name,
-                    "dataset_id": dataset_id,
-                    "key": key,
-                    "status": status,
-                    "lines_added": lines_added,
-                    "lines_removed": lines_removed,
-                }),
-            ),
-            react_core::session::ThreadStep::ToolEnd {
-                name,
-                args,
-                observation,
-                ..
-            } => {
-                let args_v = match name.as_str() {
-                    "file" => serde_json::json!({
-                        "op": args.get("op"),
-                        "op_kind": match args.get("op").and_then(|v| v.as_str()) {
-                            Some("put") => "put",
-                            Some(_) => "other",
-                            None => "missing",
-                        },
-                        "path": args.get("path"),
-                    }),
-                    "approve_and_save_artifact" => serde_json::json!({
-                        "kind": args.get("kind"),
-                        "name": args.get("name"),
-                        "dataset_id": args.get("dataset_id"),
-                    }),
-                    "approve_and_save_artifact_batch" => {
-                        let names: Vec<serde_json::Value> = args
-                            .get("items")
-                            .and_then(|v| v.as_array())
-                            .map(|items| {
-                                items
-                                    .iter()
-                                    .take(6)
-                                    .filter_map(|it| it.get("name").cloned())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        serde_json::json!({
-                            "items_count": args.get("items").and_then(|v| v.as_array()).map(|a| a.len()),
-                            "names_head": names,
-                        })
-                    }
-                    "staging_model" => serde_json::json!({
-                        "dataset_ids": args.get("dataset_ids"),
-                        "written_keys": observation.extra.get("written_keys"),
-                    }),
-                    _ => args.clone(),
-                };
-                (name.clone(), observation.ok, args_v)
-            }
-            other => (
-                "unknown".to_string(),
-                true,
-                serde_json::to_value(other).unwrap_or(serde_json::Value::Null),
-            ),
-        };
-
-        serde_json::json!({
-            "action": action,
-            "ok": ok,
-            "args": args_v,
-        })
-    }
-
     fn build_review_question_with_context(
         question: &str,
         phase: control_flow::Phase,
-        log: Option<&react_core::session::ThreadLog>,
+        execution_state: &crate::data_engineer::progress_controller::ExecutionState,
     ) -> String {
         let mut base = match phase {
             control_flow::Phase::CleanseReview => format!(
@@ -2897,46 +2566,22 @@ Apply these fixes in the output.",
             ),
         };
 
-        let Some(log) = log else { return base };
-
-        // Current entry reason (last phase step is authoritative for why we are in this phase).
-        let entry = log.steps.iter().rev().find_map(|s| match s {
-            react_core::session::ThreadStep::Phase {
-                reason_code,
-                reason_detail,
-                ..
-            } => Some((*reason_code, reason_detail.as_ref())),
-            _ => None,
-        });
-        let entry_reason_code: Option<PhaseReasonCode> = entry.and_then(|(rc, _)| rc);
-        let entry_reason_detail: serde_json::Value = entry
-            .and_then(|(_, rd)| rd.cloned())
+        let entry_reason_code: Option<PhaseReasonCode> = execution_state.phase_reason_code;
+        let entry_reason_detail: serde_json::Value = execution_state
+            .phase_reason_detail
+            .clone()
             .unwrap_or(serde_json::Value::Null);
 
-        // Prior review context: last phase transition emitted from a review decision.
         let mut prior_review_block: Option<String> = None;
-        let mut mutations_since: Vec<serde_json::Value> = Vec::new();
-
-        if let Some((idx, step)) = log.steps.iter().enumerate().rev().find(|(_, s)| match s {
-            react_core::session::ThreadStep::Phase {
-                reason_code: Some(rc),
-                ..
-            } => {
-                matches!(
-                    rc,
-                    PhaseReasonCode::ReviewProceed
-                        | PhaseReasonCode::ReviewPatchPlan
-                        | PhaseReasonCode::ReviewPatchImpl
-                )
-            }
-            _ => false,
-        }) {
-            let rd = match step {
-                react_core::session::ThreadStep::Phase { reason_detail, .. } => {
-                    reason_detail.clone().unwrap_or(serde_json::Value::Null)
-                }
-                _ => serde_json::Value::Null,
-            };
+        if matches!(
+            entry_reason_code,
+            Some(
+                PhaseReasonCode::ReviewProceed
+                    | PhaseReasonCode::ReviewPatchPlan
+                    | PhaseReasonCode::ReviewPatchImpl
+            )
+        ) {
+            let rd = entry_reason_detail.clone();
             let review_phase = rd
                 .get("review_phase")
                 .and_then(|v| v.as_str())
@@ -2959,30 +2604,21 @@ Apply these fixes in the output.",
                 meta = meta,
                 excerpt = excerpt.replace('\n', " "),
             ));
-
-            // Mutations since that review decision.
-            for step in log.steps.iter().skip(idx + 1) {
-                if Self::is_mutation_step_for_review(step) {
-                    mutations_since.push(Self::compact_mutation_summary(step));
-                    if mutations_since.len() >= 12 {
-                        break;
-                    }
-                }
-            }
         }
 
         let mut ctx_lines: Vec<String> = Vec::new();
         if let Some(prior) = prior_review_block {
             ctx_lines.push(prior);
         }
-        if !mutations_since.is_empty() {
+        if let Some(last_mutation) = execution_state.last_mutation_summary.as_ref() {
             ctx_lines.push(format!(
-                "What changed since previous review (mutations, newest-first not guaranteed):\n{}",
-                mutations_since
-                    .iter()
-                    .map(|v| format!("- {}", v))
-                    .collect::<Vec<String>>()
-                    .join("\n")
+                "Most recent mutation summary (state-derived):\n{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "op": last_mutation.op,
+                    "affected_paths": last_mutation.affected_paths,
+                    "select_terms": last_mutation.select_terms,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
             ));
         }
         if entry_reason_code.is_some() || !entry_reason_detail.is_null() {
@@ -3608,11 +3244,14 @@ Apply these fixes in the output.",
                             self.inner.call(args, ctx).await
                         }
                     }
-                    reg.register(ProbeAwareRunSqlTool {
-                        inner: SqlRunTool {
-                            query: query.clone(),
-                        },
-                    });
+                    let allow_probe_sql = guard.probe_required && !guard.probe_satisfied;
+                    if allow_probe_sql {
+                        reg.register(ProbeAwareRunSqlTool {
+                            inner: SqlRunTool {
+                                query: query.clone(),
+                            },
+                        });
+                    }
 
                     // In hard_mutation_only mode, only expose schema-batch tools when we are in
                     // schema repair mode (single_target_repair_path is absent). SQL-target repair
@@ -3649,8 +3288,10 @@ Apply these fixes in the output.",
                         "  - op=patch args: {path:string, patch_text:string} (Cursor/Aider hunks-only; patch_text starts with '@@' and MUST NOT include ---/+++ or diff --git)".to_string(),
                         "  - op=rm args: {path:string, expected_sha256?:string}".to_string(),
                         "  - op=mv args: {from:string, to:string, expected_sha256?:string}".to_string(),
-                        "- run_sql(args:{sql:string}) (targeted probes; several are allowed if they add new signal; repeated same/no-signal probes force mutation)".to_string(),
                     ]);
+                    if allow_probe_sql {
+                        tool_lines.push("- run_sql(args:{sql:string}) (targeted probes are currently required by probe gate)".to_string());
+                    }
                     if single_target_repair_path.is_some() {
                         tool_lines.push("Deterministic single-target repair mode is active: only file op=patch/rm/mv targeting the current failing model file is allowed.".to_string());
                     }
@@ -4536,16 +4177,35 @@ Apply these fixes in the output.",
             total_steps += 1;
             remaining_steps = remaining_steps.saturating_sub(1);
 
-            let execution_state = crate::data_engineer::progress_controller::ExecutionState::load_strict(
+            let mut execution_state = crate::data_engineer::progress_controller::ExecutionState::load_strict(
                 &thread_store,
                 thread_id,
             )
             .await?
             .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+            if execution_state.mode
+                == crate::data_engineer::progress_controller::ExecutionMode::Failed
+                && execution_state.current_phase != Some(control_flow::Phase::Done)
+            {
+                execution_state.mode = if matches!(
+                    execution_state.current_phase,
+                    Some(control_flow::Phase::CleanseAuthor | control_flow::Phase::ModelAuthor)
+                ) {
+                    crate::data_engineer::progress_controller::ExecutionMode::Mutate
+                } else {
+                    crate::data_engineer::progress_controller::ExecutionMode::Discover
+                };
+                let _ = execution_state.save(&thread_store, thread_id).await;
+            }
             let phase = execution_state
                 .current_phase
                 .unwrap_or(control_flow::Phase::Preflight);
-            let log = thread_store.get(thread_id).await.ok();
+            let thread_state_step_count = thread_store
+                .get_thread_state(thread_id)
+                .await
+                .ok()
+                .map(|st| st.last_materialized_step_count)
+                .unwrap_or(0);
             let idx = phase_index(phase);
             if idx > max_phase_idx_seen {
                 max_phase_idx_seen = idx;
@@ -4602,44 +4262,11 @@ Apply these fixes in the output.",
                 return Err(stop_msg);
             }
 
-            // Helper: most recent dbt_validate error context (for prompt grounding).
+            // Hard-cutover: validate failure context is sourced from typed execution state only.
             let mut last_validate_brief: Option<String> = None;
-            let mut last_validate_failed_models: Vec<serde_json::Value> = Vec::new();
-            if let Some(ref l) = log {
-                for step in l.steps.iter().rev() {
-                    let react_core::session::ThreadStep::ToolEnd {
-                        name, observation, ..
-                    } = step
-                    else {
-                        continue;
-                    };
-                    if name != "dbt_validate" {
-                        continue;
-                    }
-                    // IMPORTANT: do not truncate dbt failures to a brief. Preserve full error output when it fits,
-                    // otherwise include a deterministic excerpt (keyword-window matches).
-                    if !observation.ok {
-                        let max_chars = react_core::error_context::estimate_max_prompt_chars(
-                            &Self::plan_agent_ctx(thread_id, sctx),
-                        );
-                        last_validate_brief =
-                            Some(react_core::error_context::render_failure_context(
-                                observation,
-                                max_chars,
-                            ));
-                    }
-                    // Best-effort: extract failing model(s) from dbt stdout so the authoring LLM
-                    // can target a specific file even when plan batches are already complete.
-                    let logs_v = observation
-                        .extra
-                        .get("logs")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-                    last_validate_failed_models =
-                        dbt_error::extract_failed_models_from_logs(&logs_v);
-                    break;
-                }
-            }
+            let mut last_validate_failed_models: Vec<
+                crate::data_engineer::progress_controller::FailedModelRef,
+            > = Vec::new();
             if let Some(last) = execution_state.last_validate.as_ref() {
                 if let Some(brief) = last.brief.as_ref().filter(|s| !s.trim().is_empty()) {
                     last_validate_brief = Some(brief.clone());
@@ -4706,9 +4333,10 @@ Apply these fixes in the output.",
                     // plan to storage and then drive the subsequent authoring phase deterministically.
                     let is_cleanse = phase == Phase::CleansePlan;
                     let actx = Self::plan_agent_ctx(thread_id, sctx);
+                    let entered_from_actionable_review =
+                        execution_state.phase_reason_code == Some(PhaseReasonCode::ReviewPatchPlan);
                     let actionable_review_entry_step_idx =
-                        Self::actionable_review_entry_step_idx(log.as_ref(), phase);
-                    let entered_from_actionable_review = actionable_review_entry_step_idx.is_some();
+                        entered_from_actionable_review.then_some(thread_state_step_count);
                     let prior_cleanse_plan_for_update =
                         if entered_from_actionable_review && is_cleanse {
                             crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
@@ -4722,113 +4350,88 @@ Apply these fixes in the output.",
                             None
                         };
 
-                    // If the user already approved an existing draft, mark it approved and proceed.
-                    if let Some(ref l) = log {
-                        if let Some(start) = Self::phase_start_idx(l, phase) {
-                            if let Some(last_user) =
-                                l.steps.iter().skip(start + 1).rev().find(|s| {
-                                    matches!(s, react_core::session::ThreadStep::User { .. })
-                                })
+                    // Hard cutover: plan approval/rejection is driven by the current user input,
+                    // not by replaying user steps from the thread log.
+                    let decision = Self::parse_user_decision(question);
+                    if decision == Some(UserDecision::Approve) {
+                        if is_cleanse {
+                            let advanced = Self::approve_cleanse_plan_draft_and_advance(
+                                &thread_store,
+                                thread_id,
+                                phase,
+                                &actx,
+                                thread_state_step_count,
+                                PhaseReasonCode::PlanApproved,
+                                serde_json::json!({ "user_text": question }),
+                            )
+                            .await?;
+                            if advanced {
+                                continue;
+                            }
+                            // Idempotent: if we didn't advance (e.g. plan already approved), still proceed.
+                            control_flow::append_phase_with_intent(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                Some(phase),
+                                Phase::CleanseAuthor,
+                                control_flow::TransitionIntent::Forward,
+                                Some(PhaseReasonCode::PlanApproved),
+                                Some(serde_json::json!({ "user_text": question })),
+                            )
+                            .await?;
+                            continue;
+                        } else {
+                            let advanced = Self::approve_model_plan_draft_and_advance(
+                                &thread_store,
+                                thread_id,
+                                phase,
+                                &actx,
+                                thread_state_step_count,
+                                PhaseReasonCode::PlanApproved,
+                                serde_json::json!({ "user_text": question }),
+                            )
+                            .await?;
+                            if advanced {
+                                continue;
+                            }
+                            control_flow::append_phase_with_intent(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                Some(phase),
+                                Phase::ModelAuthor,
+                                control_flow::TransitionIntent::Forward,
+                                Some(PhaseReasonCode::PlanApproved),
+                                Some(serde_json::json!({ "user_text": question })),
+                            )
+                            .await?;
+                            continue;
+                        }
+                    }
+                    if decision == Some(UserDecision::Reject) {
+                        if is_cleanse {
+                            if let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await
                             {
-                                let decision = match last_user {
-                                    react_core::session::ThreadStep::User { text, .. } => {
-                                        Self::parse_user_decision(text)
-                                    }
-                                    _ => None,
-                                };
-                                if decision == Some(UserDecision::Approve) {
-                                    if is_cleanse {
-                                        let advanced =
-                                            Self::approve_cleanse_plan_draft_and_advance(
-                                                &thread_store,
-                                                thread_id,
-                                                phase,
-                                                &actx,
-                                                l.steps.len(),
-                                                PhaseReasonCode::PlanApproved,
-                                                serde_json::json!({ "user_step": last_user }),
-                                            )
-                                            .await?;
-                                        if advanced {
-                                            continue;
-                                        }
-                                        // Idempotent: if we didn't advance (e.g. plan already approved), still proceed.
-                                        control_flow::append_phase_with_intent(
-                                            &thread_store,
-                                            thread_id,
-                                            Some("agent".to_string()),
-                                            Some(phase),
-                                            Phase::CleanseAuthor,
-                                            control_flow::TransitionIntent::Forward,
-                                            Some(PhaseReasonCode::PlanApproved),
-                                            Some(serde_json::json!({ "user_step": last_user })),
+                                p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+                                crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
+                                    .await
+                                    .map_err(|e| {
+                                        format!(
+                                            "failed to persist cancelled cleanse plan after rejection: {e}"
                                         )
-                                        .await?;
-                                        continue;
-                                    } else {
-                                        let advanced = Self::approve_model_plan_draft_and_advance(
-                                            &thread_store,
-                                            thread_id,
-                                            phase,
-                                            &actx,
-                                            l.steps.len(),
-                                            PhaseReasonCode::PlanApproved,
-                                            serde_json::json!({ "user_step": last_user }),
+                                    })?;
+                            }
+                        } else {
+                            if let Some(mut p) = crate::data_engineer::plan::load_model_plan(&actx).await {
+                                p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+                                crate::data_engineer::plan::save_model_plan(&actx, &p)
+                                    .await
+                                    .map_err(|e| {
+                                        format!(
+                                            "failed to persist cancelled model plan after rejection: {e}"
                                         )
-                                        .await?;
-                                        if advanced {
-                                            continue;
-                                        }
-                                        control_flow::append_phase_with_intent(
-                                            &thread_store,
-                                            thread_id,
-                                            Some("agent".to_string()),
-                                            Some(phase),
-                                            Phase::ModelAuthor,
-                                            control_flow::TransitionIntent::Forward,
-                                            Some(PhaseReasonCode::PlanApproved),
-                                            Some(serde_json::json!({ "user_step": last_user })),
-                                        )
-                                        .await?;
-                                        continue;
-                                    }
-                                }
-                                if decision == Some(UserDecision::Reject) {
-                                    if is_cleanse {
-                                        if let Some(mut p) =
-                                            crate::data_engineer::plan::load_cleanse_plan(&actx)
-                                                .await
-                                        {
-                                            p.status =
-                                                crate::data_engineer::plan::PlanStatus::Cancelled;
-                                            crate::data_engineer::plan::save_cleanse_plan(
-                                                &actx, &p,
-                                            )
-                                            .await
-                                            .map_err(|e| {
-                                                format!(
-                                                    "failed to persist cancelled cleanse plan after rejection: {e}"
-                                                )
-                                            })?;
-                                        }
-                                    } else {
-                                        if let Some(mut p) =
-                                            crate::data_engineer::plan::load_model_plan(&actx).await
-                                        {
-                                            p.status =
-                                                crate::data_engineer::plan::PlanStatus::Cancelled;
-                                            crate::data_engineer::plan::save_model_plan(
-                                                &actx, &p,
-                                            )
-                                            .await
-                                            .map_err(|e| {
-                                                format!(
-                                                    "failed to persist cancelled model plan after rejection: {e}"
-                                                )
-                                            })?;
-                                        }
-                                    }
-                                }
+                                    })?;
                             }
                         }
                     }
@@ -5001,7 +4604,7 @@ Apply these fixes in the output.",
                                         thread_id,
                                         phase,
                                         &actx,
-                                        log.as_ref().map(|l| l.steps.len()).unwrap_or(0),
+                                        thread_state_step_count,
                                         PhaseReasonCode::PlanAutoApproved,
                                         detail,
                                     )
@@ -5047,7 +4650,7 @@ Apply these fixes in the output.",
                                         thread_id,
                                         phase,
                                         &actx,
-                                        log.as_ref().map(|l| l.steps.len()).unwrap_or(0),
+                                        thread_state_step_count,
                                         PhaseReasonCode::PlanAutoApproved,
                                         detail,
                                     )
@@ -5075,44 +4678,7 @@ Apply these fixes in the output.",
                     // Important: we do NOT decide the plan here; we just provide enough reality to
                     // ground the LLM's plan authoring.
                     let mut bootstrap_summary: Option<String> = None;
-                    if let Some(ref l) = log {
-                        let start = Self::phase_start_idx(l, phase).unwrap_or(0);
-                        let mut saw_files_tool = false;
-                        let mut saw_sql_schema = false;
-                        let mut saw_evidence = false;
-                        for s in l.steps.iter().skip(start + 1) {
-                            let (name_opt, ok_opt, args_opt): (
-                                Option<&str>,
-                                Option<bool>,
-                                Option<&serde_json::Value>,
-                            ) = match s {
-                                react_core::session::ThreadStep::ToolEnd {
-                                    name,
-                                    observation,
-                                    args,
-                                    ..
-                                } => (Some(name.as_str()), Some(observation.ok), Some(args)),
-                                _ => (None, None, None),
-                            };
-                            if let (Some(name), Some(true)) = (name_opt, ok_opt) {
-                                match name {
-                                    "file" => saw_files_tool = true,
-                                    "sql_schema" => saw_sql_schema = true,
-                                    "sql_stats" | "sql_sample" | "run_sql" => {
-                                        if args_opt
-                                            .map(|a| {
-                                                Self::is_valid_grounding_evidence_tool(name, a)
-                                            })
-                                            .unwrap_or(false)
-                                        {
-                                            saw_evidence = true;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        if !(saw_files_tool && saw_sql_schema && saw_evidence) {
+                    if execution_state.needs_plan_bootstrap(phase) {
                             // Bootstrap calls are intentionally conservative: list models (may be empty),
                             // read core config files, list datasets, and run a minimal probe on one table.
                             let query = sctx
@@ -5240,17 +4806,35 @@ Apply these fixes in the output.",
                                 .and_then(|v| v.as_array())
                                 .map(|a| a.len())
                                 .unwrap_or(0);
+                            let models_list_ok = models_list
+                                .get("ok")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let tables_ok = tables_obs
+                                .get("ok")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
                             let mut head_tables = tables.clone();
                             head_tables.truncate(10);
+                            let bootstrap_sufficient = models_list_ok && tables_ok;
                             bootstrap_summary = Some(format!(
-                                "Deterministic bootstrap (suite-provided):\n- models/ listed: {} item(s)\n- tables discovered (head): {:?}\n- probed table for evidence: {:?}\n- probed field: {:?}\n- probe_ok: {}\n\nIf models/ is empty, that's OK; proceed using sql_schema discovery.",
+                                "Deterministic bootstrap (suite-provided):\n- models/ listed: {} item(s)\n- models_list_ok: {}\n- sql_schema_ok: {}\n- tables discovered (head): {:?}\n- probed table for evidence: {:?}\n- probed field: {:?}\n- probe_ok: {}\n- bootstrap_sufficient: {}\n\nIf models/ is empty, that's OK; proceed using sql_schema discovery.",
                                 model_count,
+                                models_list_ok,
+                                tables_ok,
                                 head_tables,
                                 probed,
                                 probed_field,
-                                probe_ok
+                                probe_ok,
+                                bootstrap_sufficient
                             ));
-                        }
+                            if bootstrap_sufficient {
+                                let mut st = execution_state.clone();
+                                st.mark_plan_bootstrap_done(phase);
+                                st.save(&thread_store, thread_id).await.map_err(|e| {
+                                    format!("failed to persist plan bootstrap state: {e}")
+                                })?;
+                            }
                     }
                     let sys = crate::util::time_context::with_time_context(if is_cleanse {
                         prompts::cleanse_plan_system_prompt()
@@ -5258,9 +4842,9 @@ Apply these fixes in the output.",
                         prompts::model_plan_system_prompt()
                     });
                     let manifest_retry_signal = if is_cleanse {
-                        ManifestLookupRetrySignal::default()
+                        crate::data_engineer::progress_controller::ManifestLookupState::default()
                     } else {
-                        Self::model_plan_manifest_retry_signal(log.as_ref())
+                        execution_state.manifest_lookup.clone()
                     };
                     let (registry, tools_card) = Self::build_tools_for_phase(
                         phase,
@@ -5269,7 +4853,7 @@ Apply these fixes in the output.",
                         sctx,
                         None,
                         None,
-                        manifest_retry_signal.fallback_mode,
+                        manifest_retry_signal.retry_suppressed,
                     )?;
 
                     let mut q = if is_cleanse {
@@ -5284,7 +4868,7 @@ Apply these fixes in the output.",
                         )
                     };
                     if !is_cleanse {
-                        if manifest_retry_signal.fallback_mode {
+                        if manifest_retry_signal.retry_suppressed {
                             tracing::info!(
                                 "data_engineer: model_plan manifest lookup fallback enabled plan_manifest_lookup_unavailable_fallback=true manifest_retry_suppressed=true failure_signature={} repeated_failure_count={}",
                                 manifest_retry_signal
@@ -5328,42 +4912,25 @@ Apply these fixes in the output.",
                     }
                     // If this plan phase was entered because review explicitly required a plan change,
                     // include that feedback verbatim to ground the new plan.
-                    if let Some(ref l) = log {
-                        if let Some(step) = l.steps.iter().rev().find(|s| match s {
-                            react_core::session::ThreadStep::Phase { phase: p, .. } => {
-                                p == phase.as_str()
-                            }
-                            _ => false,
-                        }) {
-                            let (reason_code, reason_detail) = match step {
-                                react_core::session::ThreadStep::Phase {
-                                    reason_code,
-                                    reason_detail,
-                                    ..
-                                } => (reason_code.as_ref(), reason_detail.as_ref()),
-                                _ => (None, None),
-                            };
-                            if matches!(reason_code, Some(PhaseReasonCode::ReviewPatchPlan)) {
-                                if let Some(key) = reason_detail
-                                    .and_then(|v| v.get("meta"))
-                                    .and_then(|v| v.get("review_ref"))
-                                    .and_then(|v| v.get("key"))
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.trim().to_string())
-                                    .filter(|s| !s.is_empty())
-                                {
-                                    if let Ok(bytes) = actx.storage.get_bytes(&key).await {
-                                        let txt = String::from_utf8_lossy(&bytes).to_string();
-                                        if !txt.trim().is_empty() {
-                                            q.push_str("\nReview feedback requiring plan change (incorporate into this plan):\n");
-                                            q.push_str(txt.trim());
-                                            q.push('\n');
-                                        }
-                                    }
+                    if execution_state.phase_reason_code == Some(PhaseReasonCode::ReviewPatchPlan) {
+                        if let Some(key) = execution_state
+                            .phase_reason_detail
+                            .as_ref()
+                            .and_then(|v| v.get("meta"))
+                            .and_then(|v| v.get("review_ref"))
+                            .and_then(|v| v.get("key"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                        {
+                            if let Ok(bytes) = actx.storage.get_bytes(&key).await {
+                                let txt = String::from_utf8_lossy(&bytes).to_string();
+                                if !txt.trim().is_empty() {
+                                    q.push_str("\nReview feedback requiring plan change (incorporate into this plan):\n");
+                                    q.push_str(txt.trim());
+                                    q.push('\n');
                                 }
                             }
-
-                            // Hard cutover: no legacy design-critique loopbacks in planning prompts.
                         }
                     }
                     if let Some(ref brief) = last_validate_brief {
@@ -5476,8 +5043,7 @@ Apply these fixes in the output.",
                                 // Persistence begins only after grounding + semantic gates.
                                 // Scope progress to the current plan instance so we don't replay the full
                                 // historical log and accidentally mark tasks done from prior cycles.
-                                plan.progress.last_applied_step_idx =
-                                    log.as_ref().map(|l| l.steps.len()).unwrap_or(0);
+                                plan.progress.last_applied_step_idx = thread_state_step_count;
                                 // Capture a cheap snapshot for “current project as-is” provenance.
                                 plan.project_snapshot = serde_json::json!({
                                     "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
@@ -5740,7 +5306,7 @@ Apply these fixes in the output.",
                                         thread_id,
                                         phase,
                                         &actx,
-                                        log.as_ref().map(|l| l.steps.len()).unwrap_or(0),
+                                        thread_state_step_count,
                                         PhaseReasonCode::PlanAutoApproved,
                                         detail,
                                     )
@@ -5794,8 +5360,7 @@ Apply these fixes in the output.",
                                 // Persistence begins only after grounding + semantic gates.
                                 // Scope progress to the current plan instance so we don't replay the full
                                 // historical log and accidentally mark tasks done from prior cycles.
-                                plan.progress.last_applied_step_idx =
-                                    log.as_ref().map(|l| l.steps.len()).unwrap_or(0);
+                                plan.progress.last_applied_step_idx = thread_state_step_count;
                                 plan.project_snapshot = serde_json::json!({
                                     "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
                                     "dbt_project_yml_etag": actx.storage.head_etag(&actx.keyspace.dbt_project_key(&actx.scope)).await.ok().flatten(),
@@ -5816,59 +5381,6 @@ Apply these fixes in the output.",
                                             obj.insert(
                                                 "entry_step_idx".to_string(),
                                                 serde_json::json!(idx),
-                                            );
-                                        }
-                                    }
-                                }
-                                // Persist schema facts observed during this plan phase (no ambiguity).
-                                if let Some(ref l) = log {
-                                    let start = Self::phase_start_idx(l, phase).unwrap_or(0);
-                                    let mut calls: Vec<serde_json::Value> = Vec::new();
-                                    for s in l.steps.iter().skip(start + 1) {
-                                        let react_core::session::ThreadStep::ToolEnd {
-                                            name,
-                                            args,
-                                            observation,
-                                            ..
-                                        } = s
-                                        else {
-                                            continue;
-                                        };
-                                        if name != "sql_schema" || !observation.ok {
-                                            continue;
-                                        }
-                                        let table = args
-                                            .get("table")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.trim().to_string());
-                                        let mut rec = serde_json::json!({
-                                            "tool": "sql_schema",
-                                            "table": table,
-                                            "result": observation.extra,
-                                        });
-                                        if rec
-                                            .get("table")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.is_empty())
-                                            .unwrap_or(false)
-                                        {
-                                            if let Some(obj) = rec.as_object_mut() {
-                                                obj.remove("table");
-                                            }
-                                        }
-                                        calls.push(rec);
-                                        if calls.len() >= 120 {
-                                            break;
-                                        }
-                                    }
-                                    if !calls.is_empty() {
-                                        if plan.project_snapshot.is_null() {
-                                            plan.project_snapshot = serde_json::json!({});
-                                        }
-                                        if let Some(obj) = plan.project_snapshot.as_object_mut() {
-                                            obj.insert(
-                                                "plan_schema_facts".to_string(),
-                                                serde_json::json!({ "sql_schema_calls": calls }),
                                             );
                                         }
                                     }
@@ -6069,7 +5581,7 @@ Apply these fixes in the output.",
                                         thread_id,
                                         phase,
                                         &actx,
-                                        log.as_ref().map(|l| l.steps.len()).unwrap_or(0),
+                                        thread_state_step_count,
                                         PhaseReasonCode::PlanAutoApproved,
                                         detail,
                                     )
@@ -6098,16 +5610,8 @@ Apply these fixes in the output.",
                     let is_cleanse = phase == Phase::CleanseAuthor;
                     // Treat schema precheck failures as "validate failed" for authoring guard behavior.
                     // Otherwise we can bounce Author->Validate->Author without requiring a mutation.
-                    let entered_from_precheck_failed = log.as_ref().and_then(|l| {
-                        l.steps.iter().rev().find_map(|s| match s {
-                            react_core::session::ThreadStep::Phase {
-                                phase: p,
-                                reason_code,
-                                ..
-                            } if p == phase.as_str() => reason_code.as_ref().copied(),
-                            _ => None,
-                        })
-                    }) == Some(PhaseReasonCode::PrecheckFailed);
+                    let entered_from_precheck_failed = execution_state.phase_reason_code
+                        == Some(PhaseReasonCode::PrecheckFailed);
                     let mut phase_guard = guard.clone();
                     if entered_from_precheck_failed {
                         phase_guard.last_validate_failed = true;
@@ -6327,14 +5831,16 @@ Apply these fixes in the output.",
                                 );
                                 if !last_validate_failed_models.is_empty() {
                                     for fm in last_validate_failed_models.iter().take(6) {
-                                        let name = fm
-                                            .get("name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown_model");
-                                        let file = fm
-                                            .get("file")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("(unknown file)");
+                                        let name = if fm.name.trim().is_empty() {
+                                            "unknown_model"
+                                        } else {
+                                            fm.name.as_str()
+                                        };
+                                        let file = if fm.file.trim().is_empty() {
+                                            "(unknown file)"
+                                        } else {
+                                            fm.file.as_str()
+                                        };
                                         ctx.push_str(&format!("- {} ({})\n", name, file));
                                     }
                                 } else if let Some(ref brief) = last_validate_brief {
@@ -6392,14 +5898,16 @@ Apply these fixes in the output.",
                                     );
                                     if !last_validate_failed_models.is_empty() {
                                         for fm in last_validate_failed_models.iter().take(6) {
-                                            let name = fm
-                                                .get("name")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("unknown_model");
-                                            let file = fm
-                                                .get("file")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("(unknown file)");
+                                            let name = if fm.name.trim().is_empty() {
+                                                "unknown_model"
+                                            } else {
+                                                fm.name.as_str()
+                                            };
+                                            let file = if fm.file.trim().is_empty() {
+                                                "(unknown file)"
+                                            } else {
+                                                fm.file.as_str()
+                                            };
                                             ctx.push_str(&format!("- {} ({})\n", name, file));
                                         }
                                     } else if let Some(ref brief) = last_validate_brief {
@@ -6483,14 +5991,16 @@ Apply these fixes in the output.",
                                     );
                                         if !last_validate_failed_models.is_empty() {
                                             for fm in last_validate_failed_models.iter().take(6) {
-                                                let name = fm
-                                                    .get("name")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("unknown_model");
-                                                let file = fm
-                                                    .get("file")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("(unknown file)");
+                                                let name = if fm.name.trim().is_empty() {
+                                                    "unknown_model"
+                                                } else {
+                                                    fm.name.as_str()
+                                                };
+                                                let file = if fm.file.trim().is_empty() {
+                                                    "(unknown file)"
+                                                } else {
+                                                    fm.file.as_str()
+                                                };
                                                 ctx.push_str(&format!("- {} ({})\n", name, file));
                                             }
                                         } else if let Some(ref brief) = last_validate_brief {
@@ -6724,14 +6234,16 @@ Apply these fixes in the output.",
                                 );
                                 if !last_validate_failed_models.is_empty() {
                                     for fm in last_validate_failed_models.iter().take(6) {
-                                        let name = fm
-                                            .get("name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown_model");
-                                        let file = fm
-                                            .get("file")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("(unknown file)");
+                                        let name = if fm.name.trim().is_empty() {
+                                            "unknown_model"
+                                        } else {
+                                            fm.name.as_str()
+                                        };
+                                        let file = if fm.file.trim().is_empty() {
+                                            "(unknown file)"
+                                        } else {
+                                            fm.file.as_str()
+                                        };
                                         ctx.push_str(&format!("- {} ({})\n", name, file));
                                     }
                                 } else if let Some(ref brief) = last_validate_brief {
@@ -6789,14 +6301,16 @@ Apply these fixes in the output.",
                                     );
                                     if !last_validate_failed_models.is_empty() {
                                         for fm in last_validate_failed_models.iter().take(6) {
-                                            let name = fm
-                                                .get("name")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("unknown_model");
-                                            let file = fm
-                                                .get("file")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("(unknown file)");
+                                            let name = if fm.name.trim().is_empty() {
+                                                "unknown_model"
+                                            } else {
+                                                fm.name.as_str()
+                                            };
+                                            let file = if fm.file.trim().is_empty() {
+                                                "(unknown file)"
+                                            } else {
+                                                fm.file.as_str()
+                                            };
                                             ctx.push_str(&format!("- {} ({})\n", name, file));
                                         }
                                     } else if let Some(ref brief) = last_validate_brief {
@@ -6950,14 +6464,16 @@ Apply these fixes in the output.",
                                 );
                                         if !last_validate_failed_models.is_empty() {
                                             for fm in last_validate_failed_models.iter().take(6) {
-                                                let name = fm
-                                                    .get("name")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("unknown_model");
-                                                let file = fm
-                                                    .get("file")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("(unknown file)");
+                                                let name = if fm.name.trim().is_empty() {
+                                                    "unknown_model"
+                                                } else {
+                                                    fm.name.as_str()
+                                                };
+                                                let file = if fm.file.trim().is_empty() {
+                                                    "(unknown file)"
+                                                } else {
+                                                    fm.file.as_str()
+                                                };
                                                 ctx.push_str(&format!("- {} ({})\n", name, file));
                                             }
                                         } else if let Some(ref brief) = last_validate_brief {
@@ -7225,14 +6741,16 @@ Apply these fixes in the output.",
                     if !last_validate_failed_models.is_empty() {
                         q.push_str("\n\nFailing DBT model targets (from dbt stdout):\n");
                         for fm in last_validate_failed_models.iter().take(6) {
-                            let name = fm
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown_model");
-                            let file = fm
-                                .get("file")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("(unknown file)");
+                            let name = if fm.name.trim().is_empty() {
+                                "unknown_model"
+                            } else {
+                                fm.name.as_str()
+                            };
+                            let file = if fm.file.trim().is_empty() {
+                                "(unknown file)"
+                            } else {
+                                fm.file.as_str()
+                            };
                             q.push_str("- ");
                             q.push_str(name);
                             q.push_str(" (");
@@ -7252,10 +6770,7 @@ Apply these fixes in the output.",
                     // When the suite is in hard_mutation_only, file is patch-only (no op=get),
                     // so we MUST include the raw file content for at least the primary failing target.
                     if hard_mutation_repair_mode && !last_validate_failed_models.is_empty() {
-                        if let Some(file) = last_validate_failed_models[0]
-                            .get("file")
-                            .and_then(|v| v.as_str())
-                        {
+                        if let Some(file) = Some(last_validate_failed_models[0].file.as_str()) {
                             let file = file.trim();
                             if !file.is_empty() && file != "(unknown file)" {
                                 let base = actx
@@ -7279,56 +6794,35 @@ Apply these fixes in the output.",
                             }
                         }
                     }
-                    // Surface the most recent suite-level guard block reason (if any) to help auto-fix.
-                    if let Some(ref l) = log {
-                        if let Some(reason) = l.steps.iter().rev().find_map(|s| match s {
-                            react_core::session::ThreadStep::GuardBlock { reason, .. } => {
-                                Some(reason.as_str())
-                            }
-                            _ => None,
-                        }) {
-                            if !reason.trim().is_empty() {
-                                q.push_str(
-                                    "\n\nSuite guard note (must resolve before validate):\n",
-                                );
-                                q.push_str(reason.trim());
-                            }
-                        }
+                    // Surface the latest typed suite-level error note (if any) to help auto-fix.
+                    if let Some(reason) = execution_state
+                        .last_error_brief
+                        .as_ref()
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                    {
+                        q.push_str("\n\nSuite guard note (must resolve before validate):\n");
+                        q.push_str(reason);
                     }
                     // If we re-entered authoring due to review feedback, inject the full review text (by ref)
                     // so the agent can address it in implementation without reopening the plan.
-                    if let Some(ref l) = log {
-                        if let Some(step) = l.steps.iter().rev().find(|s| match s {
-                            react_core::session::ThreadStep::Phase { phase: p, .. } => {
-                                p == phase.as_str()
-                            }
-                            _ => false,
-                        }) {
-                            let (reason_code, reason_detail) = match step {
-                                react_core::session::ThreadStep::Phase {
-                                    reason_code,
-                                    reason_detail,
-                                    ..
-                                } => (reason_code.as_ref(), reason_detail.as_ref()),
-                                _ => (None, None),
-                            };
-                            if matches!(reason_code, Some(PhaseReasonCode::ReviewPatchImpl)) {
-                                if let Some(key) = reason_detail
-                                    .and_then(|v| v.get("meta"))
-                                    .and_then(|v| v.get("review_ref"))
-                                    .and_then(|v| v.get("key"))
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.trim().to_string())
-                                    .filter(|s| !s.is_empty())
-                                {
-                                    if let Ok(bytes) = actx.storage.get_bytes(&key).await {
-                                        let txt = String::from_utf8_lossy(&bytes).to_string();
-                                        if !txt.trim().is_empty() {
-                                            q.push_str("\n\nPRIOR REVIEW FEEDBACK (must address by editing implementation; do NOT change the approved plan/spec):\n");
-                                            q.push_str(txt.trim());
-                                            q.push('\n');
-                                        }
-                                    }
+                    if execution_state.phase_reason_code == Some(PhaseReasonCode::ReviewPatchImpl) {
+                        if let Some(key) = execution_state
+                            .phase_reason_detail
+                            .as_ref()
+                            .and_then(|v| v.get("meta"))
+                            .and_then(|v| v.get("review_ref"))
+                            .and_then(|v| v.get("key"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                        {
+                            if let Ok(bytes) = actx.storage.get_bytes(&key).await {
+                                let txt = String::from_utf8_lossy(&bytes).to_string();
+                                if !txt.trim().is_empty() {
+                                    q.push_str("\n\nPRIOR REVIEW FEEDBACK (must address by editing implementation; do NOT change the approved plan/spec):\n");
+                                    q.push_str(txt.trim());
+                                    q.push('\n');
                                 }
                             }
                         }
@@ -7473,6 +6967,16 @@ Apply these fixes in the output.",
                             reasoning_effort: None,
                         }
                     };
+                    let pre_last_mutation_marker = execution_state.last_mutation_summary.as_ref().map(
+                        |m| {
+                            format!(
+                                "{}|{}|{}",
+                                m.ts.clone().unwrap_or_default(),
+                                m.op.clone().unwrap_or_default(),
+                                m.affected_paths.join(",")
+                            )
+                        },
+                    );
                     match Agent::run_until_block_non_interactive(
                         &registry,
                         &actx,
@@ -7603,6 +7107,31 @@ Apply these fixes in the output.",
                             continue;
                         }
                         Ok(RunOutcomeNonInteractive::StepBoundary { .. }) => {
+                            if hard_mutation_repair_mode && phase_guard.last_validate_failed {
+                                let post_state = crate::data_engineer::progress_controller::ExecutionState::load_strict(
+                                    &thread_store,
+                                    thread_id,
+                                )
+                                .await?
+                                .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+                                let post_last_mutation_marker =
+                                    post_state.last_mutation_summary.as_ref().map(|m| {
+                                        format!(
+                                            "{}|{}|{}",
+                                            m.ts.clone().unwrap_or_default(),
+                                            m.op.clone().unwrap_or_default(),
+                                            m.affected_paths.join(",")
+                                        )
+                                    });
+                                if post_last_mutation_marker == pre_last_mutation_marker
+                                    && total_steps >= 8
+                                {
+                                    return Err(
+                                        "failed to make progress for this thread: no mutating file operation observed across authoring iterations while hard_mutation_repair_mode=true. Apply a direct file mutation (patch/rm/mv) to the failing model path before retrying."
+                                            .to_string(),
+                                    );
+                                }
+                            }
                             // Deterministic single-step handoff: return to outer controller loop.
                             continue;
                         }
@@ -8153,13 +7682,13 @@ Apply these fixes in the output.",
                         } else {
                             crate::data_engineer::progress_controller::ExecutionTier::Model
                         };
-                        let failing_models: Vec<serde_json::Value> = failing_targets
+                        let failing_models: Vec<
+                            crate::data_engineer::progress_controller::FailedModelRef,
+                        > = failing_targets
                             .iter()
-                            .map(|t| {
-                                serde_json::json!({
-                                    "name": t.node_id.clone(),
-                                    "file": t.canonical_path
-                                })
+                            .map(|t| crate::data_engineer::progress_controller::FailedModelRef {
+                                name: t.node_id.clone(),
+                                file: t.canonical_path.clone(),
                             })
                             .collect();
                         let backlog = crate::data_engineer::progress_controller::repair_backlog_from_failed_models(&failing_models);
@@ -8306,7 +7835,7 @@ Apply these fixes in the output.",
 
                 Phase::CleanseReview | Phase::ModelReview | Phase::PostPublishReview => {
                     let review_q =
-                        Self::build_review_question_with_context(question, phase, log.as_ref());
+                        Self::build_review_question_with_context(question, phase, &execution_state);
                     let frames =
                         review_batched::run_batched_review(thread_id, &review_q, phase, sctx)
                             .await?;
@@ -8764,13 +8293,23 @@ Apply these fixes in the output.",
             }
         }
 
-        let budget_msg = format!(
+        let mut budget_msg = format!(
             "headless_budget_exhausted: Agent reached the phase-step budget without completing.\n\nBudget:\n- max_steps_per_progress={max_phase_steps}\n- total_steps={total_steps}\n\nThis indicates a loop (re-entering phases without durable progress)."
         );
         if let Some(mut es) =
             crate::data_engineer::progress_controller::ExecutionState::load(&thread_store, thread_id)
                 .await
         {
+            budget_msg.push_str(&format!(
+                "\n\nExecution state at exhaustion:\n- current_phase={}\n- mode={}\n- phase_reason_code={}\n- replan_backtracks={}\n- stall_count={}/{}\n- hard_mutation_repair_mode={}",
+                es.current_phase.map(|p| p.as_str().to_string()).unwrap_or_else(|| "null".to_string()),
+                format!("{:?}", es.mode),
+                es.phase_reason_code.map(|c| c.as_str().to_string()).unwrap_or_else(|| "null".to_string()),
+                es.replan_backtracks,
+                es.stall_count,
+                es.max_stall_count,
+                es.hard_mutation_repair_mode,
+            ));
             es.mark_failed(budget_msg.clone());
             let _ = es.save(&thread_store, thread_id).await;
         }
@@ -10013,24 +9552,6 @@ mod tests {
             .await
             .expect("save");
 
-        let log = react_core::session::ThreadLog {
-            steps: vec![react_core::session::ThreadStep::Phase {
-                phase: control_flow::Phase::CleansePlan.as_str().to_string(),
-                from_phase: Some(control_flow::Phase::CleanseReview.as_str().to_string()),
-                reason_code: Some(react_core::control_flow::PhaseReasonCode::ReviewPatchPlan),
-                reason_detail: Some(serde_json::json!({"answer":"Fix contracts."})),
-                observation: react_core::session::Observation::ok(),
-                ts: "t".to_string(),
-                agent: "agent".to_string(),
-            }],
-            ..Default::default()
-        };
-        assert!(DataEngineerSuite::actionable_review_entry_step_idx(
-            Some(&log),
-            control_flow::Phase::CleansePlan
-        )
-        .is_some());
-
         let advanced = DataEngineerSuite::approve_cleanse_plan_draft_and_advance(
             &thread_store,
             thread_id,
@@ -10136,24 +9657,6 @@ mod tests {
             .await
             .expect("save");
 
-        let log = react_core::session::ThreadLog {
-            steps: vec![react_core::session::ThreadStep::Phase {
-                phase: control_flow::Phase::ModelPlan.as_str().to_string(),
-                from_phase: Some(control_flow::Phase::ModelReview.as_str().to_string()),
-                reason_code: Some(react_core::control_flow::PhaseReasonCode::ReviewPatchPlan),
-                reason_detail: Some(serde_json::json!({"answer":"Fix docs."})),
-                observation: react_core::session::Observation::ok(),
-                ts: "t".to_string(),
-                agent: "agent".to_string(),
-            }],
-            ..Default::default()
-        };
-        assert!(DataEngineerSuite::actionable_review_entry_step_idx(
-            Some(&log),
-            control_flow::Phase::ModelPlan
-        )
-        .is_some());
-
         let advanced = DataEngineerSuite::approve_model_plan_draft_and_advance(
             &thread_store,
             thread_id,
@@ -10195,50 +9698,6 @@ mod tests {
     }
 
     #[test]
-    fn allow_ask_approval_is_monotonic_within_phase() {
-        use crate::data_engineer::control_flow::Phase;
-        use react_core::session::ThreadLog;
-
-        let log = ThreadLog {
-            steps: vec![
-                react_core::session::ThreadStep::Phase {
-                    phase: "cleanse_author".to_string(),
-                    from_phase: None,
-                    reason_code: None,
-                    reason_detail: None,
-                    observation: react_core::session::Observation::ok(),
-                    ts: "t".to_string(),
-                    agent: "agent".to_string(),
-                },
-                react_core::session::ThreadStep::AskApproval {
-                    prompt: "p".to_string(),
-                    observation: react_core::session::Observation::ok(),
-                    ts: "t".to_string(),
-                    agent: "agent".to_string(),
-                },
-                react_core::session::ThreadStep::User {
-                    text: "approve".to_string(),
-                    observation: react_core::session::Observation::ok(),
-                    ts: "t".to_string(),
-                    agent: "agent".to_string(),
-                },
-                // Later user chatter must not re-enable ask_approval.
-                react_core::session::ThreadStep::User {
-                    text: "continue".to_string(),
-                    observation: react_core::session::Observation::ok(),
-                    ts: "t".to_string(),
-                    agent: "agent".to_string(),
-                },
-            ],
-            ..Default::default()
-        };
-        assert_eq!(
-            DataEngineerSuite::allow_ask_approval_in_phase(Some(&log), Phase::CleanseAuthor),
-            false
-        );
-    }
-
-    #[test]
     fn parse_user_decision_accepts_loose_synonyms() {
         use super::DataEngineerSuite;
         use super::UserDecision;
@@ -10274,59 +9733,27 @@ mod tests {
     #[test]
     fn review_question_includes_prior_review_and_mutation_diff_when_available() {
         use crate::data_engineer::control_flow::Phase;
-        use react_core::session::{ThreadLog, ThreadStep};
+        use crate::data_engineer::progress_controller::{ExecutionState, LastMutationSummary};
 
         let prior_review_answer = "Please add tests.";
-        let prior_review_transition = ThreadStep::Phase {
-            phase: "cleanse_author".to_string(),
-            from_phase: Some("cleanse_review".to_string()),
-            reason_code: Some(react_core::control_flow::PhaseReasonCode::ReviewPatchPlan),
-            reason_detail: Some(serde_json::json!({
-                "review_phase":"cleanse_review",
-                "meta": {"decision":"patch_plan", "dataset_ids": ["x"], "tier":"silver"},
-                "answer": prior_review_answer
-            })),
-            observation: react_core::session::Observation::ok(),
-            ts: "t".to_string(),
-            agent: "agent".to_string(),
-        };
-
-        let log = ThreadLog {
-            steps: vec![
-                prior_review_transition,
-                ThreadStep::ToolEnd {
-                    tool_id: "t1".to_string(),
-                    name: "staging_model".to_string(),
-                    clean_name: "Staging model".to_string(),
-                    args: serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
-                    status: react_core::session::ToolStepStatus::Ok,
-                    payload: None,
-                    ctx: None,
-                    observation: react_core::session::ToolObservation::normalize(
-                        serde_json::json!({"ok": true, "written_keys":["k1"]}),
-                    ),
-                    ts: "t".to_string(),
-                    agent: "agent".to_string(),
-                },
-                ThreadStep::Phase {
-                    phase: "cleanse_review".to_string(),
-                    from_phase: Some("cleanse_validate".to_string()),
-                    reason_code: Some(
-                        react_core::control_flow::PhaseReasonCode::ValidatePassToReview
-                    ),
-                    reason_detail: Some(serde_json::json!({"dbt_validate_step_idx": 1})),
-                    observation: react_core::session::Observation::ok(),
-                    ts: "t".to_string(),
-                    agent: "agent".to_string(),
-                },
-            ],
-            ..Default::default()
-        };
+        let mut st = ExecutionState::new();
+        st.phase_reason_code = Some(react_core::control_flow::PhaseReasonCode::ReviewPatchPlan);
+        st.phase_reason_detail = Some(serde_json::json!({
+            "review_phase":"cleanse_review",
+            "meta": {"decision":"patch_plan", "dataset_ids": ["x"], "tier":"silver"},
+            "answer": prior_review_answer
+        }));
+        st.last_mutation_summary = Some(LastMutationSummary {
+            op: Some("patch".to_string()),
+            affected_paths: vec!["models/staging/stg_test_raw_raw_orders.sql".to_string()],
+            select_terms: vec!["placed_at_ts".to_string()],
+            ts: Some("t".to_string()),
+        });
 
         let q = DataEngineerSuite::build_review_question_with_context(
             "orig goal",
             Phase::CleanseReview,
-            Some(&log),
+            &st,
         );
         assert!(
             q.contains("Review context"),
@@ -10337,21 +9764,39 @@ mod tests {
             "should include prior review block"
         );
         assert!(
-            q.contains("What changed since previous review"),
-            "should include mutation diff"
+            q.contains("Most recent mutation summary"),
+            "should include state-based mutation summary"
         );
         assert!(
-            q.contains("staging_model"),
-            "should mention mutation action"
+            q.contains("stg_test_raw_raw_orders.sql"),
+            "should include affected path from state"
         );
         assert!(
-            q.contains("validate_pass_to_review"),
+            q.contains("review_patch_plan"),
             "should include entry reason"
         );
         assert!(
             q.contains("Original goal"),
             "should retain original goal section"
         );
+    }
+
+    #[test]
+    fn review_question_includes_entry_reason_when_review_started_from_validate_pass() {
+        use crate::data_engineer::control_flow::Phase;
+        use crate::data_engineer::progress_controller::ExecutionState;
+
+        let mut st = ExecutionState::new();
+        st.phase_reason_code = Some(react_core::control_flow::PhaseReasonCode::ValidatePassToReview);
+        st.phase_reason_detail = Some(serde_json::json!({"dbt_validate_step_idx": 1}));
+
+        let q = DataEngineerSuite::build_review_question_with_context(
+            "orig goal",
+            Phase::CleanseReview,
+            &st,
+        );
+        assert!(q.contains("validate_pass_to_review"));
+        assert!(q.contains("dbt_validate_step_idx"));
     }
 
     #[tokio::test]
@@ -10466,26 +9911,6 @@ mod tests {
     }
 
     #[test]
-    fn grounding_evidence_requires_valid_probe_args() {
-        assert!(DataEngineerSuite::is_valid_grounding_evidence_tool(
-            "sql_stats",
-            &serde_json::json!({"table":"AwsDataCatalog.db.tbl","field":"id"})
-        ));
-        assert!(!DataEngineerSuite::is_valid_grounding_evidence_tool(
-            "sql_stats",
-            &serde_json::json!({"table":"AwsDataCatalog.db.tbl"})
-        ));
-        assert!(DataEngineerSuite::is_valid_grounding_evidence_tool(
-            "run_sql",
-            &serde_json::json!({"sql":"SELECT count(*) FROM AwsDataCatalog.db.tbl"})
-        ));
-        assert!(!DataEngineerSuite::is_valid_grounding_evidence_tool(
-            "run_sql",
-            &serde_json::json!({"sql":"SELECT 1"})
-        ));
-    }
-
-    #[test]
     fn output_field_kind_contract_rejects_unknown_variants() {
         let ok = serde_json::json!({
             "output_fields": [{"name":"a","kind":"raw"},{"name":"b","kind":"quality_flag"}]
@@ -10497,18 +9922,6 @@ mod tests {
         let err = DataEngineerSuite::validate_output_field_kind_contract(&bad)
             .expect_err("expected invalid kind");
         assert!(err.contains("allowed kind values: raw, clean, derived, quality_flag"));
-    }
-
-    #[test]
-    fn grounding_evidence_rejects_metadata_probe_sql() {
-        assert!(!DataEngineerSuite::is_valid_grounding_evidence_tool(
-            "run_sql",
-            &serde_json::json!({"sql":"SHOW SCHEMAS FROM AwsDataCatalog"})
-        ));
-        assert!(!DataEngineerSuite::is_valid_grounding_evidence_tool(
-            "run_sql",
-            &serde_json::json!({"sql":"DESCRIBE AwsDataCatalog.db.tbl"})
-        ));
     }
 
     #[tokio::test]
@@ -10540,58 +9953,26 @@ mod tests {
     }
 
     #[test]
-    fn model_plan_manifest_retry_signal_detects_repeated_failures() {
-        use react_core::session::{Observation, ThreadLog, ThreadStep, ToolObservation};
-        let log = ThreadLog {
-            steps: vec![
-                ThreadStep::Phase {
-                    phase: control_flow::Phase::ModelPlan.as_str().to_string(),
-                    from_phase: Some(control_flow::Phase::CleanseReview.as_str().to_string()),
-                    reason_code: None,
-                    reason_detail: None,
-                    observation: Observation::ok(),
-                    ts: "t".to_string(),
-                    agent: "agent".to_string(),
-                },
-                ThreadStep::ToolEnd {
-                    tool_id: "j1".to_string(),
-                    name: "json_file".to_string(),
-                    clean_name: "Json File".to_string(),
-                    args: serde_json::json!({"op":"query","path":"manifest.json","pointer":"/nodes"}),
-                    status: react_core::session::ToolStepStatus::Failed,
-                    payload: None,
-                    ctx: None,
-                    observation: ToolObservation::fail(
-                        vec!["not found or failed to fetch: NoSuchKey".to_string()],
-                        std::collections::BTreeMap::new(),
-                    ),
-                    ts: "t".to_string(),
-                    agent: "agent".to_string(),
-                },
-                ThreadStep::ToolEnd {
-                    tool_id: "j2".to_string(),
-                    name: "json_file".to_string(),
-                    clean_name: "Json File".to_string(),
-                    args: serde_json::json!({"op":"query","path":"manifest.json","pointer":"/nodes"}),
-                    status: react_core::session::ToolStepStatus::Failed,
-                    payload: None,
-                    ctx: None,
-                    observation: ToolObservation::fail(
-                        vec!["not found or failed to fetch: NoSuchKey".to_string()],
-                        std::collections::BTreeMap::new(),
-                    ),
-                    ts: "t".to_string(),
-                    agent: "agent".to_string(),
-                },
-            ],
-            ..Default::default()
+    fn model_plan_manifest_retry_state_detects_repeated_failures() {
+        use crate::data_engineer::progress_controller::{
+            classify_manifest_lookup_failure, classify_manifest_lookup_path, ExecutionState,
         };
-        let signal = DataEngineerSuite::model_plan_manifest_retry_signal(Some(&log));
-        assert!(signal.fallback_mode);
-        assert!(signal.retry_suppressed);
-        assert_eq!(signal.canonical_success_count, 0);
+
+        let mut st = ExecutionState::new();
+        let path_kind = classify_manifest_lookup_path("manifest.json")
+            .expect("manifest.json should classify as manifest lookup path");
+        let failure_kind = classify_manifest_lookup_failure(&[
+            "not found or failed to fetch: NoSuchKey".to_string(),
+        ])
+        .expect("NoSuchKey failure should classify");
+
+        st.note_manifest_lookup_attempt(path_kind, false, Some(failure_kind));
+        st.note_manifest_lookup_attempt(path_kind, false, Some(failure_kind));
+
+        assert!(st.manifest_lookup.retry_suppressed);
+        assert_eq!(st.manifest_lookup.canonical_success_count, 0);
         assert!(
-            signal
+            st.manifest_lookup
                 .failure_signature
                 .as_deref()
                 .unwrap_or("")

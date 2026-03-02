@@ -7,6 +7,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::config::ReactResolvedConfig;
+use crate::data_engineer::progress_controller::ExecutionState;
+use crate::data_engineer::state_manager;
 use react_core::agent::AgentCtx;
 use react_core::providers::{CatalogProvider, DatasetCatalogProvider};
 use react_core::session::ThreadCacheStore;
@@ -125,41 +127,17 @@ impl Tool for PublishDbtToProviderTool {
         let relations = extract_relations(&manifest);
         let plan_sha256 = plan_sha256(&relations)?;
 
-        // Determine last published digest (if any)
+        // Determine last published digest (if any) from typed execution state.
         let mut last_published_digest: Option<String> = None;
         let mut pending_plan_digest: Option<String> = None;
         let tid = ctx.thread_id.clone().unwrap_or_default();
         if !tid.is_empty() {
             if let Some(store) = ctx.thread_store.as_ref() {
-                if let Ok(log) = store.get(&tid).await {
-                    for step in log.steps.iter().rev() {
-                        let react_core::session::ThreadStep::ToolEnd {
-                            name, observation, ..
-                        } = step
-                        else {
-                            continue;
-                        };
-                        if name != "publish_dbt_to_provider" {
-                            continue;
-                        }
-                        let stage = observation
-                            .extra
-                            .get("stage")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let d = observation
-                            .extra
-                            .get("plan_sha256")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        if stage == "published" && last_published_digest.is_none() {
-                            last_published_digest = d.clone();
-                        }
-                        if stage == "await_approval" && pending_plan_digest.is_none() {
-                            pending_plan_digest = d;
-                        }
-                    }
-                }
+                let es = state_manager::load_execution_state(store, &tid)
+                    .await
+                    .unwrap_or_else(ExecutionState::new);
+                last_published_digest = es.publish_plan.last_published_plan_sha256.clone();
+                pending_plan_digest = es.publish_plan.pending_plan_sha256.clone();
             }
         }
 
@@ -177,6 +155,14 @@ impl Tool for PublishDbtToProviderTool {
 
         // Always require approval before any dbt build/publish run.
         if !confirm {
+            if !tid.is_empty() {
+                if let Some(store) = ctx.thread_store.as_ref() {
+                    let _ = state_manager::mutate_execution_state(store, &tid, |es| {
+                        es.set_pending_publish_plan(plan_sha256.clone());
+                    })
+                    .await;
+                }
+            }
             emit_trace(ctx, "publish awaiting approval");
             let exists = check_existing_relations(query, cfg, &relations).await;
             let existing_list = exists
@@ -274,6 +260,14 @@ impl Tool for PublishDbtToProviderTool {
         }
 
         emit_trace(ctx, "publish finished");
+        if !tid.is_empty() {
+            if let Some(store) = ctx.thread_store.as_ref() {
+                let _ = state_manager::mutate_execution_state(store, &tid, |es| {
+                    es.mark_publish_complete(plan_sha256.clone());
+                })
+                .await;
+            }
+        }
         Ok(serde_json::json!({
             "ok": true,
             "stage": "published",

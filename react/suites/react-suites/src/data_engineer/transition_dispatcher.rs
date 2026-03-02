@@ -7,6 +7,7 @@ use crate::data_engineer::control_flow::{
     is_model_replan_backtrack, replan_backtrack_counter_cap, Phase, TransitionIntent,
 };
 use crate::data_engineer::progress_controller::ExecutionState;
+use crate::data_engineer::state_manager;
 
 pub async fn dispatch_phase_transition(
     store: &ThreadStore,
@@ -34,7 +35,7 @@ pub async fn dispatch_phase_transition(
     }
 
     // Canonical transition side effects are centralized here.
-    let mut st = ExecutionState::load(store, thread_id)
+    let mut st = state_manager::load_execution_state(store, thread_id)
         .await
         .unwrap_or_else(ExecutionState::new);
     let prev_state = st.clone();
@@ -56,9 +57,17 @@ pub async fn dispatch_phase_transition(
             }
         }
     }
+    if phase == Phase::ModelPlan && from_phase != Some(Phase::ModelPlan) {
+        // Scope manifest retry suppression to a single model-plan attempt.
+        st.reset_manifest_lookup_state();
+    }
+    if matches!(phase, Phase::CleansePlan | Phase::ModelPlan) && from_phase != Some(phase) {
+        st.reset_plan_bootstrap(phase);
+    }
     st.current_phase = Some(phase);
     st.phase_reason_code = reason_code;
-    st.save(store, thread_id).await?;
+    st.phase_reason_detail = reason_detail.clone();
+    state_manager::save_execution_state(store, thread_id, &st).await?;
 
     let agent = agent.unwrap_or_else(|| "unknown".to_string());
     if let Err(e) = store
@@ -77,7 +86,7 @@ pub async fn dispatch_phase_transition(
         .await
     {
         // Best-effort rollback to avoid control-state/log divergence.
-        let _ = prev_state.save(store, thread_id).await;
+        let _ = state_manager::save_execution_state(store, thread_id, &prev_state).await;
         return Err(e);
     }
 
@@ -106,7 +115,9 @@ mod tests {
 
         let mut st = ExecutionState::new();
         st.replan_backtracks = 2;
-        st.save(&store, tid).await.expect("seed execution state");
+        state_manager::save_execution_state(&store, tid, &st)
+            .await
+            .expect("seed execution state");
 
         dispatch_phase_transition(
             &store,
@@ -121,7 +132,7 @@ mod tests {
         .await
         .expect("transition should succeed");
 
-        let got = ExecutionState::load(&store, tid).await.expect("state should load");
+        let got = state_manager::load_execution_state(&store, tid).await.expect("state should load");
         assert_eq!(
             got.replan_backtracks, 0,
             "forward transitions must reset loopback counter"
@@ -142,7 +153,9 @@ mod tests {
 
         let mut st = ExecutionState::new();
         st.replan_backtracks = 0;
-        st.save(&store, tid).await.expect("seed execution state");
+        state_manager::save_execution_state(&store, tid, &st)
+            .await
+            .expect("seed execution state");
 
         dispatch_phase_transition(
             &store,
@@ -157,7 +170,52 @@ mod tests {
         .await
         .expect("transition should succeed");
 
-        let got = ExecutionState::load(&store, tid).await.expect("state should load");
+        let got = state_manager::load_execution_state(&store, tid).await.expect("state should load");
         assert_eq!(got.replan_backtracks, 1);
+    }
+
+    #[tokio::test]
+    async fn entering_model_plan_resets_manifest_and_bootstrap_state() {
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let tid = "tid-model-plan-reset-state";
+
+        let mut st = ExecutionState::new();
+        st.model_plan_bootstrap_done = true;
+        st.manifest_lookup.retry_suppressed = true;
+        st.manifest_lookup.repeated_failure_count = 3;
+        st.manifest_lookup.failure_signature = Some("NoSuchKey:Ambiguous".to_string());
+        state_manager::save_execution_state(&store, tid, &st)
+            .await
+            .expect("seed execution state");
+
+        dispatch_phase_transition(
+            &store,
+            tid,
+            Some("agent".to_string()),
+            Some(Phase::ModelReview),
+            Phase::ModelPlan,
+            TransitionIntent::Loopback,
+            Some(PhaseReasonCode::ReviewPatchPlan),
+            None,
+        )
+        .await
+        .expect("transition should succeed");
+
+        let got = state_manager::load_execution_state(&store, tid).await.expect("state should load");
+        assert!(
+            !got.model_plan_bootstrap_done,
+            "model-plan bootstrap should reset on fresh model_plan entry"
+        );
+        assert!(
+            !got.manifest_lookup.retry_suppressed && got.manifest_lookup.repeated_failure_count == 0,
+            "manifest lookup retry state should reset on fresh model_plan entry"
+        );
     }
 }

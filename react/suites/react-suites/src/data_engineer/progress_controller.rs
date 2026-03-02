@@ -2,11 +2,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use react_core::control_flow::PhaseReasonCode;
-use react_core::session::{ThreadState, ThreadStore, THREAD_STATE_SCHEMA_VERSION};
+use react_core::session::ThreadStore;
 
 use crate::data_engineer::control_flow::Phase;
 
 pub const EXECUTION_STATE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FailedModelRef {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub file: String,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -24,9 +33,50 @@ pub struct LastValidateState {
     #[serde(default)]
     pub brief: Option<String>,
     #[serde(default)]
-    pub failed_models: Vec<Value>,
+    pub failed_models: Vec<FailedModelRef>,
     #[serde(default)]
     pub failure_class: Option<FailureClass>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PublishPlanState {
+    #[serde(default)]
+    pub pending_plan_sha256: Option<String>,
+    #[serde(default)]
+    pub pending_set_ts: Option<String>,
+    #[serde(default)]
+    pub last_published_plan_sha256: Option<String>,
+    #[serde(default)]
+    pub published_ts: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactFocusState {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub dataset_id: Option<String>,
+    #[serde(default)]
+    pub exists: bool,
+    #[serde(default)]
+    pub ts: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LastMutationSummary {
+    #[serde(default)]
+    pub op: Option<String>,
+    #[serde(default)]
+    pub affected_paths: Vec<String>,
+    #[serde(default)]
+    pub select_terms: Vec<String>,
+    #[serde(default)]
+    pub ts: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -301,6 +351,45 @@ pub struct SubjectiveRetryState {
     pub count: usize,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ManifestLookupPathKind {
+    CanonicalTarget,
+    Ambiguous,
+    NonCanonical,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ManifestLookupFailureKind {
+    NoSuchKey,
+    PointerNotFound,
+}
+
+impl ManifestLookupFailureKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSuchKey => "NoSuchKey",
+            Self::PointerNotFound => "PointerNotFound",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestLookupState {
+    #[serde(default)]
+    pub retry_suppressed: bool,
+    #[serde(default)]
+    pub failure_signature: Option<String>,
+    #[serde(default)]
+    pub repeated_failure_count: usize,
+    #[serde(default)]
+    pub canonical_success_count: usize,
+    #[serde(default)]
+    pub noncanonical_attempt_count: usize,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionState {
@@ -309,6 +398,8 @@ pub struct ExecutionState {
     pub current_phase: Option<Phase>,
     #[serde(default)]
     pub phase_reason_code: Option<PhaseReasonCode>,
+    #[serde(default)]
+    pub phase_reason_detail: Option<Value>,
     #[serde(default)]
     pub replan_backtracks: usize,
     #[serde(default)]
@@ -348,7 +439,7 @@ pub struct ExecutionState {
     #[serde(default)]
     pub last_error_class: Option<FailureClass>,
     #[serde(default)]
-    pub last_failed_models: Vec<Value>,
+    pub last_failed_models: Vec<FailedModelRef>,
     #[serde(default)]
     pub subjective_retry: Option<SubjectiveRetryState>,
     #[serde(default)]
@@ -357,6 +448,18 @@ pub struct ExecutionState {
     pub publish_retries: Vec<PublishRetryState>,
     #[serde(default)]
     pub probe_state: ProbeState,
+    #[serde(default)]
+    pub publish_plan: PublishPlanState,
+    #[serde(default)]
+    pub artifact_focus: Option<ArtifactFocusState>,
+    #[serde(default)]
+    pub last_mutation_summary: Option<LastMutationSummary>,
+    #[serde(default)]
+    pub manifest_lookup: ManifestLookupState,
+    #[serde(default)]
+    pub cleanse_plan_bootstrap_done: bool,
+    #[serde(default)]
+    pub model_plan_bootstrap_done: bool,
 }
 
 impl ExecutionState {
@@ -366,58 +469,6 @@ impl ExecutionState {
             max_stall_count: 3,
             ..Default::default()
         }
-    }
-
-    pub async fn load(thread_store: &ThreadStore, thread_id: &str) -> Option<Self> {
-        let st = thread_store.get_thread_state(thread_id).await.ok()?;
-        let raw = st.control_state?;
-        let parsed = serde_json::from_value::<Self>(raw).ok()?;
-        if parsed.schema_version != EXECUTION_STATE_SCHEMA_VERSION {
-            return None;
-        }
-        Some(parsed)
-    }
-
-    pub async fn load_strict(
-        thread_store: &ThreadStore,
-        thread_id: &str,
-    ) -> Result<Option<Self>, String> {
-        let st = thread_store
-            .get_thread_state(thread_id)
-            .await
-            .map_err(|e| format!("failed to load thread_state for execution_state: {e}"))?;
-        let Some(raw) = st.control_state else {
-            return Ok(None);
-        };
-        let parsed = serde_json::from_value::<Self>(raw)
-            .map_err(|e| format!("failed to parse execution_state control_state payload: {e}"))?;
-        if parsed.schema_version != EXECUTION_STATE_SCHEMA_VERSION {
-            return Err(format!(
-                "execution_state schema_version mismatch: expected {}, got {}",
-                EXECUTION_STATE_SCHEMA_VERSION, parsed.schema_version
-            ));
-        }
-        Ok(Some(parsed))
-    }
-
-    pub async fn save(&self, thread_store: &ThreadStore, thread_id: &str) -> Result<(), String> {
-        if self.schema_version != EXECUTION_STATE_SCHEMA_VERSION {
-            return Err(format!(
-                "execution_state schema_version mismatch: expected {}, got {}",
-                EXECUTION_STATE_SCHEMA_VERSION, self.schema_version
-            ));
-        }
-        let mut st = thread_store
-            .get_thread_state(thread_id)
-            .await
-            .unwrap_or_else(|_| ThreadState {
-                thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
-                thread_id: thread_id.to_string(),
-                ..ThreadState::default()
-            });
-        st.control_state = Some(serde_json::to_value(self).map_err(|e| e.to_string())?);
-        st.current_phase = self.current_phase.as_ref().map(|p| p.as_str().to_string());
-        thread_store.put_thread_state(thread_id, &st).await
     }
 
     pub fn apply_validate_success(&mut self, tier: ExecutionTier) {
@@ -454,6 +505,81 @@ impl ExecutionState {
         self.reset_probe_state_on_validate(false);
     }
 
+    pub fn reset_manifest_lookup_state(&mut self) {
+        self.manifest_lookup = ManifestLookupState::default();
+    }
+
+    pub fn needs_plan_bootstrap(&self, phase: Phase) -> bool {
+        match phase {
+            Phase::CleansePlan => !self.cleanse_plan_bootstrap_done,
+            Phase::ModelPlan => !self.model_plan_bootstrap_done,
+            _ => false,
+        }
+    }
+
+    pub fn mark_plan_bootstrap_done(&mut self, phase: Phase) {
+        match phase {
+            Phase::CleansePlan => self.cleanse_plan_bootstrap_done = true,
+            Phase::ModelPlan => self.model_plan_bootstrap_done = true,
+            _ => {}
+        }
+    }
+
+    pub fn reset_plan_bootstrap(&mut self, phase: Phase) {
+        match phase {
+            Phase::CleansePlan => self.cleanse_plan_bootstrap_done = false,
+            Phase::ModelPlan => self.model_plan_bootstrap_done = false,
+            _ => {}
+        }
+    }
+
+    pub fn note_manifest_lookup_attempt(
+        &mut self,
+        path_kind: ManifestLookupPathKind,
+        success: bool,
+        failure_kind: Option<ManifestLookupFailureKind>,
+    ) {
+        if matches!(
+            path_kind,
+            ManifestLookupPathKind::Ambiguous | ManifestLookupPathKind::NonCanonical
+        ) {
+            self.manifest_lookup.noncanonical_attempt_count =
+                self.manifest_lookup.noncanonical_attempt_count.saturating_add(1);
+        }
+        if success {
+            if path_kind == ManifestLookupPathKind::CanonicalTarget {
+                self.manifest_lookup.canonical_success_count = self
+                    .manifest_lookup
+                    .canonical_success_count
+                    .saturating_add(1);
+            }
+            self.manifest_lookup.retry_suppressed = self.manifest_lookup.repeated_failure_count >= 2
+                && self.manifest_lookup.canonical_success_count == 0;
+            return;
+        }
+        if let Some(kind) = failure_kind {
+            let signature = format!("{}:{path_kind:?}", kind.as_str());
+            let repeated = if self
+                .manifest_lookup
+                .failure_signature
+                .as_deref()
+                .map(|s| s == signature.as_str())
+                .unwrap_or(false)
+            {
+                self.manifest_lookup
+                    .repeated_failure_count
+                    .saturating_add(1)
+            } else {
+                1
+            };
+            self.manifest_lookup.failure_signature = Some(signature);
+            self.manifest_lookup.repeated_failure_count = repeated;
+        }
+        self.manifest_lookup.retry_suppressed =
+            self.manifest_lookup.repeated_failure_count >= 2
+                && self.manifest_lookup.canonical_success_count == 0;
+    }
+
     pub fn apply_validate_failure(
         &mut self,
         tier: ExecutionTier,
@@ -477,11 +603,9 @@ impl ExecutionState {
             brief: brief.clone(),
             failed_models: backlog
                 .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "name": t.model_name.clone().unwrap_or_default(),
-                        "file": t.path.clone().unwrap_or_default(),
-                    })
+                .map(|t| FailedModelRef {
+                    name: t.model_name.clone().unwrap_or_default(),
+                    file: t.path.clone().unwrap_or_default(),
                 })
                 .collect(),
             failure_class: Some(failure_class),
@@ -511,11 +635,9 @@ impl ExecutionState {
         self.last_failed_models = self
             .repair_backlog
             .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "name": t.model_name.clone().unwrap_or_default(),
-                    "file": t.path.clone().unwrap_or_default(),
-                })
+            .map(|t| FailedModelRef {
+                name: t.model_name.clone().unwrap_or_default(),
+                file: t.path.clone().unwrap_or_default(),
             })
             .collect();
         self.clear_publish_approval();
@@ -701,6 +823,100 @@ impl ExecutionState {
         self.mode = ExecutionMode::Failed;
         self.last_error_brief = Some(brief.into());
     }
+
+    pub async fn load(thread_store: &ThreadStore, thread_id: &str) -> Option<Self> {
+        crate::data_engineer::state_manager::load_execution_state(thread_store, thread_id).await
+    }
+
+    pub async fn load_strict(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+    ) -> Result<Option<Self>, String> {
+        crate::data_engineer::state_manager::load_execution_state_strict(thread_store, thread_id)
+            .await
+    }
+
+    pub async fn save(&self, thread_store: &ThreadStore, thread_id: &str) -> Result<(), String> {
+        crate::data_engineer::state_manager::save_execution_state(thread_store, thread_id, self)
+            .await
+    }
+
+    pub fn set_pending_publish_plan(&mut self, plan_sha256: String) {
+        self.publish_plan.pending_plan_sha256 = Some(plan_sha256);
+        self.publish_plan.pending_set_ts = Some(chrono::Utc::now().to_rfc3339());
+    }
+
+    pub fn mark_publish_complete(&mut self, plan_sha256: String) {
+        self.publish_plan.last_published_plan_sha256 = Some(plan_sha256);
+        self.publish_plan.published_ts = Some(chrono::Utc::now().to_rfc3339());
+        self.publish_plan.pending_plan_sha256 = None;
+        self.publish_plan.pending_set_ts = None;
+    }
+
+    pub fn set_artifact_focus(
+        &mut self,
+        kind: Option<String>,
+        name: Option<String>,
+        dataset_id: Option<String>,
+        exists: bool,
+    ) {
+        self.artifact_focus = Some(ArtifactFocusState {
+            kind,
+            name,
+            dataset_id,
+            exists,
+            ts: Some(chrono::Utc::now().to_rfc3339()),
+        });
+    }
+
+    pub fn set_last_mutation_summary(
+        &mut self,
+        op: impl Into<String>,
+        affected_paths: Vec<String>,
+        select_terms: Vec<String>,
+    ) {
+        self.last_mutation_summary = Some(LastMutationSummary {
+            op: Some(op.into()),
+            affected_paths,
+            select_terms,
+            ts: Some(chrono::Utc::now().to_rfc3339()),
+        });
+    }
+}
+
+pub fn normalize_manifest_path(path: &str) -> String {
+    path.trim().trim_matches('/').replace('\\', "/")
+}
+
+pub fn classify_manifest_lookup_path(path: &str) -> Option<ManifestLookupPathKind> {
+    let norm = normalize_manifest_path(path);
+    if norm.is_empty() {
+        return None;
+    }
+    if norm == "target/manifest.json" {
+        return Some(ManifestLookupPathKind::CanonicalTarget);
+    }
+    if norm.ends_with("target/manifest.json") {
+        return Some(ManifestLookupPathKind::NonCanonical);
+    }
+    if norm.ends_with("manifest.json") {
+        return Some(ManifestLookupPathKind::Ambiguous);
+    }
+    None
+}
+
+pub fn classify_manifest_lookup_failure(errors: &[String]) -> Option<ManifestLookupFailureKind> {
+    let joined = errors.join("\n").to_ascii_lowercase();
+    if joined.contains("nosuchkey")
+        || joined.contains("not found or failed to fetch")
+        || joined.contains("the specified key does not exist")
+    {
+        return Some(ManifestLookupFailureKind::NoSuchKey);
+    }
+    if joined.contains("pointer not found") {
+        return Some(ManifestLookupFailureKind::PointerNotFound);
+    }
+    None
 }
 
 fn obs_like_bool(
@@ -710,26 +926,38 @@ fn obs_like_bool(
     from.as_ref().and_then(pick)
 }
 
-pub fn repair_backlog_from_failed_models(failing_models: &[Value]) -> Vec<RepairTarget> {
+pub fn repair_backlog_from_failed_models(failing_models: &[FailedModelRef]) -> Vec<RepairTarget> {
     let mut out: Vec<RepairTarget> = failing_models
         .iter()
         .map(|fm| RepairTarget {
-            model_name: fm
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-            path: fm
-                .get("file")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty() && s != "(unknown file)"),
+            model_name: Some(fm.name.trim().to_string()).filter(|s| !s.is_empty()),
+            path: Some(fm.file.trim().to_string()).filter(|s| !s.is_empty() && s != "(unknown file)"),
             error_class: None,
         })
         .collect();
     out.sort_by(|a, b| a.path.cmp(&b.path).then(a.model_name.cmp(&b.model_name)));
     out.dedup_by(|a, b| a.path == b.path && a.model_name == b.model_name);
     out
+}
+
+pub fn failed_model_refs_from_values(values: &[Value]) -> Vec<FailedModelRef> {
+    values
+        .iter()
+        .map(|v| FailedModelRef {
+            name: v
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            file: v
+                .get("file")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        })
+        .collect()
 }
 
 pub fn gate_authoring_progress(state: &ExecutionState, phase: Phase) -> Result<(), String> {

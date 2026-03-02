@@ -7,7 +7,9 @@ use tracing::warn;
 use react_core::agent::AgentCtx;
 use react_core::control_flow::PhaseReasonCode;
 use react_core::providers::DbtValidateArgs;
-use react_core::session::{ThreadLog, ThreadStep, ThreadStore, ToolObservation, ToolStepStatus};
+#[cfg(test)]
+use react_core::session::ThreadLog;
+use react_core::session::{ThreadStep, ThreadStore, ToolObservation, ToolStepStatus};
 use react_core::tools::Tool;
 #[cfg(test)]
 use react_core::session::Observation;
@@ -140,25 +142,6 @@ pub enum TransitionIntent {
     Loopback,
 }
 
-fn infer_transition_intent(
-    from_phase: Option<Phase>,
-    phase: Phase,
-    reason_code: Option<PhaseReasonCode>,
-) -> TransitionIntent {
-    if is_annotation_reason(reason_code) {
-        return TransitionIntent::Annotation;
-    }
-    match from_phase {
-        Some(from) if from == phase => TransitionIntent::Annotation,
-        Some(from)
-            if is_cleanse_replan_backtrack(from, phase) || is_model_replan_backtrack(from, phase) =>
-        {
-            TransitionIntent::Loopback
-        }
-        _ => TransitionIntent::Forward,
-    }
-}
-
 #[cfg(test)]
 pub fn phase_from_log(log: Option<&ThreadLog>) -> Phase {
     let Some(log) = log else {
@@ -195,61 +178,6 @@ fn review_patch_streak_cap(reason_code_match: PhaseReasonCode) -> usize {
         .unwrap_or(3)
         .max(1)
         .min(12)
-}
-
-pub async fn append_phase(
-    store: &ThreadStore,
-    thread_id: &str,
-    agent: Option<String>,
-    phase: Phase,
-) -> Result<(), String> {
-    // Hard cutover: previous phase comes from persisted execution state, not thread log replay.
-    let prev_phase = crate::data_engineer::progress_controller::ExecutionState::load(
-        store, thread_id,
-    )
-    .await
-    .and_then(|st| st.current_phase);
-
-    append_phase_with_intent(
-        store,
-        thread_id,
-        agent,
-        prev_phase,
-        phase,
-        TransitionIntent::Forward,
-        Some(PhaseReasonCode::PhaseSet),
-        Some(serde_json::json!({
-            "derived_from_log": prev_phase.is_some(),
-        })),
-    )
-    .await
-}
-
-/// Append a phase marker step with explicit transition reasoning.
-///
-/// This is intentionally verbose: `reason_detail` is stored inline in the thread log so
-/// debugging has full context without needing to cross-reference other stores.
-pub async fn append_phase_with_reason(
-    store: &ThreadStore,
-    thread_id: &str,
-    agent: Option<String>,
-    from_phase: Option<Phase>,
-    phase: Phase,
-    reason_code: Option<PhaseReasonCode>,
-    reason_detail: Option<Value>,
-) -> Result<(), String> {
-    let intent = infer_transition_intent(from_phase, phase, reason_code);
-    append_phase_with_intent(
-        store,
-        thread_id,
-        agent,
-        from_phase,
-        phase,
-        intent,
-        reason_code,
-        reason_detail,
-    )
-    .await
 }
 
 pub async fn append_phase_with_intent(
@@ -290,6 +218,7 @@ pub struct DerivedGuardState {
     pub probe_satisfied: bool,
 }
 
+#[cfg(test)]
 fn is_mutation_step(step: &ThreadStep) -> bool {
     match step {
         ThreadStep::ToolEnd { name, args, .. } => match name.as_str() {
@@ -309,6 +238,7 @@ fn is_mutation_step(step: &ThreadStep) -> bool {
     }
 }
 
+#[cfg(test)]
 fn is_effective_mutation_step(step: &ThreadStep) -> bool {
     if !is_mutation_step(step) {
         return false;
@@ -407,10 +337,12 @@ fn is_effective_mutation_step(step: &ThreadStep) -> bool {
     }
 }
 
+#[cfg(test)]
 fn looks_like_data_probe_sql(sql: &str) -> bool {
     crate::data_engineer::progress_controller::is_meaningful_probe_sql(sql)
 }
 
+#[cfg(test)]
 #[cfg(test)]
 pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
     let mut out = DerivedGuardState::default();
@@ -593,6 +525,7 @@ pub fn derive_guard_state_from_execution_state(
 /// - Fall back to dbt path selectors: `path:<rel_path>`
 /// - If the patch touched global-impact files (macros/, packages.yml, dbt_project.yml), return an
 ///   empty list to indicate we should skip targeted validation and do full validation instead.
+#[cfg(test)]
 pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Vec<String> {
     // Find the most recent successful file mutation that should influence targeted validation.
     let mut patched_paths: Vec<String> = Vec::new();
@@ -761,6 +694,7 @@ pub(crate) fn is_model_replan_backtrack(from: Phase, to: Phase) -> bool {
 ///
 /// This is used to stop threads that repeatedly loop without meaningful phase progress.
 #[cfg(test)]
+#[cfg(test)]
 pub fn replan_backtrack_count_for_phase(log: Option<&ThreadLog>, phase: Phase) -> usize {
     let Some(log) = log else { return 0 };
     // Guard tuning: only count loopbacks since the most recent *successful* dbt_validate.
@@ -881,6 +815,7 @@ fn review_patch_streak(
 
 /// Count consecutive review->plan loopbacks caused by `review_patch_plan`.
 #[cfg(test)]
+#[cfg(test)]
 pub fn review_patch_plan_streak(log: Option<&ThreadLog>, review_phase: Phase) -> usize {
     let expected_back_to = match review_phase {
         Phase::CleanseReview => Phase::CleansePlan,
@@ -899,6 +834,7 @@ pub fn review_patch_plan_streak(log: Option<&ThreadLog>, review_phase: Phase) ->
 ///
 /// This is intentionally review-phase scoped and is used as a secondary guard when
 /// validate keeps passing but review repeatedly requests more implementation patching.
+#[cfg(test)]
 #[cfg(test)]
 pub fn review_patch_impl_streak(log: Option<&ThreadLog>, review_phase: Phase) -> usize {
     let expected_back_to = match review_phase {
@@ -921,6 +857,7 @@ pub enum AuthoringGate {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 fn phase_start_idx(log: &ThreadLog, phase: Phase) -> Option<usize> {
     for (i, step) in log.steps.iter().enumerate().rev() {
         if let ThreadStep::Phase { phase: p, .. } = step {
@@ -933,6 +870,7 @@ fn phase_start_idx(log: &ThreadLog, phase: Phase) -> Option<usize> {
     None
 }
 
+#[cfg(test)]
 #[cfg(test)]
 fn unresolved_mutation_failures_in_phase(log: &ThreadLog, phase: Phase) -> Vec<String> {
     // Collect failures since the last successful mutation in the current phase.
@@ -976,6 +914,7 @@ fn unresolved_mutation_failures_in_phase(log: &ThreadLog, phase: Phase) -> Vec<S
 /// This intentionally enforces suite-level invariants (mutation/probe requirements) in code,
 /// rather than relying on prompt-only instructions.
 #[cfg(test)]
+#[cfg(test)]
 pub fn gate_authoring_to_validate(log: Option<&ThreadLog>) -> AuthoringGate {
     let g = derive_guard_state(log);
     if g.last_validate_failed && !(g.mutated_since_fail || g.patched_since_fail) {
@@ -1004,6 +943,7 @@ pub fn gate_authoring_to_validate(log: Option<&ThreadLog>) -> AuthoringGate {
 /// Gate authoring completion itself (before advancing phases) on unresolved tool/mutation failures
 /// in the current authoring phase. This prevents the suite from moving forward after a failing
 /// mutation (e.g., staging_model/tool timeouts), even if the agent produced a Final response.
+#[cfg(test)]
 #[cfg(test)]
 pub fn gate_authoring_completion(log: Option<&ThreadLog>, phase: Phase) -> AuthoringGate {
     let Some(log) = log else {
@@ -1401,6 +1341,112 @@ pub async fn call_and_record_tool(
         Err(_) => serde_json::json!({"ok": false, "errors": ["tool timeout"]}),
     };
     let obs = ToolObservation::normalize(raw.clone());
+    if tool.name() == "json_file" {
+        let manifest_path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        if let Some(path_kind) =
+            crate::data_engineer::progress_controller::classify_manifest_lookup_path(manifest_path)
+        {
+            if let Some(mut st) = crate::data_engineer::state_manager::load_execution_state(
+                store, thread_id,
+            )
+            .await
+            {
+                if st.current_phase == Some(Phase::ModelPlan) {
+                    let failure_kind = if obs.ok {
+                        None
+                    } else {
+                        crate::data_engineer::progress_controller::classify_manifest_lookup_failure(
+                            &obs.errors,
+                        )
+                    };
+                    st.note_manifest_lookup_attempt(path_kind, obs.ok, failure_kind);
+                    if let Err(e) =
+                        crate::data_engineer::state_manager::save_execution_state(store, thread_id, &st).await
+                    {
+                        warn!("failed to persist manifest lookup telemetry: {}", e);
+                    }
+                }
+            }
+        }
+    }
+    if let Some((op, affected_paths)) = (|| {
+        let name = tool.name();
+        match name {
+            "apply_next_cleanse_batch" | "apply_next_cleanse_schema_batch" => {
+                let succeeded: Vec<String> = obs
+                    .extra
+                    .get("succeeded_dataset_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if succeeded.is_empty() {
+                    None
+                } else {
+                    Some((name.to_string(), succeeded))
+                }
+            }
+            "apply_next_model_batch" | "apply_next_model_schema_batch" => {
+                let succeeded: Vec<String> = obs
+                    .extra
+                    .get("succeeded_item_names")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if succeeded.is_empty() {
+                    None
+                } else {
+                    Some((name.to_string(), succeeded))
+                }
+            }
+            "staging_model" | "gold_model" => {
+                let written: Vec<String> = obs
+                    .extra
+                    .get("written_keys")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if written.is_empty() {
+                    None
+                } else {
+                    Some((name.to_string(), written))
+                }
+            }
+            _ => None,
+        }
+    })() {
+        if let Some(mut st) = crate::data_engineer::state_manager::load_execution_state(
+            store, thread_id,
+        )
+        .await
+        {
+            st.set_last_mutation_summary(&op, affected_paths, Vec::new());
+            if let Err(e) =
+                crate::data_engineer::state_manager::save_execution_state(store, thread_id, &st)
+                    .await
+            {
+                warn!("failed to persist non-file mutation summary: {}", e);
+            }
+        }
+    }
     let status = if obs.ok {
         ToolStepStatus::Ok
     } else {
@@ -2186,7 +2232,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_phase_with_reason_records_complete_reason_fields() {
+    async fn append_phase_with_intent_records_complete_reason_fields() {
         use react_core::keyspace::DefaultKeyspace;
         use react_core::scope::RequestScope;
         use react_core::storage::InMemoryStorageAdapter;
@@ -2201,12 +2247,13 @@ mod tests {
         let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
         let store = ThreadStore::new(storage, scope, keyspace);
 
-        append_phase_with_reason(
+        append_phase_with_intent(
             &store,
             "tid",
             Some("agent".to_string()),
             Some(Phase::Preflight),
             Phase::CleansePlan,
+            TransitionIntent::Forward,
             Some(PhaseReasonCode::PreflightOk),
             Some(serde_json::json!({"x": 1, "nested": {"y": "z"}})),
         )
@@ -2239,7 +2286,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_phase_with_reason_includes_null_fields_when_absent() {
+    async fn append_phase_with_intent_includes_null_fields_when_absent() {
         use react_core::keyspace::DefaultKeyspace;
         use react_core::scope::RequestScope;
         use react_core::storage::InMemoryStorageAdapter;
@@ -2254,12 +2301,13 @@ mod tests {
         let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
         let store = ThreadStore::new(storage, scope, keyspace);
 
-        append_phase_with_reason(
+        append_phase_with_intent(
             &store,
             "tid2",
             Some("agent".to_string()),
             None,
             Phase::CleanseAuthor,
+            TransitionIntent::Forward,
             None,
             None,
         )

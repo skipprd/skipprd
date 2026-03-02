@@ -41,12 +41,17 @@ async fn derive_select_terms(ctx: &AgentCtx, args: &Value) -> Vec<String> {
     let Some(store) = ctx.thread_store.as_ref() else {
         return vec![];
     };
-    match store.get(thread_id).await {
-        Ok(log) => {
-            crate::data_engineer::control_flow::derive_targeted_select_terms(ctx, &log).await
-        }
-        Err(_) => vec![],
-    }
+    let st = crate::data_engineer::state_manager::load_execution_state(store, thread_id)
+        .await
+        .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+    let mut out = st
+        .last_mutation_summary
+        .as_ref()
+        .map(|m| m.select_terms.clone())
+        .unwrap_or_default();
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn model_name_from_compiled_key(key: &str) -> Option<String> {
