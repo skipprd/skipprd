@@ -155,6 +155,15 @@ pub enum ProbeRequirementStatus {
     ExhaustedRequireMutation,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchFailureKind {
+    SqlValidation,
+    InfraTransient,
+    SchemaOrContract,
+    Unknown,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProbeSignature {
@@ -305,6 +314,17 @@ pub struct ProgressDelta {
     pub progress_made: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthoringNoProgressReason {
+    NoMutationObservedInHardRepair,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthoringProgressSnapshot {
+    pub progress_made: bool,
+    pub reason: Option<AuthoringNoProgressReason>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SubjectiveRetryKind {
@@ -341,6 +361,22 @@ pub enum PublishRetryKind {
 pub struct PublishRetryState {
     pub kind: PublishRetryKind,
     pub count: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PendingLoopbackIntent {
+    PatchPlan {
+        phase: Phase,
+        #[serde(default)]
+        entry_plan_key: Option<String>,
+        #[serde(default)]
+        entry_plan_digest: Option<String>,
+    },
+    PatchImpl {
+        phase: Phase,
+        entry_mutation_epoch: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -427,6 +463,10 @@ pub struct ExecutionState {
     #[serde(default)]
     pub attempt_count: usize,
     #[serde(default)]
+    pub mutation_epoch: u64,
+    #[serde(default)]
+    pub repair_started_mutation_epoch: Option<u64>,
+    #[serde(default)]
     pub consecutive_noop_patches: usize,
     #[serde(default)]
     pub stall_count: usize,
@@ -447,6 +487,8 @@ pub struct ExecutionState {
     #[serde(default)]
     pub publish_retries: Vec<PublishRetryState>,
     #[serde(default)]
+    pub pending_loopback_intent: Option<PendingLoopbackIntent>,
+    #[serde(default)]
     pub probe_state: ProbeState,
     #[serde(default)]
     pub publish_plan: PublishPlanState,
@@ -460,6 +502,29 @@ pub struct ExecutionState {
     pub cleanse_plan_bootstrap_done: bool,
     #[serde(default)]
     pub model_plan_bootstrap_done: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DataEngineerEvent {
+    ValidatePassed {
+        tier: ExecutionTier,
+    },
+    ValidateFailed {
+        tier: ExecutionTier,
+        failure_class: FailureClass,
+        failure_signature: FailureSignature,
+        backlog: Vec<RepairTarget>,
+        brief: Option<String>,
+        compile_ok: Option<bool>,
+        run_ok: Option<bool>,
+    },
+    BatchAuthoringFailed {
+        tier: ExecutionTier,
+        kind: BatchFailureKind,
+        failed_targets: Vec<FailedModelRef>,
+        brief: String,
+    },
+    BatchAuthoringRecovered,
 }
 
 impl ExecutionState {
@@ -490,6 +555,7 @@ impl ExecutionState {
         self.target_path = None;
         self.ladder_step = RepairLadderStep::PatchTarget;
         self.attempt_count = 0;
+        self.repair_started_mutation_epoch = None;
         self.consecutive_noop_patches = 0;
         self.stall_count = 0;
         self.last_progress_delta = Some(ProgressDelta {
@@ -500,6 +566,7 @@ impl ExecutionState {
         self.last_failed_models.clear();
         self.last_error_brief = None;
         self.subjective_retry = None;
+        self.pending_loopback_intent = None;
         self.clear_publish_approval();
         self.reset_publish_retries();
         self.reset_probe_state_on_validate(false);
@@ -629,6 +696,7 @@ impl ExecutionState {
         self.target_path = self.single_target_repair_path.clone();
         self.ladder_step = RepairLadderStep::PatchTarget;
         self.attempt_count = 0;
+        self.repair_started_mutation_epoch = Some(self.mutation_epoch);
         self.consecutive_noop_patches = 0;
         self.last_error_brief = brief;
         self.last_error_class = Some(failure_class);
@@ -778,6 +846,30 @@ impl ExecutionState {
         self.subjective_retry = None;
     }
 
+    pub fn set_pending_patch_plan_intent(
+        &mut self,
+        phase: Phase,
+        entry_plan_key: Option<String>,
+        entry_plan_digest: Option<String>,
+    ) {
+        self.pending_loopback_intent = Some(PendingLoopbackIntent::PatchPlan {
+            phase,
+            entry_plan_key,
+            entry_plan_digest,
+        });
+    }
+
+    pub fn set_pending_patch_impl_intent(&mut self, phase: Phase) {
+        self.pending_loopback_intent = Some(PendingLoopbackIntent::PatchImpl {
+            phase,
+            entry_mutation_epoch: self.mutation_epoch,
+        });
+    }
+
+    pub fn clear_pending_loopback_intent(&mut self) {
+        self.pending_loopback_intent = None;
+    }
+
     pub fn set_publish_approval(&mut self, decision: PublishApprovalDecision) {
         self.publish_approval = Some(PublishApprovalState {
             decision,
@@ -875,12 +967,83 @@ impl ExecutionState {
         affected_paths: Vec<String>,
         select_terms: Vec<String>,
     ) {
+        self.mutation_epoch = self.mutation_epoch.saturating_add(1);
         self.last_mutation_summary = Some(LastMutationSummary {
             op: Some(op.into()),
             affected_paths,
             select_terms,
             ts: Some(chrono::Utc::now().to_rfc3339()),
         });
+    }
+
+    pub fn apply_event(&mut self, event: DataEngineerEvent) {
+        match event {
+            DataEngineerEvent::ValidatePassed { tier } => self.apply_validate_success(tier),
+            DataEngineerEvent::ValidateFailed {
+                tier,
+                failure_class,
+                failure_signature,
+                backlog,
+                brief,
+                compile_ok,
+                run_ok,
+            } => {
+                self.apply_validate_failure(
+                    tier,
+                    failure_class,
+                    failure_signature,
+                    backlog,
+                    brief,
+                );
+                if let Some(last) = self.last_validate.as_mut() {
+                    if let Some(v) = compile_ok {
+                        last.compile_ok = Some(v);
+                    }
+                    if let Some(v) = run_ok {
+                        last.run_ok = Some(v);
+                    }
+                }
+            }
+            DataEngineerEvent::BatchAuthoringFailed {
+                tier,
+                kind,
+                failed_targets,
+                brief,
+            } => {
+                let failure_class = match kind {
+                    BatchFailureKind::SchemaOrContract => FailureClass::SchemaOrPrecheck,
+                    BatchFailureKind::SqlValidation => FailureClass::SqlOrRuntime,
+                    BatchFailureKind::InfraTransient | BatchFailureKind::Unknown => {
+                        FailureClass::Unknown
+                    }
+                };
+                let backlog = repair_backlog_from_failed_models(&failed_targets);
+                let sig = FailureSignature {
+                    class: failure_class,
+                    node_id: failed_targets
+                        .first()
+                        .map(|f| f.name.trim().to_string())
+                        .filter(|s| !s.is_empty()),
+                    canonical_path: failed_targets
+                        .first()
+                        .map(|f| f.file.trim().to_string())
+                        .filter(|s| !s.is_empty()),
+                    error_code: Some(format!("batch_{:?}", kind).to_ascii_lowercase()),
+                };
+                self.apply_validate_failure(tier, failure_class, sig, backlog, Some(brief));
+            }
+            DataEngineerEvent::BatchAuthoringRecovered => {
+                self.hard_mutation_repair_mode = false;
+                self.repair_type = RepairType::Unknown;
+                self.single_target_repair_path = None;
+                self.target_path = None;
+                self.repair_started_mutation_epoch = None;
+                self.last_error_brief = None;
+                self.last_error_class = None;
+                self.last_failed_models.clear();
+                self.pending_loopback_intent = None;
+            }
+        }
     }
 }
 
@@ -997,6 +1160,30 @@ pub fn gate_authoring_progress(state: &ExecutionState, phase: Phase) -> Result<(
     Ok(())
 }
 
+pub fn snapshot_authoring_stepboundary_progress(
+    hard_mutation_repair_mode: bool,
+    last_validate_failed: bool,
+    pre_mutation_epoch: u64,
+    post_mutation_epoch: u64,
+    post_stall_count: usize,
+    max_stall_count: usize,
+) -> AuthoringProgressSnapshot {
+    if hard_mutation_repair_mode
+        && last_validate_failed
+        && post_mutation_epoch <= pre_mutation_epoch
+        && post_stall_count >= max_stall_count.max(1)
+    {
+        return AuthoringProgressSnapshot {
+            progress_made: false,
+            reason: Some(AuthoringNoProgressReason::NoMutationObservedInHardRepair),
+        };
+    }
+    AuthoringProgressSnapshot {
+        progress_made: true,
+        reason: None,
+    }
+}
+
 pub fn is_meaningful_probe_sql(sql: &str) -> bool {
     let s = sql.trim().trim_end_matches(';').trim().to_lowercase();
     if s.is_empty() {
@@ -1037,6 +1224,51 @@ mod tests {
         let st = ExecutionState::new();
         assert_eq!(st.current_tier, ExecutionTier::Unknown);
         assert_eq!(st.mode, ExecutionMode::Discover);
+    }
+
+    #[test]
+    fn authoring_stepboundary_snapshot_flags_hard_repair_no_progress() {
+        let snapshot = snapshot_authoring_stepboundary_progress(
+            true,
+            true,
+            4,
+            4,
+            3,
+            3,
+        );
+        assert!(!snapshot.progress_made);
+        assert_eq!(
+            snapshot.reason,
+            Some(AuthoringNoProgressReason::NoMutationObservedInHardRepair)
+        );
+    }
+
+    #[test]
+    fn authoring_stepboundary_snapshot_accepts_mutation_progress() {
+        let snapshot = snapshot_authoring_stepboundary_progress(
+            true,
+            true,
+            4,
+            5,
+            0,
+            3,
+        );
+        assert!(snapshot.progress_made);
+        assert_eq!(snapshot.reason, None);
+    }
+
+    #[test]
+    fn authoring_stepboundary_snapshot_allows_single_non_mutating_turn_before_budget() {
+        let snapshot = snapshot_authoring_stepboundary_progress(
+            true,
+            true,
+            5,
+            5,
+            1,
+            3,
+        );
+        assert!(snapshot.progress_made);
+        assert_eq!(snapshot.reason, None);
     }
 
     #[test]
@@ -1315,6 +1547,46 @@ mod tests {
         let delta = st.last_progress_delta.expect("delta");
         assert!(delta.progress_made);
         assert_eq!(delta.failed_target_count_delta, -1);
+    }
+
+    #[test]
+    fn apply_event_batch_authoring_failed_enters_hard_repair_mode() {
+        let mut st = ExecutionState::new();
+        st.apply_event(DataEngineerEvent::BatchAuthoringFailed {
+            tier: ExecutionTier::Cleanse,
+            kind: BatchFailureKind::SqlValidation,
+            failed_targets: vec![FailedModelRef {
+                name: "AwsDataCatalog.test_raw.raw_customers".to_string(),
+                file: "models/staging/stg_test_raw_raw_customers.sql".to_string(),
+            }],
+            brief: "sql validation failed".to_string(),
+        });
+        assert!(st.hard_mutation_repair_mode);
+        assert_eq!(st.repair_type, RepairType::SqlTarget);
+        assert_eq!(
+            st.single_target_repair_path.as_deref(),
+            Some("models/staging/stg_test_raw_raw_customers.sql")
+        );
+        assert_eq!(st.last_validate_ok, Some(false));
+    }
+
+    #[test]
+    fn apply_event_batch_authoring_recovered_clears_repair_mode() {
+        let mut st = ExecutionState::new();
+        st.hard_mutation_repair_mode = true;
+        st.repair_type = RepairType::SqlTarget;
+        st.single_target_repair_path = Some("models/staging/x.sql".to_string());
+        st.target_path = Some("models/staging/x.sql".to_string());
+        st.last_failed_models = vec![FailedModelRef {
+            name: "x".to_string(),
+            file: "models/staging/x.sql".to_string(),
+        }];
+        st.apply_event(DataEngineerEvent::BatchAuthoringRecovered);
+        assert!(!st.hard_mutation_repair_mode);
+        assert_eq!(st.repair_type, RepairType::Unknown);
+        assert!(st.single_target_repair_path.is_none());
+        assert!(st.target_path.is_none());
+        assert!(st.last_failed_models.is_empty());
     }
 
     #[tokio::test]

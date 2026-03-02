@@ -12,6 +12,10 @@ use crate::data_engineer::chunk_progress_contract;
 use crate::data_engineer::controller_kernel;
 use crate::data_engineer::plan;
 use crate::data_engineer::plan::{CleansePlan, ModelPlan};
+use crate::data_engineer::progress_controller::{
+    BatchFailureKind, DataEngineerEvent, ExecutionTier, FailedModelRef,
+};
+use crate::data_engineer::state_manager;
 use crate::data_engineer::tools;
 
 fn extract_string_arg(args: &Value, key: &str) -> Option<String> {
@@ -79,6 +83,44 @@ fn sql_model_checklist_status(items: &[plan::PlanChecklistItem]) -> plan::Checkl
         .find(|it| it.checklist_item_id == "sql_model")
         .map(|it| it.status)
         .unwrap_or(plan::ChecklistItemStatus::Pending)
+}
+
+fn classify_batch_failure_kind(errors: &[String]) -> BatchFailureKind {
+    let joined = errors.join("\n").to_ascii_lowercase();
+    if joined.contains("sql validation failed")
+        || joined.contains("column_not_found")
+        || joined.contains("compilation error")
+        || joined.contains("runtime error")
+    {
+        return BatchFailureKind::SqlValidation;
+    }
+    if joined.contains("schema")
+        || joined.contains("contract")
+        || joined.contains("yaml")
+        || joined.contains("parse")
+    {
+        return BatchFailureKind::SchemaOrContract;
+    }
+    if joined.contains("service error")
+        || joined.contains("timeout")
+        || joined.contains("throttle")
+        || joined.contains("temporar")
+    {
+        return BatchFailureKind::InfraTransient;
+    }
+    BatchFailureKind::Unknown
+}
+
+async fn emit_batch_event(ctx: &AgentCtx, event: DataEngineerEvent) -> Result<(), String> {
+    let Some(thread_store) = ctx.thread_store.as_ref() else {
+        return Ok(());
+    };
+    let Some(thread_id) = ctx.thread_id.as_deref() else {
+        return Ok(());
+    };
+    state_manager::apply_execution_event(thread_store, thread_id, event)
+        .await
+        .map(|_| ())
 }
 
 #[derive(Clone)]
@@ -357,6 +399,49 @@ impl Tool for ApplyNextCleanseBatchTool {
                     );
                 }
             }
+            let mut failed_targets: Vec<FailedModelRef> = Vec::new();
+            for ds in failed.iter() {
+                let expected_path = plan
+                    .tasks
+                    .iter()
+                    .find(|t| t.dataset_id == *ds)
+                    .and_then(|t| t.expected_model_path.clone());
+                failed_targets.push(FailedModelRef {
+                    name: ds.clone(),
+                    file: expected_path.unwrap_or_default(),
+                });
+            }
+            let errors: Vec<String> = res
+                .get("errors")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let kind = classify_batch_failure_kind(&errors);
+            let brief = if err.trim().is_empty() {
+                "apply_next_cleanse_batch failed".to_string()
+            } else {
+                err.to_string()
+            };
+            emit_batch_event(
+                ctx,
+                DataEngineerEvent::BatchAuthoringFailed {
+                    tier: ExecutionTier::Cleanse,
+                    kind,
+                    failed_targets,
+                    brief,
+                },
+            )
+            .await?;
+        } else {
+            emit_batch_event(
+                ctx,
+                DataEngineerEvent::BatchAuthoringRecovered,
+            )
+            .await?;
         }
         let budget = controller_kernel::note_batch_result(&mut plan.progress, ok && failed.is_empty());
         plan::save_cleanse_plan(ctx, &plan)
@@ -687,6 +772,49 @@ impl Tool for ApplyNextModelBatchTool {
                     );
                 }
             }
+            let mut failed_targets: Vec<FailedModelRef> = Vec::new();
+            for n in failed.iter() {
+                let expected_path = plan
+                    .tasks
+                    .iter()
+                    .find(|t| t.name == *n)
+                    .and_then(|t| t.expected_model_path.clone());
+                failed_targets.push(FailedModelRef {
+                    name: n.clone(),
+                    file: expected_path.unwrap_or_default(),
+                });
+            }
+            let errors: Vec<String> = res
+                .get("errors")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let kind = classify_batch_failure_kind(&errors);
+            let brief = if err.trim().is_empty() {
+                "apply_next_model_batch failed".to_string()
+            } else {
+                err.to_string()
+            };
+            emit_batch_event(
+                ctx,
+                DataEngineerEvent::BatchAuthoringFailed {
+                    tier: ExecutionTier::Model,
+                    kind,
+                    failed_targets,
+                    brief,
+                },
+            )
+            .await?;
+        } else {
+            emit_batch_event(
+                ctx,
+                DataEngineerEvent::BatchAuthoringRecovered,
+            )
+            .await?;
         }
 
         let budget = controller_kernel::note_batch_result(&mut plan.progress, ok && failed.is_empty());

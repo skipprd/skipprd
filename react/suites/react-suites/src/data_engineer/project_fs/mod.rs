@@ -8,7 +8,7 @@ use std::path::Path;
 
 use diffy::Patch;
 use react_core::agent::AgentCtx;
-use react_core::providers::{DatasetCatalogProvider, DatasetId};
+use react_core::providers::DatasetCatalogProvider;
 
 use crate::data_engineer::naming;
 use crate::data_engineer::patch_contract::normalize_hunks_only_patch_text;
@@ -1472,46 +1472,6 @@ fn yaml_string_value(m: &YamlMapping, key: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn sources_value_from_dataset_ids(dss: &[DatasetId]) -> YamlValue {
-    let mut by_cat_db: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-    for ds in dss {
-        by_cat_db
-            .entry((ds.catalog.clone(), ds.database.clone()))
-            .or_default()
-            .push(ds.table.clone());
-    }
-    let mut sources_seq: Vec<YamlValue> = Vec::new();
-    for ((cat, db), mut tables) in by_cat_db.into_iter() {
-        tables.sort();
-        tables.dedup();
-        let mut src = YamlMapping::new();
-        src.insert(
-            YamlValue::String("name".to_string()),
-            YamlValue::String(db.clone()),
-        );
-        src.insert(
-            YamlValue::String("database".to_string()),
-            YamlValue::String(cat),
-        );
-        src.insert(
-            YamlValue::String("schema".to_string()),
-            YamlValue::String(db),
-        );
-        let mut tables_seq: Vec<YamlValue> = Vec::new();
-        for t in tables.into_iter() {
-            let mut tm = YamlMapping::new();
-            tm.insert(YamlValue::String("name".to_string()), YamlValue::String(t));
-            tables_seq.push(YamlValue::Mapping(tm));
-        }
-        src.insert(
-            YamlValue::String("tables".to_string()),
-            YamlValue::Sequence(tables_seq),
-        );
-        sources_seq.push(YamlValue::Mapping(src));
-    }
-    YamlValue::Sequence(sources_seq)
-}
-
 fn postprocess_model_sql(ctx: &AgentCtx, rel: &str, content: &str) -> Result<String, String> {
     validate_model_sql_identity(rel, content)?;
     let cfg = crate::config::resolved_config_from_ctx(ctx)
@@ -1612,7 +1572,7 @@ mod tests {
     use async_trait::async_trait;
     use react_core::keyspace::{DefaultKeyspace, Keyspace};
     use react_core::llm::{ChatMessage, LargeLanguageModel};
-    use react_core::providers::{QueryProvider, QueryResult};
+    use react_core::providers::{DatasetId, QueryProvider, QueryResult};
     use react_core::scope::RequestScope;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
     use std::collections::HashMap;

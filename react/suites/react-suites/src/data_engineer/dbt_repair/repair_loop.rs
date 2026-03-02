@@ -418,78 +418,7 @@ mod tests {
     use react_core::providers::{DbtValidateArgs, DbtValidateResult};
     use react_core::scope::RequestScope;
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
-    use sha2::Digest;
     use std::sync::Mutex;
-
-    fn sha256_hex(s: &str) -> String {
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(s.as_bytes());
-        hex::encode(hasher.finalize())
-    }
-
-    struct MockDbt {
-        calls: Mutex<usize>,
-    }
-
-    #[async_trait]
-    impl DbtProvider for MockDbt {
-        async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
-            Ok(())
-        }
-        async fn write_model_sql(
-            &self,
-            _scope: &RequestScope,
-            _dataset_id: &str,
-            _name: &str,
-            _sql: &str,
-        ) -> Result<String, String> {
-            Ok("k".to_string())
-        }
-        async fn write_metricflow_yaml(
-            &self,
-            _scope: &RequestScope,
-            _dataset_id: &str,
-            _name: &str,
-            _yaml_text: &str,
-        ) -> Result<String, String> {
-            Ok("k".to_string())
-        }
-
-        async fn validate_project(
-            &self,
-            _scope: &RequestScope,
-            _args: &DbtValidateArgs,
-        ) -> Result<DbtValidateResult, String> {
-            let mut c = self.calls.lock().unwrap();
-            *c += 1;
-            if *c == 1 {
-                return Ok(DbtValidateResult {
-                    ok: false,
-                    deps_ok: true,
-                    parse_ok: true,
-                    compile_ok: false,
-                    run_ok: None,
-                    uploaded_target_files: 0,
-                    errors: vec![
-                        "Runtime Error: Column 'context.session.id' cannot be resolved".to_string(),
-                    ],
-                    warnings: vec![],
-                    logs: serde_json::json!({}),
-                });
-            }
-            Ok(DbtValidateResult {
-                ok: true,
-                deps_ok: true,
-                parse_ok: true,
-                compile_ok: true,
-                run_ok: Some(true),
-                uploaded_target_files: 0,
-                errors: vec![],
-                warnings: vec![],
-                logs: serde_json::json!({}),
-            })
-        }
-    }
 
     #[derive(Default)]
     struct MockLlm {

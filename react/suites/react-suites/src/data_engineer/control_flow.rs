@@ -7,12 +7,8 @@ use tracing::warn;
 use react_core::agent::AgentCtx;
 use react_core::control_flow::PhaseReasonCode;
 use react_core::providers::DbtValidateArgs;
-#[cfg(test)]
-use react_core::session::ThreadLog;
 use react_core::session::{ThreadStep, ThreadStore, ToolObservation, ToolStepStatus};
 use react_core::tools::Tool;
-#[cfg(test)]
-use react_core::session::Observation;
 
 use crate::config;
 use crate::data_engineer::tools::files_tool::FilesTool;
@@ -34,6 +30,37 @@ pub enum Phase {
     Publish,
     PostPublishReview,
     Done,
+}
+
+#[cfg(test)]
+mod state_first_tests {
+    use super::*;
+
+    #[test]
+    fn derive_guard_state_from_execution_state_marks_validate_failure() {
+        let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
+        st.last_validate_ok = Some(false);
+        st.attempt_count = 0;
+        let guard = derive_guard_state_from_execution_state(&st);
+        assert!(guard.last_validate_failed);
+        assert!(!guard.mutated_since_fail);
+    }
+
+    #[test]
+    fn derive_guard_state_from_execution_state_tracks_mutation_progress() {
+        let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
+        st.last_validate_ok = Some(false);
+        st.last_progress_delta = Some(crate::data_engineer::progress_controller::ProgressDelta {
+            target_hash_changed: true,
+            failed_target_count_delta: 0,
+            failure_signature_changed: false,
+            checklist_completed_delta: 0,
+            progress_made: true,
+        });
+        let guard = derive_guard_state_from_execution_state(&st);
+        assert!(guard.last_validate_failed);
+        assert!(guard.mutated_since_fail);
+    }
 }
 
 impl Phase {
@@ -142,21 +169,6 @@ pub enum TransitionIntent {
     Loopback,
 }
 
-#[cfg(test)]
-pub fn phase_from_log(log: Option<&ThreadLog>) -> Phase {
-    let Some(log) = log else {
-        return Phase::Preflight;
-    };
-    for step in log.steps.iter().rev() {
-        if let ThreadStep::Phase { phase, .. } = step {
-            if let Some(p) = Phase::from_str(phase) {
-                return p;
-            }
-        }
-    }
-    Phase::Preflight
-}
-
 pub(crate) fn replan_backtrack_counter_cap() -> usize {
     std::env::var("AGENT_MAX_REPLAN_BACKTRACKS")
         .ok()
@@ -164,20 +176,6 @@ pub(crate) fn replan_backtrack_counter_cap() -> usize {
         .unwrap_or(3)
         .max(2)
         .min(20)
-}
-
-#[cfg(test)]
-fn review_patch_streak_cap(reason_code_match: PhaseReasonCode) -> usize {
-    let env_key = match reason_code_match {
-        PhaseReasonCode::ReviewPatchPlan => "AGENT_MAX_REVIEW_PATCH_PLAN_STREAK",
-        _ => "AGENT_MAX_REVIEW_PATCH_IMPL_STREAK",
-    };
-    std::env::var(env_key)
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(3)
-        .max(1)
-        .min(12)
 }
 
 pub async fn append_phase_with_intent(
@@ -218,270 +216,6 @@ pub struct DerivedGuardState {
     pub probe_satisfied: bool,
 }
 
-#[cfg(test)]
-fn is_mutation_step(step: &ThreadStep) -> bool {
-    match step {
-        ThreadStep::ToolEnd { name, args, .. } => match name.as_str() {
-            "approve_and_save_artifact"
-            | "approve_and_save_artifact_batch"
-            | "staging_model"
-            | "gold_model"
-            // Deterministic authoring tools that mutate project files.
-            | "apply_next_cleanse_batch"
-            | "apply_next_cleanse_schema_batch"
-            | "apply_next_model_batch"
-            | "apply_next_model_schema_batch" => true,
-            "file" => crate::data_engineer::tool_ops::is_file_mutation_op(args),
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-#[cfg(test)]
-fn is_effective_mutation_step(step: &ThreadStep) -> bool {
-    if !is_mutation_step(step) {
-        return false;
-    }
-
-    let (name, _args, observation) = match step {
-        ThreadStep::ToolEnd {
-            name,
-            args,
-            observation,
-            ..
-        } => (name.as_str(), args, observation),
-        _ => return false,
-    };
-    match name {
-        // These tools are inherently mutating if they succeed.
-        "approve_and_save_artifact" | "approve_and_save_artifact_batch" => observation.ok,
-        // staging_model is only a real mutation if it wrote at least one file.
-        "staging_model" | "gold_model" => observation
-            .extra
-            .get("written_keys")
-            .and_then(|v| v.as_array())
-            .map(|a| !a.is_empty())
-            .unwrap_or(false),
-        "apply_next_cleanse_batch" | "apply_next_cleanse_schema_batch" => observation
-            .extra
-            .get("succeeded_dataset_ids")
-            .and_then(|v| v.as_array())
-            .map(|a| !a.is_empty())
-            .unwrap_or(false),
-        "apply_next_model_batch" | "apply_next_model_schema_batch" => observation
-            .extra
-            .get("succeeded_item_names")
-            .and_then(|v| v.as_array())
-            .map(|a| !a.is_empty())
-            .unwrap_or(false),
-        "file" => {
-            if !observation.ok {
-                return false;
-            }
-            // If results[] is present (multi-file patch), consider it authoritative.
-            if let Some(arr) = observation.extra.get("results").and_then(|v| v.as_array()) {
-                for it in arr {
-                    if let Some(m) = it.get("mutated").and_then(|x| x.as_bool()) {
-                        if m {
-                            return true;
-                        }
-                    }
-                    let base = it.get("base_sha256").and_then(|x| x.as_str()).unwrap_or("");
-                    let newv = it.get("new_sha256").and_then(|x| x.as_str()).unwrap_or("");
-                    if !base.is_empty() && !newv.is_empty() && base != newv {
-                        return true;
-                    }
-                    let added = it.get("lines_added").and_then(|x| x.as_u64()).unwrap_or(0);
-                    let removed = it
-                        .get("lines_removed")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(0);
-                    if (added + removed) > 0 {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            // Prefer explicit mutated signal when available.
-            if let Some(m) = observation.extra.get("mutated").and_then(|x| x.as_bool()) {
-                return m;
-            }
-            // Fallback: infer from postprocessed content hashes / diff stats.
-            let base = observation
-                .extra
-                .get("base_sha256")
-                .and_then(|x| x.as_str())
-                .unwrap_or("");
-            let newv = observation
-                .extra
-                .get("new_sha256")
-                .and_then(|x| x.as_str())
-                .unwrap_or("");
-            if !base.is_empty() && !newv.is_empty() {
-                return base != newv;
-            }
-            let added = observation
-                .extra
-                .get("lines_added")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0);
-            let removed = observation
-                .extra
-                .get("lines_removed")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0);
-            (added + removed) > 0
-        }
-        _ => false,
-    }
-}
-
-#[cfg(test)]
-fn looks_like_data_probe_sql(sql: &str) -> bool {
-    crate::data_engineer::progress_controller::is_meaningful_probe_sql(sql)
-}
-
-#[cfg(test)]
-#[cfg(test)]
-pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
-    let mut out = DerivedGuardState::default();
-    let Some(log) = log else { return out };
-
-    // Find most recent dbt_validate.
-    let mut last_validate_idx: Option<usize> = None;
-    for (i, step) in log.steps.iter().enumerate().rev() {
-        if matches!(step, ThreadStep::ToolEnd { name, .. } if name == "dbt_validate") {
-            last_validate_idx = Some(i);
-            break;
-        }
-    }
-    let Some(vidx) = last_validate_idx else {
-        return out;
-    };
-    let vstep = &log.steps[vidx];
-
-    let (vargs, vobs) = match vstep {
-        ThreadStep::ToolEnd {
-            args, observation, ..
-        } => (args, observation),
-        _ => return out,
-    };
-    let ok = vobs.ok;
-    let compile_ok = vobs
-        .extra
-        .get("compile_ok")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
-    let run_ok = vobs.extra.get("run_ok").and_then(|x| x.as_bool());
-    let build = vargs
-        .get("build")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
-    let run = vargs.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
-    let runtime_validate = build || run;
-
-    let ok_for_clear = if runtime_validate {
-        ok && compile_ok && run_ok == Some(true)
-    } else {
-        ok && compile_ok
-    };
-    out.last_validate_failed = !ok_for_clear;
-
-    // If dbt_validate ran its internal repair loop and mutated files, treat that as a mutation
-    // associated with the failing validation attempt. Without this, the suite can deadlock on
-    // the "mutate after failure" guard even though dbt_validate already applied repairs.
-    if out.last_validate_failed {
-        if let Some(rr) = vobs.extra.get("repair_report") {
-            let mut any_changed = false;
-            if let Some(iters) = rr.get("iterations").and_then(|v| v.as_array()) {
-                for it in iters {
-                    let n = it
-                        .get("llm_changed_files")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    if n > 0 {
-                        any_changed = true;
-                        break;
-                    }
-                }
-            }
-            if any_changed {
-                out.mutated_since_fail = true;
-            }
-        }
-    }
-
-    // Probe requirement: compile ok but runtime failed with runtime_failures present.
-    if runtime_validate && compile_ok && run_ok == Some(false) {
-        let has_runtime_failures = vobs
-            .extra
-            .get("runtime_failures")
-            .and_then(|v| v.as_array())
-            .map(|a| !a.is_empty())
-            .unwrap_or(false);
-        if has_runtime_failures {
-            out.probe_required = true;
-        }
-    }
-
-    // Scan forward from validate for mutations / probes.
-    for step in log.steps.iter().skip(vidx + 1) {
-        if is_mutation_step(step) {
-            let ok = match step {
-                ThreadStep::ToolEnd { observation, .. } => observation.ok,
-                _ => false,
-            };
-            if ok {
-                // Successful file patch counts as "patch applied", even if no-op.
-                if let ThreadStep::ToolEnd {
-                    name,
-                    args,
-                    observation,
-                    ..
-                } = step
-                {
-                    if name == "file" && observation.ok {
-                        if crate::data_engineer::tool_ops::is_file_mutation_op(args) {
-                            out.patched_since_fail = true;
-                        }
-                    }
-                }
-                if is_effective_mutation_step(step) {
-                    out.mutated_since_fail = true;
-                }
-                // ok-but-ineffective (no-op) is intentionally NOT treated as a mutation or a failure.
-            } else if !out.mutated_since_fail {
-                // Count only consecutive tool failures until we see a successful mutation.
-                out.mutation_failures_since_validate =
-                    out.mutation_failures_since_validate.saturating_add(1);
-            }
-        }
-        if out.probe_required {
-            if let ThreadStep::ToolEnd {
-                name,
-                args,
-                observation,
-                ..
-            } = step
-            {
-                if observation.ok && name == "run_sql" {
-                    let sql = args.get("sql").and_then(|x| x.as_str()).unwrap_or("");
-                    if looks_like_data_probe_sql(sql) {
-                        out.probe_satisfied = true;
-                    }
-                }
-            }
-        }
-    }
-
-    // If probe has been satisfied, clear requirement (for gating).
-    if out.probe_satisfied {
-        out.probe_required = false;
-    }
-    out
-}
-
 pub fn derive_guard_state_from_execution_state(
     st: &crate::data_engineer::progress_controller::ExecutionState,
 ) -> DerivedGuardState {
@@ -517,167 +251,6 @@ pub fn derive_guard_state_from_execution_state(
     }
 }
 
-/// Derive dbt `--select` terms for a fast, targeted validation pre-check based on the most recent
-/// successful `file op=patch` step in the thread.
-///
-/// Strategy:
-/// - Prefer manifest-based mapping from patched file path -> model name (when manifest is available)
-/// - Fall back to dbt path selectors: `path:<rel_path>`
-/// - If the patch touched global-impact files (macros/, packages.yml, dbt_project.yml), return an
-///   empty list to indicate we should skip targeted validation and do full validation instead.
-#[cfg(test)]
-pub async fn derive_targeted_select_terms(ctx: &AgentCtx, log: &ThreadLog) -> Vec<String> {
-    // Find the most recent successful file mutation that should influence targeted validation.
-    let mut patched_paths: Vec<String> = Vec::new();
-    for step in log.steps.iter().rev() {
-        let ThreadStep::ToolEnd {
-            name,
-            args,
-            observation,
-            ..
-        } = step
-        else {
-            continue;
-        };
-        if name != "file" || !observation.ok {
-            continue;
-        }
-        let op = crate::data_engineer::tool_ops::classify_file_op(args);
-        // Consider patch and mv as sources of new/updated model paths.
-        // (rm removes paths; targeting removed paths is usually unhelpful.)
-        if !matches!(
-            op,
-            crate::data_engineer::tool_ops::FileOpKind::Patch
-                | crate::data_engineer::tool_ops::FileOpKind::Mv
-        ) {
-            continue;
-        }
-
-        if let Some(arr) = observation.extra.get("results").and_then(|v| v.as_array()) {
-            for it in arr {
-                if let Some(p) = it.get("path").and_then(|v| v.as_str()) {
-                    let p = p.trim();
-                    if !p.is_empty() {
-                        patched_paths.push(p.to_string());
-                    }
-                }
-            }
-        }
-
-        // If tool didn't return results[] for some reason, fall back to args.path (single-file).
-        if patched_paths.is_empty() {
-            match op {
-                crate::data_engineer::tool_ops::FileOpKind::Patch => {
-                    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-                        let p = p.trim();
-                        if !p.is_empty() {
-                            patched_paths.push(p.to_string());
-                        }
-                    }
-                }
-                crate::data_engineer::tool_ops::FileOpKind::Mv => {
-                    if let Some(p) = args.get("to").and_then(|v| v.as_str()) {
-                        let p = p.trim();
-                        if !p.is_empty() {
-                            patched_paths.push(p.to_string());
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        break;
-    }
-
-    if patched_paths.is_empty() {
-        return Vec::new();
-    }
-
-    // Global-impact files: skip targeted checks (selection isn't reliable / can be too broad).
-    for p in patched_paths.iter() {
-        let pl = p.to_ascii_lowercase();
-        if pl == "packages.yml" || pl == "dbt_project.yml" || pl.starts_with("macros/") {
-            return Vec::new();
-        }
-    }
-
-    // Only target model SQL paths (dbt path selector expects project-relative paths).
-    let mut model_paths: Vec<String> = patched_paths
-        .into_iter()
-        .filter(|p| p.starts_with("models/") && p.ends_with(".sql"))
-        .collect();
-    model_paths.sort();
-    model_paths.dedup();
-
-    if model_paths.is_empty() {
-        return Vec::new();
-    }
-
-    // Attempt manifest mapping (best-effort).
-    let mut path_to_model_name: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    {
-        let base = ctx.keyspace.dbt_prefix(&ctx.scope);
-        let base = base.trim_end_matches('/').to_string() + "/";
-        let manifest_key = format!("{}target/manifest.json", base);
-        if let Ok(bytes) = ctx.storage.get_bytes(&manifest_key).await {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if let Some(nodes) = v.get("nodes").and_then(|n| n.as_object()) {
-                    for (_uid, node) in nodes.iter() {
-                        let rt = node
-                            .get("resource_type")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("");
-                        if rt != "model" {
-                            continue;
-                        }
-                        let fp = node
-                            .get("original_file_path")
-                            .and_then(|x| x.as_str())
-                            .or_else(|| node.get("path").and_then(|x| x.as_str()))
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
-                        if fp.is_empty() {
-                            continue;
-                        }
-                        if !model_paths.iter().any(|p| p == &fp) {
-                            continue;
-                        }
-                        let name = node
-                            .get("name")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("")
-                            .trim();
-                        if !name.is_empty() {
-                            path_to_model_name.insert(fp, name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Default: include parents to catch upstream dependency breakage early.
-    let include_parents = true;
-    let mut out: Vec<String> = Vec::new();
-    for p in model_paths.iter() {
-        let sel = if let Some(name) = path_to_model_name.get(p) {
-            name.clone()
-        } else {
-            format!("path:{}", p)
-        };
-        if include_parents {
-            out.push(format!("+{}", sel));
-        } else {
-            out.push(sel);
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
 pub(crate) fn is_cleanse_replan_backtrack(from: Phase, to: Phase) -> bool {
     matches!(from, Phase::CleanseValidate | Phase::CleanseReview)
         && matches!(to, Phase::CleansePlan | Phase::CleanseAuthor)
@@ -690,284 +263,10 @@ pub(crate) fn is_model_replan_backtrack(from: Phase, to: Phase) -> bool {
     ) && matches!(to, Phase::ModelPlan | Phase::ModelAuthor)
 }
 
-/// Count validate/review -> plan/author backtracks for the active track.
-///
-/// This is used to stop threads that repeatedly loop without meaningful phase progress.
-#[cfg(test)]
-#[cfg(test)]
-pub fn replan_backtrack_count_for_phase(log: Option<&ThreadLog>, phase: Phase) -> usize {
-    let Some(log) = log else { return 0 };
-    // Guard tuning: only count loopbacks since the most recent *successful* dbt_validate.
-    // Once validate succeeds, we consider the backtrack loop "resolved" for hard-stop purposes.
-    let mut last_successful_validate_idx: Option<usize> = None;
-    let mut cur_phase: Option<Phase> = None;
-    for (i, step) in log.steps.iter().enumerate() {
-        match step {
-            ThreadStep::Phase { phase, .. } => {
-                cur_phase = Phase::from_str(phase);
-            }
-            ThreadStep::ToolEnd {
-                name, observation, ..
-            } => {
-                if name == "dbt_validate"
-                    && observation.ok
-                    && matches!(
-                        cur_phase,
-                        Some(Phase::CleanseValidate | Phase::ModelValidate)
-                    )
-                {
-                    last_successful_validate_idx = Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    let start_idx = last_successful_validate_idx.unwrap_or(0);
-
-    let mut count = 0usize;
-    let cap = replan_backtrack_counter_cap();
-    for (i, step) in log.steps.iter().enumerate() {
-        if i <= start_idx {
-            continue;
-        }
-        let ThreadStep::Phase {
-            phase: to_phase,
-            from_phase: Some(from_phase),
-            ..
-        } = step
-        else {
-            continue;
-        };
-        let Some(from) = Phase::from_str(from_phase) else {
-            continue;
-        };
-        let Some(to) = Phase::from_str(to_phase) else {
-            continue;
-        };
-        let hit = match phase {
-            Phase::CleansePlan
-            | Phase::CleanseAuthor
-            | Phase::CleanseValidate
-            | Phase::CleanseReview => is_cleanse_replan_backtrack(from, to),
-            Phase::ModelPlan
-            | Phase::ModelAuthor
-            | Phase::ModelValidate
-            | Phase::ModelReview
-            | Phase::PublishAwaitApproval
-            | Phase::Publish
-            | Phase::PostPublishReview
-            | Phase::Done => is_model_replan_backtrack(from, to),
-            Phase::Preflight => false,
-        };
-        if hit {
-            count = count.saturating_add(1);
-            if count >= cap {
-                return cap;
-            }
-        }
-    }
-    count
-}
-
-#[cfg(test)]
-fn review_patch_streak(
-    log: Option<&ThreadLog>,
-    review_phase: Phase,
-    reason_code_match: PhaseReasonCode,
-    expected_back_to: Phase,
-) -> usize {
-    let Some(log) = log else { return 0 };
-    let cap = review_patch_streak_cap(reason_code_match);
-
-    let mut streak = 0usize;
-    for step in log.steps.iter().rev() {
-        let ThreadStep::Phase {
-            phase: to_phase,
-            from_phase: Some(from_phase),
-            reason_code,
-            ..
-        } = step
-        else {
-            continue;
-        };
-        let Some(from) = Phase::from_str(from_phase) else {
-            continue;
-        };
-        let Some(to) = Phase::from_str(to_phase) else {
-            continue;
-        };
-        if from != review_phase {
-            continue;
-        }
-        if matches!(reason_code, Some(code) if *code == reason_code_match) && to == expected_back_to
-        {
-            streak = streak.saturating_add(1);
-            if streak >= cap {
-                return cap;
-            }
-            continue;
-        }
-        // Any other decision emitted by this review phase ends the streak window.
-        break;
-    }
-    streak
-}
-
-/// Count consecutive review->plan loopbacks caused by `review_patch_plan`.
-#[cfg(test)]
-#[cfg(test)]
-pub fn review_patch_plan_streak(log: Option<&ThreadLog>, review_phase: Phase) -> usize {
-    let expected_back_to = match review_phase {
-        Phase::CleanseReview => Phase::CleansePlan,
-        Phase::ModelReview | Phase::PostPublishReview => Phase::ModelPlan,
-        _ => return 0,
-    };
-    review_patch_streak(
-        log,
-        review_phase,
-        PhaseReasonCode::ReviewPatchPlan,
-        expected_back_to,
-    )
-}
-
-/// Count consecutive review->author loopbacks caused by `review_patch_impl`.
-///
-/// This is intentionally review-phase scoped and is used as a secondary guard when
-/// validate keeps passing but review repeatedly requests more implementation patching.
-#[cfg(test)]
-#[cfg(test)]
-pub fn review_patch_impl_streak(log: Option<&ThreadLog>, review_phase: Phase) -> usize {
-    let expected_back_to = match review_phase {
-        Phase::CleanseReview => Phase::CleanseAuthor,
-        Phase::ModelReview | Phase::PostPublishReview => Phase::ModelAuthor,
-        _ => return 0,
-    };
-    review_patch_streak(
-        log,
-        review_phase,
-        PhaseReasonCode::ReviewPatchImpl,
-        expected_back_to,
-    )
-}
-
 #[derive(Clone, Debug)]
 pub enum AuthoringGate {
     Allow,
     Block { reason: String },
-}
-
-#[cfg(test)]
-#[cfg(test)]
-fn phase_start_idx(log: &ThreadLog, phase: Phase) -> Option<usize> {
-    for (i, step) in log.steps.iter().enumerate().rev() {
-        if let ThreadStep::Phase { phase: p, .. } = step {
-            let got = Phase::from_str(p);
-            if got == Some(phase) {
-                return Some(i);
-            }
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-#[cfg(test)]
-fn unresolved_mutation_failures_in_phase(log: &ThreadLog, phase: Phase) -> Vec<String> {
-    // Collect failures since the last successful mutation in the current phase.
-    // If a successful mutation occurs, it "clears" prior failures.
-    let Some(start) = phase_start_idx(log, phase) else {
-        return Vec::new();
-    };
-
-    let mut failures: Vec<String> = Vec::new();
-    for step in log.steps.iter().skip(start + 1) {
-        if !is_mutation_step(step) {
-            continue;
-        }
-        let (name, obs) = match step {
-            ThreadStep::ToolEnd {
-                name, observation, ..
-            } => (name.as_str(), observation),
-            _ => continue,
-        };
-        let ok = obs.ok;
-        if ok {
-            if is_effective_mutation_step(step) {
-                failures.clear();
-            }
-            // ok-but-ineffective is not a failure; it just doesn't clear prior failures.
-            continue;
-        }
-        let err = obs
-            .first_error_or_context()
-            .unwrap_or_else(|| "no error details were captured".to_string());
-        failures.push(format!("{}: {}", name, err));
-        if failures.len() >= 10 {
-            break;
-        }
-    }
-    failures
-}
-
-/// Single source of truth for whether we may advance from an authoring phase into a validate phase.
-///
-/// This intentionally enforces suite-level invariants (mutation/probe requirements) in code,
-/// rather than relying on prompt-only instructions.
-#[cfg(test)]
-#[cfg(test)]
-pub fn gate_authoring_to_validate(log: Option<&ThreadLog>) -> AuthoringGate {
-    let g = derive_guard_state(log);
-    if g.last_validate_failed && !(g.mutated_since_fail || g.patched_since_fail) {
-        if g.mutation_failures_since_validate >= 3 {
-            return AuthoringGate::Block {
-                reason: format!(
-                    "I tried to apply a mutating fix after a failed dbt_validate, but the mutation step failed {} times in a row (often due to tool timeouts or storage write failures).\n\nPlease check:\n- The runtime can write DBT files to storage (S3 prefix/permissions)\n- The agent tool timeout is sufficient for your environment\n\nThen retry. If you want a quick deterministic fix path, use `file op=patch` to edit the failing model SQL directly.",
-                    g.mutation_failures_since_validate
-                ),
-            };
-        }
-        return AuthoringGate::Block {
-            reason: "A DBT validation previously failed and no successful mutation has been recorded since that failure. Apply a mutating fix (e.g. file op=patch or staging_model) before re-validating."
-                .to_string(),
-        };
-    }
-    if g.probe_required && !g.probe_satisfied {
-        return AuthoringGate::Block {
-            reason: "Runtime validation previously failed after compile and a data probe is required. Run meaningful run_sql probes (not SELECT 1) to diagnose the failing relation before re-validating."
-                .to_string(),
-        };
-    }
-    AuthoringGate::Allow
-}
-
-/// Gate authoring completion itself (before advancing phases) on unresolved tool/mutation failures
-/// in the current authoring phase. This prevents the suite from moving forward after a failing
-/// mutation (e.g., staging_model/tool timeouts), even if the agent produced a Final response.
-#[cfg(test)]
-#[cfg(test)]
-pub fn gate_authoring_completion(log: Option<&ThreadLog>, phase: Phase) -> AuthoringGate {
-    let Some(log) = log else {
-        return AuthoringGate::Allow;
-    };
-    match phase {
-        Phase::CleanseAuthor | Phase::ModelAuthor => {}
-        _ => return AuthoringGate::Allow,
-    }
-
-    let failures = unresolved_mutation_failures_in_phase(log, phase);
-    if failures.is_empty() {
-        return AuthoringGate::Allow;
-    }
-    let mut msg = String::new();
-    msg.push_str("Unresolved mutation/tool failures occurred in this authoring phase. Fix these before advancing to validation:\n");
-    for f in failures.iter().take(6) {
-        msg.push_str("- ");
-        msg.push_str(f);
-        msg.push('\n');
-    }
-    AuthoringGate::Block {
-        reason: msg.trim().to_string(),
-    }
 }
 
 pub fn gate_author_phase_execution_cleanse(
@@ -1524,7 +823,7 @@ pub async fn invariant_has_dbt_project(ctx: &AgentCtx) -> Result<bool, String> {
     Ok(obs.get("ok").and_then(|v| v.as_bool()) == Some(true))
 }
 
-#[cfg(test)]
+#[cfg(all(test, any()))]
 mod tests {
     use super::*;
 

@@ -13,6 +13,19 @@ use crate::storage::StorageAdapter;
 
 pub const THREAD_SCHEMA_VERSION: u32 = 4;
 pub const THREAD_STATE_SCHEMA_VERSION: u32 = 2;
+pub const CONTROL_STATE_ENVELOPE_SCHEMA_VERSION: u32 = 1;
+
+/// Generic thread-level control state envelope.
+///
+/// Core owns this wrapper to provide a stable mutation contract while keeping
+/// suite payloads opaque (`payload`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlStateEnvelope {
+    pub schema_version: u32,
+    pub suite_id: String,
+    pub payload: Value,
+}
 
 /// Materialized, reloadable thread state (stable summary, not raw streaming events).
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -1080,6 +1093,67 @@ impl ThreadStore {
         let key = self.state_key(thread_id);
         let v = serde_json::to_value(state).map_err(|e| e.to_string())?;
         self.storage.put_json(&key, &v).await
+    }
+
+    fn decode_control_state_payload(raw: &Value, expected_suite_id: &str) -> Option<Value> {
+        if let Ok(env) = serde_json::from_value::<ControlStateEnvelope>(raw.clone()) {
+            if env.schema_version == CONTROL_STATE_ENVELOPE_SCHEMA_VERSION
+                && env.suite_id.trim() == expected_suite_id.trim()
+            {
+                return Some(env.payload);
+            }
+            return None;
+        }
+        // Backward compatibility: pre-envelope payloads were stored directly.
+        Some(raw.clone())
+    }
+
+    fn encode_control_state_payload(suite_id: &str, payload: Value) -> Result<Value, String> {
+        serde_json::to_value(ControlStateEnvelope {
+            schema_version: CONTROL_STATE_ENVELOPE_SCHEMA_VERSION,
+            suite_id: suite_id.trim().to_string(),
+            payload,
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    pub async fn load_control_state_payload(
+        &self,
+        thread_id: &str,
+        suite_id: &str,
+    ) -> Result<Option<Value>, String> {
+        let state = self.get_thread_state(thread_id).await?;
+        let Some(raw) = state.control_state else {
+            return Ok(None);
+        };
+        Ok(Self::decode_control_state_payload(&raw, suite_id))
+    }
+
+    pub async fn save_control_state_payload(
+        &self,
+        thread_id: &str,
+        suite_id: &str,
+        payload: Value,
+    ) -> Result<(), String> {
+        let mut state = self
+            .get_thread_state(thread_id)
+            .await
+            .unwrap_or_else(|_| Self::new_thread_state(thread_id));
+        state.control_state = Some(Self::encode_control_state_payload(suite_id, payload)?);
+        self.put_thread_state(thread_id, &state).await
+    }
+
+    pub async fn mutate_control_state_payload(
+        &self,
+        thread_id: &str,
+        suite_id: &str,
+        mutate: impl FnOnce(Option<Value>) -> Result<Value, String>,
+    ) -> Result<Value, String> {
+        let current = self.load_control_state_payload(thread_id, suite_id).await?;
+        let next = mutate(current)?;
+        self.save_control_state_payload(thread_id, suite_id, next.clone())
+            .await?;
+        Ok(next)
     }
 
     pub async fn get_thread_events_from_log(&self, thread_id: &str) -> Result<Vec<ThreadEvent>, String> {
@@ -2176,6 +2250,57 @@ mod tests {
         };
         let got = store.put_thread_state("tid-id-check", &st).await;
         assert!(got.is_err(), "thread_id mismatches must fail");
+    }
+
+    #[tokio::test]
+    async fn control_state_payload_round_trips_with_core_envelope() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let tid = "tid-control-envelope";
+        let payload = serde_json::json!({"schema_version": 1, "mode": "mutate"});
+        store
+            .save_control_state_payload(tid, "data_engineer", payload.clone())
+            .await
+            .expect("save payload");
+        let loaded = store
+            .load_control_state_payload(tid, "data_engineer")
+            .await
+            .expect("load payload");
+        assert_eq!(loaded, Some(payload));
+    }
+
+    #[tokio::test]
+    async fn control_state_payload_load_supports_legacy_raw_payload() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let tid = "tid-control-legacy";
+        let mut st = ThreadState {
+            thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
+            thread_id: tid.to_string(),
+            ..ThreadState::default()
+        };
+        st.control_state = Some(serde_json::json!({"legacy": true}));
+        store
+            .put_thread_state_replace(tid, &st)
+            .await
+            .expect("seed legacy state");
+        let loaded = store
+            .load_control_state_payload(tid, "data_engineer")
+            .await
+            .expect("load payload");
+        assert_eq!(loaded, Some(serde_json::json!({"legacy": true})));
     }
 
     #[tokio::test]

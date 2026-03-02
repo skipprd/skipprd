@@ -1,5 +1,7 @@
 use async_trait::async_trait;
+use serde::Serialize;
 use serde_json::json;
+use crate::data_engineer::authoring_driver::AuthoringKind;
 
 use crate::data_engineer_shared::policy_sql_validated::SqlValidatedPolicy;
 use crate::data_engineer_shared::types::DatasetCandidate;
@@ -48,6 +50,7 @@ pub mod files_store;
 pub mod prompt_packets;
 pub mod prompts;
 pub mod authoring_ir;
+pub mod authoring_driver;
 pub mod chunk_progress_contract;
 pub mod references;
 mod review_batched;
@@ -89,6 +92,17 @@ fn lock_prompt_for_plan(
         next_items,
         expected_paths,
     )
+}
+
+fn batch_lock_error(reason: &str) -> String {
+    let code = crate::data_engineer::controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted
+        .code();
+    format!("batch_locked:{}: {}", code, reason)
+}
+
+fn stable_json_digest<T: Serialize>(value: &T) -> Option<String> {
+    let raw = serde_json::to_string(value).ok()?;
+    Some(react_core::llm_observability::sha256_hex_str(&raw))
 }
 
 /// Interrupt policy used by non-deterministic single-pass modes.
@@ -201,11 +215,6 @@ mod interrupt_only_policy_tests {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AuthoringKind {
-    Cleanse,
-    Model,
-}
 
 #[derive(Clone, Debug)]
 enum AllowedBatch {
@@ -213,12 +222,6 @@ enum AllowedBatch {
     CleanseSchemaDatasetIds(Vec<String>),
     ModelSqlItemNames(Vec<String>),
     ModelSchemaItemNames(Vec<String>),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UserDecision {
-    Approve,
-    Reject,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,15 +264,6 @@ impl AgentMode {
         }
     }
 
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Ask => "ask",
-            Self::Model => "model",
-            Self::Cleanse => "cleanse",
-            Self::Review => "review",
-            Self::Agent => "agent",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1930,71 +1924,90 @@ Apply these fixes in the output.",
         out
     }
 
-    /// Parse a user approval/rejection decision from free-form text.
-    ///
-    /// In agent-mode we accept a small set of loose synonyms so chat replies like
-    /// "Approved", "ok", or "continue" don't trap the loop in repeated approval prompts.
-    fn parse_user_decision(text: &str) -> Option<UserDecision> {
-        let raw = text.trim();
-        if raw.is_empty() {
-            return None;
-        }
+    async fn set_pending_patch_plan_intent(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+        phase: control_flow::Phase,
+        entry_plan_key: Option<String>,
+        entry_plan_digest: Option<String>,
+    ) -> Result<(), String> {
+        crate::data_engineer::state_manager::mutate_execution_state(thread_store, thread_id, |es| {
+            es.set_pending_patch_plan_intent(phase, entry_plan_key.clone(), entry_plan_digest.clone());
+        })
+        .await
+        .map(|_| ())
+    }
 
-        fn normalize_token(s: &str) -> Option<String> {
-            let t = s
-                .trim()
-                // Strip surrounding punctuation (approve!, reject., etc).
-                .trim_matches(|c: char| !c.is_ascii_alphanumeric())
-                .to_lowercase();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t)
+    async fn set_pending_patch_impl_intent(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+        phase: control_flow::Phase,
+    ) -> Result<(), String> {
+        crate::data_engineer::state_manager::mutate_execution_state(thread_store, thread_id, |es| {
+            es.set_pending_patch_impl_intent(phase);
+        })
+        .await
+        .map(|_| ())
+    }
+
+    async fn clear_pending_loopback_intent(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+    ) -> Result<(), String> {
+        crate::data_engineer::state_manager::mutate_execution_state(thread_store, thread_id, |es| {
+            es.clear_pending_loopback_intent();
+        })
+        .await
+        .map(|_| ())
+    }
+
+    fn patch_plan_intent_blocks_fast_forward(
+        execution_state: &crate::data_engineer::progress_controller::ExecutionState,
+        phase: control_flow::Phase,
+        current_plan_key: &str,
+        current_plan_digest: Option<&str>,
+    ) -> bool {
+        let Some(intent) = execution_state.pending_loopback_intent.as_ref() else {
+            return false;
+        };
+        match intent {
+            crate::data_engineer::progress_controller::PendingLoopbackIntent::PatchPlan {
+                phase: intent_phase,
+                entry_plan_key,
+                entry_plan_digest,
+            } => {
+                if *intent_phase != phase {
+                    return false;
+                }
+                let key_changed = entry_plan_key
+                    .as_ref()
+                    .map(|k| k.trim() != current_plan_key.trim())
+                    .unwrap_or(true);
+                let digest_changed = match (entry_plan_digest.as_deref(), current_plan_digest) {
+                    (Some(prev), Some(cur)) => prev.trim() != cur.trim(),
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+                !(key_changed || digest_changed)
             }
-        }
-
-        // Prefer first token so "yes please" still counts.
-        let first = raw.split_whitespace().next().unwrap_or("");
-        let tok = normalize_token(first).or_else(|| normalize_token(raw))?;
-
-        match tok.as_str() {
-            // Approve
-            "approve" | "approved" | "yes" | "y" | "ok" | "okay" | "continue" => {
-                Some(UserDecision::Approve)
-            }
-            // Reject
-            "reject" | "rejected" | "no" | "n" => Some(UserDecision::Reject),
-            _ => None,
+            _ => false,
         }
     }
 
-    async fn capture_publish_approval_from_question(
-        thread_store: &ThreadStore,
-        thread_id: &str,
-        question: &str,
-    ) -> Result<Option<UserDecision>, String> {
-        let decision = Self::parse_user_decision(question);
-        let Some(decision) = decision else {
-            return Ok(None);
+    fn patch_impl_intent_unsatisfied(
+        execution_state: &crate::data_engineer::progress_controller::ExecutionState,
+        phase: control_flow::Phase,
+    ) -> bool {
+        let Some(intent) = execution_state.pending_loopback_intent.as_ref() else {
+            return false;
         };
-        let mut st = crate::data_engineer::progress_controller::ExecutionState::load_strict(
-            thread_store,
-            thread_id,
-        )
-        .await?
-        .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
-        match decision {
-            UserDecision::Approve => st.set_publish_approval(
-                crate::data_engineer::progress_controller::PublishApprovalDecision::Approved,
-            ),
-            UserDecision::Reject => st.set_publish_approval(
-                crate::data_engineer::progress_controller::PublishApprovalDecision::Rejected,
-            ),
+        match intent {
+            crate::data_engineer::progress_controller::PendingLoopbackIntent::PatchImpl {
+                phase: intent_phase,
+                entry_mutation_epoch,
+            } => *intent_phase == phase && execution_state.mutation_epoch <= *entry_mutation_epoch,
+            _ => false,
         }
-        st.save(thread_store, thread_id).await.map_err(|e| {
-            format!("failed to persist publish approval decision in execution state: {e}")
-        })?;
-        Ok(Some(decision))
     }
 
     async fn approve_cleanse_plan_draft_and_advance(
@@ -2089,6 +2102,7 @@ Apply these fixes in the output.",
         crate::data_engineer::plan::save_cleanse_plan(actx, &p)
             .await
             .map_err(|e| format!("failed to persist approved cleanse plan: {e}"))?;
+        let _ = Self::clear_pending_loopback_intent(thread_store, thread_id).await;
 
         control_flow::append_phase_with_intent(
             thread_store,
@@ -2178,6 +2192,7 @@ Apply these fixes in the output.",
         crate::data_engineer::plan::save_model_plan(actx, &p)
             .await
             .map_err(|e| format!("failed to persist approved model plan: {e}"))?;
+        let _ = Self::clear_pending_loopback_intent(thread_store, thread_id).await;
 
         control_flow::append_phase_with_intent(
             thread_store,
@@ -3018,6 +3033,26 @@ Apply these fixes in the output.",
                 // If the last validation failed and no mutation has happened since, enforce a hard tool lock:
                 // the next step MUST be a mutation.
                 let hard_mutation_only = guard.last_validate_failed && !guard.mutated_since_fail;
+                let allow_probe_sql = guard.probe_required && !guard.probe_satisfied;
+                let plan_batched_cleanse_sql = phase == control_flow::Phase::CleanseAuthor
+                    && matches!(allowed_batch, Some(AllowedBatch::CleanseSqlDatasetIds(_)));
+                let plan_batched_cleanse_schema = phase == control_flow::Phase::CleanseAuthor
+                    && matches!(allowed_batch, Some(AllowedBatch::CleanseSchemaDatasetIds(_)));
+                let plan_batched_model_sql = phase == control_flow::Phase::ModelAuthor
+                    && matches!(allowed_batch, Some(AllowedBatch::ModelSqlItemNames(_)));
+                let plan_batched_model_schema = phase == control_flow::Phase::ModelAuthor
+                    && matches!(allowed_batch, Some(AllowedBatch::ModelSchemaItemNames(_)));
+                let authoring_policy = crate::data_engineer::authoring_driver::derive_authoring_tool_policy(
+                    crate::data_engineer::authoring_driver::AuthoringToolPolicyInput {
+                        hard_mutation_only,
+                        single_target_repair: single_target_repair_path.is_some(),
+                        allow_probe_sql,
+                        plan_batched_cleanse_sql,
+                        plan_batched_cleanse_schema,
+                        plan_batched_model_sql,
+                        plan_batched_model_schema,
+                    },
+                );
 
                 if hard_mutation_only {
                     // Mutation-only file tool to avoid "read-only thrash" when we require a mutation next.
@@ -3244,7 +3279,6 @@ Apply these fixes in the output.",
                             self.inner.call(args, ctx).await
                         }
                     }
-                    let allow_probe_sql = guard.probe_required && !guard.probe_satisfied;
                     if allow_probe_sql {
                         reg.register(ProbeAwareRunSqlTool {
                             inner: SqlRunTool {
@@ -3258,7 +3292,10 @@ Apply these fixes in the output.",
                     // mode must stay file-targeted to avoid schema-tool no-op loops.
                     let mut tool_lines: Vec<String> = Vec::new();
                     if phase == control_flow::Phase::CleanseAuthor
-                        && single_target_repair_path.is_none()
+                        && !matches!(
+                            authoring_policy,
+                            crate::data_engineer::authoring_driver::AuthoringToolPolicy::HardMutationSingleTarget
+                        )
                     {
                         reg.register(
                             tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
@@ -3271,7 +3308,10 @@ Apply these fixes in the output.",
                         );
                     }
                     if phase == control_flow::Phase::ModelAuthor
-                        && single_target_repair_path.is_none()
+                        && !matches!(
+                            authoring_policy,
+                            crate::data_engineer::authoring_driver::AuthoringToolPolicy::HardMutationSingleTarget
+                        )
                     {
                         reg.register(
                             tools::apply_next_schema_batch::ApplyNextModelSchemaBatchTool {
@@ -3367,15 +3407,10 @@ Apply these fixes in the output.",
                     });
                     reg.register(JsonFileTool);
 
-                    let plan_batched_cleanse_sql = phase == control_flow::Phase::CleanseAuthor
-                        && matches!(allowed_batch, Some(AllowedBatch::CleanseSqlDatasetIds(_)));
-                    let plan_batched_cleanse_schema = phase == control_flow::Phase::CleanseAuthor
-                        && matches!(allowed_batch, Some(AllowedBatch::CleanseSchemaDatasetIds(_)));
-                    let plan_batched_model_sql = phase == control_flow::Phase::ModelAuthor
-                        && matches!(allowed_batch, Some(AllowedBatch::ModelSqlItemNames(_)));
-                    let plan_batched_model_schema = phase == control_flow::Phase::ModelAuthor
-                        && matches!(allowed_batch, Some(AllowedBatch::ModelSchemaItemNames(_)));
-                    if plan_batched_cleanse_sql {
+                    if matches!(
+                        authoring_policy,
+                        crate::data_engineer::authoring_driver::AuthoringToolPolicy::BatchingCleanseSql
+                    ) {
                         let lines = vec![
                             "- apply_next_cleanse_batch(args:{instructions?:string})".to_string(),
                             "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})".to_string(),
@@ -3391,7 +3426,10 @@ Apply these fixes in the output.",
                             Vec::new(),
                             Some("Not available in this phase: staging_model (batch tool calls it deterministically), dbt_validate, publish_dbt_to_provider.".to_string()),
                         );
-                    } else if plan_batched_cleanse_schema {
+                    } else if matches!(
+                        authoring_policy,
+                        crate::data_engineer::authoring_driver::AuthoringToolPolicy::BatchingCleanseSchema
+                    ) {
                         let lines = vec![
                             "- apply_next_cleanse_schema_batch(args:{instructions?:string})"
                                 .to_string(),
@@ -3408,7 +3446,10 @@ Apply these fixes in the output.",
                             Vec::new(),
                             Some("Not available in this phase: staging_model, apply_next_cleanse_batch, dbt_validate, publish_dbt_to_provider.".to_string()),
                         );
-                    } else if plan_batched_model_sql {
+                    } else if matches!(
+                        authoring_policy,
+                        crate::data_engineer::authoring_driver::AuthoringToolPolicy::BatchingModelSql
+                    ) {
                         let lines = vec![
                             "- apply_next_model_batch(args:{instructions?:string})".to_string(),
                             "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int} | {op:\"patch\", path:string, patch_text:string} | {op:\"rm\", path:string, expected_sha256?:string} | {op:\"mv\", from:string, to:string, expected_sha256?:string})".to_string(),
@@ -3424,7 +3465,10 @@ Apply these fixes in the output.",
                             Vec::new(),
                             Some("Not available in this phase: gold_model (batch tool calls it deterministically), dbt_validate, publish_dbt_to_provider.".to_string()),
                         );
-                    } else if plan_batched_model_schema {
+                    } else if matches!(
+                        authoring_policy,
+                        crate::data_engineer::authoring_driver::AuthoringToolPolicy::BatchingModelSchema
+                    ) {
                         let lines = vec![
                             "- apply_next_model_schema_batch(args:{instructions?:string})"
                                 .to_string(),
@@ -4214,11 +4258,8 @@ Apply these fixes in the output.",
             }
             let guard: DerivedGuardState =
                 control_flow::derive_guard_state_from_execution_state(&execution_state);
-            let allow_ask_approval = match phase {
-                // Plan phases may require multiple approval prompts across iterations (reject -> revise -> ask again).
-                Phase::CleansePlan | Phase::ModelPlan => true,
-                _ => true,
-            };
+            // Agent mode is non-interactive: never expose ask-approval/ask-user pathways.
+            let allow_ask_approval = false;
             let replan_backtracks = execution_state.replan_backtracks;
             if execution_state.stall_count >= execution_state.max_stall_count
                 && matches!(
@@ -4350,102 +4391,30 @@ Apply these fixes in the output.",
                             None
                         };
 
-                    // Hard cutover: plan approval/rejection is driven by the current user input,
-                    // not by replaying user steps from the thread log.
-                    let decision = Self::parse_user_decision(question);
-                    if decision == Some(UserDecision::Approve) {
-                        if is_cleanse {
-                            let advanced = Self::approve_cleanse_plan_draft_and_advance(
-                                &thread_store,
-                                thread_id,
-                                phase,
-                                &actx,
-                                thread_state_step_count,
-                                PhaseReasonCode::PlanApproved,
-                                serde_json::json!({ "user_text": question }),
-                            )
-                            .await?;
-                            if advanced {
-                                continue;
-                            }
-                            // Idempotent: if we didn't advance (e.g. plan already approved), still proceed.
-                            control_flow::append_phase_with_intent(
-                                &thread_store,
-                                thread_id,
-                                Some("agent".to_string()),
-                                Some(phase),
-                                Phase::CleanseAuthor,
-                                control_flow::TransitionIntent::Forward,
-                                Some(PhaseReasonCode::PlanApproved),
-                                Some(serde_json::json!({ "user_text": question })),
-                            )
-                            .await?;
-                            continue;
-                        } else {
-                            let advanced = Self::approve_model_plan_draft_and_advance(
-                                &thread_store,
-                                thread_id,
-                                phase,
-                                &actx,
-                                thread_state_step_count,
-                                PhaseReasonCode::PlanApproved,
-                                serde_json::json!({ "user_text": question }),
-                            )
-                            .await?;
-                            if advanced {
-                                continue;
-                            }
-                            control_flow::append_phase_with_intent(
-                                &thread_store,
-                                thread_id,
-                                Some("agent".to_string()),
-                                Some(phase),
-                                Phase::ModelAuthor,
-                                control_flow::TransitionIntent::Forward,
-                                Some(PhaseReasonCode::PlanApproved),
-                                Some(serde_json::json!({ "user_text": question })),
-                            )
-                            .await?;
-                            continue;
-                        }
-                    }
-                    if decision == Some(UserDecision::Reject) {
-                        if is_cleanse {
-                            if let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await
-                            {
-                                p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-                                crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
-                                    .await
-                                    .map_err(|e| {
-                                        format!(
-                                            "failed to persist cancelled cleanse plan after rejection: {e}"
-                                        )
-                                    })?;
-                            }
-                        } else {
-                            if let Some(mut p) = crate::data_engineer::plan::load_model_plan(&actx).await {
-                                p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-                                crate::data_engineer::plan::save_model_plan(&actx, &p)
-                                    .await
-                                    .map_err(|e| {
-                                        format!(
-                                            "failed to persist cancelled model plan after rejection: {e}"
-                                        )
-                                    })?;
-                            }
-                        }
-                    }
+                    // Agent-mode hard cutover: no ask/reply approval semantics.
+                    // Plan transitions are deterministic and state-driven; free-form question text
+                    // must never be interpreted as approve/reject in this mode.
 
                     // If an approved plan already exists (oldest active plan for this thread), move forward (idempotent).
                     if is_cleanse {
                         if let Some(mut p) =
                             crate::data_engineer::plan::load_cleanse_plan(&actx).await
                         {
+                            let current_digest = stable_json_digest(&p);
                             if matches!(
                                 p.status,
                                 crate::data_engineer::plan::PlanStatus::Approved
                                     | crate::data_engineer::plan::PlanStatus::Completed
                             ) {
+                                if Self::patch_plan_intent_blocks_fast_forward(
+                                    &execution_state,
+                                    phase,
+                                    &p.plan_key,
+                                    current_digest.as_deref(),
+                                ) {
+                                    // Review requested a plan patch; do not bypass plan regeneration via old approved/completed plan.
+                                    continue;
+                                }
                                 // Safety: an empty/invalid approved plan would cause authoring to fast-forward.
                                 if p.tasks.is_empty() || p.batches.is_empty() {
                                     let plan_key = p.plan_key.clone();
@@ -4471,6 +4440,9 @@ Apply these fixes in the output.",
                                     .await?;
                                     continue;
                                 }
+                                let _ =
+                                    Self::clear_pending_loopback_intent(&thread_store, thread_id)
+                                        .await;
                                 control_flow::append_phase_with_intent(
                                     &thread_store,
                                     thread_id,
@@ -4491,11 +4463,21 @@ Apply these fixes in the output.",
                         if let Some(mut p) =
                             crate::data_engineer::plan::load_model_plan(&actx).await
                         {
+                            let current_digest = stable_json_digest(&p);
                             if matches!(
                                 p.status,
                                 crate::data_engineer::plan::PlanStatus::Approved
                                     | crate::data_engineer::plan::PlanStatus::Completed
                             ) {
+                                if Self::patch_plan_intent_blocks_fast_forward(
+                                    &execution_state,
+                                    phase,
+                                    &p.plan_key,
+                                    current_digest.as_deref(),
+                                ) {
+                                    // Review requested a plan patch; do not bypass plan regeneration via old approved/completed plan.
+                                    continue;
+                                }
                                 // Safety: an empty/invalid approved plan would cause authoring to fast-forward.
                                 if p.tasks.is_empty() || p.batches.is_empty() {
                                     let plan_key = p.plan_key.clone();
@@ -4525,6 +4507,9 @@ Apply these fixes in the output.",
                                     .await?;
                                     continue;
                                 }
+                                let _ =
+                                    Self::clear_pending_loopback_intent(&thread_store, thread_id)
+                                        .await;
                                 control_flow::append_phase_with_intent(
                                     &thread_store,
                                     thread_id,
@@ -4613,12 +4598,23 @@ Apply these fixes in the output.",
                                         continue;
                                     }
                                 }
-                                let prompt = format!(
-                                    "{}\n\nApprove this cleanse plan? Reply \"approve\" or \"reject\".\n\n(Plan saved to: {})",
-                                    crate::data_engineer::plan::summarize_cleanse_plan(&p, 30),
-                                    p.plan_key
-                                );
-                                return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
+                                let advanced = Self::approve_cleanse_plan_draft_and_advance(
+                                    &thread_store,
+                                    thread_id,
+                                    phase,
+                                    &actx,
+                                    thread_state_step_count,
+                                    PhaseReasonCode::PlanAutoApproved,
+                                    serde_json::json!({
+                                        "auto_approved_in_agent_mode": true,
+                                        "source": "existing_draft_plan"
+                                    }),
+                                )
+                                .await?;
+                                if advanced {
+                                    continue;
+                                }
+                                continue;
                             }
                         }
                     } else {
@@ -4659,12 +4655,23 @@ Apply these fixes in the output.",
                                         continue;
                                     }
                                 }
-                                let prompt = format!(
-                                    "{}\n\nApprove this model plan? Reply \"approve\" or \"reject\".\n\n(Plan saved to: {})",
-                                    crate::data_engineer::plan::summarize_model_plan(&p, 30),
-                                    p.plan_key
-                                );
-                                return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
+                                let advanced = Self::approve_model_plan_draft_and_advance(
+                                    &thread_store,
+                                    thread_id,
+                                    phase,
+                                    &actx,
+                                    thread_state_step_count,
+                                    PhaseReasonCode::PlanAutoApproved,
+                                    serde_json::json!({
+                                        "auto_approved_in_agent_mode": true,
+                                        "source": "existing_draft_plan"
+                                    }),
+                                )
+                                .await?;
+                                if advanced {
+                                    continue;
+                                }
+                                continue;
                             }
                         }
                     }
@@ -5315,12 +5322,23 @@ Apply these fixes in the output.",
                                         continue;
                                     }
                                 }
-                                let prompt = format!(
-                                    "{}\n\nApprove this cleanse plan? Reply \"approve\" or \"reject\".\n\n(Plan saved to: {})",
-                                    crate::data_engineer::plan::summarize_cleanse_plan(&plan, 30),
-                                    plan.plan_key
-                                );
-                                return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
+                                let advanced = Self::approve_cleanse_plan_draft_and_advance(
+                                    &thread_store,
+                                    thread_id,
+                                    phase,
+                                    &actx,
+                                    thread_state_step_count,
+                                    PhaseReasonCode::PlanAutoApproved,
+                                    serde_json::json!({
+                                        "auto_approved_in_agent_mode": true,
+                                        "source": "new_draft_plan"
+                                    }),
+                                )
+                                .await?;
+                                if advanced {
+                                    continue;
+                                }
+                                continue;
                             } else {
                                 let candidates = Self::generate_model_candidates(
                                     &actx,
@@ -5590,12 +5608,23 @@ Apply these fixes in the output.",
                                         continue;
                                     }
                                 }
-                                let prompt = format!(
-                                    "{}\n\nApprove this model plan? Reply \"approve\" or \"reject\".\n\n(Plan saved to: {})",
-                                    crate::data_engineer::plan::summarize_model_plan(&plan, 30),
-                                    plan.plan_key
-                                );
-                                return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
+                                let advanced = Self::approve_model_plan_draft_and_advance(
+                                    &thread_store,
+                                    thread_id,
+                                    phase,
+                                    &actx,
+                                    thread_state_step_count,
+                                    PhaseReasonCode::PlanAutoApproved,
+                                    serde_json::json!({
+                                        "auto_approved_in_agent_mode": true,
+                                        "source": "new_draft_plan"
+                                    }),
+                                )
+                                .await?;
+                                if advanced {
+                                    continue;
+                                }
+                                continue;
                             }
                         }
                         Ok(RunOutcomeNonInteractive::StepBoundary { .. }) => {
@@ -5607,7 +5636,15 @@ Apply these fixes in the output.",
                 }
 
                 Phase::CleanseAuthor | Phase::ModelAuthor => {
-                    let is_cleanse = phase == Phase::CleanseAuthor;
+                    let adapter = crate::data_engineer::authoring_driver::adapter_for_phase(phase)
+                        .ok_or_else(|| {
+                            format!(
+                                "authoring adapter missing for phase '{}'",
+                                phase.as_str()
+                            )
+                        })?;
+                    let is_cleanse =
+                        adapter.kind() == crate::data_engineer::authoring_driver::AuthoringKind::Cleanse;
                     // Treat schema precheck failures as "validate failed" for authoring guard behavior.
                     // Otherwise we can bounce Author->Validate->Author without requiring a mutation.
                     let entered_from_precheck_failed = execution_state.phase_reason_code
@@ -5628,6 +5665,9 @@ Apply these fixes in the output.",
                     } else {
                         prompts::model_system_prompt()
                     });
+                    let authoring_ctx = crate::data_engineer::authoring_driver::AuthoringCtx {
+                        phase,
+                    };
                     let mut actx = AgentCtx {
                         top_k: 30,
                         per_step_timeout_secs: 10,
@@ -5790,7 +5830,7 @@ Apply these fixes in the output.",
                                 .append_step(thread_id, step)
                                 .await
                                 .map_err(|e| format!("failed to append guard step: {e}"))?;
-                            return Err(format!("agent_mode_await_user_forbidden: {}", reason));
+                            return Err(batch_lock_error(&reason));
                         }
                             if plan.status != crate::data_engineer::plan::PlanStatus::Approved
                                 && plan.status != crate::data_engineer::plan::PlanStatus::Completed
@@ -6193,7 +6233,7 @@ Apply these fixes in the output.",
                                 .append_step(thread_id, step)
                                 .await
                                 .map_err(|e| format!("failed to append guard step: {e}"))?;
-                            return Err(format!("agent_mode_await_user_forbidden: {}", reason));
+                            return Err(batch_lock_error(&reason));
                         }
                             if plan.status != crate::data_engineer::plan::PlanStatus::Approved
                                 && plan.status != crate::data_engineer::plan::PlanStatus::Completed
@@ -6967,16 +7007,7 @@ Apply these fixes in the output.",
                             reasoning_effort: None,
                         }
                     };
-                    let pre_last_mutation_marker = execution_state.last_mutation_summary.as_ref().map(
-                        |m| {
-                            format!(
-                                "{}|{}|{}",
-                                m.ts.clone().unwrap_or_default(),
-                                m.op.clone().unwrap_or_default(),
-                                m.affected_paths.join(",")
-                            )
-                        },
-                    );
+                    let pre_mutation_epoch = execution_state.mutation_epoch;
                     match Agent::run_until_block_non_interactive(
                         &registry,
                         &actx,
@@ -7030,6 +7061,36 @@ Apply these fixes in the output.",
                                     .await
                                     .map_err(|e| format!("failed to append guard step: {e}"))?;
                                 continue;
+                            }
+                            if Self::patch_impl_intent_unsatisfied(&gate_state, phase) {
+                                let reason = format!(
+                                    "progress_gate_blocked: review requested implementation patch for phase '{}' and no successful mutation has been recorded since loopback. Apply a mutating file op (patch/rm/mv) before re-validating.",
+                                    phase.as_str()
+                                );
+                                let ts = chrono::Utc::now().to_rfc3339();
+                                let step = react_core::session::ThreadStep::GuardBlock {
+                                    phase: phase.as_str().to_string(),
+                                    kind: GuardBlockKind::AuthoringToValidate,
+                                    reason: reason.clone(),
+                                    observation: react_core::session::Observation::fail(vec![
+                                        reason.clone(),
+                                    ]),
+                                    ts,
+                                    agent: "agent".to_string(),
+                                };
+                                thread_store
+                                    .append_step(thread_id, step)
+                                    .await
+                                    .map_err(|e| format!("failed to append guard step: {e}"))?;
+                                continue;
+                            }
+                            if matches!(
+                                gate_state.pending_loopback_intent.as_ref(),
+                                Some(crate::data_engineer::progress_controller::PendingLoopbackIntent::PatchImpl { phase: p, .. }) if *p == phase
+                            ) {
+                                let _ =
+                                    Self::clear_pending_loopback_intent(&thread_store, thread_id)
+                                        .await;
                             }
 
                             // Model authoring must actually produce at least one gold model SQL file.
@@ -7114,22 +7175,22 @@ Apply these fixes in the output.",
                                 )
                                 .await?
                                 .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
-                                let post_last_mutation_marker =
-                                    post_state.last_mutation_summary.as_ref().map(|m| {
-                                        format!(
-                                            "{}|{}|{}",
-                                            m.ts.clone().unwrap_or_default(),
-                                            m.op.clone().unwrap_or_default(),
-                                            m.affected_paths.join(",")
-                                        )
-                                    });
-                                if post_last_mutation_marker == pre_last_mutation_marker
-                                    && total_steps >= 8
-                                {
-                                    return Err(
-                                        "failed to make progress for this thread: no mutating file operation observed across authoring iterations while hard_mutation_repair_mode=true. Apply a direct file mutation (patch/rm/mv) to the failing model path before retrying."
-                                            .to_string(),
-                                    );
+                                let snapshot = crate::data_engineer::progress_controller::snapshot_authoring_stepboundary_progress(
+                                    hard_mutation_repair_mode,
+                                    phase_guard.last_validate_failed,
+                                    pre_mutation_epoch,
+                                    post_state.mutation_epoch,
+                                    post_state.stall_count,
+                                    post_state.max_stall_count,
+                                );
+                                match crate::data_engineer::authoring_driver::AuthoringDriver::run_turn(
+                                    &authoring_ctx,
+                                    &snapshot,
+                                ) {
+                                    crate::data_engineer::authoring_driver::AuthoringTurnResult::HardError {
+                                        message,
+                                    } => return Err(message),
+                                    crate::data_engineer::authoring_driver::AuthoringTurnResult::Continue => {}
                                 }
                             }
                             // Deterministic single-step handoff: return to outer controller loop.
@@ -7483,19 +7544,20 @@ Apply these fixes in the output.",
                     ) {
                         // Update canonical execution state (hard-cutover: primary decision source).
                         {
-                            let mut es = crate::data_engineer::progress_controller::ExecutionState::load(
-                                &thread_store,
-                                thread_id,
-                            )
-                            .await
-                            .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
                             let tier = if phase == Phase::CleanseValidate {
                                 crate::data_engineer::progress_controller::ExecutionTier::Cleanse
                             } else {
                                 crate::data_engineer::progress_controller::ExecutionTier::Model
                             };
-                            es.apply_validate_success(tier);
-                            es.save(&thread_store, thread_id).await.map_err(|e| {
+                            crate::data_engineer::state_manager::apply_execution_event(
+                                &thread_store,
+                                thread_id,
+                                crate::data_engineer::progress_controller::DataEngineerEvent::ValidatePassed {
+                                    tier,
+                                },
+                            )
+                            .await
+                            .map_err(|e| {
                                 format!("failed to persist execution state after validate pass: {e}")
                             })?;
                         }
@@ -7671,12 +7733,6 @@ Apply these fixes in the output.",
 
                     // Update canonical execution state from this validate failure (hard-cutover: primary decision source).
                     {
-                        let mut es = crate::data_engineer::progress_controller::ExecutionState::load(
-                            &thread_store,
-                            thread_id,
-                        )
-                        .await
-                        .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
                         let tier = if phase == Phase::CleanseValidate {
                             crate::data_engineer::progress_controller::ExecutionTier::Cleanse
                         } else {
@@ -7703,23 +7759,26 @@ Apply these fixes in the output.",
                                 crate::data_engineer::progress_controller::FailureClass::Unknown
                             }
                         };
-                        es.apply_validate_failure(
-                            tier,
-                            failure_class_state,
-                            crate::data_engineer::progress_controller::FailureSignature {
-                                class: failure_class_state,
-                                node_id: Some(failure_signature.node_id.clone()),
-                                canonical_path: Some(failure_signature.canonical_path.clone()),
-                                error_code: Some(failure_signature.error_code.clone()),
+                        crate::data_engineer::state_manager::apply_execution_event(
+                            &thread_store,
+                            thread_id,
+                            crate::data_engineer::progress_controller::DataEngineerEvent::ValidateFailed {
+                                tier,
+                                failure_class: failure_class_state,
+                                failure_signature: crate::data_engineer::progress_controller::FailureSignature {
+                                    class: failure_class_state,
+                                    node_id: Some(failure_signature.node_id.clone()),
+                                    canonical_path: Some(failure_signature.canonical_path.clone()),
+                                    error_code: Some(failure_signature.error_code.clone()),
+                                },
+                                backlog,
+                                brief: Some(brief.clone()),
+                                compile_ok: Some(compile_ok),
+                                run_ok: Some(run_ok),
                             },
-                            backlog,
-                            Some(brief.clone()),
-                        );
-                        if let Some(last) = es.last_validate.as_mut() {
-                            last.compile_ok = Some(compile_ok);
-                            last.run_ok = Some(run_ok);
-                        }
-                        es.save(&thread_store, thread_id).await.map_err(|e| {
+                        )
+                        .await
+                        .map_err(|e| {
                             format!("failed to persist execution state after validate failure: {e}")
                         })?;
                     }
@@ -7955,6 +8014,7 @@ Apply these fixes in the output.",
 
                     match meta.decision {
                         ReviewDecision::Proceed => {
+                            let _ = Self::clear_pending_loopback_intent(&thread_store, thread_id).await;
                             // Move forward in the deterministic pipeline.
                             let next = match phase {
                                 Phase::CleanseReview => Phase::ModelPlan,
@@ -7981,6 +8041,36 @@ Apply these fixes in the output.",
                                 ReviewTier::Gold => Phase::ModelPlan,
                                 ReviewTier::Unknown => Phase::ModelPlan,
                             };
+                            let plan_actx = Self::plan_agent_ctx(thread_id, sctx);
+                            let (entry_plan_key, entry_plan_digest) = match back {
+                                Phase::CleansePlan => {
+                                    if let Some(p) =
+                                        crate::data_engineer::plan::load_cleanse_plan_any(&plan_actx).await
+                                    {
+                                        (Some(p.plan_key.clone()), stable_json_digest(&p))
+                                    } else {
+                                        (None, None)
+                                    }
+                                }
+                                Phase::ModelPlan => {
+                                    if let Some(p) =
+                                        crate::data_engineer::plan::load_model_plan_any(&plan_actx).await
+                                    {
+                                        (Some(p.plan_key.clone()), stable_json_digest(&p))
+                                    } else {
+                                        (None, None)
+                                    }
+                                }
+                                _ => (None, None),
+                            };
+                            let _ = Self::set_pending_patch_plan_intent(
+                                &thread_store,
+                                thread_id,
+                                back,
+                                entry_plan_key,
+                                entry_plan_digest,
+                            )
+                            .await;
                             control_flow::append_phase_with_intent(
                                 &thread_store,
                                 thread_id,
@@ -8001,6 +8091,9 @@ Apply these fixes in the output.",
                                 ReviewTier::Gold => Phase::ModelAuthor,
                                 ReviewTier::Unknown => Phase::ModelAuthor,
                             };
+                            let _ =
+                                Self::set_pending_patch_impl_intent(&thread_store, thread_id, back)
+                                    .await;
                             control_flow::append_phase_with_intent(
                                 &thread_store,
                                 thread_id,
@@ -8018,32 +8111,16 @@ Apply these fixes in the output.",
                 }
 
                 Phase::PublishAwaitApproval => {
-                    let _ = Self::capture_publish_approval_from_question(
-                        &thread_store,
-                        thread_id,
-                        question,
-                    )
-                    .await?;
                     let mut es = crate::data_engineer::progress_controller::ExecutionState::load_strict(
                         &thread_store,
                         thread_id,
                     )
                     .await?
                     .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
-                    if es
-                        .publish_approval
-                        .as_ref()
-                        .map(|s| {
-                            s.decision
-                                == crate::data_engineer::progress_controller::PublishApprovalDecision::Rejected
-                        })
-                        .unwrap_or(false)
-                    {
-                        return Err(
-                            "publish was rejected; provide updated guidance and rerun the agent"
-                                .to_string(),
-                        );
-                    }
+                    // Agent mode is fully autonomous: publish approval is internal-only state.
+                    es.set_publish_approval(
+                        crate::data_engineer::progress_controller::PublishApprovalDecision::Approved,
+                    );
                     if crate::data_engineer::progress_controller::gate_publish_progress(
                         &es,
                         Phase::PublishAwaitApproval,
@@ -8117,7 +8194,7 @@ Apply these fixes in the output.",
                             retry_limit,
                         );
                         es.set_publish_approval(
-                            crate::data_engineer::progress_controller::PublishApprovalDecision::AwaitingUserApproval,
+                            crate::data_engineer::progress_controller::PublishApprovalDecision::Approved,
                         );
                         es.save(&thread_store, thread_id).await.map_err(|e| {
                             format!("failed to persist publish await-approval state: {e}")
@@ -8127,12 +8204,21 @@ Apply these fixes in the output.",
                                 "publish_await_approval_not_converged_after_retries: retries={retry_count}"
                             ));
                         }
-                        let prompt = obs
-                            .get("prompt")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Approve to publish?")
-                            .to_string();
-                        return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
+                        control_flow::append_phase_with_intent(
+                            &thread_store,
+                            thread_id,
+                            Some("agent".to_string()),
+                            Some(Phase::PublishAwaitApproval),
+                            Phase::Publish,
+                            control_flow::TransitionIntent::Forward,
+                            Some(PhaseReasonCode::UserApprovedPublish),
+                            Some(serde_json::json!({
+                                "auto_approved_in_agent_mode": true,
+                                "publish_observation": obs,
+                            })),
+                        )
+                        .await?;
+                        continue;
                     }
                     // Publish failed: send back to model authoring to fix.
                     let retry_limit = crate::data_engineer::controller_kernel::publish_retry_limit();
@@ -8167,42 +8253,25 @@ Apply these fixes in the output.",
                 }
 
                 Phase::Publish => {
-                    let _ = Self::capture_publish_approval_from_question(
-                        &thread_store,
-                        thread_id,
-                        question,
-                    )
-                    .await?;
                     let mut es = crate::data_engineer::progress_controller::ExecutionState::load_strict(
                         &thread_store,
                         thread_id,
                     )
                     .await?
                     .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
-                    if es
-                        .publish_approval
-                        .as_ref()
-                        .map(|s| {
-                            s.decision
-                                == crate::data_engineer::progress_controller::PublishApprovalDecision::Rejected
-                        })
-                        .unwrap_or(false)
-                    {
-                        return Err(
-                            "publish was rejected; provide updated guidance and rerun the agent"
-                                .to_string(),
-                        );
-                    }
+                    es.set_publish_approval(
+                        crate::data_engineer::progress_controller::PublishApprovalDecision::Approved,
+                    );
                     if let Err(_reason) =
                         crate::data_engineer::progress_controller::gate_publish_progress(
                             &es,
                             Phase::Publish,
                         )
                     {
-                        return Ok(vec![FlowFrame::AwaitApproval {
-                            prompt: "Publish requires explicit approval. Reply \"approve\" to continue."
-                                .to_string(),
-                        }]);
+                        es.save(&thread_store, thread_id).await.map_err(|e| {
+                            format!("failed to persist auto-approved publish state: {e}")
+                        })?;
+                        continue;
                     }
                     let actx = Self::agent_tool_ctx(thread_id, sctx);
                     let tool = tools::publish_dbt_to_provider::PublishDbtToProviderTool {
@@ -9698,39 +9767,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_user_decision_accepts_loose_synonyms() {
-        use super::DataEngineerSuite;
-        use super::UserDecision;
-
-        for s in [
-            "approve", "Approved", "approve!", "yes", "Y", "ok", "OK", "okay", "continue",
-        ] {
-            assert_eq!(
-                DataEngineerSuite::parse_user_decision(s),
-                Some(UserDecision::Approve),
-                "expected approve for input={}",
-                s
-            );
-        }
-        for s in ["reject", "Rejected", "reject.", "no", "N"] {
-            assert_eq!(
-                DataEngineerSuite::parse_user_decision(s),
-                Some(UserDecision::Reject),
-                "expected reject for input={}",
-                s
-            );
-        }
-        for s in ["", "   ", "maybe", "later", "continue?maybe"] {
-            assert_eq!(
-                DataEngineerSuite::parse_user_decision(s),
-                None,
-                "expected none for input={}",
-                s
-            );
-        }
-    }
-
-    #[test]
     fn review_question_includes_prior_review_and_mutation_diff_when_available() {
         use crate::data_engineer::control_flow::Phase;
         use crate::data_engineer::progress_controller::{ExecutionState, LastMutationSummary};
@@ -9797,6 +9833,63 @@ mod tests {
         );
         assert!(q.contains("validate_pass_to_review"));
         assert!(q.contains("dbt_validate_step_idx"));
+    }
+
+    #[test]
+    fn patch_plan_intent_blocks_fast_forward_when_plan_is_unchanged() {
+        use crate::data_engineer::control_flow::Phase;
+        use crate::data_engineer::progress_controller::{
+            ExecutionState, PendingLoopbackIntent,
+        };
+
+        let mut st = ExecutionState::new();
+        st.pending_loopback_intent = Some(PendingLoopbackIntent::PatchPlan {
+            phase: Phase::CleansePlan,
+            entry_plan_key: Some("k1".to_string()),
+            entry_plan_digest: Some("d1".to_string()),
+        });
+        assert!(DataEngineerSuite::patch_plan_intent_blocks_fast_forward(
+            &st,
+            Phase::CleansePlan,
+            "k1",
+            Some("d1"),
+        ));
+        assert!(!DataEngineerSuite::patch_plan_intent_blocks_fast_forward(
+            &st,
+            Phase::CleansePlan,
+            "k2",
+            Some("d1"),
+        ));
+        assert!(!DataEngineerSuite::patch_plan_intent_blocks_fast_forward(
+            &st,
+            Phase::CleansePlan,
+            "k1",
+            Some("d2"),
+        ));
+    }
+
+    #[test]
+    fn patch_impl_intent_requires_mutation_epoch_advance() {
+        use crate::data_engineer::control_flow::Phase;
+        use crate::data_engineer::progress_controller::{
+            ExecutionState, PendingLoopbackIntent,
+        };
+
+        let mut st = ExecutionState::new();
+        st.mutation_epoch = 4;
+        st.pending_loopback_intent = Some(PendingLoopbackIntent::PatchImpl {
+            phase: Phase::ModelAuthor,
+            entry_mutation_epoch: 4,
+        });
+        assert!(DataEngineerSuite::patch_impl_intent_unsatisfied(
+            &st,
+            Phase::ModelAuthor
+        ));
+        st.mutation_epoch = 5;
+        assert!(!DataEngineerSuite::patch_impl_intent_unsatisfied(
+            &st,
+            Phase::ModelAuthor
+        ));
     }
 
     #[tokio::test]

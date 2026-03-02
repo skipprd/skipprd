@@ -45,16 +45,7 @@ impl Default for TaskStatus {
     }
 }
 
-fn mark_task_in_progress(status: &mut TaskStatus) {
-    // When we observe a tool call that targets a task, that indicates active work/rework.
-    *status = TaskStatus::InProgress;
-}
-
-fn mark_task_needs_update(status: &mut TaskStatus) {
-    // Any note/error attached to a task should surface as "needs_update" for UI remediation.
-    *status = TaskStatus::NeedsUpdate;
-}
-
+#[cfg(test)]
 fn file_stem(s: &str) -> Option<String> {
     std::path::Path::new(s)
         .file_stem()
@@ -62,6 +53,7 @@ fn file_stem(s: &str) -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+#[cfg(test)]
 fn extract_file_paths(op: &str, args: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
@@ -138,19 +130,6 @@ pub struct PlanMutation {
     /// Additional structured detail (best-effort; keep small).
     #[serde(default)]
     pub detail: Value,
-}
-
-fn push_plan_mutation(muts: &mut Vec<PlanMutation>, reason_code: &str, detail: Value) {
-    muts.push(PlanMutation {
-        ts: chrono::Utc::now().to_rfc3339(),
-        reason_code: reason_code.to_string(),
-        detail,
-    });
-    // Keep bounded.
-    if muts.len() > 50 {
-        let keep = muts.split_off(muts.len().saturating_sub(50));
-        *muts = keep;
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2232,6 +2211,7 @@ fn recompute_model_task_status(t: &mut ModelTask) {
     t.status = task_status_from_checklist(&t.checklist);
 }
 
+#[cfg(test)]
 fn evidence_from_tool_end(
     step_idx: usize,
     kind: &str,

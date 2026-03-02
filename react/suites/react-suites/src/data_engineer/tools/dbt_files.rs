@@ -937,7 +937,8 @@ fn canonicalize_silver_folder_alias(rel: &str) -> (String, Option<String>) {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RemoveFileArgs {
-    op: String,
+    #[serde(rename = "op")]
+    _op: String,
     path: String,
     #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
     expected_sha256: Option<String>,
@@ -946,7 +947,8 @@ struct RemoveFileArgs {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MoveFileArgs {
-    op: String,
+    #[serde(rename = "op")]
+    _op: String,
     from: String,
     to: String,
     #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
