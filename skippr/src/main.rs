@@ -455,18 +455,15 @@ async fn main() {
                 cfg.base_url
             );
             let llm = llm::create_llm(&cfg);
-            // NOTE: ReAct suite features moved to the standalone `react` crate/binary.
+            // NOTE: Suite-related features were moved to a separate runtime service.
             if options.ask_list
                 || options.ask_open.is_some()
                 || options.cleanse
                 || options.model
                 || options.ask.is_some()
             {
-                eprintln!("This command moved to the standalone `react` crate.");
-                eprintln!(
-                    "Run the ReAct server via `cargo run -p react -- serve --port <PORT> --log`."
-                );
-                eprintln!("(Ask/model/threads utilities will be exposed via the react CLI/server going forward.)");
+                eprintln!("This command is no longer available in the skippr CLI.");
+                eprintln!("Use the dedicated runtime service for ask/model/threads workflows.");
                 return;
             }
             if !options.embed.is_empty() {
@@ -485,9 +482,9 @@ async fn main() {
             }
         }
         Mode::Serve(opts) => {
-            eprintln!("The ReAct WebSocket server moved to the standalone `react` crate.");
+            eprintln!("The WebSocket server is no longer hosted by the skippr binary.");
             eprintln!(
-                "Run: `cargo run -p react -- serve --port {} --log`",
+                "Use the dedicated runtime service (configured port: {}).",
                 opts.port
             );
             return;
@@ -657,7 +654,7 @@ async fn discover(log: bool) {
     // (legacy catalog module removed; this is now provider-driven)
     // Stats tailer disabled
 
-    // NOTE: ReAct catalog build moved to the `react` crate.
+    // NOTE: Catalog build is handled by the dedicated runtime service.
 
     // Final metrics snapshot (same as periodic per-minute print)
     // if log {
@@ -867,7 +864,7 @@ async fn discover(log: bool) {
         }
     }
 
-    // NOTE: ReAct embeddings sync moved to the `react` crate.
+    // NOTE: Embeddings sync is handled by the dedicated runtime service.
 
     {
         let mut counter_lock = METRICS.write();
@@ -1229,7 +1226,7 @@ async fn sync() {
         );
     }
     info!("Pipeline sync complete");
-    // NOTE: ReAct catalog/semantic/embeddings work moved to the standalone `react` crate.
+    // NOTE: Catalog/semantic/embeddings work is handled by the dedicated runtime service.
     if progress.enabled() {
         progress.finish();
     }

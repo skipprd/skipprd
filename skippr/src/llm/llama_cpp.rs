@@ -318,13 +318,9 @@ mod inner {
         let mut json_depth: i32 = 0;
         let mut json_buf = String::new();
         let mut n_cur = batch.n_tokens();
-        // cap new tokens; use smaller cap for structured JSON outputs
-        let is_strict_json = matches!(
-            options.expected_format,
-            react_core::llm::LlmExpectedFormat::JsonObject
-                | react_core::llm::LlmExpectedFormat::JsonSchema(_)
-                | react_core::llm::LlmExpectedFormat::JsonSchemaSpec { .. }
-        );
+        // Skippr chat() no longer carries expected-format options; keep generation
+        // policy local to this crate and free of external runtime dependencies.
+        let is_strict_json = false;
         let max_new_tokens: i32 = if is_strict_json {
             // Allow larger responses for structured JSON outputs. Scale with context.
             ((tuned_ctx_len as i32) / 2).clamp(256, 2048)

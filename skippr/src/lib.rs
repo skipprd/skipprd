@@ -1,12 +1,10 @@
 //! Skippr library crate.
 //!
 //! This package builds both:
-//! - a library (`skippr`) for reusable components (ReAct runtime, SQL runtime, adapters)
+//! - a library (`skippr`) for reusable components (SQL runtime, adapters)
 //! - a binary (`src/main.rs`) for ingestion/CLI
-//!
-//! The refactor in progress moves agent runtime under `react/` and SQL/DataFusion under `sqlrt/`.
 
-// NOTE: This library is being split into clean boundaries (react + sqlrt) over time.
+// NOTE: This library is being split into cleaner module boundaries over time.
 // For now, we expose the existing modules so the library can compile and the binary can
 // progressively migrate off `mod ...` declarations.
 
