@@ -1013,7 +1013,76 @@ impl Buffers {
             }
         }
 
+        let (scanned, removed, errors) = Self::cleanup_orphan_seg_commits(200_000);
+        info!(
+            "Migration: orphan commit cleanup scanned={} removed={} errors={}",
+            scanned, removed, errors
+        );
         let _ = fs::write(&marker, b"ok");
+    }
+
+    /// Best-effort cleanup for `.seg.commit` files that no longer have a sibling `.seg`.
+    /// Returns (scanned_commit_markers, removed_orphans, errors).
+    pub fn cleanup_orphan_seg_commits(max_scan: usize) -> (usize, usize, usize) {
+        if max_scan == 0 {
+            return (0, 0, 0);
+        }
+        let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
+        if !seg_dir.exists() {
+            return (0, 0, 0);
+        }
+
+        let mut scanned = 0usize;
+        let mut removed = 0usize;
+        let mut errors = 0usize;
+
+        let entries = match fs::read_dir(&seg_dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                warn!(
+                    "Orphan commit cleanup: failed to read dir {}: {}",
+                    seg_dir.to_string_lossy(),
+                    e
+                );
+                return (0, 0, 1);
+            }
+        };
+
+        for entry in entries.flatten() {
+            if scanned >= max_scan {
+                break;
+            }
+            let path = entry.path();
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if !name.ends_with(".seg.commit") {
+                continue;
+            }
+            scanned = scanned.saturating_add(1);
+
+            // `foo.seg.commit` -> `foo.seg`
+            let seg_path = path.with_extension("");
+            if seg_path.exists() {
+                continue;
+            }
+
+            match fs::remove_file(&path) {
+                Ok(_) => {
+                    removed = removed.saturating_add(1);
+                }
+                Err(e) => {
+                    if e.kind() != io::ErrorKind::NotFound {
+                        errors = errors.saturating_add(1);
+                        warn!(
+                            "Orphan commit cleanup: failed removing {}: {}",
+                            path.to_string_lossy(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        (scanned, removed, errors)
     }
 
     fn next_compaction_candidates(
@@ -1555,6 +1624,19 @@ impl Buffers {
                             e
                         );
                     } else {
+                        let commit_path = seg_path.with_extension("seg.commit");
+                        match fs::remove_file(&commit_path) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                if e.kind() != io::ErrorKind::NotFound {
+                                    warn!(
+                                        "Failed to remove commit marker {}: {}",
+                                        commit_path.to_string_lossy(),
+                                        e
+                                    );
+                                }
+                            }
+                        }
                         // println!("Removed fully-compacted segment {}", seg_path.to_string_lossy());
                         // remove all tombstones for this segment
                         for part in m.index.iter() {
@@ -1586,6 +1668,8 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
     let started = std::time::Instant::now();
     let mut count = 0u64;
     let mut bytes = 0u64;
+    let mut dir_entries_scanned = 0u64;
+    let mut commit_markers_seen = 0u64;
 
     info!("Indexing commited WAL Segments");
 
@@ -1596,6 +1680,11 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
         for entry in fs::read_dir(&seg_dir)? {
             let entry = entry?;
             let path = entry.path();
+            dir_entries_scanned = dir_entries_scanned.saturating_add(1);
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name.ends_with(".seg.commit") {
+                commit_markers_seen = commit_markers_seen.saturating_add(1);
+            }
             if path.extension().and_then(|s| s.to_str()) == Some("seg") {
                 let commit = path.with_extension("seg.commit");
                 if commit.exists() {
@@ -1606,6 +1695,10 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
     }
 
     let seg_files_count = seg_files.len();
+    info!(
+        "WAL scan examined {} entries (commit_markers_seen={}, committed_seg_candidates={})",
+        dir_entries_scanned, commit_markers_seen, seg_files_count
+    );
     let mut namespaces: HashSet<String> = HashSet::new();
     let mut namespace_partition_files: HashMap<(String, String, Option<i64>, String), u64> =
         HashMap::new();

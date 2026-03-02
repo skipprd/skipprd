@@ -1104,26 +1104,58 @@ async fn sync() {
         if progress.enabled() {
             progress.start("Finalising");
         }
+        let finalising_started = std::time::Instant::now();
+        info!("Finalising: stopping background compactor");
         // Stop background compactor pool and wait for in-flight to drain
         Buffers::request_compactor_stop();
+        info!("Finalising: waiting for in-flight compactions to drain");
         // Wait for in-flight to reach zero (bounded wait)
-        for _ in 0..40 {
+        for i in 0..40 {
             let inflight = skippr::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
                 .load(std::sync::atomic::Ordering::Relaxed);
             if inflight == 0 {
+                info!("Finalising: in-flight compactions drained after {} checks", i + 1);
                 break;
+            }
+            if i % 10 == 9 {
+                info!(
+                    "Finalising: waiting for in-flight compactions (inflight={})",
+                    inflight
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
+        let remaining_inflight = skippr::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if remaining_inflight > 0 {
+            warn!(
+                "Finalising: compactor drain timeout reached with {} in-flight tasks",
+                remaining_inflight
+            );
+        }
+        info!("Finalising: running forced compaction pass 1");
         Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
         // Safety loop: if any .seg remain, run another pass (handles late live persist)
         if Buffers::segs_remaining() > 0 {
+            info!("Finalising: running forced compaction pass 2");
             Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
         }
+        let (scanned_commits, removed_orphans, orphan_errors) =
+            Buffers::cleanup_orphan_seg_commits(200_000);
+        info!(
+            "Finalising: orphan commit cleanup scanned={} removed={} errors={}",
+            scanned_commits, removed_orphans, orphan_errors
+        );
+        info!(
+            "Finalising: compaction+cleanup finished in {:?}",
+            finalising_started.elapsed()
+        );
     }
     // Single-thread model: no background compaction tasks remain here
     // Wait for background Glue partition tasks to settle to avoid undercount at end
+    info!("Finalising: waiting for Athena partition tasks to drain");
     skippr::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
+    info!("Finalising: Athena partition tasks drained");
     if progress.enabled() {
         progress.complete("Finalising");
     }

@@ -660,19 +660,27 @@ impl Ingest {
                         // and the task was already counted in queue_length when it was added to the queue
 
                         thread_pool_clone.execute(move || {
-                            // Create a new runtime for this thread
-                            let rt = tokio::runtime::Runtime::new().unwrap();
-                            let handle = rt.handle().clone();
-
-                            // Process the batch
-                            Ingest::process_batch(
-                                &datas_clone,
-                                &offset_db_clone,
-                                &mut schema_hashes,
-                                handle,
-                                shared_output_clone,
-                            );
-
+                            // Ensure panics and runtime init failures do not wedge queue accounting.
+                            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                match tokio::runtime::Runtime::new() {
+                                    Ok(rt) => {
+                                        let handle = rt.handle().clone();
+                                        Ingest::process_batch(
+                                            &datas_clone,
+                                            &offset_db_clone,
+                                            &mut schema_hashes,
+                                            handle,
+                                            shared_output_clone,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to create runtime for queued ingest task: {}", e);
+                                    }
+                                }
+                            }));
+                            if result.is_err() {
+                                error!("Queued ingest task panicked; forcing completion signal");
+                            }
                             // Don't panic if sending fails (channel might be closed during shutdown)
                             let _ = tx.send(0);
                         });
