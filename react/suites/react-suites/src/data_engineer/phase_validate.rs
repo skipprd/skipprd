@@ -81,6 +81,7 @@ impl DataEngineerSuite {
         thread_store: &ThreadStore,
         thread_id: &str,
         phase: Phase,
+        thread_state_step_count: usize,
         completion_snapshot: Option<crate::data_engineer::plan::PlanCompletionSnapshot>,
         active_plan_key: Option<String>,
         dbt_validate_observation: serde_json::Value,
@@ -142,11 +143,7 @@ impl DataEngineerSuite {
         } else {
             Phase::ModelReview
         };
-        let trigger_step_idx = thread_store
-            .get(thread_id)
-            .await
-            .map(|l| l.steps.len().saturating_sub(1))
-            .unwrap_or(0);
+        let trigger_step_idx = thread_state_step_count.saturating_sub(1);
         crate::data_engineer::phase_contract::commit_phase_decision(
             thread_store,
             thread_id,
@@ -175,7 +172,7 @@ impl DataEngineerSuite {
         _execution_state: &crate::data_engineer::progress_controller::ExecutionState,
         _guard: &crate::data_engineer::control_flow::DerivedGuardState,
         _allow_ask_approval: bool,
-        _thread_state_step_count: usize,
+        thread_state_step_count: usize,
         _last_validate_brief: &Option<String>,
         _last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
     ) -> Result<PhaseExecutorOutcome, String> {
@@ -536,6 +533,7 @@ if matches!(
         &thread_store,
         thread_id,
         phase,
+        thread_state_step_count,
         completion_snapshot,
         active_plan_key,
         obs.observation.clone(),
@@ -644,11 +642,7 @@ let errs: Vec<String> = obs
 }
 
 // Validation failed -> go back to corresponding author phase.
-let trigger_step_idx = thread_store
-    .get(thread_id)
-    .await
-    .map(|l| l.steps.len().saturating_sub(1))
-    .unwrap_or(0);
+let trigger_step_idx = thread_state_step_count.saturating_sub(1);
 let to_phase = if phase == Phase::CleanseValidate {
     Phase::CleanseAuthor
 } else {

@@ -55,7 +55,7 @@ Hard rules:
 
 pub fn tool_card_common_prefix() -> &'static str {
     r#"Tools:
-- artifacts(args:{op:"list", dataset_id?:string, type?:"model"|"metric", limit?:int} | {op:"get", dataset_id:string, type:"model"|"metric", name:string})
+- artifacts(args:{op:"list", type?:"model"|"metric", tier?:string, limit?:int} | {op:"get", path:string})
 - file(
     args:
       | {op:"list", prefix?:string, limit?:int}
@@ -76,10 +76,8 @@ pub fn tool_card_common_prefix() -> &'static str {
 - dbt_validate(args:{project_name?:string, profiles_dir?:string, target?:string, dataset_ids?:[string], build?:bool, run?:bool})
 - publish_dbt_to_provider(args:{target?:string, dataset_ids?:[string], confirm?:bool})
 - sql_register(args:{dataset_ids:[string]}) -> {"ok":true,"count":int}
-- catalog_note(args:{dataset_id?:string, dataset_ids?:[string], field?:string, text:string, tags?:[string], preview?:boolean})
-  # NOTE: catalog_note accepts EITHER:
-  # - dataset_id (preferred), OR
-  # - dataset_ids with exactly one item (len==1).
+- catalog_note(args:{dataset_id:string, field?:string, text:string, tags?:[string], preview?:boolean})
+  # NOTE: dataset_id is required; dataset_ids is not accepted.
 
 Usage guidance:
 - Prefer batch scaffolding: use batch tools when available; for file op=patch, patch one file per call.
@@ -128,5 +126,17 @@ mod tests {
         assert!(c.contains("checklist/work-group driven"));
         assert!(c.contains("downstream phases will compensate"));
         assert!(c.contains("Do NOT call ask_user/ask_approval during agent-mode authoring"));
+    }
+
+    #[test]
+    fn tool_card_catalog_note_contract_matches_runtime() {
+        let c = tool_card_common_prefix();
+        assert!(c.contains(
+            "artifacts(args:{op:\"list\", type?:\"model\"|\"metric\", tier?:string, limit?:int} | {op:\"get\", path:string})"
+        ));
+        assert!(c.contains(
+            "catalog_note(args:{dataset_id:string, field?:string, text:string, tags?:[string], preview?:boolean})"
+        ));
+        assert!(!c.contains("catalog_note(args:{dataset_id?:string, dataset_ids?:[string]"));
     }
 }

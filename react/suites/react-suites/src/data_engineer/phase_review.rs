@@ -41,6 +41,7 @@ impl DataEngineerSuite {
         question: &str,
         sctx: &SuiteCtx,
         execution_state: &crate::data_engineer::progress_controller::ExecutionState,
+        thread_state_step_count: usize,
         out_frames: &mut Vec<FlowFrame>,
     ) -> Result<PhaseExecutorOutcome, String> {
         let review_q = Self::build_review_question_with_context(question, phase, execution_state);
@@ -68,28 +69,14 @@ impl DataEngineerSuite {
             other => return Ok(PhaseExecutorOutcome::Return(vec![other])),
         };
 
-        let (trigger_step_idx, trigger_step) = thread_store
-            .get(thread_id)
-            .await
-            .ok()
-            .and_then(|l| {
-                let idx = l.steps.len().saturating_sub(1);
-                l.steps.last().cloned().map(|s| (idx, s))
-            })
-            .unwrap_or((
-                0,
-                react_core::session::ThreadStep::Phase {
-                    phase: "unknown".to_string(),
-                    from_phase: None,
-                    reason_code: Some(PhaseReasonCode::PhaseSet),
-                    reason_detail: Some(serde_json::json!({
-                        "fallback": "missing_thread_step"
-                    })),
-                    observation: react_core::session::Observation::ok(),
-                    ts: chrono::Utc::now().to_rfc3339(),
-                    agent: "agent".to_string(),
-                },
-            ));
+        let trigger_step_idx = thread_state_step_count.saturating_sub(1);
+        let trigger_step = serde_json::json!({
+            "phase": phase.as_str(),
+            "phase_reason_code": execution_state
+                .phase_reason_code
+                .map(|c| c.as_str().to_string()),
+            "phase_reason_detail": execution_state.phase_reason_detail.clone(),
+        });
 
         let mut meta: ReviewDecisionMeta = decision_meta_v
             .and_then(|v| serde_json::from_value(v).ok())
@@ -99,15 +86,10 @@ impl DataEngineerSuite {
                 dataset_ids: vec![],
                 review_ref: None,
             });
-        let review_ref_from_trigger = match &trigger_step {
-            react_core::session::ThreadStep::Phase { reason_detail, .. } => {
-                reason_detail
-                    .as_ref()
-                    .and_then(|v| v.get("review_ref"))
-                    .cloned()
-            }
-            _ => None,
-        };
+        let review_ref_from_trigger = trigger_step
+            .get("phase_reason_detail")
+            .and_then(|v| v.get("review_ref"))
+            .cloned();
         if meta.review_ref.is_none() {
             meta.review_ref = review_ref_from_trigger;
         }
@@ -151,7 +133,7 @@ impl DataEngineerSuite {
             forced_by_subjective_retry,
             review_retry_count,
             trigger_step_idx,
-            serde_json::to_value(&trigger_step).unwrap_or(serde_json::Value::Null),
+            trigger_step,
         );
 
         match meta.decision {

@@ -39,16 +39,14 @@ pub trait DbtProvider: Send + Sync {
     async fn write_model_sql(
         &self,
         scope: &RequestScope,
-        dataset_id: &str,
-        name: &str,
+        rel_path: &str,
         sql: &str,
     ) -> Result<String, String>;
 
     async fn write_metricflow_yaml(
         &self,
         scope: &RequestScope,
-        dataset_id: &str,
-        name: &str,
+        rel_path: &str,
         yaml_text: &str,
     ) -> Result<String, String>;
 

@@ -538,26 +538,38 @@ pub async fn apply_patch(
                             match Patch::from_str(patch_src.as_ref()) {
                                 Ok(p) => p,
                                 Err(e2) => {
-                                    if let Some(repl) =
-                                        try_apply_unified_hunks_flexible(patch_src.as_ref(), &old)
+                                    if e2
+                                        .to_string()
+                                        .contains("unable to parse hunk header")
                                     {
-                                        apply_result_code =
-                                            PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
-                                        parse_error_fallback_content = Some(repl);
-                                        Patch::from_str("--- a/x\n+++ b/x\n@@ -1,0 +1,0 @@\n")
-                                            .map_err(|_| format!("invalid patch: {}", e2))?
+                                        if let Some(repl) = try_apply_unified_hunks_flexible(
+                                            patch_src.as_ref(),
+                                            &old,
+                                        ) {
+                                            apply_result_code =
+                                                PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
+                                            parse_error_fallback_content = Some(repl);
+                                            Patch::from_str("--- a/x\n+++ b/x\n@@ -1,0 +1,0 @@\n")
+                                                .map_err(|_| format!("invalid patch: {}", e2))?
+                                        } else {
+                                            return Err(format!("invalid patch: {}", e2));
+                                        }
                                     } else {
                                         return Err(format!("invalid patch: {}", e2));
                                     }
                                 }
                             }
                         } else {
-                            if let Some(repl) = try_apply_unified_hunks_flexible(&unified, &old) {
-                                apply_result_code =
-                                    PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
-                                parse_error_fallback_content = Some(repl);
-                                Patch::from_str("--- a/x\n+++ b/x\n@@ -1,0 +1,0 @@\n")
-                                    .map_err(|_| format!("invalid patch: {}", emsg))?
+                            if emsg.contains("unable to parse hunk header") {
+                                if let Some(repl) = try_apply_unified_hunks_flexible(&unified, &old) {
+                                    apply_result_code =
+                                        PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
+                                    parse_error_fallback_content = Some(repl);
+                                    Patch::from_str("--- a/x\n+++ b/x\n@@ -1,0 +1,0 @@\n")
+                                        .map_err(|_| format!("invalid patch: {}", emsg))?
+                                } else {
+                                    return Err(format!("invalid patch: {}", emsg));
+                                }
                             } else {
                                 return Err(format!("invalid patch: {}", emsg));
                             }
@@ -580,26 +592,7 @@ pub async fn apply_patch(
                             }
                             c
                         }
-                        Err(e) => {
-                            // Fallbacks (in order):
-                            // 1) full-file rewrite reconstruction from hunk body
-                            // 2) flexible Cursor/Aider-style hunk search/replace
-                            if let Some(repl) =
-                                try_reconstruct_full_file_replacement(patch_src.as_ref(), &old)
-                            {
-                                apply_result_code =
-                                PatchApplyResultCode::AppliedUnifiedByFullReplacementReconstruction;
-                                repl
-                            } else if let Some(repl) =
-                                try_apply_unified_hunks_flexible(patch_src.as_ref(), &old)
-                            {
-                                apply_result_code =
-                                    PatchApplyResultCode::AppliedUnifiedByFlexibleFallback;
-                                repl
-                            } else {
-                                return Err(format!("patch apply failed: {}", e));
-                            }
-                        }
+                        Err(e) => return Err(format!("patch apply failed: {}", e)),
                     }
                 }
             }

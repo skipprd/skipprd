@@ -818,14 +818,15 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
                         .set_title_if_absent(&thread_id, &truncate_title(&question, 64))
                         .await;
                 }
-                // run agent
-                let frames = run_agent_and_frames(
+                // run suite non-streaming fallback
+                let frames = run_suite_and_frames(
                     &thread_id,
                     &question,
                     &suite_id,
                     &agent,
                     &state.reg,
                     &state.suite_ctx,
+                    SuiteRunKind::New,
                 )
                 .await?;
                 for f in frames {
@@ -1102,14 +1103,15 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
                     out.push(s);
                 }
             }
-            // run agent
-            let frames = run_agent_and_frames(
+            // run suite non-streaming fallback
+            let frames = run_suite_and_frames(
                 &thread_id,
                 &question,
                 &suite_id,
                 &agent,
                 &state.reg,
                 &state.suite_ctx,
+                SuiteRunKind::Open,
             )
             .await?;
             for f in frames {
@@ -1297,13 +1299,14 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
                 thread_id,
                 agent
             );
-            let frames = run_user_and_frames(
+            let frames = run_suite_and_frames(
                 &thread_id,
                 &text,
                 &suite_id,
                 &agent,
                 &state.reg,
                 &state.suite_ctx,
+                SuiteRunKind::User,
             )
             .await?;
             for f in frames {
@@ -2525,16 +2528,10 @@ async fn process_approve(
     state: &mut ConnState,
     write: &mut (impl SinkExt<Message> + Unpin),
 ) -> Result<(), String> {
-    let cid = v
-        .get("cid")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| "cid required".to_string())?
-        .to_string();
-    let thread_id = v
-        .get("thread_id")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| "thread_id required".to_string())?
-        .to_string();
+    let req: api::ApproveRequest =
+        serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+    let cid = req.cid;
+    let thread_id = req.thread_id;
     if thread_id.is_empty() {
         return Err("thread_id required".into());
     }
@@ -2606,16 +2603,10 @@ async fn process_reject(
     state: &mut ConnState,
     write: &mut (impl SinkExt<Message> + Unpin),
 ) -> Result<(), String> {
-    let cid = v
-        .get("cid")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| "cid required".to_string())?
-        .to_string();
-    let thread_id = v
-        .get("thread_id")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| "thread_id required".to_string())?
-        .to_string();
+    let req: api::RejectRequest =
+        serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+    let cid = req.cid;
+    let thread_id = req.thread_id;
     if thread_id.is_empty() {
         return Err("thread_id required".into());
     }
@@ -3589,13 +3580,14 @@ async fn run_agent_with_processing_suite(
     }
 }
 
-async fn run_agent_and_frames(
+async fn run_suite_and_frames(
     thread_id: &str,
     question: &str,
     suite_id: &str,
     agent: &str,
     reg: &SuiteRegistry,
     sctx: &SuiteCtx,
+    kind: SuiteRunKind,
 ) -> Result<Vec<AgentFrame>, String> {
     // Delegate to suites
     let convert = |ff: react_core::suite::FlowFrame| -> AgentFrame {
@@ -3619,47 +3611,11 @@ async fn run_agent_and_frames(
     let suite = reg
         .get(suite_id)
         .ok_or_else(|| format!("invalid suite_id '{}'", suite_id))?;
-    let frames = suite
-        .handle_open(thread_id, question, agent, sctx)
-        .await?
-        .into_iter()
-        .map(convert)
-        .collect();
-    Ok(frames)
-}
-
-async fn run_user_and_frames(
-    thread_id: &str,
-    text: &str,
-    suite_id: &str,
-    agent: &str,
-    reg: &SuiteRegistry,
-    sctx: &SuiteCtx,
-) -> Result<Vec<AgentFrame>, String> {
-    let convert = |ff: react_core::suite::FlowFrame| -> AgentFrame {
-        match ff {
-            react_core::suite::FlowFrame::Final {
-                kind,
-                payload,
-                display,
-            } => AgentFrame::Final {
-                kind,
-                payload,
-                display,
-            },
-            react_core::suite::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
-            react_core::suite::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
-            react_core::suite::FlowFrame::AwaitApproval { prompt } => {
-                AgentFrame::AwaitApproval { prompt }
-            }
-        }
-    };
-    let suite = reg
-        .get(suite_id)
-        .ok_or_else(|| format!("invalid suite_id '{}'", suite_id))?;
-    let frames = suite
-        .handle_user(thread_id, text, agent, sctx)
-        .await?
+    let frames = match kind {
+        SuiteRunKind::New => suite.handle_new(thread_id, question, agent, sctx).await?,
+        SuiteRunKind::Open => suite.handle_open(thread_id, question, agent, sctx).await?,
+        SuiteRunKind::User => suite.handle_user(thread_id, question, agent, sctx).await?,
+    }
         .into_iter()
         .map(convert)
         .collect();

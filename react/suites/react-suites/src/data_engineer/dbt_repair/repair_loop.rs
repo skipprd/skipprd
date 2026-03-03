@@ -534,8 +534,7 @@ mod tests {
             async fn write_model_sql(
                 &self,
                 _scope: &RequestScope,
-                _dataset_id: &str,
-                _name: &str,
+                _rel_path: &str,
                 _sql: &str,
             ) -> Result<String, String> {
                 Ok("k".to_string())
@@ -543,8 +542,7 @@ mod tests {
             async fn write_metricflow_yaml(
                 &self,
                 _scope: &RequestScope,
-                _dataset_id: &str,
-                _name: &str,
+                _rel_path: &str,
                 _yaml_text: &str,
             ) -> Result<String, String> {
                 Ok("k".to_string())
@@ -642,8 +640,7 @@ mod tests {
             async fn write_model_sql(
                 &self,
                 _scope: &RequestScope,
-                _dataset_id: &str,
-                _name: &str,
+                _rel_path: &str,
                 _sql: &str,
             ) -> Result<String, String> {
                 Ok("k".to_string())
@@ -651,8 +648,7 @@ mod tests {
             async fn write_metricflow_yaml(
                 &self,
                 _scope: &RequestScope,
-                _dataset_id: &str,
-                _name: &str,
+                _rel_path: &str,
                 _yaml_text: &str,
             ) -> Result<String, String> {
                 Ok("k".to_string())
@@ -786,8 +782,7 @@ mod tests {
             async fn write_model_sql(
                 &self,
                 _scope: &RequestScope,
-                _dataset_id: &str,
-                _name: &str,
+                _rel_path: &str,
                 _sql: &str,
             ) -> Result<String, String> {
                 Ok("k".to_string())
@@ -795,8 +790,7 @@ mod tests {
             async fn write_metricflow_yaml(
                 &self,
                 _scope: &RequestScope,
-                _dataset_id: &str,
-                _name: &str,
+                _rel_path: &str,
                 _yaml_text: &str,
             ) -> Result<String, String> {
                 Ok("k".to_string())
@@ -933,8 +927,7 @@ mod tests {
             async fn write_model_sql(
                 &self,
                 _scope: &RequestScope,
-                _dataset_id: &str,
-                _name: &str,
+                _rel_path: &str,
                 _sql: &str,
             ) -> Result<String, String> {
                 Ok("k".to_string())
@@ -942,8 +935,7 @@ mod tests {
             async fn write_metricflow_yaml(
                 &self,
                 _scope: &RequestScope,
-                _dataset_id: &str,
-                _name: &str,
+                _rel_path: &str,
                 _yaml_text: &str,
             ) -> Result<String, String> {
                 Ok("k".to_string())
@@ -1051,8 +1043,7 @@ mod tests {
             async fn write_model_sql(
                 &self,
                 _scope: &RequestScope,
-                _dataset_id: &str,
-                _name: &str,
+                _rel_path: &str,
                 _sql: &str,
             ) -> Result<String, String> {
                 Ok("k".to_string())
@@ -1060,8 +1051,7 @@ mod tests {
             async fn write_metricflow_yaml(
                 &self,
                 _scope: &RequestScope,
-                _dataset_id: &str,
-                _name: &str,
+                _rel_path: &str,
                 _yaml_text: &str,
             ) -> Result<String, String> {
                 Ok("k".to_string())
@@ -1159,8 +1149,7 @@ mod tests {
             async fn write_model_sql(
                 &self,
                 _scope: &RequestScope,
-                _dataset_id: &str,
-                _name: &str,
+                _rel_path: &str,
                 _sql: &str,
             ) -> Result<String, String> {
                 Ok("k".to_string())
@@ -1168,8 +1157,7 @@ mod tests {
             async fn write_metricflow_yaml(
                 &self,
                 _scope: &RequestScope,
-                _dataset_id: &str,
-                _name: &str,
+                _rel_path: &str,
                 _yaml_text: &str,
             ) -> Result<String, String> {
                 Ok("k".to_string())

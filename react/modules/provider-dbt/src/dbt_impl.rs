@@ -45,21 +45,6 @@ pub struct DbtRunnerConfig {
     pub docker_mount_aws_dir: bool,
 }
 
-fn encode_key_component(s: &str) -> String {
-    // Same encoding strategy as Keyspace: keep a conservative safe set, percent-encode the rest.
-    let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
-        let c = *b as char;
-        let safe = c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'; // allow dots
-        if safe {
-            out.push(c);
-        } else {
-            out.push_str(&format!("%{:02X}", b));
-        }
-    }
-    out
-}
-
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let mut f = std::fs::File::create(path).map_err(|e| e.to_string())?;
@@ -1116,17 +1101,14 @@ impl DbtProvider for DbtProjectProvider {
     async fn write_model_sql(
         &self,
         scope: &RequestScope,
-        dataset_id: &str,
-        name: &str,
+        rel_path: &str,
         sql: &str,
     ) -> Result<String, String> {
-        let dir = encode_key_component(dataset_id);
-        let key = format!(
-            "{}models/{}/{}.sql",
-            self.keyspace.dbt_prefix(scope),
-            dir,
-            name
-        );
+        let rel = rel_path.trim_start_matches('/');
+        if !rel.starts_with("models/") || !rel.ends_with(".sql") || rel.contains("..") {
+            return Err("model rel_path must be a safe models/*.sql path".to_string());
+        }
+        let key = format!("{}{}", self.keyspace.dbt_prefix(scope), rel);
         self.storage
             .put_bytes(&key, sql.as_bytes(), "text/sql")
             .await?;
@@ -1136,17 +1118,14 @@ impl DbtProvider for DbtProjectProvider {
     async fn write_metricflow_yaml(
         &self,
         scope: &RequestScope,
-        dataset_id: &str,
-        name: &str,
+        rel_path: &str,
         yaml_text: &str,
     ) -> Result<String, String> {
-        let dir = encode_key_component(dataset_id);
-        let key = format!(
-            "{}metrics/{}/{}.yaml",
-            self.keyspace.dbt_prefix(scope),
-            dir,
-            name
-        );
+        let rel = rel_path.trim_start_matches('/');
+        if !rel.starts_with("metrics/") || !rel.ends_with(".yaml") || rel.contains("..") {
+            return Err("metric rel_path must be a safe metrics/*.yaml path".to_string());
+        }
+        let key = format!("{}{}", self.keyspace.dbt_prefix(scope), rel);
         self.storage
             .put_bytes(&key, yaml_text.as_bytes(), "text/yaml")
             .await?;

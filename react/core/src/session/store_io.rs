@@ -94,18 +94,15 @@ impl ThreadStore {
             },
         );
 
-        // Keep thread_state strongly consistent with the persisted step sequence. We do not fail
-        // append_step after the log write succeeds, but we must surface materialization failures.
+        // Hard cutover: step append must fail closed if thread_state materialization fails.
         if let Err(e) = self
             .materialize_thread_state_incremental(thread_id, step_count, &step)
             .await
         {
-            tracing::warn!(
+            return Err(format!(
                 "thread_state_materialize_failed thread_id={} step_count={} error={}",
-                thread_id,
-                step_count,
-                e
-            );
+                thread_id, step_count, e
+            ));
         }
         Ok(())
     }
@@ -363,7 +360,21 @@ impl ThreadStore {
 
     pub async fn delete(&self, thread_id: &str) -> Result<(), String> {
         let key = self.key(thread_id)?;
+        let cache_key = self.cache_key_for(&key);
+        let state_key = self.state_key(thread_id)?;
+        let thread_prefix = format!(
+            "{}/{}.",
+            self.keyspace.threads_prefix(&self.scope).trim_end_matches('/'),
+            thread_id
+        );
         self.storage.delete_object(&key).await?;
+        let _ = self.storage.delete_object(&state_key).await;
+        if let Ok(keys) = self.storage.list_prefix(&thread_prefix).await {
+            for k in keys {
+                let _ = self.storage.delete_object(&k).await;
+            }
+        }
+        cache().remove(&cache_key);
         Ok(())
     }
 

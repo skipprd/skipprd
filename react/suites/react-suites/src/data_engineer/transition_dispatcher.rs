@@ -39,8 +39,8 @@ pub async fn dispatch_phase_transition(
     }
 
     // Canonical transition side effects are centralized here.
-    let mut st = state_manager::load_execution_state(store, thread_id)
-        .await
+    let mut st = state_manager::load_execution_state_strict(store, thread_id)
+        .await?
         .unwrap_or_else(ExecutionState::new);
     let prev_state = st.clone();
     let mut phase_state = st.phase_state();
@@ -692,6 +692,10 @@ mod tests {
             validate_src.contains("commit_validate_pass_transition"),
             "phase_validate should commit validate-pass transitions through one helper"
         );
+        assert!(
+            !validate_src.contains(&format!("{}{}", "thread_store", ".get(thread_id)")),
+            "phase_validate must not derive runtime control metadata from thread log replay"
+        );
 
         let author_src = include_str!("phase_author.rs");
         assert!(
@@ -705,6 +709,12 @@ mod tests {
         assert!(
             author_src.contains("decide_author_validate_trigger"),
             "phase_author should use a single author->validate decision helper"
+        );
+
+        let review_src = include_str!("phase_review.rs");
+        assert!(
+            !review_src.contains(&format!("{}{}", "thread_store", ".get(thread_id)")),
+            "phase_review must not derive runtime control metadata from thread log replay"
         );
     }
 

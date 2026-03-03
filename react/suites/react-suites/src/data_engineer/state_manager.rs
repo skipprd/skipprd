@@ -24,11 +24,19 @@ pub async fn load_execution_state_strict(
     thread_store: &ThreadStore,
     thread_id: &str,
 ) -> Result<Option<ExecutionState>, String> {
-    let Some(parsed) = thread_store
+    let loaded = match thread_store
         .load_typed_control_state::<ExecutionState>(thread_id, DATA_ENGINEER_SUITE_ID)
         .await
-        .map_err(|e| format!("failed to load thread_state for execution_state: {e}"))?
-    else {
+    {
+        Ok(loaded) => loaded,
+        Err(e) if e.to_ascii_lowercase().contains("not found") => return Ok(None),
+        Err(e) => {
+            return Err(format!(
+                "failed to load thread_state for execution_state: {e}"
+            ))
+        }
+    };
+    let Some(parsed) = loaded else {
         return Ok(None);
     };
     if parsed.schema_version != EXECUTION_STATE_SCHEMA_VERSION {

@@ -44,27 +44,37 @@ async fn was_recently_removed_in_repair(ctx: &AgentCtx, rel_path: &str) -> bool 
     let want = files_store::normalize_rel_path(rel_path)
         .ok()
         .unwrap_or_else(|| rel_path.trim().to_string());
-    crate::data_engineer::state_manager::load_execution_state(store, thread_id)
-        .await
-        .and_then(|st| {
+    match crate::data_engineer::state_manager::load_execution_state_strict(store, thread_id).await
+    {
+        Ok(Some(st)) => {
             if !st.hard_mutation_repair_mode() {
-                return None;
+                return false;
             }
-            st.last_mutation_summary.and_then(|m| {
-                let op = m.op.unwrap_or_default();
-                if op != "rm" {
-                    return None;
-                }
-                let matched = m.affected_paths.into_iter().any(|p| {
-                    files_store::normalize_rel_path(&p)
-                        .ok()
-                        .map(|n| n == want)
-                        .unwrap_or_else(|| p.trim() == want)
-                });
-                Some(matched)
-            })
-        })
-        .unwrap_or(false)
+            st.last_mutation_summary
+                .and_then(|m| {
+                    let op = m.op.unwrap_or_default();
+                    if op != "rm" {
+                        return None;
+                    }
+                    let matched = m.affected_paths.into_iter().any(|p| {
+                        files_store::normalize_rel_path(&p)
+                            .ok()
+                            .map(|n| n == want)
+                            .unwrap_or_else(|| p.trim() == want)
+                    });
+                    Some(matched)
+                })
+                .unwrap_or(false)
+        }
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(
+                "failed to load strict execution state for dbt_files remove guard: {}",
+                e
+            );
+            false
+        }
+    }
 }
 
 fn deserialize_opt_nonempty_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>

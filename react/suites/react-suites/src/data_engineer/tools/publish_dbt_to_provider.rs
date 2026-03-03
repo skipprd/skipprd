@@ -133,8 +133,11 @@ impl Tool for PublishDbtToProviderTool {
         let tid = ctx.thread_id.clone().unwrap_or_default();
         if !tid.is_empty() {
             if let Some(store) = ctx.thread_store.as_ref() {
-                let es = state_manager::load_execution_state(store, &tid)
+                let es = state_manager::load_execution_state_strict(store, &tid)
                     .await
+                    .map_err(|e| {
+                        format!("failed to load strict execution state for publish: {e}")
+                    })?
                     .unwrap_or_else(ExecutionState::new);
                 last_published_digest = es.publish_plan.last_published_plan_sha256.clone();
                 pending_plan_digest = es.publish_plan.pending_plan_sha256.clone();
@@ -492,8 +495,7 @@ mod tests {
         async fn write_model_sql(
             &self,
             _scope: &RequestScope,
-            _dataset_id: &str,
-            _name: &str,
+            _rel_path: &str,
             _sql: &str,
         ) -> Result<String, String> {
             Ok("k".to_string())
@@ -502,8 +504,7 @@ mod tests {
         async fn write_metricflow_yaml(
             &self,
             _scope: &RequestScope,
-            _dataset_id: &str,
-            _name: &str,
+            _rel_path: &str,
             _yaml_text: &str,
         ) -> Result<String, String> {
             Ok("k".to_string())

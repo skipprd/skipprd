@@ -618,25 +618,32 @@ pub async fn call_and_record_tool(
         if let Some(path_kind) =
             crate::data_engineer::progress_controller::classify_manifest_lookup_path(manifest_path)
         {
-            if let Some(mut st) = crate::data_engineer::state_manager::load_execution_state(
-                store, thread_id,
-            )
-            .await
+            match crate::data_engineer::state_manager::load_execution_state_strict(store, thread_id)
+                .await
             {
-                if st.current_phase == Some(Phase::ModelPlan) {
-                    let failure_kind = if obs.ok {
-                        None
-                    } else {
-                        crate::data_engineer::progress_controller::classify_manifest_lookup_failure(
-                            &obs.errors,
-                        )
-                    };
-                    st.note_manifest_lookup_attempt(path_kind, obs.ok, failure_kind);
-                    if let Err(e) =
-                        crate::data_engineer::state_manager::save_execution_state(store, thread_id, &st).await
-                    {
-                        warn!("failed to persist manifest lookup telemetry: {}", e);
+                Ok(Some(mut st)) => {
+                    if st.current_phase == Some(Phase::ModelPlan) {
+                        let failure_kind = if obs.ok {
+                            None
+                        } else {
+                            crate::data_engineer::progress_controller::classify_manifest_lookup_failure(
+                                &obs.errors,
+                            )
+                        };
+                        st.note_manifest_lookup_attempt(path_kind, obs.ok, failure_kind);
+                        if let Err(e) =
+                            crate::data_engineer::state_manager::save_execution_state(store, thread_id, &st).await
+                        {
+                            warn!("failed to persist manifest lookup telemetry: {}", e);
+                        }
                     }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(
+                        "failed to load strict execution state for manifest telemetry: {}",
+                        e
+                    );
                 }
             }
         }
@@ -701,17 +708,24 @@ pub async fn call_and_record_tool(
             _ => None,
         }
     })() {
-        if let Some(mut st) = crate::data_engineer::state_manager::load_execution_state(
-            store, thread_id,
-        )
-        .await
+        match crate::data_engineer::state_manager::load_execution_state_strict(store, thread_id)
+            .await
         {
-            st.set_last_mutation_summary(&op, affected_paths, Vec::new());
-            if let Err(e) =
-                crate::data_engineer::state_manager::save_execution_state(store, thread_id, &st)
-                    .await
-            {
-                warn!("failed to persist non-file mutation summary: {}", e);
+            Ok(Some(mut st)) => {
+                st.set_last_mutation_summary(&op, affected_paths, Vec::new());
+                if let Err(e) =
+                    crate::data_engineer::state_manager::save_execution_state(store, thread_id, &st)
+                        .await
+                {
+                    warn!("failed to persist non-file mutation summary: {}", e);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(
+                    "failed to load strict execution state for mutation summary: {}",
+                    e
+                );
             }
         }
     }

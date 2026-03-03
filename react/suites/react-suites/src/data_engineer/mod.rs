@@ -2852,6 +2852,7 @@ Apply these fixes in the output.",
                         question,
                         sctx,
                         &execution_state,
+                        thread_state_step_count,
                         &mut out_frames,
                     )
                     .await? {

@@ -7,7 +7,6 @@ pub enum FileOpKind {
     Patch,
     Rm,
     Mv,
-    PutLegacy,
     Other,
 }
 
@@ -18,8 +17,6 @@ pub fn classify_file_op(args: &Value) -> FileOpKind {
         Some("patch") => FileOpKind::Patch,
         Some("rm") => FileOpKind::Rm,
         Some("mv") => FileOpKind::Mv,
-        // Legacy logs may still contain put; treat as mutating for history-gates.
-        Some("put") => FileOpKind::PutLegacy,
         _ => FileOpKind::Other,
     }
 }
@@ -31,7 +28,7 @@ pub fn is_file_read_op(args: &Value) -> bool {
 pub fn is_file_mutation_op(args: &Value) -> bool {
     matches!(
         classify_file_op(args),
-        FileOpKind::Patch | FileOpKind::Rm | FileOpKind::Mv | FileOpKind::PutLegacy
+        FileOpKind::Patch | FileOpKind::Rm | FileOpKind::Mv
     )
 }
 

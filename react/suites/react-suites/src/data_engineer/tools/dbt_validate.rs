@@ -41,9 +41,19 @@ async fn derive_select_terms(ctx: &AgentCtx, args: &Value) -> Vec<String> {
     let Some(store) = ctx.thread_store.as_ref() else {
         return vec![];
     };
-    let st = crate::data_engineer::state_manager::load_execution_state(store, thread_id)
+    let st = match crate::data_engineer::state_manager::load_execution_state_strict(store, thread_id)
         .await
-        .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
+    {
+        Ok(Some(st)) => st,
+        Ok(None) => crate::data_engineer::progress_controller::ExecutionState::new(),
+        Err(e) => {
+            tracing::warn!(
+                "skipping targeted validate terms due to invalid execution state: {}",
+                e
+            );
+            return vec![];
+        }
+    };
     let mut out = st
         .last_mutation_summary
         .as_ref()
@@ -548,8 +558,7 @@ mod tests {
         async fn write_model_sql(
             &self,
             _scope: &RequestScope,
-            _dataset_id: &str,
-            _name: &str,
+            _rel_path: &str,
             _sql: &str,
         ) -> Result<String, String> {
             Ok("k".to_string())
@@ -557,8 +566,7 @@ mod tests {
         async fn write_metricflow_yaml(
             &self,
             _scope: &RequestScope,
-            _dataset_id: &str,
-            _name: &str,
+            _rel_path: &str,
             _yaml_text: &str,
         ) -> Result<String, String> {
             Ok("k".to_string())
