@@ -7,7 +7,7 @@ use crate::adapters::storage::StorageAdapter;
 use crate::providers::{Keyspace, RequestScope};
 
 use crate::ws::terminal::{self, TerminalEvent};
-use react_core::providers::{DbtProvider, DbtValidateArgs, DbtValidateResult};
+use react_core::providers::{DbtFailureClass, DbtProvider, DbtValidateArgs, DbtValidateResult};
 
 #[derive(Clone)]
 pub struct DbtProjectProvider {
@@ -75,6 +75,51 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let mut f = std::fs::File::create(path).map_err(|e| e.to_string())?;
     f.write_all(bytes).map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Debug)]
+struct SanitizedProjectYaml {
+    text: String,
+    changed: bool,
+}
+
+fn render_dbt_project_yaml(project_name: &str, profile_name: &str) -> String {
+    format!(
+        "name: {name}\nversion: '1.0'\nprofile: '{profile_name}'\nmodel-paths: ['models']\nseed-paths: ['seeds']\nmacro-paths: ['macros']\ntarget-path: 'target'\n\nmodels:\n  {name}:\n    # Suffix strategy: dbt materializes schemas as <DBT_TARGET_SCHEMA>_<suffix>.\n    # Default all models into GOLD by setting their custom schema name to the gold suffix.\n    +schema: \"{{{{ env_var('DBT_GOLD_SUFFIX', 'warehouse') }}}}\"\n    # Force staging models under models/staging into SILVER.\n    staging:\n      +schema: \"{{{{ env_var('DBT_SILVER_SUFFIX', 'silver') }}}}\"\n",
+        name = project_name,
+        profile_name = profile_name
+    )
+}
+
+fn sanitize_dbt_project_yaml(raw: &str, desired_profile: &str) -> SanitizedProjectYaml {
+    let mut changed = false;
+    let mut v: serde_yaml::Value = match serde_yaml::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => {
+            changed = true;
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        }
+    };
+    if !matches!(v, serde_yaml::Value::Mapping(_)) {
+        v = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        changed = true;
+    }
+    let map = v.as_mapping_mut().expect("mapping enforced above");
+    let dep_key = serde_yaml::Value::String("depends_on".to_string());
+    if map.remove(&dep_key).is_some() {
+        changed = true;
+    }
+    let prof_key = serde_yaml::Value::String("profile".to_string());
+    let desired_profile = serde_yaml::Value::String(desired_profile.to_string());
+    if map.get(&prof_key) != Some(&desired_profile) {
+        map.insert(prof_key, desired_profile);
+        changed = true;
+    }
+    let text = serde_yaml::to_string(&v).unwrap_or_else(|_| raw.to_string());
+    if text != raw {
+        changed = true;
+    }
+    SanitizedProjectYaml { text, changed }
 }
 
 #[derive(Clone, Debug)]
@@ -985,6 +1030,95 @@ fn combine_errors(a: &CmdOut, b: &CmdOut) -> Vec<String> {
 }
 
 impl DbtProjectProvider {
+    async fn ensure_storage_project_yaml(
+        &self,
+        scope: &RequestScope,
+        project_name: &str,
+    ) -> Result<(), String> {
+        let project_key = self.keyspace.dbt_project_key(scope);
+        let existing = if self.storage.head_etag(&project_key).await?.is_some() {
+            Some(self.storage.get_bytes(&project_key).await?)
+        } else {
+            None
+        };
+
+        let rendered = render_dbt_project_yaml(project_name, &scope.project_id);
+        let existing_text = existing
+            .as_ref()
+            .map(|b| String::from_utf8_lossy(b).to_string());
+        let base = existing_text.as_deref().unwrap_or(&rendered);
+        let sanitized = sanitize_dbt_project_yaml(base, &scope.project_id);
+        if existing.is_none() || sanitized.changed {
+            self.storage
+                .put_bytes(&project_key, sanitized.text.as_bytes(), "text/yaml")
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_local_project_yaml(
+        &self,
+        scope: &RequestScope,
+        project_name: &str,
+        proj_path: &Path,
+    ) -> Result<(), String> {
+        if !proj_path.exists() {
+            let rendered = render_dbt_project_yaml(project_name, &scope.project_id);
+            write_file(proj_path, rendered.as_bytes())?;
+        }
+        let raw = std::fs::read_to_string(proj_path).unwrap_or_default();
+        let sanitized = sanitize_dbt_project_yaml(&raw, &scope.project_id);
+        if sanitized.changed {
+            write_file(proj_path, sanitized.text.as_bytes())?;
+            // Best-effort persistence back to storage for future runs.
+            let project_key = self.keyspace.dbt_project_key(scope);
+            let _ = self
+                .storage
+                .put_bytes(&project_key, sanitized.text.as_bytes(), "text/yaml")
+                .await;
+        }
+        Ok(())
+    }
+
+    fn classify_validate_failure(errors: &[String]) -> DbtFailureClass {
+        if errors.is_empty() {
+            return DbtFailureClass::NoFailure;
+        }
+        let s = errors.join("\n").to_ascii_lowercase();
+        if s.contains("workgroup is not found")
+            || (s.contains("datacatalog") && s.contains("was not found"))
+            || s.contains("accessdenied")
+            || s.contains("expiredtoken")
+            || s.contains("signaturedoesnotmatch")
+        {
+            return DbtFailureClass::WarehouseConfig;
+        }
+        if (s.contains("depends on a source named") && s.contains("which was not found"))
+            || (s.contains("source named") && s.contains("was not found"))
+        {
+            return DbtFailureClass::MissingSource;
+        }
+        if s.contains("got duplicate keys")
+            || s.contains("profiles.yml")
+            || s.contains("dbt_project.yml")
+            || s.contains("additional properties are not allowed")
+            || s.contains("schema.yml")
+            || s.contains("yaml")
+        {
+            return DbtFailureClass::SchemaOrProject;
+        }
+        if s.contains("compilation error")
+            || s.contains("runtime error")
+            || s.contains("database error")
+            || s.contains("failed to execute query")
+            || s.contains("invalidrequestexception")
+            || s.contains("sql")
+        {
+            return DbtFailureClass::SqlOrRuntime;
+        }
+        DbtFailureClass::Unknown
+    }
+
     async fn upload_dir_to_storage(&self, local_dir: &Path, prefix: &str) -> Result<usize, String> {
         if !local_dir.is_dir() {
             return Ok(0);
@@ -1028,39 +1162,8 @@ impl DbtProjectProvider {
 #[async_trait]
 impl DbtProvider for DbtProjectProvider {
     async fn ensure_minimal_project(&self, scope: &RequestScope) -> Result<(), String> {
-        let project_key = self.keyspace.dbt_project_key(scope);
-        if self.storage.head_etag(&project_key).await?.is_some() {
-            // Back-compat / self-heal: if an existing dbt_project.yml is invalid for dbt-core (e.g. has a top-level
-            // `depends_on` key), rewrite it to a minimal valid project file. Otherwise, leave it intact.
-            if let Ok(bytes) = self.storage.get_bytes(&project_key).await {
-                let text = String::from_utf8_lossy(&bytes).to_string();
-                if let Ok(yv) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
-                    if let Some(map) = yv.as_mapping() {
-                        let has_depends_on = map
-                            .keys()
-                            .any(|k| k.as_str().map(|s| s == "depends_on").unwrap_or(false));
-                        if !has_depends_on {
-                            return Ok(());
-                        }
-                    } else {
-                        // Non-mapping YAML: treat as invalid and rewrite.
-                    }
-                } else {
-                    // Unparseable YAML: rewrite.
-                }
-            }
-            // Fall through and rewrite below.
-        }
         let name = format!("{}_project", scope.project_id.replace('/', "_"));
-        let y = format!(
-            "name: {name}\nversion: '1.0'\nprofile: '{project_id}'\nmodel-paths: ['models']\nseed-paths: ['seeds']\nmacro-paths: ['macros']\ntarget-path: 'target'\n\nmodels:\n  {name}:\n    # Suffix strategy: dbt materializes schemas as <DBT_TARGET_SCHEMA>_<suffix>.\n    # Default all models into GOLD by setting their custom schema name to the gold suffix.\n    +schema: \"{{{{ env_var('DBT_GOLD_SUFFIX', 'warehouse') }}}}\"\n    # Force staging models under models/staging into SILVER.\n    staging:\n      +schema: \"{{{{ env_var('DBT_SILVER_SUFFIX', 'silver') }}}}\"\n",
-            name = name,
-            project_id = scope.project_id
-        );
-        self.storage
-            .put_bytes(&project_key, y.as_bytes(), "text/yaml")
-            .await?;
-        Ok(())
+        self.ensure_storage_project_yaml(scope, &name).await
     }
 
     async fn write_model_sql(
@@ -1152,61 +1255,8 @@ impl DbtProvider for DbtProjectProvider {
             file_count += 1;
         }
 
-        // Ensure minimal project file if missing
         let proj = root.join("dbt_project.yml");
-        if !proj.exists() {
-            // Important: profile name must match the generated `profiles.yml` entry, which is scope.project_id.
-            let y = format!(
-                "name: {}\nversion: '1.0'\nprofile: '{}'\nmodel-paths: ['models']\ntarget-path: 'target'\n\nmodels:\n  {}:\n    # Suffix strategy: dbt materializes schemas as <DBT_TARGET_SCHEMA>_<suffix>.\n    +schema: \"{{{{ env_var('DBT_GOLD_SUFFIX', 'warehouse') }}}}\"\n    staging:\n      +schema: \"{{{{ env_var('DBT_SILVER_SUFFIX', 'silver') }}}}\"\n",
-                project_name,
-                scope.project_id
-                ,
-                project_name
-            );
-            write_file(&proj, y.as_bytes())?;
-        }
-
-        // Sanitize dbt_project.yml for dbt-core strict schema:
-        // - Remove invalid top-level keys like `depends_on` (seen in some templates).
-        // - Force `profile:` to match scope.project_id so it aligns with generated profiles.yml.
-        // - Persist the sanitized version back to storage so future runs are clean.
-        {
-            let project_key = self.keyspace.dbt_project_key(scope);
-            let raw = std::fs::read_to_string(&proj).unwrap_or_default();
-            let mut changed = false;
-            let mut v: serde_yaml::Value = match serde_yaml::from_str(&raw) {
-                Ok(v) => v,
-                Err(_) => {
-                    changed = true;
-                    serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-                }
-            };
-            if !matches!(v, serde_yaml::Value::Mapping(_)) {
-                v = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-                changed = true;
-            }
-            let map = v.as_mapping_mut().unwrap();
-            // Remove invalid top-level depends_on
-            let dep_key = serde_yaml::Value::String("depends_on".to_string());
-            if map.remove(&dep_key).is_some() {
-                changed = true;
-            }
-            // Force profile to scope.project_id
-            let prof_key = serde_yaml::Value::String("profile".to_string());
-            let desired_profile = serde_yaml::Value::String(scope.project_id.clone());
-            if map.get(&prof_key) != Some(&desired_profile) {
-                map.insert(prof_key, desired_profile);
-                changed = true;
-            }
-            if changed {
-                let new_text = serde_yaml::to_string(&v).unwrap_or_else(|_| raw.clone());
-                let _ = write_file(&proj, new_text.as_bytes());
-                let _ = self
-                    .storage
-                    .put_bytes(&project_key, new_text.as_bytes(), "text/yaml")
-                    .await;
-            }
-        }
+        self.ensure_local_project_yaml(scope, &project_name, &proj).await?;
 
         let mut envs: Vec<(&str, String)> = Vec::new();
         if let Some(pd) = profiles_dir.as_ref() {
@@ -1371,6 +1421,7 @@ impl DbtProvider for DbtProjectProvider {
         for e in combine_errors(&compile_res, run_or_build_res.as_ref().unwrap_or(&empty)) {
             errs_vec.push(e);
         }
+        let failure_class = Self::classify_validate_failure(&errs_vec);
 
         Ok(DbtValidateResult {
             ok,
@@ -1379,6 +1430,7 @@ impl DbtProvider for DbtProjectProvider {
             compile_ok: compile_res.status_ok,
             run_ok: run_or_build_res.as_ref().map(|o| o.status_ok),
             uploaded_target_files: uploaded_files,
+            failure_class,
             errors: errs_vec,
             warnings: vec![],
             logs: serde_json::json!({
@@ -1395,6 +1447,26 @@ impl DbtProvider for DbtProjectProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_dbt_project_yaml_has_expected_paths_and_suffixes() {
+        let y = render_dbt_project_yaml("data_engineer", "project_a");
+        assert!(y.contains("name: data_engineer"));
+        assert!(y.contains("profile: 'project_a'"));
+        assert!(y.contains("seed-paths: ['seeds']"));
+        assert!(y.contains("macro-paths: ['macros']"));
+        assert!(y.contains("DBT_GOLD_SUFFIX"));
+        assert!(y.contains("DBT_SILVER_SUFFIX"));
+    }
+
+    #[test]
+    fn sanitize_dbt_project_yaml_strips_depends_on_and_forces_profile() {
+        let raw = "name: demo\ndepends_on: []\nprofile: wrong\n";
+        let out = sanitize_dbt_project_yaml(raw, "correct_profile");
+        assert!(out.changed);
+        assert!(!out.text.contains("depends_on"));
+        assert!(out.text.contains("profile: correct_profile"));
+    }
 
     #[test]
     fn docker_args_require_image() {

@@ -297,6 +297,7 @@ impl Tool for StagingModelTool {
         if let Err(e) = dbt.ensure_minimal_project(&ctx.scope).await {
             return Ok(serde_json::json!({
                 "ok": false,
+                "batch_failure_kind": "unknown",
                 "datasets": dataset_ids.len(),
                 "written_keys": [],
                 "schema_key": Value::Null,
@@ -350,6 +351,7 @@ impl Tool for StagingModelTool {
             // IMPORTANT: do not write schema.yml or any models if the dataset facts are not proven.
             return Ok(serde_json::json!({
                 "ok": false,
+                "batch_failure_kind": "schema_or_contract",
                 "datasets": dataset_ids.len(),
                 "written_keys": [],
                 "schema_key": Value::Null,
@@ -391,6 +393,7 @@ impl Tool for StagingModelTool {
                 Err(e) => {
                     return Ok(serde_json::json!({
                         "ok": false,
+                        "batch_failure_kind": "schema_or_contract",
                         "datasets": dataset_ids.len(),
                         "written_keys": [],
                         "schema_key": schema_key,
@@ -406,6 +409,7 @@ impl Tool for StagingModelTool {
             {
                 return Ok(serde_json::json!({
                     "ok": false,
+                    "batch_failure_kind": "schema_or_contract",
                     "datasets": dataset_ids.len(),
                     "written_keys": [],
                     "schema_key": schema_key,
@@ -423,6 +427,7 @@ impl Tool for StagingModelTool {
                     Err(e) => {
                         return Ok(serde_json::json!({
                             "ok": false,
+                            "batch_failure_kind": "schema_or_contract",
                             "datasets": dataset_ids.len(),
                             "written_keys": [],
                             "schema_key": schema_key,
@@ -448,6 +453,7 @@ impl Tool for StagingModelTool {
                     Err(e) => {
                         return Ok(serde_json::json!({
                             "ok": false,
+                            "batch_failure_kind": "schema_or_contract",
                             "datasets": dataset_ids.len(),
                             "written_keys": [],
                             "schema_key": schema_key,
@@ -463,6 +469,7 @@ impl Tool for StagingModelTool {
                 {
                     return Ok(serde_json::json!({
                         "ok": false,
+                        "batch_failure_kind": "schema_or_contract",
                         "datasets": dataset_ids.len(),
                         "written_keys": [],
                         "schema_key": schema_key,
@@ -553,6 +560,7 @@ impl Tool for StagingModelTool {
                 ));
                 return Ok(serde_json::json!({
                     "ok": false,
+                    "batch_failure_kind": "schema_or_contract",
                     "datasets": dataset_ids.len(),
                     "written_keys": written,
                     "schema_key": schema_key,
@@ -567,6 +575,7 @@ impl Tool for StagingModelTool {
                 ));
                 return Ok(serde_json::json!({
                     "ok": false,
+                    "batch_failure_kind": "schema_or_contract",
                     "datasets": dataset_ids.len(),
                     "written_keys": written,
                     "schema_key": schema_key,
@@ -587,6 +596,7 @@ impl Tool for StagingModelTool {
                 ));
                 return Ok(serde_json::json!({
                     "ok": false,
+                    "batch_failure_kind": "sql_validation",
                     "datasets": dataset_ids.len(),
                     "written_keys": written,
                     "schema_key": schema_key,
@@ -600,6 +610,7 @@ impl Tool for StagingModelTool {
                 ));
                 return Ok(serde_json::json!({
                     "ok": false,
+                    "batch_failure_kind": "sql_validation",
                     "datasets": dataset_ids.len(),
                     "written_keys": written,
                     "schema_key": schema_key,
@@ -946,6 +957,7 @@ impl Tool for StagingModelTool {
 
         Ok(serde_json::json!({
             "ok": errors.is_empty(),
+            "batch_failure_kind": if errors.is_empty() { Value::Null } else { Value::String("unknown".to_string()) },
             "datasets": dataset_ids.len(),
             "written_keys": written,
             "schema_key": schema_key,

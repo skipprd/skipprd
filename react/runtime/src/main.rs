@@ -644,6 +644,7 @@ async fn main() {
                 }
             };
             bind_runtime_scope_preference(&cfg.scope);
+            react::runtime_settings::bind_resolved_config(&cfg);
 
             let log_dir = resolve_log_dir(&cfg);
             let enable_console = cli.log.is_some() && !cli.terminal;
@@ -913,6 +914,7 @@ async fn main() {
                 }
             };
             bind_runtime_scope_preference(&cfg.scope);
+            react::runtime_settings::bind_resolved_config(&cfg);
 
             let log_dir = resolve_log_dir(&cfg);
             // In terminal mode we keep console clean; logs always go to file.

@@ -252,13 +252,6 @@ fn getenv_nonempty(key: &str) -> Option<String> {
     })
 }
 
-fn set_env_if_unset(key: &str, value: &str) {
-    if getenv_nonempty(key).is_some() {
-        return;
-    }
-    std::env::set_var(key, value);
-}
-
 fn ensure_safe_segment(name: &str, v: &str) -> Result<(), String> {
     let t = v.trim();
     if t.is_empty() {
@@ -365,12 +358,13 @@ pub fn resolve_config(file: ReactConfigFile, ov: ServeOverrides) -> Result<React
 
         // LLM env surface
         let llmf = file.llm.unwrap_or_default();
+        let llm_provider_raw = getenv_nonempty("LLM_PROVIDER").or(llmf.provider);
+        let provider = match llm_provider_raw {
+            Some(raw) => LlmProvider::from_config_str(&raw).map_err(|e| e.to_string())?,
+            None => LlmProvider::default(),
+        };
         let llm = LlmResolved {
-            provider: LlmProvider::from_str_loose(
-                &getenv_nonempty("LLM_PROVIDER")
-                    .or(llmf.provider)
-                    .unwrap_or_default(),
-            ),
+            provider,
             base_url: getenv_nonempty("LLM_BASE_URL").or(llmf.base_url),
             chat_model: getenv_nonempty("LLM_CHAT_MODEL").or(llmf.chat_model),
             embed_model: getenv_nonempty("LLM_EMBED_MODEL").or(llmf.embed_model),
@@ -522,71 +516,6 @@ pub fn resolve_config(file: ReactConfigFile, ov: ServeOverrides) -> Result<React
             },
         };
 
-        // Fill env defaults for subsystems that still read env internally.
-        // IMPORTANT: we never overwrite an explicitly set env var.
-        set_env_if_unset("LLM_PROVIDER", &cfg.llm.provider.to_string());
-        if let Some(v) = cfg.llm.base_url.as_ref() {
-            set_env_if_unset("LLM_BASE_URL", v);
-        }
-        if let Some(v) = cfg.llm.chat_model.as_ref() {
-            set_env_if_unset("LLM_CHAT_MODEL", v);
-        }
-        if let Some(v) = cfg.llm.embed_model.as_ref() {
-            set_env_if_unset("LLM_EMBED_MODEL", v);
-        }
-        if let Some(v) = cfg.llm.context_length.as_ref() {
-            set_env_if_unset("LLM_CONTEXT_LENGTH", &v.to_string());
-        }
-        if let Some(v) = cfg.llm.gpu_layers.as_ref() {
-            set_env_if_unset("LLM_GPU_LAYERS", &v.to_string());
-        }
-        if let Some(v) = cfg.llm.http_timeout_secs.as_ref() {
-            set_env_if_unset("LLM_HTTP_TIMEOUT_SECS", &v.to_string());
-        }
-        if let Some(v) = cfg.llm.max_tokens.as_ref() {
-            set_env_if_unset("LLM_MAX_TOKENS", &v.to_string());
-        }
-        if let Some(v) = cfg.llm.temperature.as_ref() {
-            set_env_if_unset("LLM_TEMPERATURE", &v.to_string());
-        }
-        if let Some(v) = cfg.llm.top_p.as_ref() {
-            set_env_if_unset("LLM_TOP_P", &v.to_string());
-        }
-
-        if let Some(v) = cfg.providers.dbt.profiles_dir.as_ref() {
-            set_env_if_unset("DBT_PROFILES_DIR", v);
-        }
-        if !cfg.providers.dbt.target.is_empty() {
-            set_env_if_unset("DBT_TARGET", &cfg.providers.dbt.target);
-        }
-        if !cfg.providers.dbt.naming.target_schema.is_empty() {
-            set_env_if_unset("DBT_TARGET_SCHEMA", &cfg.providers.dbt.naming.target_schema);
-        }
-        if !cfg.providers.dbt.naming.silver_suffix.is_empty() {
-            set_env_if_unset("DBT_SILVER_SUFFIX", &cfg.providers.dbt.naming.silver_suffix);
-        }
-        if !cfg.providers.dbt.naming.gold_suffix.is_empty() {
-            set_env_if_unset("DBT_GOLD_SUFFIX", &cfg.providers.dbt.naming.gold_suffix);
-        }
-        set_env_if_unset("DBT_RUNNER", &cfg.providers.dbt.runner);
-        if let Some(v) = cfg.providers.dbt.docker_image.as_ref() {
-            set_env_if_unset("DBT_DOCKER_IMAGE", v);
-        }
-        if let Some(v) = cfg.providers.dbt.docker_platform.as_ref() {
-            set_env_if_unset("DBT_DOCKER_PLATFORM", v);
-        }
-        if let Some(v) = cfg.providers.dbt.docker_network.as_ref() {
-            set_env_if_unset("DBT_DOCKER_NETWORK", v);
-        }
-        set_env_if_unset(
-            "DBT_DOCKER_MOUNT_AWS_DIR",
-            if cfg.providers.dbt.docker_mount_aws_dir {
-                "true"
-            } else {
-                "false"
-            },
-        );
-
     Ok(cfg)
 }
 
@@ -716,5 +645,75 @@ mod tests {
         assert_eq!(cfg.storage.mode, StorageMode::Local);
         assert!(cfg.storage.bucket.is_none());
         assert!(cfg.storage.path.as_ref().is_some());
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_llm_provider() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_env(&["LLM_PROVIDER"]);
+        let file = ReactConfigFile {
+            llm: Some(LlmFile {
+                provider: Some("SOME_UNKNOWN_PROVIDER".to_string()),
+                ..Default::default()
+            }),
+            providers: Some(ProvidersFile {
+                warehouse: Some(WarehouseFile::Postgres {
+                    database: None,
+                    schema: None,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = resolve_config(file, ServeOverrides::default()).unwrap_err();
+        assert!(err.contains("unsupported llm provider"));
+    }
+
+    #[test]
+    fn resolve_config_does_not_mutate_llm_or_dbt_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_env(&["LLM_PROVIDER", "LLM_CHAT_MODEL", "DBT_TARGET", "DBT_SILVER_SUFFIX"]);
+        std::env::set_var("LLM_PROVIDER", "NULL");
+        std::env::set_var("LLM_CHAT_MODEL", "preset-chat-model");
+        std::env::set_var("DBT_TARGET", "preset-target");
+        std::env::set_var("DBT_SILVER_SUFFIX", "preset-silver");
+        let file = ReactConfigFile {
+            llm: Some(LlmFile {
+                provider: Some("OPENAI_COMPAT".to_string()),
+                chat_model: Some("gpt-5.1".to_string()),
+                ..Default::default()
+            }),
+            providers: Some(ProvidersFile {
+                warehouse: Some(WarehouseFile::Postgres {
+                    database: None,
+                    schema: None,
+                }),
+                dbt: Some(DbtFile {
+                    target: Some("athena".to_string()),
+                    naming: Some(DbtNamingFile {
+                        silver_suffix: Some("silver".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let _ = resolve_config(file, ServeOverrides::default()).expect("resolve");
+        assert_eq!(std::env::var("LLM_PROVIDER").ok().as_deref(), Some("NULL"));
+        assert_eq!(
+            std::env::var("LLM_CHAT_MODEL").ok().as_deref(),
+            Some("preset-chat-model")
+        );
+        assert_eq!(
+            std::env::var("DBT_TARGET").ok().as_deref(),
+            Some("preset-target")
+        );
+        assert_eq!(
+            std::env::var("DBT_SILVER_SUFFIX").ok().as_deref(),
+            Some("preset-silver")
+        );
+        clear_env(&["LLM_PROVIDER", "LLM_CHAT_MODEL", "DBT_TARGET", "DBT_SILVER_SUFFIX"]);
     }
 }

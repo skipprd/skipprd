@@ -291,7 +291,7 @@ impl Tool for ApplyNextCleanseBatchTool {
                     &batch,
                     &format!("apply_next_cleanse_batch failed: {}", e.trim()),
                 );
-                let kind = crate::data_engineer::tools::batch_sql_runner::classify_batch_failure_kind(&[e.clone()]);
+                let kind = BatchFailureKind::Unknown;
                 controller_kernel::note_batch_result_with_failure_kind(
                     &mut plan.progress,
                     false,
@@ -370,8 +370,8 @@ impl Tool for ApplyNextCleanseBatchTool {
                     file: expected_path.unwrap_or_default(),
                 });
             }
-            let errors = crate::data_engineer::tools::batch_sql_runner::extract_errors(&res);
-            let kind = crate::data_engineer::tools::batch_sql_runner::classify_batch_failure_kind(&errors);
+            let kind = crate::data_engineer::tools::batch_sql_runner::extract_batch_failure_kind(&res)
+                .map_err(|e| format!("apply_next_cleanse_batch_contract_error: {e}"))?;
             failure_kind_for_budget = Some(kind);
             let brief = if err.trim().is_empty() {
                 "apply_next_cleanse_batch failed".to_string()
@@ -665,7 +665,7 @@ impl Tool for ApplyNextModelBatchTool {
                     &batch_names,
                     &format!("apply_next_model_batch failed: {}", e.trim()),
                 );
-                let kind = crate::data_engineer::tools::batch_sql_runner::classify_batch_failure_kind(&[e.clone()]);
+                let kind = BatchFailureKind::Unknown;
                 controller_kernel::note_batch_result_with_failure_kind(
                     &mut plan.progress,
                     false,
@@ -737,8 +737,8 @@ impl Tool for ApplyNextModelBatchTool {
                     file: expected_path.unwrap_or_default(),
                 });
             }
-            let errors = crate::data_engineer::tools::batch_sql_runner::extract_errors(&res);
-            let kind = crate::data_engineer::tools::batch_sql_runner::classify_batch_failure_kind(&errors);
+            let kind = crate::data_engineer::tools::batch_sql_runner::extract_batch_failure_kind(&res)
+                .map_err(|e| format!("apply_next_model_batch_contract_error: {e}"))?;
             failure_kind_for_budget = Some(kind);
             let brief = if err.trim().is_empty() {
                 "apply_next_model_batch failed".to_string()

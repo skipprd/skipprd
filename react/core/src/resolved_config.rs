@@ -1,6 +1,7 @@
 use crate::scope::RequestScope;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::str::FromStr;
 
 // ── Enums that replace stringly-typed dispatch ──────────────────────────
 
@@ -83,14 +84,44 @@ impl Default for LlmProvider {
 }
 
 impl LlmProvider {
-    pub fn from_str_loose(s: &str) -> Self {
-        match s.trim().to_ascii_uppercase().as_str() {
-            "OPENAI_COMPAT" => Self::OpenaiCompat,
-            "OPENAI" => Self::Openai,
-            "HTTP" => Self::Http,
-            "LLAMA_CPP" => Self::LlamaCpp,
-            "NULL" | "" => Self::Null,
-            _ => Self::OpenaiCompat,
+    pub fn from_config_str(s: &str) -> Result<Self, ConfigParseError> {
+        Self::from_str(s)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigParseError {
+    InvalidLlmProvider { value: String },
+}
+
+impl fmt::Display for ConfigParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidLlmProvider { value } => write!(
+                f,
+                "unsupported llm provider '{}' (expected one of: NULL, OPENAI_COMPAT, OPENAI, HTTP, LLAMA_CPP)",
+                value
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigParseError {}
+
+impl FromStr for LlmProvider {
+    type Err = ConfigParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let raw = s.trim();
+        match raw.to_ascii_uppercase().as_str() {
+            "OPENAI_COMPAT" => Ok(Self::OpenaiCompat),
+            "OPENAI" => Ok(Self::Openai),
+            "HTTP" => Ok(Self::Http),
+            "LLAMA_CPP" => Ok(Self::LlamaCpp),
+            "NULL" => Ok(Self::Null),
+            _ => Err(ConfigParseError::InvalidLlmProvider {
+                value: raw.to_string(),
+            }),
         }
     }
 }

@@ -27,9 +27,27 @@ pub struct DbtValidateResult {
     pub compile_ok: bool,
     pub run_ok: Option<bool>,
     pub uploaded_target_files: usize,
+    pub failure_class: DbtFailureClass,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
     pub logs: serde_json::Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DbtFailureClass {
+    NoFailure,
+    WarehouseConfig,
+    SqlOrRuntime,
+    SchemaOrProject,
+    MissingSource,
+    Unknown,
+}
+
+impl Default for DbtFailureClass {
+    fn default() -> Self {
+        Self::NoFailure
+    }
 }
 
 #[async_trait]

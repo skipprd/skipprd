@@ -5,33 +5,13 @@ use std::collections::HashSet;
 use crate::data_engineer::progress_controller::{BatchFailureKind, DataEngineerEvent};
 use crate::data_engineer::state_manager;
 
-pub(crate) fn classify_batch_failure_kind(errors: &[String]) -> BatchFailureKind {
-    let joined = errors.join("\n").to_ascii_lowercase();
-    if joined.contains("sql validation failed")
-        || joined.contains("column_not_found")
-        || joined.contains("compilation error")
-        || joined.contains("runtime error")
-    {
-        return BatchFailureKind::SqlValidation;
-    }
-    if joined.contains("schema")
-        || joined.contains("contract")
-        || joined.contains("yaml")
-        || joined.contains("parse")
-    {
-        return BatchFailureKind::SchemaOrContract;
-    }
-    if joined.contains("service error")
-        || joined.contains("timeout")
-        || joined.contains("throttle")
-        || joined.contains("temporar")
-        || joined.contains("http 502")
-        || joined.contains("http 503")
-        || joined.contains("http 504")
-    {
-        return BatchFailureKind::InfraTransient;
-    }
-    BatchFailureKind::Unknown
+pub(crate) fn extract_batch_failure_kind(res: &Value) -> Result<BatchFailureKind, String> {
+    let raw = res
+        .get("batch_failure_kind")
+        .cloned()
+        .ok_or_else(|| "missing required field batch_failure_kind".to_string())?;
+    serde_json::from_value::<BatchFailureKind>(raw)
+        .map_err(|e| format!("invalid batch_failure_kind value: {e}"))
 }
 
 pub(crate) fn classify_schema_batch_failure_kind(msg: &str) -> BatchFailureKind {

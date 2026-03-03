@@ -9,6 +9,7 @@ pub mod llm;
 pub mod models;
 pub mod providers;
 pub mod run;
+pub mod runtime_settings;
 pub mod thread_logs;
 pub mod ws;
 

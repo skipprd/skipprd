@@ -17,8 +17,6 @@ use react_core::session::{CatalogBootstrapState, ThreadBootstrapState, ThreadSto
 use react_core::tools::{Tool, ToolRegistry};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-#[cfg(test)]
-use crate::data_engineer::failure_classifier::ValidateFailureClass;
 use crate::data_engineer::phase_contract::{
     commit_guard_block as apply_guard_block, plan_status_reason_detail,
 };
@@ -92,7 +90,6 @@ pub mod dataset_truth;
 pub mod dbt_error;
 pub mod dbt_repair;
 pub mod facts;
-pub mod failure_classifier;
 pub mod naming;
 pub mod mutation_gateway;
 pub mod patch_contract;
@@ -3040,10 +3037,17 @@ Apply these fixes in the output.",
                         .get("errors")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
-                    let class = dbt_error::classify(&errs);
+                    let class = obs
+                        .get("failure_class")
+                        .cloned()
+                        .and_then(|v| {
+                            serde_json::from_value::<react_core::providers::DbtFailureClass>(v)
+                                .ok()
+                        })
+                        .unwrap_or(react_core::providers::DbtFailureClass::Unknown);
                     let brief = dbt_error::compact_brief(&errs, 2, 900);
 
-                    if matches!(class, dbt_error::DbtErrorClass::WarehouseConfig) {
+                    if matches!(class, react_core::providers::DbtFailureClass::WarehouseConfig) {
                         return Err(format!(
                             "dbt_validate failed due to a warehouse/aws configuration issue: {}",
                             brief
@@ -4662,33 +4666,6 @@ mod tests {
                 .and_then(|v| v.get("patched_since_fail"))
                 .and_then(|v| v.as_bool()),
             Some(true)
-        );
-    }
-
-    #[test]
-    fn classify_validate_failure_prefers_schema_for_precheck_and_yaml() {
-        // Explicit precheck failure should be schema-class.
-        assert_eq!(
-            crate::data_engineer::failure_classifier::classify_validate_failure(true, None, None),
-            ValidateFailureClass::SchemaOrPrecheck
-        );
-        // YAML/schema hints should be schema-class.
-        assert_eq!(
-            crate::data_engineer::failure_classifier::classify_validate_failure(
-                false,
-                Some("Error in models/schema.yml: duplicate definitions"),
-                None
-            ),
-            ValidateFailureClass::SchemaOrPrecheck
-        );
-        // Compilation errors should be SQL/runtime-class.
-        assert_eq!(
-            crate::data_engineer::failure_classifier::classify_validate_failure(
-                false,
-                Some("Compilation Error: syntax error near FROM"),
-                None
-            ),
-            ValidateFailureClass::SqlOrRuntime
         );
     }
 

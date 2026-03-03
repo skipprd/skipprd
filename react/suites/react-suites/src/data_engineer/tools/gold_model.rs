@@ -730,6 +730,7 @@ impl Tool for GoldModelTool {
 
         Ok(serde_json::json!({
             "ok": errors.is_empty(),
+            "batch_failure_kind": if errors.is_empty() { Value::Null } else { Value::String("unknown".to_string()) },
             "written_keys": written,
             "notes": out_notes,
             "remediation_hints": remediation_hints,

@@ -104,17 +104,21 @@ impl LargeLanguageModel for RouterModel {
         let model = crate::helpers::configuration::Config::llm_chat_model()
             .unwrap_or_else(|| "gpt-4o-mini".to_string());
 
-        let default_max_output_tokens =
+        let default_max_output_tokens = crate::runtime_settings::llm_max_tokens().or_else(|| {
             crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "1024")
                 .parse()
-                .ok();
-        let default_temperature =
+                .ok()
+        });
+        let default_temperature = crate::runtime_settings::llm_temperature().or_else(|| {
             crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2")
                 .parse()
-                .ok();
-        let default_top_p = crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0")
-            .parse()
-            .ok();
+                .ok()
+        });
+        let default_top_p = crate::runtime_settings::llm_top_p().or_else(|| {
+            crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0")
+                .parse()
+                .ok()
+        });
 
         let max_output_tokens = apply_hard_cap_max_output_tokens(
             options.max_output_tokens.or(default_max_output_tokens),

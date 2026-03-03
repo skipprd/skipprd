@@ -541,6 +541,7 @@ mod tests {
                 compile_ok: true,
                 run_ok: Some(args.build),
                 uploaded_target_files: 1,
+                failure_class: react_core::providers::DbtFailureClass::NoFailure,
                 errors: vec![],
                 warnings: vec![],
                 logs: serde_json::json!({}),

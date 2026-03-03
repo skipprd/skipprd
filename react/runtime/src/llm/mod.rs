@@ -41,10 +41,13 @@ pub fn create_llm(_cfg: &LlmConfig) -> Arc<dyn LargeLanguageModel> {
 }
 
 pub fn config_from_env() -> LlmConfig {
-    let prov = crate::helpers::configuration::Config::llm_provider().to_uppercase();
-    let provider = match prov.as_str() {
-        "OPENAI" | "OPENAI_COMPAT" | "HTTP" => LlmProviderType::OpenAICompat,
-        _ => LlmProviderType::Local,
+    let provider = match crate::runtime_settings::llm_provider() {
+        Some(react_core::resolved_config::LlmProvider::Openai)
+        | Some(react_core::resolved_config::LlmProvider::OpenaiCompat)
+        | Some(react_core::resolved_config::LlmProvider::Http) => LlmProviderType::OpenAICompat,
+        Some(react_core::resolved_config::LlmProvider::LlamaCpp)
+        | Some(react_core::resolved_config::LlmProvider::Null)
+        | None => LlmProviderType::Local,
     };
     let ctx_len_opt = crate::helpers::configuration::Config::llm_context_length_opt();
     let ctx_len = match ctx_len_opt {

@@ -4,7 +4,8 @@ use super::remediate::remediate_dbt_failures_grounded_with_llm;
 use super::remediate::RemediationDiff;
 use react_core::agent::AgentCtx;
 use react_core::providers::{
-    CatalogProvider, DatasetCatalogProvider, DbtProvider, DbtValidateArgs, DbtValidateResult,
+    CatalogProvider, DatasetCatalogProvider, DbtFailureClass, DbtProvider, DbtValidateArgs,
+    DbtValidateResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
@@ -236,7 +237,7 @@ pub async fn run_repair_loop(
         report.iterations_run = i + 1;
         let unresolved_columns =
             crate::data_engineer::dbt_error::extract_unresolved_columns(&res.errors);
-        let class = crate::data_engineer::dbt_error::classify(&res.errors);
+        let class = res.failure_class;
         let _ = (datasets, catalog, dataset_ids); // reserved for future targeted catalog refresh
         let catalog_refreshed = false;
 
@@ -279,10 +280,7 @@ pub async fn run_repair_loop(
         }
 
         // Missing sources are grounding failures; do NOT attempt SQL remediation.
-        if matches!(
-            class,
-            crate::data_engineer::dbt_error::DbtErrorClass::MissingSource
-        ) {
+        if matches!(class, DbtFailureClass::MissingSource) {
             report.iterations.push(RepairIteration {
                 iteration: i + 1,
                 scanned_models: 0,
@@ -304,9 +302,7 @@ pub async fn run_repair_loop(
 
         let allow_llm_repair = matches!(
             class,
-            crate::data_engineer::dbt_error::DbtErrorClass::SqlFailure
-                | crate::data_engineer::dbt_error::DbtErrorClass::SqlOrModel
-                | crate::data_engineer::dbt_error::DbtErrorClass::Unknown
+            DbtFailureClass::SqlOrRuntime | DbtFailureClass::Unknown
         );
 
         let mut llm_changed_files: usize = 0;
@@ -385,10 +381,7 @@ pub async fn run_repair_loop(
         }
 
         // Stop on non-remediable warehouse config errors.
-        if matches!(
-            class,
-            crate::data_engineer::dbt_error::DbtErrorClass::WarehouseConfig
-        ) {
+        if matches!(class, DbtFailureClass::WarehouseConfig) {
             report.stopped_reason = Some("warehouse_config".to_string());
             return Ok((res, report));
         }
@@ -559,6 +552,7 @@ mod tests {
                     compile_ok: false,
                     run_ok: None,
                     uploaded_target_files: 0,
+                    failure_class: react_core::providers::DbtFailureClass::SqlOrRuntime,
                     errors: vec!["Compilation Error: something".to_string()],
                     warnings: vec![],
                     logs: serde_json::json!({}),
@@ -665,6 +659,7 @@ mod tests {
                     compile_ok: true,
                     run_ok: Some(false),
                     uploaded_target_files: 0,
+                    failure_class: react_core::providers::DbtFailureClass::SqlOrRuntime,
                     errors: vec!["Database Error: something during run".to_string()],
                     warnings: vec![],
                     logs: serde_json::json!({}),
@@ -810,6 +805,7 @@ mod tests {
                         compile_ok: true,
                         run_ok: Some(false),
                         uploaded_target_files: 0,
+                        failure_class: react_core::providers::DbtFailureClass::SqlOrRuntime,
                         errors: vec![format!("Runtime Error: Column 'context.session.id' cannot be resolved (models/staging/stg_src_events.sql)")],
                         warnings: vec![],
                         logs: serde_json::json!({}),
@@ -822,6 +818,7 @@ mod tests {
                     compile_ok: true,
                     run_ok: Some(true),
                     uploaded_target_files: 0,
+                    failure_class: react_core::providers::DbtFailureClass::NoFailure,
                     errors: vec![],
                     warnings: vec![],
                     logs: serde_json::json!({}),
@@ -952,6 +949,7 @@ mod tests {
                     compile_ok: false,
                     run_ok: None,
                     uploaded_target_files: 0,
+                    failure_class: react_core::providers::DbtFailureClass::SqlOrRuntime,
                     errors: vec!["Compilation Error: mismatched input".to_string()],
                     warnings: vec![],
                     logs: serde_json::json!({}),
@@ -1068,6 +1066,7 @@ mod tests {
                     compile_ok: false,
                     run_ok: None,
                     uploaded_target_files: 0,
+                    failure_class: react_core::providers::DbtFailureClass::SqlOrRuntime,
                     errors: vec!["Compilation Error: syntax error".to_string()],
                     warnings: vec![],
                     logs: serde_json::json!({}),
@@ -1177,6 +1176,7 @@ mod tests {
                         compile_ok: false,
                         run_ok: None,
                         uploaded_target_files: 0,
+                        failure_class: react_core::providers::DbtFailureClass::SchemaOrProject,
                         errors: vec!["Compilation Error: 'dbt_utils' is undefined".to_string()],
                         warnings: vec![],
                         logs: serde_json::json!({}),
@@ -1189,6 +1189,7 @@ mod tests {
                     compile_ok: true,
                     run_ok: Some(true),
                     uploaded_target_files: 0,
+                    failure_class: react_core::providers::DbtFailureClass::NoFailure,
                     errors: vec![],
                     warnings: vec![],
                     logs: serde_json::json!({}),

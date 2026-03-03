@@ -25,10 +25,16 @@ impl Config {
     }
 
     pub fn llm_provider() -> String {
-        Self::getenv("LLM_PROVIDER", "OPENAI_CHAT")
+        if let Some(provider) = crate::runtime_settings::llm_provider() {
+            return provider.to_string();
+        }
+        Self::getenv("LLM_PROVIDER", "OPENAI_COMPAT")
     }
 
     pub fn llm_base_url() -> Option<String> {
+        if let Some(v) = crate::runtime_settings::llm_base_url() {
+            return Some(v);
+        }
         std::env::var("LLM_BASE_URL")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -41,24 +47,36 @@ impl Config {
     }
 
     pub fn llm_chat_model() -> Option<String> {
+        if let Some(v) = crate::runtime_settings::llm_chat_model() {
+            return Some(v);
+        }
         std::env::var("LLM_CHAT_MODEL")
             .ok()
             .filter(|v| !v.trim().is_empty())
     }
 
     pub fn llm_embed_model() -> Option<String> {
+        if let Some(v) = crate::runtime_settings::llm_embed_model() {
+            return Some(v);
+        }
         std::env::var("LLM_EMBED_MODEL")
             .ok()
             .filter(|v| !v.trim().is_empty())
     }
 
     pub fn llm_gpu_layers() -> Option<usize> {
+        if let Some(v) = crate::runtime_settings::llm_gpu_layers() {
+            return Some(v);
+        }
         std::env::var("LLM_GPU_LAYERS")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
     }
 
     pub fn llm_context_length_opt() -> Option<usize> {
+        if let Some(v) = crate::runtime_settings::llm_context_length() {
+            return Some(v);
+        }
         std::env::var("LLM_CONTEXT_LENGTH")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())

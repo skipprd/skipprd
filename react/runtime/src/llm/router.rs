@@ -1,5 +1,6 @@
 use dashmap::DashMap;
 use once_cell::sync::OnceCell;
+use react_core::resolved_config::LlmProvider;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use crate::helpers::configuration::Config;
 use tracing::debug;
 
 use super::adapter::Adapter;
-use super::registry::{pick_adapter_from_config, pick_openai_adapter_for_model};
+use super::registry::pick_openai_adapter_for_model;
 use super::types::{
     ChatRequest, ChatResponse, ChatResponseFormat, EmbedRequest, EmbedResponse,
     ProviderHttpRequest, ProviderHttpResponse,
@@ -68,8 +69,8 @@ struct HttpRetryPolicy {
 
 impl HttpRetryPolicy {
     fn from_env() -> Self {
-        let request_timeout_secs: u64 = Config::getenv("LLM_HTTP_TIMEOUT_SECS", "1200")
-            .parse()
+        let request_timeout_secs: u64 = crate::runtime_settings::llm_http_timeout_secs()
+            .or_else(|| Config::getenv("LLM_HTTP_TIMEOUT_SECS", "1200").parse().ok())
             .unwrap_or(420)
             .max(30)
             .min(1800);
@@ -159,7 +160,6 @@ impl LlmRouter {
     }
 
     pub fn new() -> Self {
-        let adapter = pick_adapter_from_config();
         let retry_policy = HttpRetryPolicy::from_env();
         let http = ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(
@@ -167,7 +167,7 @@ impl LlmRouter {
             ))
             .build();
         Self {
-            adapter,
+            adapter: Arc::new(crate::llm::llama_cpp_adapter::LlamaCppAdapter::new()),
             base_url: Config::llm_base_url(),
             api_key: Config::llm_api_key(),
             http,
@@ -176,8 +176,7 @@ impl LlmRouter {
     }
 
     pub fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, String> {
-        use react_core::resolved_config::LlmProvider;
-        let provider = LlmProvider::from_str_loose(&Config::llm_provider());
+        let provider = crate::runtime_settings::llm_provider().unwrap_or(LlmProvider::Null);
         let adapter: Arc<dyn Adapter> = match provider {
             LlmProvider::LlamaCpp | LlmProvider::Null => self.adapter.clone(),
             LlmProvider::Openai | LlmProvider::OpenaiCompat | LlmProvider::Http => pick_openai_adapter_for_model(&req.model),
@@ -427,8 +426,7 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
     }
 
     pub fn embed(&self, req: &EmbedRequest) -> Result<EmbedResponse, String> {
-        use react_core::resolved_config::LlmProvider;
-        let provider = LlmProvider::from_str_loose(&Config::llm_provider());
+        let provider = crate::runtime_settings::llm_provider().unwrap_or(LlmProvider::Null);
         let adapter: Arc<dyn Adapter> = match provider {
             LlmProvider::LlamaCpp | LlmProvider::Null => self.adapter.clone(),
             LlmProvider::Openai | LlmProvider::OpenaiCompat | LlmProvider::Http => pick_openai_adapter_for_model(&req.model),

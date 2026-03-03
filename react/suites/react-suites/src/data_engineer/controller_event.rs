@@ -64,15 +64,17 @@ impl ValidateObservationContract {
     }
 }
 
-fn failure_class_from_errors(errors: &[String]) -> ValidateFailureClass {
-    match crate::data_engineer::dbt_error::classify(errors) {
-        crate::data_engineer::dbt_error::DbtErrorClass::WarehouseConfig => {
+fn failure_class_from_validate_result(obj: &serde_json::Map<String, Value>) -> ValidateFailureClass {
+    let class = obj
+        .get("failure_class")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<react_core::providers::DbtFailureClass>(v).ok())
+        .unwrap_or(react_core::providers::DbtFailureClass::Unknown);
+    match class {
+        react_core::providers::DbtFailureClass::WarehouseConfig => {
             ValidateFailureClass::WarehouseConfig
         }
-        crate::data_engineer::dbt_error::DbtErrorClass::SqlFailure
-        | crate::data_engineer::dbt_error::DbtErrorClass::SqlOrModel => {
-            ValidateFailureClass::SqlOrRuntime
-        }
+        react_core::providers::DbtFailureClass::SqlOrRuntime => ValidateFailureClass::SqlOrRuntime,
         _ => ValidateFailureClass::Unknown,
     }
 }
@@ -249,7 +251,7 @@ pub fn attach_validate_outcome_v2(obs: &mut Value) -> Result<ValidateOutcomeV2, 
         })
         .unwrap_or_default();
     let logs = obj.get("logs").cloned().unwrap_or(Value::Null);
-    let class = failure_class_from_errors(&errors);
+    let class = failure_class_from_validate_result(obj);
     let failing_targets = if ok {
         Vec::new()
     } else {
@@ -617,6 +619,7 @@ mod tests {
             "ok": false,
             "compile_ok": false,
             "run_ok": false,
+            "failure_class": "warehouse_config",
             "errors": [
                 "Compilation Error in model stg_orders (models/staging/stg_orders.sql)"
             ],
@@ -628,5 +631,25 @@ mod tests {
             contract.outcome_v2.failing_targets[0].canonical_path,
             "models/staging/stg_orders.sql"
         );
+    }
+
+    #[test]
+    fn validate_contract_uses_typed_failure_class_field() {
+        let obs = serde_json::json!({
+            "ok": false,
+            "compile_ok": false,
+            "run_ok": false,
+            "failure_class": "warehouse_config",
+            "errors": [
+                "Compilation Error in model stg_orders (models/staging/stg_orders.sql)"
+            ],
+            "logs": {}
+        });
+        let contract = validate_contract_from_observation(obs).expect("contract");
+        let sig = contract
+            .outcome_v2
+            .failure_signature
+            .expect("expected failure signature");
+        assert_eq!(sig.class, ValidateFailureClass::WarehouseConfig);
     }
 }
