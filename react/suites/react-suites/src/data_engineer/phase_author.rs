@@ -1,28 +1,177 @@
 use super::*;
 use crate::data_engineer::control_flow::Phase;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrecheckAuthoringHandoff {
+    None,
+    SchemaRepair,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthorValidateTrigger {
+    WorkGroupValidate,
+    PlanTasksDone,
+}
+
+fn precheck_authoring_handoff(reason_code: Option<PhaseReasonCode>) -> PrecheckAuthoringHandoff {
+    if reason_code == Some(PhaseReasonCode::PrecheckFailed) {
+        PrecheckAuthoringHandoff::SchemaRepair
+    } else {
+        PrecheckAuthoringHandoff::None
+    }
+}
+
+fn decide_author_validate_trigger(
+    next_action: &crate::data_engineer::plan::AuthoringNextAction,
+    completion_snapshot: &crate::data_engineer::plan::PlanCompletionSnapshot,
+    last_validate_failed: bool,
+) -> Option<AuthorValidateTrigger> {
+    if last_validate_failed {
+        return None;
+    }
+    if matches!(
+        next_action,
+        crate::data_engineer::plan::AuthoringNextAction::Validate
+    ) {
+        return Some(AuthorValidateTrigger::WorkGroupValidate);
+    }
+    if completion_snapshot.completion_state() == crate::data_engineer::plan::PlanCompletionState::Complete {
+        return Some(AuthorValidateTrigger::PlanTasksDone);
+    }
+    None
+}
+
 async fn transition_plan_missing(
     thread_store: &ThreadStore,
     thread_id: &str,
     phase: Phase,
     track: TrackKind,
 ) -> Result<(), String> {
-    apply_phase_transition(
+    crate::data_engineer::phase_contract::commit_phase_decision(
         thread_store,
         thread_id,
         Some(phase),
-        track.plan_phase(),
-        control_flow::TransitionIntent::Loopback,
-        Some(PhaseReasonCode::PlanMissing),
-        Some(crate::data_engineer::phase_reason_detail::plan_missing(
-            track.as_str(),
-            format!(
-                "authoring entered without an active {} plan; routing back to planning",
-                track.as_str()
-            ),
-        )),
+        crate::data_engineer::phase_contract::PhaseDecision::loopback(
+            track.plan_phase(),
+            Some(PhaseReasonCode::PlanMissing),
+            Some(crate::data_engineer::phase_reason_detail::plan_missing(
+                track.as_str(),
+                format!(
+                    "authoring entered without an active {} plan; routing back to planning",
+                    track.as_str()
+                ),
+            )),
+        ),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data_engineer::control_flow::Phase;
+
+    #[test]
+    fn patch_based_repair_step_detection_is_explicit() {
+        assert!(is_patch_based_repair_step(
+            &crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget
+        ));
+        assert!(is_patch_based_repair_step(
+            &crate::data_engineer::progress_controller::RepairLadderStep::ReplaceContents
+        ));
+        assert!(!is_patch_based_repair_step(
+            &crate::data_engineer::progress_controller::RepairLadderStep::FsOp
+        ));
+        assert!(!is_patch_based_repair_step(
+            &crate::data_engineer::progress_controller::RepairLadderStep::Stop
+        ));
+    }
+
+    #[test]
+    fn missing_target_abort_reason_includes_structured_context() {
+        let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
+        st.hard_mutation_repair_mode = true;
+        st.attempt_count = 2;
+        st.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
+        let reason = build_missing_target_repair_abort_reason(
+            Phase::CleanseAuthor,
+            "models/staging/stg_test_raw_raw_order_items.sql",
+            Some(
+                "picnic/dev/example2/dbt/models/staging/stg_test_raw_raw_order_items.sql"
+                    .to_string(),
+            ),
+            &crate::data_engineer::progress_controller::RepairLadderStep::ReplaceContents,
+            &st,
+            &Some("compile failed".to_string()),
+            Some("not found".to_string()),
+        );
+        assert!(reason.contains("repair_target_content_unavailable"));
+        assert!(reason.contains("stg_test_raw_raw_order_items.sql"));
+        assert!(reason.contains("\"ladder_step\": \"ReplaceContents\""));
+        assert!(reason.contains("\"storage_read_error\": \"not found\""));
+    }
+
+    #[test]
+    fn precheck_handoff_is_typed() {
+        assert_eq!(
+            precheck_authoring_handoff(Some(PhaseReasonCode::PrecheckFailed)),
+            PrecheckAuthoringHandoff::SchemaRepair
+        );
+        assert_eq!(
+            precheck_authoring_handoff(Some(PhaseReasonCode::ValidateFail)),
+            PrecheckAuthoringHandoff::None
+        );
+        assert_eq!(
+            precheck_authoring_handoff(None),
+            PrecheckAuthoringHandoff::None
+        );
+    }
+
+    #[test]
+    fn author_validate_trigger_is_single_source() {
+        let incomplete = crate::data_engineer::plan::PlanCompletionSnapshot {
+            all_done: false,
+            pending_count: 1,
+            pending_refs: vec![],
+        };
+        let complete = crate::data_engineer::plan::PlanCompletionSnapshot {
+            all_done: true,
+            pending_count: 0,
+            pending_refs: vec![],
+        };
+        assert_eq!(
+            decide_author_validate_trigger(
+                &crate::data_engineer::plan::AuthoringNextAction::Validate,
+                &incomplete,
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            decide_author_validate_trigger(
+                &crate::data_engineer::plan::AuthoringNextAction::Validate,
+                &incomplete,
+                false
+            ),
+            Some(AuthorValidateTrigger::WorkGroupValidate)
+        );
+        assert_eq!(
+            decide_author_validate_trigger(
+                &crate::data_engineer::plan::AuthoringNextAction::None,
+                &complete,
+                false
+            ),
+            Some(AuthorValidateTrigger::PlanTasksDone)
+        );
+        assert_eq!(
+            decide_author_validate_trigger(
+                &crate::data_engineer::plan::AuthoringNextAction::AuthorSql(vec!["x".to_string()]),
+                &incomplete,
+                false
+            ),
+            None
+        );
+    }
 }
 
 async fn transition_plan_not_approved(
@@ -32,16 +181,17 @@ async fn transition_plan_not_approved(
     track: TrackKind,
     status: String,
 ) -> Result<(), String> {
-    apply_phase_transition(
+    crate::data_engineer::phase_contract::commit_phase_decision(
         thread_store,
         thread_id,
         Some(phase),
-        track.plan_phase(),
-        control_flow::TransitionIntent::Loopback,
-        Some(PhaseReasonCode::PlanNotApproved),
-        Some(crate::data_engineer::phase_reason_detail::plan_not_approved(
-            status,
-        )),
+        crate::data_engineer::phase_contract::PhaseDecision::loopback(
+            track.plan_phase(),
+            Some(PhaseReasonCode::PlanNotApproved),
+            Some(crate::data_engineer::phase_reason_detail::plan_not_approved(
+                status,
+            )),
+        ),
     )
     .await
 }
@@ -54,18 +204,19 @@ async fn transition_plan_semantic_invalid_loopback(
     plan_key: String,
     reason: String,
 ) -> Result<(), String> {
-    apply_phase_transition(
+    crate::data_engineer::phase_contract::commit_phase_decision(
         thread_store,
         thread_id,
         Some(phase),
-        track.plan_phase(),
-        control_flow::TransitionIntent::Loopback,
-        Some(PhaseReasonCode::PlanSemanticInvalid),
-        Some(crate::data_engineer::phase_reason_detail::plan_semantic_invalid(
-            plan_key,
-            reason,
-            DataEngineerSuite::churn_audit_acceptance_criteria(),
-        )),
+        crate::data_engineer::phase_contract::PhaseDecision::loopback(
+            track.plan_phase(),
+            Some(PhaseReasonCode::PlanSemanticInvalid),
+            Some(crate::data_engineer::phase_reason_detail::plan_semantic_invalid(
+                plan_key,
+                reason,
+                DataEngineerSuite::churn_audit_acceptance_criteria(),
+            )),
+        ),
     )
     .await
 }
@@ -78,14 +229,15 @@ async fn transition_to_track_validate_with_plan_key(
     reason_code: PhaseReasonCode,
     plan_key: String,
 ) -> Result<(), String> {
-    apply_phase_transition(
+    crate::data_engineer::phase_contract::commit_phase_decision(
         thread_store,
         thread_id,
         Some(phase),
-        track.validate_phase(),
-        control_flow::TransitionIntent::Forward,
-        Some(reason_code),
-        Some(crate::data_engineer::phase_reason_detail::plan_key(plan_key)),
+        crate::data_engineer::phase_contract::PhaseDecision::forward(
+            track.validate_phase(),
+            Some(reason_code),
+            Some(crate::data_engineer::phase_reason_detail::plan_key(plan_key)),
+        ),
     )
     .await
 }
@@ -94,12 +246,18 @@ async fn track_completion_snapshot_all_done(actx: &AgentCtx, is_cleanse: bool) -
     if is_cleanse {
         crate::data_engineer::plan::load_cleanse_plan(actx)
             .await
-            .map(|p| crate::data_engineer::plan::snapshot_cleanse_completion(&p).all_done)
+            .map(|p| {
+                crate::data_engineer::plan::snapshot_cleanse_completion(&p).completion_state()
+                    == crate::data_engineer::plan::PlanCompletionState::Complete
+            })
             .unwrap_or(false)
     } else {
         crate::data_engineer::plan::load_model_plan(actx)
             .await
-            .map(|p| crate::data_engineer::plan::snapshot_model_completion(&p).all_done)
+            .map(|p| {
+                crate::data_engineer::plan::snapshot_model_completion(&p).completion_state()
+                    == crate::data_engineer::plan::PlanCompletionState::Complete
+            })
             .unwrap_or(false)
     }
 }
@@ -139,18 +297,38 @@ fn build_repair_mode_context(
     plan_key: &str,
     last_validate_brief: &Option<String>,
     last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
+    ladder_step: &crate::data_engineer::progress_controller::RepairLadderStep,
+    attempt_count: usize,
     defer_schema_work: bool,
     all_tasks_done_but_validate_failed: bool,
 ) -> String {
     let kind = track.as_str();
+    let next_action_line = match ladder_step {
+        crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget => {
+            "Next action: call file with op='patch' targeting the failing path.".to_string()
+        }
+        crate::data_engineer::progress_controller::RepairLadderStep::ReplaceContents => {
+            "Next action: replace_contents step is active; rewrite the target file content with a single guarded patch.".to_string()
+        }
+        crate::data_engineer::progress_controller::RepairLadderStep::FsOp => {
+            "Next action: fs_op step is active; use file op='mv' or op='rm' only for filesystem corrections on the target path.".to_string()
+        }
+        crate::data_engineer::progress_controller::RepairLadderStep::Stop => {
+            "Repair ladder is at stop; do not continue autonomous edits without a manual fix.".to_string()
+        }
+    };
     let mut ctx = if all_tasks_done_but_validate_failed {
         format!(
-            "Approved {kind} plan (stored at: {plan_key}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with file op=patch|rm|mv; if patching, use Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+            "Approved {kind} plan (stored at: {plan_key}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\nRepair ladder state: step={:?}, attempt_count={}.\n{next_action_line}\n\nRepair targets (fix these DBT files directly; if patching, use Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+            ladder_step,
+            attempt_count,
             crate::data_engineer::patch_contract::single_file_patch_good_example_json()
         )
     } else {
         format!(
-            "Approved {kind} plan (stored at: {plan_key}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call file with a mutating op (patch|rm|mv) scoped to a repair target path.\n- If using patch: args.path + args.patch_text (Cursor/Aider hunks-only: '@@ ... @@'; no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
+            "Approved {kind} plan (stored at: {plan_key}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\nRepair ladder state: step={:?}, attempt_count={}.\n{next_action_line}\n- If using patch: args.path + args.patch_text (Cursor/Aider hunks-only: '@@ ... @@'; no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
+            ladder_step,
+            attempt_count,
             crate::data_engineer::patch_contract::single_file_patch_good_example_json()
         )
     };
@@ -164,6 +342,44 @@ fn build_repair_mode_context(
         );
     }
     ctx
+}
+
+fn is_patch_based_repair_step(
+    ladder: &crate::data_engineer::progress_controller::RepairLadderStep,
+) -> bool {
+    matches!(
+        ladder,
+        crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget
+            | crate::data_engineer::progress_controller::RepairLadderStep::ReplaceContents
+    )
+}
+
+fn build_missing_target_repair_abort_reason(
+    phase: crate::data_engineer::control_flow::Phase,
+    target_path: &str,
+    target_storage_key: Option<String>,
+    ladder: &crate::data_engineer::progress_controller::RepairLadderStep,
+    execution_state: &crate::data_engineer::progress_controller::ExecutionState,
+    last_validate_brief: &Option<String>,
+    target_read_error: Option<String>,
+) -> String {
+    let detail = serde_json::json!({
+        "reason": "repair_target_content_unavailable",
+        "phase": phase.as_str(),
+        "target_path": target_path,
+        "target_storage_key": target_storage_key,
+        "ladder_step": format!("{:?}", ladder),
+        "attempt_count": execution_state.attempt_count,
+        "repair_type": format!("{:?}", execution_state.repair_type),
+        "hard_mutation_repair_mode": execution_state.hard_mutation_repair_mode,
+        "last_validate_brief": last_validate_brief.clone(),
+        "storage_read_error": target_read_error,
+        "action": "repair aborted to avoid blind patch generation; provide target content path/state and retry",
+    });
+    format!(
+        "hard repair aborted: target content unavailable for patch-based repair. {}",
+        serde_json::to_string_pretty(&detail).unwrap_or_else(|_| detail.to_string())
+    )
 }
 
 impl DataEngineerSuite {
@@ -195,19 +411,16 @@ let track = if is_cleanse {
 } else {
     TrackKind::Model
 };
-// Treat schema precheck failures as "validate failed" for authoring guard behavior.
-// Otherwise we can bounce Author->Validate->Author without requiring a mutation.
-let entered_from_precheck_failed = execution_state.phase_reason_code
-    == Some(PhaseReasonCode::PrecheckFailed);
+// Treat precheck-failed handoff as an explicit typed schema-repair entry mode.
 let mut phase_guard = guard.clone();
-if entered_from_precheck_failed {
+let precheck_handoff = precheck_authoring_handoff(execution_state.phase_reason_code);
+if precheck_handoff == PrecheckAuthoringHandoff::SchemaRepair {
     phase_guard.last_validate_failed = true;
     phase_guard.mutated_since_fail = false;
 }
 let hard_mutation_repair_mode = execution_state.hard_mutation_repair_mode;
 let mut repair_type = execution_state.repair_type;
-if entered_from_precheck_failed {
-    // Precheck-driven re-entry is always a schema repair path.
+if precheck_handoff == PrecheckAuthoringHandoff::SchemaRepair {
     repair_type = crate::data_engineer::progress_controller::RepairType::Schema;
 }
 let sys = crate::util::time_context::with_time_context(if is_cleanse {
@@ -386,6 +599,8 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 &plan.plan_key,
                 last_validate_brief,
                 last_validate_failed_models,
+                &execution_state.ladder_step,
+                execution_state.attempt_count,
                 true,
                 false,
             );
@@ -500,16 +715,27 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                     Some(AllowedBatch::CleanseSchemaDatasetIds(ids.clone())),
                 )
             } else {
-                if matches!(
+                let completion_snapshot =
+                    crate::data_engineer::plan::snapshot_cleanse_completion(&plan);
+                if let Some(trigger) = decide_author_validate_trigger(
                     &next_action,
-                    crate::data_engineer::plan::AuthoringNextAction::Validate
+                    &completion_snapshot,
+                    phase_guard.last_validate_failed,
                 ) {
+                    let reason_code = match trigger {
+                        AuthorValidateTrigger::WorkGroupValidate => {
+                            PhaseReasonCode::WorkGroupValidate
+                        }
+                        AuthorValidateTrigger::PlanTasksDone => {
+                            PhaseReasonCode::PlanTasksDone
+                        }
+                    };
                     transition_to_track_validate_with_plan_key(
                         &thread_store,
                         thread_id,
                         phase,
                         track,
-                        PhaseReasonCode::WorkGroupValidate,
+                        reason_code,
                         plan.plan_key.clone(),
                     )
                     .await?;
@@ -524,6 +750,8 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         &plan.plan_key,
                         last_validate_brief,
                         last_validate_failed_models,
+                        &execution_state.ladder_step,
+                        execution_state.attempt_count,
                         false,
                         true,
                     );
@@ -531,17 +759,6 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         ctx,
                         None, // allow freeform file patching for targeted repair
                     )
-                } else if crate::data_engineer::plan::snapshot_cleanse_completion(&plan).all_done {
-                    transition_to_track_validate_with_plan_key(
-                        &thread_store,
-                        thread_id,
-                        phase,
-                        track,
-                        PhaseReasonCode::PlanTasksDone,
-                        plan.plan_key.clone(),
-                    )
-                    .await?;
-                    return Ok(PhaseExecutorOutcome::Continue);
                 } else {
                     let reason = "approved cleanse plan is not executable: no next work-group action while checklist work remains".to_string();
                     apply_guard_block(
@@ -705,6 +922,8 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 &plan.plan_key,
                 last_validate_brief,
                 last_validate_failed_models,
+                &execution_state.ladder_step,
+                execution_state.attempt_count,
                 true,
                 false,
             );
@@ -890,16 +1109,27 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 ctx.push_str("\nIMPORTANT: Do NOT call the SQL batch-authoring tool while schema checklist work remains; continue schema checklist repairs first.\n");
                 (ctx, None)
             } else {
-                if matches!(
+                let completion_snapshot =
+                    crate::data_engineer::plan::snapshot_model_completion(&plan);
+                if let Some(trigger) = decide_author_validate_trigger(
                     &next_action,
-                    crate::data_engineer::plan::AuthoringNextAction::Validate
+                    &completion_snapshot,
+                    phase_guard.last_validate_failed,
                 ) {
+                    let reason_code = match trigger {
+                        AuthorValidateTrigger::WorkGroupValidate => {
+                            PhaseReasonCode::WorkGroupValidate
+                        }
+                        AuthorValidateTrigger::PlanTasksDone => {
+                            PhaseReasonCode::PlanTasksDone
+                        }
+                    };
                     transition_to_track_validate_with_plan_key(
                         &thread_store,
                         thread_id,
                         phase,
                         track,
-                        PhaseReasonCode::WorkGroupValidate,
+                        reason_code,
                         plan.plan_key.clone(),
                     )
                     .await?;
@@ -913,21 +1143,12 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         &plan.plan_key,
                         last_validate_brief,
                         last_validate_failed_models,
+                        &execution_state.ladder_step,
+                        execution_state.attempt_count,
                         false,
                         true,
                     );
                     (ctx, None)
-                } else if crate::data_engineer::plan::snapshot_model_completion(&plan).all_done {
-                    transition_to_track_validate_with_plan_key(
-                        &thread_store,
-                        thread_id,
-                        phase,
-                        track,
-                        PhaseReasonCode::PlanTasksDone,
-                        plan.plan_key.clone(),
-                    )
-                    .await?;
-                    return Ok(PhaseExecutorOutcome::Continue);
                 } else {
                     let reason = "approved model plan is not executable: no next work-group action while checklist work remains".to_string();
                     apply_guard_block(
@@ -1300,6 +1521,9 @@ if hard_mutation_repair_mode
     let ladder = es.ladder_step.clone();
 
     let mut content = String::new();
+    let mut target_exists = false;
+    let mut target_storage_key: Option<String> = None;
+    let mut target_read_error: Option<String> = None;
     if !target.is_empty() {
         let base = actx
             .keyspace
@@ -1307,9 +1531,39 @@ if hard_mutation_repair_mode
             .trim_end_matches('/')
             .to_string();
         let key = format!("{}/{}", base, target);
-        if let Ok(bytes) = actx.storage.get_bytes(&key).await {
-            content = String::from_utf8_lossy(&bytes).to_string();
+        target_storage_key = Some(key.clone());
+        match actx.storage.get_bytes(&key).await {
+            Ok(bytes) => {
+                target_exists = true;
+                content = String::from_utf8_lossy(&bytes).to_string();
+            }
+            Err(e) => {
+                target_read_error = Some(e.to_string());
+            }
         }
+    }
+
+    // Hard fallback: patch-based repair without reliable target content causes blind hunk generation.
+    // Bubble a structured error immediately instead of looping on context-miss patches.
+    if is_patch_based_repair_step(&ladder) && !target_exists {
+        let reason = build_missing_target_repair_abort_reason(
+            phase,
+            &target,
+            target_storage_key,
+            &ladder,
+            &es,
+            last_validate_brief,
+            target_read_error,
+        );
+        apply_guard_block(
+            &thread_store,
+            thread_id,
+            phase,
+            GuardBlockKind::AuthoringToValidate,
+            reason.clone(),
+        )
+        .await?;
+        return Err(reason);
     }
 
     let envelope = crate::data_engineer::prompt_packets::PromptEnvelope {
@@ -1333,20 +1587,25 @@ if hard_mutation_repair_mode
             .map_err(|e| format!("invalid repair prompt envelope: {e}"))?;
 
     repair.push_str("\nRules:\n");
-    repair.push_str("- You MUST call file with a mutating op next (patch|rm|mv).\n");
+    repair.push_str("- You MUST call file with a mutating op next.\n");
     repair.push_str("- You MUST mutate ONLY the target file above.\n");
     repair.push_str("- Do NOT use placeholder patch headers like '@@ ... @@'; use real hunks with exact context from the current file content.\n");
     if target.ends_with(".yml") || target.ends_with(".yaml") {
         repair.push_str("- YAML repair rule: edit existing keys in place; do NOT append duplicate top-level keys like 'version:' or 'models:'.\n");
     }
     match ladder {
-        crate::data_engineer::progress_controller::RepairLadderStep::ReplaceFile => {
-            repair.push_str("- IMPORTANT: prefer a guarded single-file patch (args.path + args.patch_text; hunks-only). If patching cannot converge, you may use rm/mv but only against the target path.\n");
+        crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget => {
+            repair.push_str("- REQUIRED OP MODE: patch_target. Use file op='patch' only.\n");
+        }
+        crate::data_engineer::progress_controller::RepairLadderStep::ReplaceContents => {
+            repair.push_str("- REQUIRED OP MODE: replace_contents. Use file op='patch' only and rewrite target content decisively.\n");
+        }
+        crate::data_engineer::progress_controller::RepairLadderStep::FsOp => {
+            repair.push_str("- REQUIRED OP MODE: fs_op. Use file op='mv' or op='rm' only (no patch in this step).\n");
         }
         crate::data_engineer::progress_controller::RepairLadderStep::Stop => {
             repair.push_str("- STOP: prior repair attempts did not converge. Do not continue.\n");
         }
-        crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget => {}
     }
 
     let fence_lang = if target.ends_with(".yml") || target.ends_with(".yaml") {
@@ -1521,14 +1780,15 @@ match Agent::run_until_block_non_interactive(
             has_models,
         )
         .await;
-        apply_phase_transition(
+        crate::data_engineer::phase_contract::commit_phase_decision(
             &thread_store,
             thread_id,
             Some(phase),
-            to_phase,
-            control_flow::TransitionIntent::Forward,
-            Some(PhaseReasonCode::AuthoringComplete),
-            Some(reason_detail),
+            crate::data_engineer::phase_contract::PhaseDecision::forward(
+                to_phase,
+                Some(PhaseReasonCode::AuthoringComplete),
+                Some(reason_detail),
+            ),
         )
         .await?;
         return Ok(PhaseExecutorOutcome::Continue);

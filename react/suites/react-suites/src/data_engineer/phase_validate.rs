@@ -1,8 +1,83 @@
 use super::*;
 use crate::data_engineer::control_flow::Phase;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ValidatePassTransition {
+    ToAuthoring,
+    ToReview,
+}
+
 impl DataEngineerSuite {
-    async fn transition_after_validate_pass(
+    fn decide_validate_pass_transition(
+        completion_snapshot: Option<&crate::data_engineer::plan::PlanCompletionSnapshot>,
+    ) -> ValidatePassTransition {
+        match completion_snapshot
+            .map(|snap| snap.completion_state())
+            .unwrap_or(crate::data_engineer::plan::PlanCompletionState::Complete)
+        {
+            crate::data_engineer::plan::PlanCompletionState::Incomplete => {
+                ValidatePassTransition::ToAuthoring
+            }
+            crate::data_engineer::plan::PlanCompletionState::Complete => {
+                ValidatePassTransition::ToReview
+            }
+        }
+    }
+
+    async fn reduce_validate_pass_plan_state(
+        actx: &AgentCtx,
+        phase: Phase,
+    ) -> Result<
+        (
+            Option<crate::data_engineer::plan::PlanCompletionSnapshot>,
+            Option<String>,
+        ),
+        String,
+    > {
+        let mut completion_snapshot: Option<
+            crate::data_engineer::plan::PlanCompletionSnapshot,
+        > = None;
+        let mut active_plan_key: Option<String> = None;
+        if phase == Phase::CleanseValidate {
+            if let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan_any(actx).await
+            {
+                crate::data_engineer::plan::apply_cleanse_progress_event(
+                    &mut p,
+                    crate::data_engineer::plan::PlanProgressEvent::CleanseValidateDone,
+                );
+                let snap = crate::data_engineer::plan::snapshot_cleanse_completion(&p);
+                active_plan_key = Some(p.plan_key.clone());
+                if snap.all_done {
+                    p.status = crate::data_engineer::plan::PlanStatus::Completed;
+                } else {
+                    p.status = crate::data_engineer::plan::PlanStatus::Approved;
+                }
+                completion_snapshot = Some(snap);
+                crate::data_engineer::plan::save_cleanse_plan(actx, &p).await.map_err(|e| {
+                    format!("failed to persist cleanse plan validate-pass state: {e}")
+                })?;
+            }
+        } else if let Some(mut p) = crate::data_engineer::plan::load_model_plan_any(actx).await {
+            crate::data_engineer::plan::apply_model_progress_event(
+                &mut p,
+                crate::data_engineer::plan::PlanProgressEvent::ModelValidateDone,
+            );
+            let snap = crate::data_engineer::plan::snapshot_model_completion(&p);
+            active_plan_key = Some(p.plan_key.clone());
+            if snap.all_done {
+                p.status = crate::data_engineer::plan::PlanStatus::Completed;
+            } else {
+                p.status = crate::data_engineer::plan::PlanStatus::Approved;
+            }
+            completion_snapshot = Some(snap);
+            crate::data_engineer::plan::save_model_plan(actx, &p).await.map_err(|e| {
+                format!("failed to persist model plan validate-pass state: {e}")
+            })?;
+        }
+        Ok((completion_snapshot, active_plan_key))
+    }
+
+    async fn commit_validate_pass_transition(
         thread_store: &ThreadStore,
         thread_id: &str,
         phase: Phase,
@@ -11,10 +86,8 @@ impl DataEngineerSuite {
         dbt_validate_observation: serde_json::Value,
         signal: &str,
     ) -> Result<(), String> {
-        if completion_snapshot
-            .as_ref()
-            .map(|snap| !snap.all_done)
-            .unwrap_or(false)
+        if Self::decide_validate_pass_transition(completion_snapshot.as_ref())
+            == ValidatePassTransition::ToAuthoring
         {
             let reason = format!(
                 "{}: dbt_validate succeeded but plan checklist work is still pending; returning to authoring",
@@ -33,31 +106,32 @@ impl DataEngineerSuite {
             } else {
                 Phase::ModelAuthor
             };
-            apply_phase_transition(
+            crate::data_engineer::phase_contract::commit_phase_decision(
                 thread_store,
                 thread_id,
                 Some(phase),
-                to_phase,
-                control_flow::TransitionIntent::Loopback,
-                Some(PhaseReasonCode::ValidatePassToAuthoring),
-                Some(crate::data_engineer::phase_reason_detail::to_value(
-                    &crate::data_engineer::phase_reason_detail::ValidatePassToAuthoringDetail {
-                        signal: signal.to_string(),
-                        plan_key: active_plan_key,
-                        pending_count: completion_snapshot
-                            .as_ref()
-                            .map(|snap| snap.pending_count)
-                            .unwrap_or(0),
-                        pending_refs: completion_snapshot
-                            .as_ref()
-                            .map(|snap| snap.pending_refs.clone())
-                            .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
-                            .unwrap_or(serde_json::Value::Array(vec![])),
-                        dbt_validate_observation,
-                        next_action: "resume_authoring_for_remaining_plan_work".to_string(),
-                        audit_acceptance: Self::churn_audit_acceptance_criteria(),
-                    },
-                )),
+                crate::data_engineer::phase_contract::PhaseDecision::loopback(
+                    to_phase,
+                    Some(PhaseReasonCode::ValidatePassToAuthoring),
+                    Some(crate::data_engineer::phase_reason_detail::to_value(
+                        &crate::data_engineer::phase_reason_detail::ValidatePassToAuthoringDetail {
+                            signal: signal.to_string(),
+                            plan_key: active_plan_key,
+                            pending_count: completion_snapshot
+                                .as_ref()
+                                .map(|snap| snap.pending_count)
+                                .unwrap_or(0),
+                            pending_refs: completion_snapshot
+                                .as_ref()
+                                .map(|snap| snap.pending_refs.clone())
+                                .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
+                                .unwrap_or(serde_json::Value::Array(vec![])),
+                            dbt_validate_observation,
+                            next_action: "resume_authoring_for_remaining_plan_work".to_string(),
+                            audit_acceptance: Self::churn_audit_acceptance_criteria(),
+                        },
+                    )),
+                ),
             )
             .await?;
             return Ok(());
@@ -73,19 +147,20 @@ impl DataEngineerSuite {
             .await
             .map(|l| l.steps.len().saturating_sub(1))
             .unwrap_or(0);
-        apply_phase_transition(
+        crate::data_engineer::phase_contract::commit_phase_decision(
             thread_store,
             thread_id,
             Some(phase),
-            to_phase,
-            control_flow::TransitionIntent::Forward,
-            Some(PhaseReasonCode::ValidatePassToReview),
-            Some(crate::data_engineer::phase_reason_detail::to_value(
-                &crate::data_engineer::phase_reason_detail::ValidatePassToReviewDetail {
-                    dbt_validate_observation,
-                    dbt_validate_step_idx: trigger_step_idx,
-                },
-            )),
+            crate::data_engineer::phase_contract::PhaseDecision::forward(
+                to_phase,
+                Some(PhaseReasonCode::ValidatePassToReview),
+                Some(crate::data_engineer::phase_reason_detail::to_value(
+                    &crate::data_engineer::phase_reason_detail::ValidatePassToReviewDetail {
+                        dbt_validate_observation,
+                        dbt_validate_step_idx: trigger_step_idx,
+                    },
+                )),
+            ),
         )
         .await?;
         Ok(())
@@ -101,19 +176,10 @@ impl DataEngineerSuite {
             return Ok(false);
         }
         let actx = Self::agent_tool_ctx(thread_id, sctx);
-        let mut completion_snapshot: Option<crate::data_engineer::plan::PlanCompletionSnapshot> = None;
-        let mut active_plan_key: Option<String> = None;
-        if phase == Phase::CleanseValidate {
-            if let Some(p) = crate::data_engineer::plan::load_cleanse_plan_any(&actx).await {
-                completion_snapshot = Some(crate::data_engineer::plan::snapshot_cleanse_completion(&p));
-                active_plan_key = Some(p.plan_key.clone());
-            }
-        } else if let Some(p) = crate::data_engineer::plan::load_model_plan_any(&actx).await {
-            completion_snapshot = Some(crate::data_engineer::plan::snapshot_model_completion(&p));
-            active_plan_key = Some(p.plan_key.clone());
-        }
+        let (completion_snapshot, active_plan_key) =
+            Self::reduce_validate_pass_plan_state(&actx, phase).await?;
 
-        Self::transition_after_validate_pass(
+        Self::commit_validate_pass_transition(
             thread_store,
             thread_id,
             phase,
@@ -195,14 +261,15 @@ if let Err(e) =
     } else {
         Phase::ModelAuthor
     };
-    apply_phase_transition(
+    crate::data_engineer::phase_contract::commit_phase_decision(
         &thread_store,
         thread_id,
         Some(phase),
-        to_phase,
-        control_flow::TransitionIntent::Loopback,
-        Some(PhaseReasonCode::PrecheckFailed),
-        Some(serde_json::json!({ "error": e })),
+        crate::data_engineer::phase_contract::PhaseDecision::loopback(
+            to_phase,
+            Some(PhaseReasonCode::PrecheckFailed),
+            Some(serde_json::json!({ "error": e })),
+        ),
     )
     .await?;
     return Ok(PhaseExecutorOutcome::Continue);
@@ -228,14 +295,15 @@ if let Err(e) =
     } else {
         Phase::ModelAuthor
     };
-    apply_phase_transition(
+    crate::data_engineer::phase_contract::commit_phase_decision(
         &thread_store,
         thread_id,
         Some(phase),
-        to_phase,
-        control_flow::TransitionIntent::Loopback,
-        Some(PhaseReasonCode::PrecheckFailed),
-        Some(serde_json::json!({ "error": e })),
+        crate::data_engineer::phase_contract::PhaseDecision::loopback(
+            to_phase,
+            Some(PhaseReasonCode::PrecheckFailed),
+            Some(serde_json::json!({ "error": e })),
+        ),
     )
     .await?;
     return Ok(PhaseExecutorOutcome::Continue);
@@ -489,54 +557,10 @@ if matches!(
         })?;
     }
 
-    // Mark the active plan completed only when validate passes AND checklist execution is complete.
-    let mut completion_snapshot: Option<
-        crate::data_engineer::plan::PlanCompletionSnapshot,
-    > = None;
-    let mut active_plan_key: Option<String> = None;
-    if phase == Phase::CleanseValidate {
-        if let Some(mut p) =
-            crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
-        {
-            crate::data_engineer::plan::apply_cleanse_progress_event(
-                &mut p,
-                crate::data_engineer::plan::PlanProgressEvent::CleanseValidateDone,
-            );
-            let snap = crate::data_engineer::plan::snapshot_cleanse_completion(&p);
-            active_plan_key = Some(p.plan_key.clone());
-            if snap.all_done {
-                p.status = crate::data_engineer::plan::PlanStatus::Completed;
-            } else {
-                p.status = crate::data_engineer::plan::PlanStatus::Approved;
-            }
-            completion_snapshot = Some(snap);
-            crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
-                .await
-                .map_err(|e| format!("failed to persist cleanse plan validate-pass state: {e}"))?;
-        }
-    } else {
-        if let Some(mut p) =
-            crate::data_engineer::plan::load_model_plan_any(&actx).await
-        {
-            crate::data_engineer::plan::apply_model_progress_event(
-                &mut p,
-                crate::data_engineer::plan::PlanProgressEvent::ModelValidateDone,
-            );
-            let snap = crate::data_engineer::plan::snapshot_model_completion(&p);
-            active_plan_key = Some(p.plan_key.clone());
-            if snap.all_done {
-                p.status = crate::data_engineer::plan::PlanStatus::Completed;
-            } else {
-                p.status = crate::data_engineer::plan::PlanStatus::Approved;
-            }
-            completion_snapshot = Some(snap);
-            crate::data_engineer::plan::save_model_plan(&actx, &p)
-                .await
-                .map_err(|e| format!("failed to persist model plan validate-pass state: {e}"))?;
-        }
-    }
+    let (completion_snapshot, active_plan_key) =
+        Self::reduce_validate_pass_plan_state(&actx, phase).await?;
 
-    Self::transition_after_validate_pass(
+    Self::commit_validate_pass_transition(
         &thread_store,
         thread_id,
         phase,
@@ -737,24 +761,57 @@ if phase == Phase::CleanseValidate {
             })?;
     }
 }
-apply_phase_transition(
+
+crate::data_engineer::phase_contract::commit_phase_decision(
     &thread_store,
     thread_id,
     Some(phase),
-    to_phase,
-    control_flow::TransitionIntent::Loopback,
-    Some(PhaseReasonCode::ValidateFail),
-    Some(crate::data_engineer::phase_reason_detail::to_value(
-        &crate::data_engineer::phase_reason_detail::ValidateFailDetail {
-            dbt_validate_observation: obs.observation.clone(),
-            dbt_validate_step_idx: trigger_step_idx,
-            errors: errs,
-            facts_bundle: serde_json::to_value(&facts_bundle).unwrap_or(serde_json::Value::Null),
-        },
-    )),
+    crate::data_engineer::phase_contract::PhaseDecision::loopback(
+        to_phase,
+        Some(PhaseReasonCode::ValidateFail),
+        Some(crate::data_engineer::phase_reason_detail::to_value(
+            &crate::data_engineer::phase_reason_detail::ValidateFailDetail {
+                dbt_validate_observation: obs.observation.clone(),
+                dbt_validate_step_idx: trigger_step_idx,
+                errors: errs,
+                facts_bundle: serde_json::to_value(&facts_bundle).unwrap_or(serde_json::Value::Null),
+            },
+        )),
+    ),
 )
 .await?;
 return Ok(PhaseExecutorOutcome::Continue);
                 
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_pass_transition_decision_is_typed() {
+        let incomplete = crate::data_engineer::plan::PlanCompletionSnapshot {
+            all_done: false,
+            pending_count: 2,
+            pending_refs: vec![],
+        };
+        let complete = crate::data_engineer::plan::PlanCompletionSnapshot {
+            all_done: true,
+            pending_count: 0,
+            pending_refs: vec![],
+        };
+        assert_eq!(
+            DataEngineerSuite::decide_validate_pass_transition(Some(&incomplete)),
+            ValidatePassTransition::ToAuthoring
+        );
+        assert_eq!(
+            DataEngineerSuite::decide_validate_pass_transition(Some(&complete)),
+            ValidatePassTransition::ToReview
+        );
+        assert_eq!(
+            DataEngineerSuite::decide_validate_pass_transition(None),
+            ValidatePassTransition::ToReview
+        );
     }
 }

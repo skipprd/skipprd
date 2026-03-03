@@ -662,4 +662,43 @@ mod tests {
             "phase_preflight should use shared phase decision constructors"
         );
     }
+
+    #[test]
+    fn validate_and_author_use_phase_contract_transition_seam() {
+        let validate_src = include_str!("phase_validate.rs");
+        assert!(
+            validate_src.contains("commit_phase_decision"),
+            "phase_validate should commit transitions through phase contract helpers"
+        );
+        assert!(
+            !validate_src.contains("apply_phase_transition("),
+            "phase_validate should not bypass commit_phase_decision"
+        );
+        assert!(
+            validate_src.contains("reduce_validate_pass_plan_state"),
+            "phase_validate should route normal and reconcile validate-pass through one reducer"
+        );
+        assert!(
+            validate_src.matches("reduce_validate_pass_plan_state(&actx, phase)").count() >= 2,
+            "phase_validate should call the validate-pass reducer from both reconcile and normal pass paths"
+        );
+        assert!(
+            validate_src.matches("commit_validate_pass_transition").count() >= 2,
+            "phase_validate should commit reconcile and normal validate-pass transitions through one helper"
+        );
+
+        let author_src = include_str!("phase_author.rs");
+        assert!(
+            author_src.contains("commit_phase_decision"),
+            "phase_author should commit transitions through phase contract helpers"
+        );
+        assert!(
+            !author_src.contains("apply_phase_transition("),
+            "phase_author should not bypass commit_phase_decision"
+        );
+        assert!(
+            author_src.contains("decide_author_validate_trigger"),
+            "phase_author should use a single author->validate decision helper"
+        );
+    }
 }

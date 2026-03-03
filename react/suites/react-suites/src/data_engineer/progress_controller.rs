@@ -114,8 +114,9 @@ impl Default for ExecutionMode {
 #[serde(rename_all = "snake_case")]
 pub enum RepairLadderStep {
     PatchTarget = 1,
-    ReplaceFile = 2,
-    Stop = 3,
+    ReplaceContents = 2,
+    FsOp = 3,
+    Stop = 4,
 }
 
 impl Default for RepairLadderStep {
@@ -1007,10 +1008,11 @@ impl ExecutionState {
             return;
         }
         repair.consecutive_noop_patches = repair.consecutive_noop_patches.saturating_add(1);
-        repair.ladder_step = if repair.attempt_count >= 2 {
-            RepairLadderStep::Stop
-        } else {
-            RepairLadderStep::ReplaceFile
+        repair.ladder_step = match repair.ladder_step {
+            RepairLadderStep::PatchTarget => RepairLadderStep::ReplaceContents,
+            RepairLadderStep::ReplaceContents => RepairLadderStep::FsOp,
+            RepairLadderStep::FsOp => RepairLadderStep::Stop,
+            RepairLadderStep::Stop => RepairLadderStep::Stop,
         };
         repair.stall_count = repair.stall_count.saturating_add(1);
         repair.last_progress_delta = Some(ProgressDelta {
@@ -1369,8 +1371,8 @@ impl ExecutionState {
                 "repair ladder advanced while hard_mutation_repair_mode is disabled".to_string(),
             );
         }
-        if repair.ladder_step == RepairLadderStep::Stop && repair.attempt_count < 2 {
-            violations.push("repair ladder reached stop before two attempts".to_string());
+        if repair.ladder_step == RepairLadderStep::Stop && repair.attempt_count < 3 {
+            violations.push("repair ladder reached stop before three attempts".to_string());
         }
         if let Some(single_target) = repair
             .single_target_repair_path
@@ -1998,9 +2000,9 @@ mod tests {
         st.hard_mutation_repair_mode = true;
         st.repair_type = RepairType::SqlTarget;
         st.ladder_step = RepairLadderStep::Stop;
-        st.attempt_count = 1;
+        st.attempt_count = 2;
         let err = st.validate_invariants().expect_err("invariants must fail");
-        assert!(err.contains("repair ladder reached stop before two attempts"));
+        assert!(err.contains("repair ladder reached stop before three attempts"));
     }
 
     #[test]

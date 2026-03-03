@@ -37,6 +37,23 @@ pub struct PlanCompletionSnapshot {
     pub pending_refs: Vec<PlanPendingRef>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanCompletionState {
+    Complete,
+    Incomplete,
+}
+
+impl PlanCompletionSnapshot {
+    pub fn completion_state(&self) -> PlanCompletionState {
+        if self.all_done {
+            PlanCompletionState::Complete
+        } else {
+            PlanCompletionState::Incomplete
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlanProgressEvent {

@@ -407,7 +407,7 @@ impl DataEngineerSuite {
                             let is_repair_mutation =
                                 crate::data_engineer::tool_ops::is_file_repair_mutation_op(&args);
                             if self.single_target_path.is_some() && !is_repair_mutation {
-                                return Err("file is in deterministic single-target repair mode; only op='patch'|'rm'|'mv' is allowed.".to_string());
+                                return Err("file is in deterministic single-target repair mode; only repair mutation ops are allowed.".to_string());
                             }
                             if self.single_target_path.is_none()
                                 && !is_repair_mutation
@@ -470,36 +470,55 @@ impl DataEngineerSuite {
                                                 want, want
                                             ));
                                         }
-                                        crate::data_engineer::progress_controller::RepairLadderStep::ReplaceFile => {
-                                            if op == "patch" {
-                                                // Hard cutover: Cursor/Aider hunks-only patches only.
-                                                let patch_text = args
-                                                    .get("patch_text")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("");
-                                                let has_patch_text = !patch_text.trim().is_empty()
-                                                    && patch_text.trim_start().starts_with("@@");
-                                                let guard_path_ok = args
-                                                    .get("path")
-                                                    .and_then(|v| v.as_str())
-                                                    .map(|p| p.trim() == want)
-                                                    .unwrap_or(false);
-                                                if patch_text.contains("@@ ... @@") {
-                                                    return Err(format!(
-                                                        "deterministic repair ladder step for '{}': placeholder hunk header '@@ ... @@' is not allowed. Use real hunks with exact context lines from the current file content.",
-                                                        want
-                                                    ));
-                                                }
-                                                if !has_patch_text || !guard_path_ok {
-                                                    return Err(format!(
-                                                        "deterministic repair ladder step requires a guarded single-file patch for '{}': args must include path='{}' + patch_text starting with '@@' (Cursor/Aider hunks-only; no ---/+++ headers).",
-                                                        want,
-                                                        want
-                                                    ));
-                                                }
+                                        crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget => {
+                                            if op != "patch" {
+                                                return Err(format!(
+                                                    "deterministic repair ladder step for '{}': patch_target requires op='patch'.",
+                                                    want
+                                                ));
                                             }
                                         }
-                                        crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget => {}
+                                        crate::data_engineer::progress_controller::RepairLadderStep::ReplaceContents => {
+                                            if op != "patch" {
+                                                return Err(format!(
+                                                    "deterministic repair ladder step for '{}': replace_contents requires op='patch'.",
+                                                    want,
+                                                ));
+                                            }
+                                            // Hard cutover: Cursor/Aider hunks-only patches only.
+                                            let patch_text = args
+                                                .get("patch_text")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            let has_patch_text = !patch_text.trim().is_empty()
+                                                && patch_text.trim_start().starts_with("@@");
+                                            let guard_path_ok = args
+                                                .get("path")
+                                                .and_then(|v| v.as_str())
+                                                .map(|p| p.trim() == want)
+                                                .unwrap_or(false);
+                                            if patch_text.contains("@@ ... @@") {
+                                                return Err(format!(
+                                                    "deterministic repair ladder step for '{}': placeholder hunk header '@@ ... @@' is not allowed. Use real hunks with exact context lines from the current file content.",
+                                                    want
+                                                ));
+                                            }
+                                            if !has_patch_text || !guard_path_ok {
+                                                return Err(format!(
+                                                    "deterministic repair ladder step requires a guarded single-file patch for '{}': args must include path='{}' + patch_text starting with '@@' (Cursor/Aider hunks-only; no ---/+++ headers).",
+                                                    want,
+                                                    want
+                                                ));
+                                            }
+                                        }
+                                        crate::data_engineer::progress_controller::RepairLadderStep::FsOp => {
+                                            if op != "rm" && op != "mv" {
+                                                return Err(format!(
+                                                    "deterministic repair ladder step for '{}': fs_op requires op='rm' or op='mv'.",
+                                                    want
+                                                ));
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -665,7 +684,7 @@ impl DataEngineerSuite {
                     tool_lines.extend_from_slice(&[
                         "- file(args:{op:\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
                         "  - op=patch args: {path:string, patch_text:string} (Cursor/Aider hunks-only; patch_text starts with '@@' and MUST NOT include ---/+++ or diff --git)".to_string(),
-                        "  - op=rm args: {path:string, expected_sha256?:string}".to_string(),
+                        "  - op=rm args: {path:string, expected_sha256?:string} (allowed only in fs_op ladder step)".to_string(),
                         "  - op=mv args: {from:string, to:string, expected_sha256?:string}".to_string(),
                     ]);
                     if allow_probe_sql {

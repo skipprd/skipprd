@@ -1,232 +1,243 @@
-# React Architecture Review
+# React Simplification Audit (Core + Suites + Modules)
+
+Date: 2026-03-03
+
+## Scope and constraints
+
+- Audited handwritten Rust under:
+  - `react/core/src`
+  - `react/suites/react-suites/src`
+  - `react/modules/*/src`
+- Excluded generated code.
+- Cross-checked cleanup proposals against `ask-ws.yaml` contract constraints.
+- Priority lens: compile-time guarantees, DRY, simplicity, and canonical mutation paths.
+
+## Executive summary
+
+The architecture is significantly cleaner than before, but not yet "as simple as possible."
+The main remaining complexity comes from:
+
+1. wide optional runtime contexts (`SuiteCtx`/`AgentCtx` style),
+2. duplicated orchestration skeletons (especially cleanse/model track logic),
+3. thin indirection wrappers that add seams without adding invariants,
+4. a few canonical-path leaks (multiple equivalent state write/mutation entrypoints).
+
+Most high-impact simplification is still available without changing behavior.
+
+## Highest-impact, lowest-risk candidates
+
+### Core
+
+1) `react/core/src/keyspace.rs`
+- Issue: repeated temporary `DefaultKeyspace { bucket: "" }` delegation in `LocalKeyspace`.
+- Why complex: large duplication and harder key-layout evolution.
+- Cleanup: extract shared key-layout helpers or hold embedded `DefaultKeyspace` once.
+- Risk: low.
+- Impact: medium.
+
+2) `react/core/src/providers/warehouse.rs`
+- Issue: duplicated `"warehouse provider not configured"` result branches.
+- Why complex: repetitive error boilerplate.
+- Cleanup: helper `not_configured<T>() -> Result<T, String>`.
+- Risk: low.
+- Impact: low.
+
+3) `react/core/src/session/mod.rs`
+- Issue: repeated "known variants + Other(String)" enum serde pattern.
+- Why complex: repeated conversion/serde glue for multiple enums.
+- Cleanup: macro/helper for extensible enum serde pattern.
+- Risk: low.
+- Impact: medium.
+
+4) `react/core/src/schema_registry.rs`
+- Issue: validator compilation cost repeated at call sites.
+- Why complex: runtime cost and repeated initialization logic.
+- Cleanup: cache compiled schema validators in `OnceCell`.
+- Risk: low.
+- Impact: low to medium.
+
+### Suites
+
+5) `react/suites/react-suites/src/data_engineer/phase_validate.rs`
+- Issue: repeated validate tool start/end recording and branch ceremony.
+- Why complex: telemetry/plumbing drift risk across validate modes.
+- Cleanup: shared helper `run_and_record_validate_step(...)`.
+- Risk: low.
+- Impact: high.
+
+6) `react/suites/react-suites/src/data_engineer/phase_publish.rs`
+- Issue: duplicated publish success/failure/retry transition patterns.
+- Why complex: policy changes must be synchronized in parallel blocks.
+- Cleanup: shared publish observation + retry helper(s).
+- Risk: low to medium.
+- Impact: high.
+
+7) `react/suites/react-suites/src/data_engineer/tool_registry_builder.rs`
+- Issue: inline file-tool wrappers and repeated gating logic.
+- Why complex: policy spread and subtle divergence risk.
+- Cleanup: centralize file tool policies behind typed enum (`ReadOnly`, `MutationOnly`, `SingleTargetMutation`).
+- Risk: low to medium.
+- Impact: high.
+
+8) `react/suites/react-suites/src/data_engineer/phase_actions.rs` + `transition_dispatcher.rs`
+- Issue: thin wrapper indirection.
+- Why complex: additional seam with little invariant ownership.
+- Cleanup: remove wrapper layer or make it sole typed transition facade.
+- Risk: low.
+- Impact: medium.
+
+9) `react/suites/react-suites/src/data_engineer/loopback_intents.rs` + `phase_gate.rs`
+- Issue: passthrough wrapper pattern.
+- Why complex: lookup/navigation overhead for little additional value.
+- Cleanup: merge intent predicates with gate evaluator; keep state mutation helpers only if they own transaction semantics.
+- Risk: low.
+- Impact: medium.
+
+### Modules
+
+10) `react/modules/provider-athena/src/athena_impl.rs` + `react/modules/provider-bigquery/src/lib.rs`
+- Issue: duplicate SQL alias-reuse detector logic.
+- Why complex: same lint behavior implemented twice.
+- Cleanup: move shared SQL lint helper to core/provider-common utility.
+- Risk: low.
+- Impact: high.
+
+11) `react/modules/provider-dbt/src/dbt_impl.rs`
+- Issue: duplicated command runner logic (`host` vs `docker` labeled command variants).
+- Why complex: process execution/logging semantics duplicated.
+- Cleanup: single command runner abstraction with pluggable command builder.
+- Risk: medium.
+- Impact: high.
+
+12) `react/modules/provider-dbt/src/dbt_impl.rs`
+- Issue: stringly `DbtRunnerConfig.mode`.
+- Why complex: runtime typo class.
+- Cleanup: enum `DbtRunnerMode { Host, Docker }`.
+- Risk: low.
+- Impact: medium.
 
-## Scope
+13) `react/modules/provider-vector-lance/src/lance_store.rs` + `global_lance_store.rs`
+- Issue: near-duplicate upsert/query implementations.
+- Why complex: behavior drift risk (already slight `meta` handling differences).
+- Cleanup: extract shared table IO module; keep thin wrappers.
+- Risk: medium.
+- Impact: high.
 
-This review summarizes current architecture complexity in:
+## Medium/high-risk structural simplifications
 
-- `react/core`
-- `react/suites/react-suites` (especially `data_engineer`)
+1) `react/core/src/suite.rs`
+- Issue: `SuiteCtx` optional-provider bag encourages runtime checks and illegal states.
+- Cleanup: introduce suite-specific typed contexts with required providers.
+- Risk: medium.
+- Impact: very high.
 
-It emphasizes **safe, high-impact** changes that reduce code and simplify behavior after the phase-gate refactor.
+2) `react/core/src/scope.rs`
+- Issue: raw `String` scope ids.
+- Cleanup: validated newtypes (`TenantId`, `WorkspaceId`, `ProjectId`) at construction boundary.
+- Risk: medium.
+- Impact: high.
 
-## Current State (Blunt Assessment)
-
-### Overall
-
-- `react-core`: **High architectural complexity**
-- `react-suites`: **Medium-high**
-- `data_engineer`: **High**
-
-### Why
-
-- Large "god modules" with mixed concerns.
-- Duplicate cleanse/model execution shapes.
-- Multiple state representations and many control details carried via JSON payloads.
-- Residual layering overlap despite successful phase-gate cutover.
-
-## Highest-Impact Smells
-
-### 1) Oversized orchestration modules
-
-- `react/suites/react-suites/src/data_engineer/mod.rs`
-- `react/suites/react-suites/src/data_engineer/plan.rs`
-- `react/core/src/session/mod.rs`
-- `react/core/src/agent/mod.rs`
-
-Risk:
-
-- Broad blast radius for any change.
-- Hard to reason about invariants.
-- Refactor confidence depends on broad regression testing.
-
-### 2) Cleanse/model duplication
-
-Paths are structurally parallel but implemented separately in many places.
-
-Risk:
-
-- Bug fixes must be duplicated.
-- Drift between tracks is likely.
-
-### 3) Wide mutable state surface (`ExecutionState`)
-
-Many orthogonal concerns live in one evolving state object.
-
-Risk:
-
-- Hidden coupling.
-- Invalid or stale combinations are easier to produce.
-
-### 4) String/JSON-heavy control metadata
-
-- Transitions still depend on many `reason_detail: Option<Value>` payload shapes.
-
-Risk:
-
-- Compile-time safety reduced.
-- Schema drift and runtime-only failures during refactors.
-
-### 5) Boundary leakage between pure flow and runtime side effects
-
-- Some modules mix phase logic, tool orchestration, persistence, and error shaping.
-
-Risk:
-
-- Hard to isolate and test deterministic behavior.
-- Hard to delete old paths cleanly.
-
-## Safe + High Impact Changes (Recommended First)
-
-These are ordered to maximize simplification with minimal regression risk.
-
-### A) Split `data_engineer/mod.rs` into phase executors
-
-Safety: **High**  
-Impact: **High**
-
-What to do:
-
-- Move phase-specific branches into:
-  - `phase_plan.rs`
-  - `phase_author.rs`
-  - `phase_validate.rs`
-  - `phase_publish.rs`
-- Keep `mod.rs` as wiring and dispatch only.
-
-Why safe:
-
-- Mechanical extraction with behavior parity.
-- Existing tests can be reused without semantic changes.
-
-Code reduction effect:
-
-- Significant local complexity reduction in `mod.rs`.
-
-### B) Consolidate cleanse/model runner skeleton
-
-Safety: **High**  
-Impact: **High**
-
-What to do:
-
-- Introduce a shared track executor shape using `TrackKind`.
-- Keep track-specific data loading/prompt details as parameters.
-- Remove mirrored control-flow branches where structure is identical.
-
-Why safe:
-
-- Mostly deduplication of already equivalent logic.
-- Leverages current typed phase-gate and transition APIs.
-
-Code reduction effect:
-
-- Removes duplicated branch trees and repeated transition payload code.
-
-### C) Type reason-detail payloads for control-critical transitions
-
-Safety: **Medium**  
-Impact: **High**
-
-What to do:
-
-- Add typed `PhaseReasonDetail` variants for key reason codes.
-- Keep freeform JSON only for non-critical diagnostic attachments.
-
-Why high impact:
-
-- Compile-time guarantees for transition metadata.
-- Reduces runtime schema drift risk.
-
-Why medium safety:
-
-- Cross-cutting signature changes across many call sites.
-
-### D) Decompose `ExecutionState` into typed sub-states
-
-Safety: **Medium**  
-Impact: **High**
-
-What to do:
-
-- Split into nested structs:
-  - `PhaseState`
-  - `RepairState`
-  - `PublishState`
-  - `ProbeState`
-  - `ManifestState`
-- Keep event reducer central, but target smaller state mutation surfaces.
-
-Why high impact:
-
-- Clear invariants.
-- Lower coupling between unrelated transitions.
-
-Why medium safety:
-
-- Requires careful migration of event application and serialization.
-
-### E) `react-core` state representation simplification
-
-Safety: **Medium**  
-Impact: **High**
-
-What to do:
-
-- Reduce duplicate run-state representations in core where feasible.
-- Keep one canonical path for runtime-critical state derivation/projection.
-
-Why high impact:
-
-- Eliminates a class of drift bugs.
-
-Why medium safety:
-
-- Touches foundational runtime behavior.
-
-## Lower-Risk Cleanup (Do Anytime)
-
-### 1) Delete thin wrappers and stale compatibility paths
-
-Safety: **High**  
-Impact: **Medium**
-
-- Continue removing transitional helpers once no longer needed.
-- Keep only one entrypoint per operation (transition, block, state mutation).
-
-### 2) Split oversized tool files by concern
-
-Safety: **High**  
-Impact: **Medium**
-
-- Separate parsing/policy/rewrite logic from tool adapters.
-- Improves readability and test targeting.
-
-### 3) Keep enforcement tests for legacy-path prevention
-
-Safety: **High**  
-Impact: **Medium**
-
-- Preserve source-level checks that prevent reintroduction of direct legacy paths.
-
-## Suggested Execution Order
-
-1. Extract phase executors from `mod.rs` (A).
-2. Consolidate cleanse/model runner skeleton (B).
-3. Delete remaining compatibility wrappers and flatten boundaries.
-4. Introduce typed reason details (C).
-5. Decompose `ExecutionState` (D).
-6. Tackle `react-core` representation simplification (E).
-
-## What Not To Do
-
-- Do not add new abstraction layers that simply forward calls.
-- Do not mix behavior changes with structural extraction in one step.
-- Do not rely on runtime JSON shape checks where enums can encode invariants.
-
-## Success Criteria
-
-- Fewer LOC and fewer branch points in orchestration files.
-- No duplicated cleanse/model control skeletons.
-- Typed transition metadata for control-critical paths.
-- Smaller state mutation surface with explicit sub-state ownership.
-- Equivalent behavior validated by focused regression suites.
+3) `react/core/src/session/store_io.rs` + `materialization.rs`
+- Issue: multiple public thread-state write semantics and fallback key behavior.
+- Cleanup:
+  - fail fast on key build errors (remove `invalid/...` fallback),
+  - reduce public write paths to one canonical API with explicit write mode internalized.
+- Risk: medium.
+- Impact: very high.
+
+4) `react/suites/react-suites/src/data_engineer/phase_plan.rs` + `phase_author.rs`
+- Issue: mirrored cleanse/model skeletons with track-specific branch trees.
+- Cleanup: typed `TrackOps` adapter so one shared flow owns orchestration and track strategy owns deltas.
+- Risk: medium to high.
+- Impact: very high.
+
+5) `react/suites/react-suites/src/data_engineer/progress_controller.rs`
+- Issue: very large flat `ExecutionState` + manual snapshot/setter mapping.
+- Cleanup: direct nested substate ownership in struct and reducer methods scoped by substate.
+- Risk: high.
+- Impact: very high.
+
+6) `react/suites/react-suites/src/data_engineer/mod.rs`
+- Issue: still very large orchestration hub.
+- Cleanup: split phase loop/dispatch/bootstrap orchestration into focused modules and keep phase dispatch table explicit.
+- Risk: high.
+- Impact: high.
+
+## Canonical-path violations to fix first
+
+1) `react/core/src/session/store_io.rs`
+- `key()` / `state_key()` fallback to `invalid/...` namespace instead of failing fast.
+
+2) `react/core/src/session` write surfaces
+- overlapping `put_thread_state`, `put_thread_state_replace`, and materialization write behavior increase semantic drift risk.
+
+3) control-state mutation surfaces
+- typed and untyped save/mutate surfaces coexist; keep one canonical reducer-centric typed mutation path.
+
+## Trait/contract consolidation opportunities
+
+Current design is directionally correct, but there is still contract layering that can likely be reduced:
+
+- `WorkflowSuiteContract` + `WorkflowPolicy`:
+  - keep separate only if you need independent swapping/composition.
+  - otherwise collapse into one suite workflow contract trait.
+
+- transition wrappers:
+  - remove thin wrappers that only forward to dispatcher.
+  - keep one transition API and make it the only public write seam.
+
+- context contracts:
+  - prefer strongly typed suite context over one global optional bag.
+
+Heuristic:
+- Keep a trait only if it has multiple realistic implementations now, enforces a hard dependency boundary, or materially improves compile-time guarantees/tests.
+
+## OpenAPI compatibility guardrails (`ask-ws.yaml`)
+
+All cleanup proposals must preserve these contract rules:
+
+1) discriminator fields and enum values are fixed.
+- `type` and `kind` unions must remain exact.
+
+2) mixed naming is intentional.
+- preserve existing `snake_case` and `camelCase` fields exactly as specified.
+
+3) `additionalProperties: false` schemas cannot gain ad-hoc fields.
+
+4) nullability and required fields are contract-critical.
+- do not change absent-vs-null behavior without spec update.
+
+5) sequencing/meta fields (`v`, `server_time`, `seq`, ids, timestamps) are required in specific responses and must remain stable.
+
+6) ask final payload requirements remain strict (`payload.answer` and `payload.sql` for ask final).
+
+## Recommended phased execution
+
+### Phase A (safe, high impact)
+- dedup `phase_validate` and `phase_publish` plumbing.
+- centralize file tool policy wrappers.
+- consolidate duplicated provider lint/parser helpers.
+
+### Phase B (contract tightening)
+- typed `DbtRunnerMode`.
+- scope/id newtypes.
+- shrink thin wrapper seams around transitions/intents.
+
+### Phase C (structural simplification)
+- track adapter unification for plan/author.
+- canonical session write path consolidation.
+- `ExecutionState` nested substate ownership refactor.
+
+### Phase D (final flattening)
+- reduce `data_engineer/mod.rs` to orchestration wiring only.
+- enforce with source tests: one transition API, one reducer mutation boundary, one control-state mutation path.
+
+## Exit criteria for "as simple as possible"
+
+- One transition write seam.
+- One reducer mutation seam.
+- One control-state persistence/mutation seam.
+- No mirrored cleanse/model orchestration skeletons.
+- No control-critical inline JSON literals.
+- Suite contexts compile-time enforce required providers.
+- API contract parity maintained with `ask-ws.yaml`.

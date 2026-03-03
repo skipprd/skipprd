@@ -3853,7 +3853,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hard_mutation_mode_single_target_allows_rm_mv_on_target_only() {
+    async fn hard_mutation_mode_single_target_patch_target_rejects_rm() {
         let mut sctx = SuiteCtx::default();
         sctx.query = Some(Arc::new(MockQuery));
         let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
@@ -3878,6 +3878,73 @@ mod tests {
         )
         .expect("build_tools_for_phase should succeed");
 
+        if let Some(store) = actx.thread_store.as_ref() {
+            let mut seeded = crate::data_engineer::progress_controller::ExecutionState::new();
+            seeded.last_validate_ok = Some(false);
+            seeded.hard_mutation_repair_mode = true;
+            seeded.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
+            seeded.single_target_repair_path = Some("models/marts/fct_orders.sql".to_string());
+            seeded.target_path = Some("models/marts/fct_orders.sql".to_string());
+            seeded.ladder_step =
+                crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget;
+            seeded
+                .save(store, "t")
+                .await
+                .expect("seed patch-target hard repair state");
+        }
+
+        let err_target = reg
+            .call(
+                "file",
+                serde_json::json!({"op":"rm","path":"models/marts/fct_orders.sql"}),
+                &actx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err_target.contains("patch_target requires op='patch'"));
+    }
+
+    #[tokio::test]
+    async fn hard_mutation_mode_single_target_replace_contents_rejects_rm() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+
+        let guard = crate::data_engineer::control_flow::DerivedGuardState {
+            last_validate_failed: true,
+            mutated_since_fail: false,
+            patched_since_fail: false,
+            mutation_failures_since_validate: 0,
+            probe_required: false,
+            probe_satisfied: false,
+        };
+
+        let (reg, _card) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::ModelAuthor,
+            &guard,
+            true,
+            &sctx,
+            None,
+            Some("models/marts/fct_orders.sql".to_string()),
+            false,
+        )
+        .expect("build_tools_for_phase should succeed");
+
+        if let Some(store) = actx.thread_store.as_ref() {
+            let mut seeded = crate::data_engineer::progress_controller::ExecutionState::new();
+            seeded.last_validate_ok = Some(false);
+            seeded.hard_mutation_repair_mode = true;
+            seeded.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
+            seeded.single_target_repair_path = Some("models/marts/fct_orders.sql".to_string());
+            seeded.target_path = Some("models/marts/fct_orders.sql".to_string());
+            seeded.ladder_step =
+                crate::data_engineer::progress_controller::RepairLadderStep::ReplaceContents;
+            seeded
+                .save(store, "t")
+                .await
+                .expect("seed replace-contents hard repair state");
+        }
+
         let err_off_target = reg
             .call(
                 "file",
@@ -3888,8 +3955,83 @@ mod tests {
             .unwrap_err();
         assert!(err_off_target.contains("single-target repair mode violation"));
 
-        // Target operations are not asserted here because rm/mv may fail in test storage
-        // setup for reasons unrelated to single-target path policy.
+        let target_err = reg
+            .call(
+                "file",
+                serde_json::json!({"op":"rm","path":"models/marts/fct_orders.sql"}),
+                &actx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            target_err.contains("replace_contents requires op='patch'"),
+            "replace_contents step should reject rm even on target path"
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_mutation_mode_single_target_fs_op_rejects_patch_allows_rm() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+
+        let guard = crate::data_engineer::control_flow::DerivedGuardState {
+            last_validate_failed: true,
+            mutated_since_fail: false,
+            patched_since_fail: false,
+            mutation_failures_since_validate: 0,
+            probe_required: false,
+            probe_satisfied: false,
+        };
+
+        let (reg, _card) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::ModelAuthor,
+            &guard,
+            true,
+            &sctx,
+            None,
+            Some("models/marts/fct_orders.sql".to_string()),
+            false,
+        )
+        .expect("build_tools_for_phase should succeed");
+
+        if let Some(store) = actx.thread_store.as_ref() {
+            let mut seeded = crate::data_engineer::progress_controller::ExecutionState::new();
+            seeded.last_validate_ok = Some(false);
+            seeded.hard_mutation_repair_mode = true;
+            seeded.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
+            seeded.single_target_repair_path = Some("models/marts/fct_orders.sql".to_string());
+            seeded.target_path = Some("models/marts/fct_orders.sql".to_string());
+            seeded.ladder_step = crate::data_engineer::progress_controller::RepairLadderStep::FsOp;
+            seeded.attempt_count = 2;
+            seeded
+                .save(store, "t")
+                .await
+                .expect("seed fs-op hard repair state");
+        }
+
+        let patch_err = reg
+            .call(
+                "file",
+                serde_json::json!({
+                    "op":"patch",
+                    "path":"models/marts/fct_orders.sql",
+                    "patch_text":"@@\n- select 1 as id\n+ select 2 as id\n"
+                }),
+                &actx,
+            )
+            .await
+            .unwrap_err();
+        assert!(patch_err.contains("fs_op requires op='rm' or op='mv'"));
+
+        let rm_result = reg
+            .call(
+                "file",
+                serde_json::json!({"op":"rm","path":"models/marts/fct_orders.sql"}),
+                &actx,
+            )
+            .await;
+        assert!(rm_result.is_ok(), "fs_op should allow rm on target path");
     }
 
     #[tokio::test]
@@ -4608,7 +4750,8 @@ mod tests {
                 "legacy inline GuardBlock construction must not appear in {name}"
             );
             assert!(
-                normalized.contains("apply_phase_transition("),
+                normalized.contains("apply_phase_transition(")
+                    || normalized.contains("commit_phase_decision("),
                 "kernel transition helper should be used in {name}"
             );
             if name == "mod.rs" || name == "phase_author.rs" {
