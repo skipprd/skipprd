@@ -11,9 +11,7 @@ use crate::suite::{Suite, SuiteCtx};
 use react_core::agent::{
     Agent, AgentCtx, AgentPolicy, Interrupt, RunOutcome, RunOutcomeNonInteractive,
 };
-use react_core::control_flow::{
-    GuardBlockKind, PhaseReasonCode, ReviewDecision, ReviewDecisionMeta, ReviewTier,
-};
+use react_core::control_flow::{GuardBlockKind, PhaseReasonCode, ReviewDecision};
 use react_core::llm::LlmCallOptions;
 use react_core::session::{CatalogBootstrapState, ThreadBootstrapState, ThreadStore, ToolStepStatus};
 use react_core::tools::{Tool, ToolRegistry};
@@ -43,6 +41,9 @@ pub mod patch_contract;
 pub mod files_patch_repair;
 pub mod phase_actions;
 pub mod phase_gate;
+mod phase_preflight;
+mod phase_publish;
+mod phase_review;
 pub mod plan;
 pub mod ws_plans;
 pub mod plan_kind;
@@ -126,6 +127,11 @@ impl TrackKind {
             Self::Model => control_flow::Phase::ModelAuthor,
         }
     }
+}
+
+enum PhaseExecutorOutcome {
+    Continue,
+    Return(Vec<FlowFrame>),
 }
 
 /// Interrupt policy used by non-deterministic single-pass modes.
@@ -4304,55 +4310,10 @@ Apply these fixes in the output.",
             }
 
             match phase {
-                Phase::Preflight => {
-                    // Require core providers.
-                    if sctx.query.is_none() {
-                        return Err("data engineer agent requires a warehouse provider configured. configure providers.warehouse and restart.".to_string());
-                    }
-                    if sctx.dbt.is_none() {
-                        return Err("data engineer agent requires a dbt provider configured. enable providers.dbt and restart.".to_string());
-                    }
-                    // Ensure minimal dbt project exists.
-                    if let Some(dbt) = sctx.dbt.as_ref() {
-                        if let Err(e) = dbt.ensure_minimal_project(&sctx.scope).await {
-                            let key = sctx.keyspace.dbt_project_key(&sctx.scope);
-                            return Err(format!(
-                                "failed to create the dbt project in storage. expected file: {key}. error: {e}. this is usually an s3 permission/prefix issue."
-                            ));
-                        }
-                    }
-                    // Hard gate: dbt_project.yml MUST exist before we proceed, otherwise we will loop in authoring.
-                    let key = sctx.keyspace.dbt_project_key(&sctx.scope);
-                    match sctx.storage.head_etag(&key).await {
-                        Ok(Some(_)) => {}
-                        Ok(None) => {
-                            return Err(format!(
-                                "dbt project is incomplete: dbt_project.yml is missing in storage. expected file: {key}. without this file the suite cannot validate/build."
-                            ));
-                        }
-                        Err(e) => {
-                            return Err(format!(
-                                "unable to verify presence of dbt_project.yml in storage. expected file: {key}. error: {e}"
-                            ));
-                        }
-                    }
-                    // Persist transition.
-                    apply_phase_transition(
-                        &thread_store,
-                        thread_id,
-                        Some(Phase::Preflight),
-                        Phase::CleansePlan,
-                        control_flow::TransitionIntent::Forward,
-                        Some(PhaseReasonCode::PreflightOk),
-                        Some(serde_json::json!({
-                            "dbt_project_key": key,
-                            "has_query_provider": sctx.query.is_some(),
-                            "has_dbt_provider": sctx.dbt.is_some(),
-                        })),
-                    )
-                    .await?;
-                    continue;
-                }
+                Phase::Preflight => match Self::execute_preflight_phase(&thread_store, thread_id, sctx).await? {
+                    PhaseExecutorOutcome::Continue => continue,
+                    PhaseExecutorOutcome::Return(frames) => return Ok(frames),
+                },
 
                 Phase::CleansePlan | Phase::ModelPlan => {
                     // Plan phases are read-only discovery + plan authoring. They persist an approved
@@ -7775,464 +7736,40 @@ Apply these fixes in the output.",
                 }
 
                 Phase::CleanseReview | Phase::ModelReview | Phase::PostPublishReview => {
-                    let review_q =
-                        Self::build_review_question_with_context(question, phase, &execution_state);
-                    let frames =
-                        review_batched::run_batched_review(thread_id, &review_q, phase, sctx)
-                            .await?;
-                    let first = frames.into_iter().next().unwrap_or(FlowFrame::Final {
-                        kind: "generic".to_string(),
-                        payload: serde_json::json!({ "text": "" }),
-                        display: None,
-                    });
-                    let (mut answer, decision_meta_v) = match first {
-                        FlowFrame::Final {
-                            payload, display, ..
-                        } => {
-                            let ans = display
-                                .or_else(|| {
-                                    payload
-                                        .get("text")
-                                        .and_then(|x| x.as_str())
-                                        .map(|s| s.to_string())
-                                })
-                                .unwrap_or_default();
-                            let mv = payload.get("meta").cloned();
-                            (ans, mv)
-                        }
-                        other => return Ok(vec![other]),
-                    };
-
-                    // Best-effort: capture the review final step as the trigger for phase transitions.
-                    let (trigger_step_idx, trigger_step) = thread_store
-                        .get(thread_id)
-                        .await
-                        .ok()
-                        .and_then(|l| {
-                            let idx = l.steps.len().saturating_sub(1);
-                            l.steps.last().cloned().map(|s| (idx, s))
-                        })
-                        .unwrap_or((
-                            0,
-                            react_core::session::ThreadStep::Phase {
-                                phase: "unknown".to_string(),
-                                from_phase: None,
-                                reason_code: Some(PhaseReasonCode::PhaseSet),
-                                reason_detail: Some(serde_json::json!({
-                                    "fallback": "missing_thread_step"
-                                })),
-                                observation: react_core::session::Observation::ok(),
-                                ts: chrono::Utc::now().to_rfc3339(),
-                                agent: "agent".to_string(),
-                            },
-                        ));
-
-                    let mut meta: ReviewDecisionMeta = decision_meta_v
-                        .and_then(|v| serde_json::from_value(v).ok())
-                        .unwrap_or(ReviewDecisionMeta {
-                            decision: ReviewDecision::Proceed,
-                            tier: ReviewTier::Unknown,
-                            dataset_ids: vec![],
-                            review_ref: None,
-                        });
-                    // Fallback: extract review_ref (if present) from the trigger step so we can persist a stable pointer
-                    // without embedding the full review text in subsequent phase transitions.
-                    let review_ref_from_trigger = match &trigger_step {
-                        react_core::session::ThreadStep::Phase { reason_detail, .. } => {
-                            reason_detail
-                                .as_ref()
-                                .and_then(|v| v.get("review_ref"))
-                                .cloned()
-                        }
-                        _ => None,
-                    };
-                    if meta.review_ref.is_none() {
-                        meta.review_ref = review_ref_from_trigger;
-                    }
-                    let mut review_retry_count = 0usize;
-                    if let Some(kind) = Self::review_retry_kind(meta.decision) {
-                        review_retry_count =
-                            Self::bump_subjective_retry(&thread_store, thread_id, phase, kind)
-                                .await;
-                    } else {
-                        Self::reset_subjective_retry(&thread_store, thread_id).await;
-                    }
-                    let forced_by_subjective_retry = Self::review_retry_kind(meta.decision)
-                        .is_some()
-                        && review_retry_count
-                            > crate::data_engineer::controller_kernel::subjective_retry_limit();
-                    let forced_progress = forced_by_subjective_retry;
-                    if forced_progress {
-                        let reason = format!(
-                            "subjective review retry limit reached ({})",
-                            review_retry_count
-                        );
-                        tracing::warn!(
-                            "data_engineer: forcing review proceed phase={} reason={}",
-                            phase.as_str(),
-                            reason
-                        );
-                        meta.decision = ReviewDecision::Proceed;
-                        answer.push_str(&format!(
-                            "\n\nProgress guard: review remained subjective without convergence (retry_count={}). Proceeding to next phase to avoid non-convergent review loops.",
-                            review_retry_count,
-                        ));
-                        Self::reset_subjective_retry(&thread_store, thread_id).await;
-                    }
-                    out_frames.push(FlowFrame::Review {
-                        text: answer.clone(),
-                        meta: serde_json::to_value(&meta).ok(),
-                    });
-
-                    let reason_detail = serde_json::json!({
-                        "review_phase": phase.as_str(),
-                        "meta": meta,
-                        "answer": answer,
-                        "forced_progress_guard": forced_progress,
-                        "forced_progress_by_subjective_retry": forced_by_subjective_retry,
-                        "review_subjective_retry_count": review_retry_count,
-                        "trigger_step_idx": trigger_step_idx,
-                        "trigger_step": trigger_step,
-                    });
-
-                    match meta.decision {
-                        ReviewDecision::Proceed => {
-                            let _ = Self::clear_pending_loopback_intent(&thread_store, thread_id).await;
-                            // Move forward in the deterministic pipeline.
-                            let next = match phase {
-                                Phase::CleanseReview => Phase::ModelPlan,
-                                Phase::ModelReview => Phase::PublishAwaitApproval,
-                                Phase::PostPublishReview => Phase::Done,
-                                _ => Phase::Done,
-                            };
-                            apply_phase_transition(
-                                &thread_store,
-                                thread_id,
-                                Some(phase),
-                                next,
-                                control_flow::TransitionIntent::Forward,
-                                Some(PhaseReasonCode::ReviewProceed),
-                                Some(reason_detail),
-                            )
-                            .await?;
-                            continue;
-                        }
-                        ReviewDecision::PatchPlan => {
-                            let back = match meta.tier {
-                                ReviewTier::Silver => Phase::CleansePlan,
-                                ReviewTier::Gold => Phase::ModelPlan,
-                                ReviewTier::Unknown => Phase::ModelPlan,
-                            };
-                            let plan_actx = Self::plan_agent_ctx(thread_id, sctx);
-                            let (entry_plan_key, entry_plan_digest) = match back {
-                                Phase::CleansePlan => {
-                                    if let Some(p) =
-                                        crate::data_engineer::plan::load_cleanse_plan_any(&plan_actx).await
-                                    {
-                                        (Some(p.plan_key.clone()), stable_json_digest(&p))
-                                    } else {
-                                        (None, None)
-                                    }
-                                }
-                                Phase::ModelPlan => {
-                                    if let Some(p) =
-                                        crate::data_engineer::plan::load_model_plan_any(&plan_actx).await
-                                    {
-                                        (Some(p.plan_key.clone()), stable_json_digest(&p))
-                                    } else {
-                                        (None, None)
-                                    }
-                                }
-                                _ => (None, None),
-                            };
-                            let _ = Self::set_pending_patch_plan_intent(
-                                &thread_store,
-                                thread_id,
-                                back,
-                                entry_plan_key,
-                                entry_plan_digest,
-                            )
-                            .await;
-                            apply_phase_transition(
-                                &thread_store,
-                                thread_id,
-                                Some(phase),
-                                back,
-                                control_flow::TransitionIntent::Loopback,
-                                Some(PhaseReasonCode::ReviewPatchPlan),
-                                Some(reason_detail),
-                            )
-                            .await?;
-                            continue;
-                        }
-                        ReviewDecision::PatchImpl => {
-                            // Conformance/correctness fix in implementation (plan remains authoritative).
-                            let back = match meta.tier {
-                                ReviewTier::Silver => Phase::CleanseAuthor,
-                                ReviewTier::Gold => Phase::ModelAuthor,
-                                ReviewTier::Unknown => Phase::ModelAuthor,
-                            };
-                            let _ =
-                                Self::set_pending_patch_impl_intent(&thread_store, thread_id, back)
-                                    .await;
-                            apply_phase_transition(
-                                &thread_store,
-                                thread_id,
-                                Some(phase),
-                                back,
-                                control_flow::TransitionIntent::Loopback,
-                                Some(PhaseReasonCode::ReviewPatchImpl),
-                                Some(reason_detail),
-                            )
-                            .await?;
-                            continue;
-                        }
+                    match Self::execute_review_phase(
+                        &thread_store,
+                        thread_id,
+                        phase,
+                        question,
+                        sctx,
+                        &execution_state,
+                        &mut out_frames,
+                    )
+                    .await? {
+                        PhaseExecutorOutcome::Continue => continue,
+                        PhaseExecutorOutcome::Return(frames) => return Ok(frames),
                     }
                 }
 
-                Phase::PublishAwaitApproval => {
-                    let mut es = crate::data_engineer::progress_controller::ExecutionState::load_strict(
-                        &thread_store,
-                        thread_id,
-                    )
-                    .await?
-                    .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
-                    // Agent mode is fully autonomous: publish approval is internal-only state.
-                    es.set_publish_approval(
-                        crate::data_engineer::progress_controller::PublishApprovalDecision::Approved,
-                    );
-                    if crate::data_engineer::progress_controller::gate_publish_progress(
-                        &es,
-                        Phase::PublishAwaitApproval,
-                    )
-                    .is_ok()
-                    {
-                        es.reset_publish_retry(
-                            crate::data_engineer::progress_controller::PublishRetryKind::AwaitApprovalLoop,
-                        );
-                        es.save(&thread_store, thread_id).await.map_err(|e| {
-                            format!("failed to persist publish approval consumption state: {e}")
-                        })?;
-                        apply_phase_transition(
-                            &thread_store,
-                            thread_id,
-                            Some(Phase::PublishAwaitApproval),
-                            Phase::Publish,
-                            control_flow::TransitionIntent::Forward,
-                            Some(PhaseReasonCode::UserApprovedPublish),
-                            Some(serde_json::json!({
-                                "approval_state": es.publish_approval,
-                            })),
-                        )
-                        .await?;
-                        continue;
-                    }
+                Phase::PublishAwaitApproval => match Self::execute_publish_await_approval_phase(
+                    &thread_store,
+                    thread_id,
+                    sctx,
+                )
+                .await? {
+                    PhaseExecutorOutcome::Continue => continue,
+                    PhaseExecutorOutcome::Return(frames) => return Ok(frames),
+                },
 
-                    let actx = Self::agent_tool_ctx(thread_id, sctx);
-                    let tool = tools::publish_dbt_to_provider::PublishDbtToProviderTool {
-                        datasets: sctx.datasets.clone(),
-                        catalog: sctx.catalog.clone(),
-                    };
-                    let obs = control_flow::call_and_record_tool(
-                        &thread_store,
-                        thread_id,
-                        Some("agent".to_string()),
-                        &tool,
-                        serde_json::json!({}),
-                        &actx,
-                        60,
-                    )
-                    .await;
-                    let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let stage = obs.get("stage").and_then(|v| v.as_str()).unwrap_or("");
-                    if ok && (stage == "published" || stage == "no_change") {
-                        es.clear_publish_approval();
-                        es.reset_publish_retries();
-                        es.save(&thread_store, thread_id).await.map_err(|e| {
-                            format!("failed to persist publish success state: {e}")
-                        })?;
-                        apply_phase_transition(
-                            &thread_store,
-                            thread_id,
-                            Some(Phase::PublishAwaitApproval),
-                            Phase::PostPublishReview,
-                            control_flow::TransitionIntent::Forward,
-                            Some(PhaseReasonCode::PublishSuccess),
-                            Some(serde_json::json!({
-                                "publish_observation": obs,
-                            })),
-                        )
-                        .await?;
-                        continue;
-                    }
-                    if ok && stage == "await_approval" {
-                        let retry_limit = crate::data_engineer::controller_kernel::publish_retry_limit();
-                        let retry_count = es.bump_publish_retry(
-                            crate::data_engineer::progress_controller::PublishRetryKind::AwaitApprovalLoop,
-                            retry_limit,
-                        );
-                        es.set_publish_approval(
-                            crate::data_engineer::progress_controller::PublishApprovalDecision::Approved,
-                        );
-                        es.save(&thread_store, thread_id).await.map_err(|e| {
-                            format!("failed to persist publish await-approval state: {e}")
-                        })?;
-                        if retry_count > retry_limit {
-                            return Err(format!(
-                                "publish_await_approval_not_converged_after_retries: retries={retry_count}"
-                            ));
-                        }
-                        apply_phase_transition(
-                            &thread_store,
-                            thread_id,
-                            Some(Phase::PublishAwaitApproval),
-                            Phase::Publish,
-                            control_flow::TransitionIntent::Forward,
-                            Some(PhaseReasonCode::UserApprovedPublish),
-                            Some(serde_json::json!({
-                                "auto_approved_in_agent_mode": true,
-                                "publish_observation": obs,
-                            })),
-                        )
-                        .await?;
-                        continue;
-                    }
-                    // Publish failed: send back to model authoring to fix.
-                    let retry_limit = crate::data_engineer::controller_kernel::publish_retry_limit();
-                    let retry_count = es.bump_publish_retry(
-                        crate::data_engineer::progress_controller::PublishRetryKind::PublishFailureLoop,
-                        retry_limit,
-                    );
-                    es.clear_publish_approval();
-                    es.save(&thread_store, thread_id).await.map_err(|e| {
-                        format!("failed to persist publish failure state: {e}")
-                    })?;
-                    if retry_count > retry_limit {
-                        return Err(format!(
-                            "publish_failure_not_converged_after_retries: retries={retry_count}"
-                        ));
-                    }
-                    apply_phase_transition(
-                        &thread_store,
-                        thread_id,
-                        Some(Phase::PublishAwaitApproval),
-                        Phase::ModelAuthor,
-                        control_flow::TransitionIntent::Loopback,
-                        Some(PhaseReasonCode::PublishFail),
-                        Some(serde_json::json!({
-                            "publish_observation": obs,
-                            "publish_failure_retry_count": retry_count,
-                        })),
-                    )
-                    .await?;
-                    continue;
-                }
+                Phase::Publish => match Self::execute_publish_phase(&thread_store, thread_id, sctx).await? {
+                    PhaseExecutorOutcome::Continue => continue,
+                    PhaseExecutorOutcome::Return(frames) => return Ok(frames),
+                },
 
-                Phase::Publish => {
-                    let mut es = crate::data_engineer::progress_controller::ExecutionState::load_strict(
-                        &thread_store,
-                        thread_id,
-                    )
-                    .await?
-                    .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
-                    es.set_publish_approval(
-                        crate::data_engineer::progress_controller::PublishApprovalDecision::Approved,
-                    );
-                    if let Err(_reason) =
-                        crate::data_engineer::progress_controller::gate_publish_progress(
-                            &es,
-                            Phase::Publish,
-                        )
-                    {
-                        es.save(&thread_store, thread_id).await.map_err(|e| {
-                            format!("failed to persist auto-approved publish state: {e}")
-                        })?;
-                        continue;
-                    }
-                    let actx = Self::agent_tool_ctx(thread_id, sctx);
-                    let tool = tools::publish_dbt_to_provider::PublishDbtToProviderTool {
-                        datasets: sctx.datasets.clone(),
-                        catalog: sctx.catalog.clone(),
-                    };
-                    let obs = control_flow::call_and_record_tool(
-                        &thread_store,
-                        thread_id,
-                        Some("agent".to_string()),
-                        &tool,
-                        serde_json::json!({"confirm": true}),
-                        &actx,
-                        600,
-                    )
-                    .await;
-                    let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let stage = obs.get("stage").and_then(|v| v.as_str()).unwrap_or("");
-                    if ok && (stage == "published" || stage == "no_change") {
-                        es.clear_publish_approval();
-                        es.reset_publish_retries();
-                        es.save(&thread_store, thread_id).await.map_err(|e| {
-                            format!("failed to persist publish confirmed-success state: {e}")
-                        })?;
-                        apply_phase_transition(
-                            &thread_store,
-                            thread_id,
-                            Some(Phase::Publish),
-                            Phase::PostPublishReview,
-                            control_flow::TransitionIntent::Forward,
-                            Some(PhaseReasonCode::PublishConfirmedSuccess),
-                            Some(serde_json::json!({
-                                "publish_observation": obs,
-                            })),
-                        )
-                        .await?;
-                        continue;
-                    }
-                    // Failed publish -> back to model authoring.
-                    let retry_limit = crate::data_engineer::controller_kernel::publish_retry_limit();
-                    let retry_count = es.bump_publish_retry(
-                        crate::data_engineer::progress_controller::PublishRetryKind::PublishFailureLoop,
-                        retry_limit,
-                    );
-                    es.clear_publish_approval();
-                    es.save(&thread_store, thread_id).await.map_err(|e| {
-                        format!("failed to persist publish confirmed-failure state: {e}")
-                    })?;
-                    if retry_count > retry_limit {
-                        return Err(format!(
-                            "publish_confirmed_failure_not_converged_after_retries: retries={retry_count}"
-                        ));
-                    }
-                    apply_phase_transition(
-                        &thread_store,
-                        thread_id,
-                        Some(Phase::Publish),
-                        Phase::ModelAuthor,
-                        control_flow::TransitionIntent::Loopback,
-                        Some(PhaseReasonCode::PublishConfirmedFail),
-                        Some(serde_json::json!({
-                            "publish_observation": obs,
-                            "publish_failure_retry_count": retry_count,
-                        })),
-                    )
-                    .await?;
-                    continue;
-                }
-
-                Phase::Done => {
-                    let mut answer = "Agent flow completed (deterministic phases): cleanse → validate → review → model → validate → review → publish → review.\n".to_string();
-                    if let Some(last) = out_frames.iter().rev().find_map(|f| match f {
-                        FlowFrame::Review { text, .. } => Some(text.clone()),
-                        _ => None,
-                    }) {
-                        answer.push_str("\nLatest review summary:\n");
-                        answer.push_str(&last);
-                    }
-                    out_frames.push(FlowFrame::Final {
-                        kind: "generic".to_string(),
-                        payload: serde_json::json!({ "text": answer.clone() }),
-                        display: Some(answer),
-                    });
-                    return Ok(out_frames);
-                }
+                Phase::Done => match Self::execute_done_phase(&mut out_frames)? {
+                    PhaseExecutorOutcome::Continue => continue,
+                    PhaseExecutorOutcome::Return(frames) => return Ok(frames),
+                },
             }
         }
 
