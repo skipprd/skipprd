@@ -1493,6 +1493,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_key_build_failures_are_hard_errors() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            project_id: "p".into(),
+        };
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let bad_tid = "bad/id";
+
+        let append_err = store
+            .append_step(
+                bad_tid,
+                ThreadStep::User {
+                    text: "hi".to_string(),
+                    observation: Observation::ok(),
+                    ts: "t".to_string(),
+                    agent: "ask".to_string(),
+                },
+            )
+            .await
+            .expect_err("invalid thread ids must fail key construction");
+        assert!(append_err.contains("failed to build thread key"));
+
+        let state = ThreadState {
+            thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
+            thread_id: bad_tid.to_string(),
+            ..ThreadState::default()
+        };
+        let write_err = store
+            .put_thread_state_replace(bad_tid, &state)
+            .await
+            .expect_err("invalid thread ids must fail state key construction");
+        assert!(write_err.contains("failed to build thread state key"));
+    }
+
+    #[tokio::test]
     async fn control_state_payload_round_trips_with_core_envelope() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));

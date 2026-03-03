@@ -8,6 +8,12 @@ use super::{
     CONTROL_STATE_ENVELOPE_SCHEMA_VERSION, THREAD_SCHEMA_VERSION, THREAD_STATE_SCHEMA_VERSION,
 };
 
+#[derive(Clone, Copy)]
+enum ThreadStateWriteMode {
+    Merge,
+    Replace,
+}
+
 impl ThreadStore {
     pub fn new(
         storage: Arc<dyn crate::storage::StorageAdapter>,
@@ -21,16 +27,16 @@ impl ThreadStore {
         }
     }
 
-    pub(crate) fn key(&self, thread_id: &str) -> String {
+    pub(crate) fn key(&self, thread_id: &str) -> Result<String, String> {
         self.keyspace
             .thread_key(&self.scope, thread_id)
-            .unwrap_or_else(|_| format!("invalid/thread/{}.json", thread_id))
+            .map_err(|e| format!("failed to build thread key for '{thread_id}': {e}"))
     }
 
-    pub(crate) fn state_key(&self, thread_id: &str) -> String {
+    pub(crate) fn state_key(&self, thread_id: &str) -> Result<String, String> {
         self.keyspace
             .thread_state_key(&self.scope, thread_id)
-            .unwrap_or_else(|_| format!("invalid/state/{}/state.json", thread_id))
+            .map_err(|e| format!("failed to build thread state key for '{thread_id}': {e}"))
     }
 
     fn list_prefix(&self) -> String {
@@ -73,7 +79,7 @@ impl ThreadStore {
     }
 
     pub async fn append_step(&self, thread_id: &str, step: ThreadStep) -> Result<(), String> {
-        let key = self.key(thread_id);
+        let key = self.key(thread_id)?;
         let cache_key = self.cache_key_for(&key);
         let mut log = self.load_thread_log_for_write(&key).await?;
         log.steps.push(step.clone());
@@ -105,7 +111,7 @@ impl ThreadStore {
     }
 
     pub async fn get_thread_state(&self, thread_id: &str) -> Result<ThreadState, String> {
-        let key = self.state_key(thread_id);
+        let key = self.state_key(thread_id)?;
         let v = self.storage.get_json(&key).await?;
         let s = serde_json::from_value::<ThreadState>(v)
             .map_err(|e| format!("failed to parse thread state: {e}"))?;
@@ -119,57 +125,15 @@ impl ThreadStore {
     }
 
     pub async fn put_thread_state(&self, thread_id: &str, state: &ThreadState) -> Result<(), String> {
-        if state.thread_state_schema_version != THREAD_STATE_SCHEMA_VERSION {
-            return Err(format!(
-                "thread_state schema_version mismatch: expected {}, got {}",
-                THREAD_STATE_SCHEMA_VERSION, state.thread_state_schema_version
-            ));
-        }
-        if state.thread_id != thread_id {
-            return Err(format!(
-                "thread_state thread_id mismatch: expected {}, got {}",
-                thread_id, state.thread_id
-            ));
-        }
-        // Non-destructive write: merge incoming patch with existing persisted state.
-        let mut merged = self
-            .get_thread_state(thread_id)
+        self.write_thread_state(thread_id, state, ThreadStateWriteMode::Merge)
             .await
-            .unwrap_or_else(|_| Self::new_thread_state(thread_id));
-        if let Some(v) = state.suite_id.clone() {
-            merged.suite_id = Some(v);
-        }
-        if let Some(v) = state.agent_type.clone() {
-            merged.agent_type = Some(v);
-        }
-        if let Some(v) = state.current_phase.clone() {
-            merged.current_phase = Some(v);
-        }
-        merged.last_materialized_step_count = merged
-            .last_materialized_step_count
-            .max(state.last_materialized_step_count);
-        merged.total_runtime_ms = merged.total_runtime_ms.max(state.total_runtime_ms);
-        for (k, v) in state.items.iter() {
-            merged.items.insert(k.clone(), v.clone());
-        }
-        if let Some(v) = state.suite_state.clone() {
-            merged.suite_state = Some(v);
-        }
-        if let Some(v) = state.control_state.clone() {
-            merged.control_state = Some(v);
-        }
-        if state.bootstrap.catalog.is_some() {
-            merged.bootstrap.catalog = state.bootstrap.catalog.clone();
-        }
-        merged.thread_state_schema_version = THREAD_STATE_SCHEMA_VERSION;
-        merged.thread_id = thread_id.to_string();
-        self.put_thread_state_replace(thread_id, &merged).await
     }
 
-    pub async fn put_thread_state_replace(
+    async fn write_thread_state(
         &self,
         thread_id: &str,
         state: &ThreadState,
+        mode: ThreadStateWriteMode,
     ) -> Result<(), String> {
         if state.thread_state_schema_version != THREAD_STATE_SCHEMA_VERSION {
             return Err(format!(
@@ -183,9 +147,57 @@ impl ThreadStore {
                 thread_id, state.thread_id
             ));
         }
-        let key = self.state_key(thread_id);
-        let v = serde_json::to_value(state).map_err(|e| e.to_string())?;
+        let next_state = match mode {
+            ThreadStateWriteMode::Replace => state.clone(),
+            ThreadStateWriteMode::Merge => {
+                // Non-destructive write: merge incoming patch with existing persisted state.
+                let mut merged = self
+                    .get_thread_state(thread_id)
+                    .await
+                    .unwrap_or_else(|_| Self::new_thread_state(thread_id));
+                if let Some(v) = state.suite_id.clone() {
+                    merged.suite_id = Some(v);
+                }
+                if let Some(v) = state.agent_type.clone() {
+                    merged.agent_type = Some(v);
+                }
+                if let Some(v) = state.current_phase.clone() {
+                    merged.current_phase = Some(v);
+                }
+                merged.last_materialized_step_count = merged
+                    .last_materialized_step_count
+                    .max(state.last_materialized_step_count);
+                merged.total_runtime_ms = merged.total_runtime_ms.max(state.total_runtime_ms);
+                for (k, v) in state.items.iter() {
+                    merged.items.insert(k.clone(), v.clone());
+                }
+                if let Some(v) = state.suite_state.clone() {
+                    merged.suite_state = Some(v);
+                }
+                if let Some(v) = state.control_state.clone() {
+                    merged.control_state = Some(v);
+                }
+                if state.bootstrap.catalog.is_some() {
+                    merged.bootstrap.catalog = state.bootstrap.catalog.clone();
+                }
+                merged
+            }
+        };
+        let mut final_state = next_state;
+        final_state.thread_state_schema_version = THREAD_STATE_SCHEMA_VERSION;
+        final_state.thread_id = thread_id.to_string();
+        let key = self.state_key(thread_id)?;
+        let v = serde_json::to_value(&final_state).map_err(|e| e.to_string())?;
         self.storage.put_json(&key, &v).await
+    }
+
+    pub(crate) async fn put_thread_state_replace(
+        &self,
+        thread_id: &str,
+        state: &ThreadState,
+    ) -> Result<(), String> {
+        self.write_thread_state(thread_id, state, ThreadStateWriteMode::Replace)
+            .await
     }
 
     fn decode_control_state_payload(raw: &Value, expected_suite_id: &str) -> Option<Value> {
@@ -209,7 +221,7 @@ impl ThreadStore {
         .map_err(|e| e.to_string())
     }
 
-    pub async fn load_control_state_payload(
+    pub(crate) async fn load_control_state_payload(
         &self,
         thread_id: &str,
         suite_id: &str,
@@ -221,7 +233,7 @@ impl ThreadStore {
         Ok(Self::decode_control_state_payload(&raw, suite_id))
     }
 
-    pub async fn save_control_state_payload(
+    pub(crate) async fn save_control_state_payload(
         &self,
         thread_id: &str,
         suite_id: &str,
@@ -235,7 +247,7 @@ impl ThreadStore {
         self.put_thread_state(thread_id, &state).await
     }
 
-    pub async fn mutate_control_state_payload(
+    pub(crate) async fn mutate_control_state_payload(
         &self,
         thread_id: &str,
         suite_id: &str,
@@ -278,10 +290,22 @@ impl ThreadStore {
         suite_id: &str,
         mutate: impl FnOnce(Option<T>) -> Result<T, String>,
     ) -> Result<T, String> {
-        let current = self.load_typed_control_state::<T>(thread_id, suite_id).await?;
-        let next = mutate(current)?;
-        self.save_typed_control_state(thread_id, suite_id, &next).await?;
-        Ok(next)
+        let mut typed_next: Option<T> = None;
+        self.mutate_control_state_payload(thread_id, suite_id, |current_raw| {
+            let current = match current_raw {
+                Some(raw) => Some(
+                    serde_json::from_value::<T>(raw)
+                        .map_err(|e| format!("failed to parse typed control state payload: {e}"))?,
+                ),
+                None => None,
+            };
+            let next = mutate(current)?;
+            typed_next = Some(next);
+            serde_json::to_value(typed_next.as_ref().expect("typed next set"))
+                .map_err(|e| format!("failed to serialize typed control state payload: {e}"))
+        })
+        .await?;
+        typed_next.ok_or_else(|| "typed control-state mutation produced no value".to_string())
     }
 
     pub async fn get_thread_events_from_log(&self, thread_id: &str) -> Result<Vec<super::ThreadEvent>, String> {
@@ -290,7 +314,7 @@ impl ThreadStore {
     }
 
     pub async fn get(&self, thread_id: &str) -> Result<ThreadLog, String> {
-        let key = self.key(thread_id);
+        let key = self.key(thread_id)?;
         let cache_key = self.cache_key_for(&key);
         // Serve from cache if fresh (5 seconds)
         if let Some(entry) = cache().get(&cache_key) {
@@ -338,13 +362,13 @@ impl ThreadStore {
     }
 
     pub async fn delete(&self, thread_id: &str) -> Result<(), String> {
-        let key = self.key(thread_id);
+        let key = self.key(thread_id)?;
         self.storage.delete_object(&key).await?;
         Ok(())
     }
 
     pub async fn set_title_if_absent(&self, thread_id: &str, title: &str) -> Result<(), String> {
-        let key = self.key(thread_id);
+        let key = self.key(thread_id)?;
         let cache_key = self.cache_key_for(&key);
         let mut log = self.load_thread_log_for_write(&key).await?;
         if log.title.is_none() || log.title.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
@@ -363,7 +387,7 @@ impl ThreadStore {
     }
 
     pub async fn finalize_title(&self, thread_id: &str, title: &str) -> Result<(), String> {
-        let key = self.key(thread_id);
+        let key = self.key(thread_id)?;
         let cache_key = self.cache_key_for(&key);
         let mut log = self.load_thread_log_for_write(&key).await?;
         if !log.title_finalized {
