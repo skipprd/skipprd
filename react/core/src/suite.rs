@@ -186,15 +186,11 @@ pub trait WorkflowSuiteContract {
     fn reason_as_str(reason: Self::ReasonCode) -> &'static str;
     fn is_backtrack(from: Self::Phase, to: Self::Phase) -> bool;
     fn replan_backtrack_cap() -> usize;
-}
-
-/// Runtime policy hooks used by the core workflow kernel.
-pub trait WorkflowPolicy<C: WorkflowSuiteContract> {
-    fn pre_turn(&self, _state: &C::State) -> crate::workflow::PreTurnDirective {
+    fn pre_turn(_state: &Self::State) -> crate::workflow::PreTurnDirective {
         crate::workflow::PreTurnDirective::Proceed
     }
 
-    fn reduce(&self, state: &mut C::State, event: C::Event);
+    fn reduce(state: &mut Self::State, event: Self::Event);
 }
 
 pub type DynSuite = Arc<dyn Suite>;

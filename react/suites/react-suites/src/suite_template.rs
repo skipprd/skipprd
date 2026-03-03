@@ -3,7 +3,7 @@
 //! Copy this module when adding a new suite and replace the placeholder types.
 //! The goal is to make extension points explicit and compile-time checked.
 
-use react_core::suite::{WorkflowPolicy, WorkflowSuiteContract};
+use react_core::suite::WorkflowSuiteContract;
 use react_core::workflow::PreTurnDirective;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,12 +67,8 @@ impl WorkflowSuiteContract for TemplateWorkflowContract {
     fn replan_backtrack_cap() -> usize {
         3
     }
-}
 
-pub struct TemplateWorkflowPolicy;
-
-impl WorkflowPolicy<TemplateWorkflowContract> for TemplateWorkflowPolicy {
-    fn pre_turn(&self, state: &TemplateState) -> PreTurnDirective {
+    fn pre_turn(state: &TemplateState) -> PreTurnDirective {
         if state.replan_backtracks >= TemplateWorkflowContract::replan_backtrack_cap() {
             return PreTurnDirective::FailFast {
                 kind: react_core::control_flow::GuardBlockKind::BatchLocked,
@@ -82,7 +78,7 @@ impl WorkflowPolicy<TemplateWorkflowContract> for TemplateWorkflowPolicy {
         PreTurnDirective::Proceed
     }
 
-    fn reduce(&self, state: &mut TemplateState, event: TemplateEvent) {
+    fn reduce(state: &mut TemplateState, event: TemplateEvent) {
         match event {
             TemplateEvent::Enter(p) => state.phase = Some(p),
             TemplateEvent::Loopback => {

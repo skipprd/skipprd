@@ -48,13 +48,8 @@ impl react_core::suite::WorkflowSuiteContract for DataEngineerSuite {
     fn replan_backtrack_cap() -> usize {
         control_flow::replan_backtrack_counter_cap()
     }
-}
 
-pub struct DataEngineerWorkflowPolicy;
-
-impl react_core::suite::WorkflowPolicy<DataEngineerSuite> for DataEngineerWorkflowPolicy {
     fn pre_turn(
-        &self,
         state: &crate::data_engineer::progress_controller::ExecutionState,
     ) -> react_core::workflow::PreTurnDirective {
         let phase = state
@@ -69,7 +64,6 @@ impl react_core::suite::WorkflowPolicy<DataEngineerSuite> for DataEngineerWorkfl
     }
 
     fn reduce(
-        &self,
         state: &mut crate::data_engineer::progress_controller::ExecutionState,
         event: crate::data_engineer::progress_controller::DataEngineerEvent,
     ) {

@@ -1,4 +1,4 @@
-use crate::scope::RequestScope;
+use crate::scope::{ensure_safe_scope_segment, RequestScope};
 
 pub trait Keyspace: Send + Sync {
     fn threads_prefix(&self, scope: &RequestScope) -> String;
@@ -59,16 +59,7 @@ impl DefaultKeyspace {
     }
 
     fn ensure_safe_segment(seg: &str) -> Result<(), String> {
-        if seg.is_empty() {
-            return Err("empty path segment".to_string());
-        }
-        if seg.contains("..") {
-            return Err("path traversal '..' is not allowed".to_string());
-        }
-        if seg.contains('/') || seg.contains('\\') {
-            return Err("path separators are not allowed in path segments".to_string());
-        }
-        Ok(())
+        ensure_safe_scope_segment("key segment", seg)
     }
 }
 
