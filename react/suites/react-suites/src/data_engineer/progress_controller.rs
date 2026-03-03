@@ -687,6 +687,12 @@ impl ExecutionState {
         self.debug_assert_invariants();
     }
 
+    fn with_phase_state_mut(&mut self, mutate: impl FnOnce(&mut PhaseState)) {
+        let mut phase = self.phase_state();
+        mutate(&mut phase);
+        self.set_phase_state(phase);
+    }
+
     pub fn repair_state(&self) -> RepairState {
         RepairState {
             last_validate_ok: self.last_validate_ok,
@@ -734,6 +740,12 @@ impl ExecutionState {
         self.debug_assert_invariants();
     }
 
+    fn with_repair_state_mut(&mut self, mutate: impl FnOnce(&mut RepairState)) {
+        let mut repair = self.repair_state();
+        mutate(&mut repair);
+        self.set_repair_state(repair);
+    }
+
     pub fn publish_state(&self) -> PublishState {
         PublishState {
             publish_approval: self.publish_approval.clone(),
@@ -749,6 +761,12 @@ impl ExecutionState {
         self.debug_assert_invariants();
     }
 
+    fn with_publish_state_mut(&mut self, mutate: impl FnOnce(&mut PublishState)) {
+        let mut publish = self.publish_state();
+        mutate(&mut publish);
+        self.set_publish_state(publish);
+    }
+
     pub fn probe_state_snapshot(&self) -> ProbeState {
         self.probe_state.clone()
     }
@@ -756,6 +774,12 @@ impl ExecutionState {
     pub fn set_probe_state_snapshot(&mut self, probe: ProbeState) {
         self.probe_state = probe;
         self.debug_assert_invariants();
+    }
+
+    fn with_probe_state_mut(&mut self, mutate: impl FnOnce(&mut ProbeState)) {
+        let mut probe = self.probe_state_snapshot();
+        mutate(&mut probe);
+        self.set_probe_state_snapshot(probe);
     }
 
     pub fn manifest_state(&self) -> ManifestState {
@@ -773,10 +797,16 @@ impl ExecutionState {
         self.debug_assert_invariants();
     }
 
-    pub fn reset_manifest_lookup_state(&mut self) {
+    fn with_manifest_state_mut(&mut self, mutate: impl FnOnce(&mut ManifestState)) {
         let mut manifest = self.manifest_state();
-        manifest.manifest_lookup = ManifestLookupState::default();
+        mutate(&mut manifest);
         self.set_manifest_state(manifest);
+    }
+
+    pub fn reset_manifest_lookup_state(&mut self) {
+        self.with_manifest_state_mut(|manifest| {
+            manifest.manifest_lookup = ManifestLookupState::default();
+        });
     }
 
     pub fn needs_plan_bootstrap(&self, phase: Phase) -> bool {
@@ -789,23 +819,19 @@ impl ExecutionState {
     }
 
     pub fn mark_plan_bootstrap_done(&mut self, phase: Phase) {
-        let mut manifest = self.manifest_state();
-        match phase {
+        self.with_manifest_state_mut(|manifest| match phase {
             Phase::CleansePlan => manifest.cleanse_plan_bootstrap_done = true,
             Phase::ModelPlan => manifest.model_plan_bootstrap_done = true,
             _ => {}
-        }
-        self.set_manifest_state(manifest);
+        });
     }
 
     pub fn reset_plan_bootstrap(&mut self, phase: Phase) {
-        let mut manifest = self.manifest_state();
-        match phase {
+        self.with_manifest_state_mut(|manifest| match phase {
             Phase::CleansePlan => manifest.cleanse_plan_bootstrap_done = false,
             Phase::ModelPlan => manifest.model_plan_bootstrap_done = false,
             _ => {}
-        }
-        self.set_manifest_state(manifest);
+        });
     }
 
     pub fn note_manifest_lookup_attempt(
@@ -996,9 +1022,10 @@ impl ExecutionState {
     }
 
     pub fn reset_probe_state_on_validate(&mut self, is_failure: bool) {
-        let mut probe = ProbeState::default();
-        probe.required = is_failure;
-        self.set_probe_state_snapshot(probe);
+        self.with_probe_state_mut(|probe| {
+            *probe = ProbeState::default();
+            probe.required = is_failure;
+        });
     }
 
     pub fn note_probe_attempt(
@@ -1007,28 +1034,29 @@ impl ExecutionState {
         ok: bool,
         signature: ProbeSignature,
     ) -> ProbeOutcomeKind {
-        let mut probe = self.probe_state_snapshot();
-        probe.attempts_total = probe.attempts_total.saturating_add(1);
         let meaningful_sql = is_meaningful_probe_sql(sql);
-        let outcome = if !ok {
-            probe.failed_attempts = probe.failed_attempts.saturating_add(1);
-            probe.repeated_signature_streak = probe.repeated_signature_streak.saturating_add(1);
-            ProbeOutcomeKind::Failed
-        } else if !meaningful_sql {
-            probe.non_meaningful_attempts = probe.non_meaningful_attempts.saturating_add(1);
-            probe.repeated_signature_streak = probe.repeated_signature_streak.saturating_add(1);
-            ProbeOutcomeKind::NonMeaningful
-        } else if probe.last_signature.as_ref() == Some(&signature) {
-            probe.meaningful_attempts = probe.meaningful_attempts.saturating_add(1);
-            probe.repeated_signature_streak = probe.repeated_signature_streak.saturating_add(1);
-            ProbeOutcomeKind::MeaningfulSameSignal
-        } else {
-            probe.meaningful_attempts = probe.meaningful_attempts.saturating_add(1);
-            probe.repeated_signature_streak = 0;
-            ProbeOutcomeKind::MeaningfulNewSignal
-        };
-        probe.last_signature = Some(signature);
-        self.set_probe_state_snapshot(probe);
+        let mut outcome = ProbeOutcomeKind::Failed;
+        self.with_probe_state_mut(|probe| {
+            probe.attempts_total = probe.attempts_total.saturating_add(1);
+            outcome = if !ok {
+                probe.failed_attempts = probe.failed_attempts.saturating_add(1);
+                probe.repeated_signature_streak = probe.repeated_signature_streak.saturating_add(1);
+                ProbeOutcomeKind::Failed
+            } else if !meaningful_sql {
+                probe.non_meaningful_attempts = probe.non_meaningful_attempts.saturating_add(1);
+                probe.repeated_signature_streak = probe.repeated_signature_streak.saturating_add(1);
+                ProbeOutcomeKind::NonMeaningful
+            } else if probe.last_signature.as_ref() == Some(&signature) {
+                probe.meaningful_attempts = probe.meaningful_attempts.saturating_add(1);
+                probe.repeated_signature_streak = probe.repeated_signature_streak.saturating_add(1);
+                ProbeOutcomeKind::MeaningfulSameSignal
+            } else {
+                probe.meaningful_attempts = probe.meaningful_attempts.saturating_add(1);
+                probe.repeated_signature_streak = 0;
+                ProbeOutcomeKind::MeaningfulNewSignal
+            };
+            probe.last_signature = Some(signature.clone());
+        });
         outcome
     }
 
@@ -1081,13 +1109,13 @@ impl ExecutionState {
         entry_plan_key: Option<String>,
         entry_plan_digest: Option<String>,
     ) {
-        let mut repair = self.repair_state();
-        repair.pending_loopback_intent = Some(PendingLoopbackIntent::PatchPlan {
+        self.with_repair_state_mut(|repair| {
+            repair.pending_loopback_intent = Some(PendingLoopbackIntent::PatchPlan {
             phase,
             entry_plan_key,
             entry_plan_digest,
         });
-        self.set_repair_state(repair);
+        });
     }
 
     pub fn set_pending_patch_impl_intent(&mut self, phase: Phase) {
@@ -1100,24 +1128,24 @@ impl ExecutionState {
     }
 
     pub fn clear_pending_loopback_intent(&mut self) {
-        let mut repair = self.repair_state();
-        repair.pending_loopback_intent = None;
-        self.set_repair_state(repair);
+        self.with_repair_state_mut(|repair| {
+            repair.pending_loopback_intent = None;
+        });
     }
 
     pub fn set_publish_approval(&mut self, decision: PublishApprovalDecision) {
-        let mut publish = self.publish_state();
-        publish.publish_approval = Some(PublishApprovalState {
-            decision,
-            ts: chrono::Utc::now().to_rfc3339(),
+        self.with_publish_state_mut(|publish| {
+            publish.publish_approval = Some(PublishApprovalState {
+                decision,
+                ts: chrono::Utc::now().to_rfc3339(),
+            });
         });
-        self.set_publish_state(publish);
     }
 
     pub fn clear_publish_approval(&mut self) {
-        let mut publish = self.publish_state();
-        publish.publish_approval = None;
-        self.set_publish_state(publish);
+        self.with_publish_state_mut(|publish| {
+            publish.publish_approval = None;
+        });
     }
 
     pub fn is_publish_approved(&self) -> bool {
@@ -1148,25 +1176,26 @@ impl ExecutionState {
     }
 
     pub fn reset_publish_retries(&mut self) {
-        let mut publish = self.publish_state();
-        publish.publish_retries.clear();
-        self.set_publish_state(publish);
+        self.with_publish_state_mut(|publish| {
+            publish.publish_retries.clear();
+        });
     }
 
     pub fn enter_validate_mode(&mut self, tier: ExecutionTier) {
-        let mut phase = self.phase_state();
-        phase.current_tier = tier;
-        phase.mode = ExecutionMode::Validate;
-        self.set_phase_state(phase);
+        self.with_phase_state_mut(|phase| {
+            phase.current_tier = tier;
+            phase.mode = ExecutionMode::Validate;
+        });
     }
 
     pub fn mark_failed(&mut self, brief: impl Into<String>) {
-        let mut phase = self.phase_state();
-        let mut repair = self.repair_state();
-        phase.mode = ExecutionMode::Failed;
-        repair.last_error_brief = Some(brief.into());
-        self.set_phase_state(phase);
-        self.set_repair_state(repair);
+        let brief = brief.into();
+        self.with_phase_state_mut(|phase| {
+            phase.mode = ExecutionMode::Failed;
+        });
+        self.with_repair_state_mut(|repair| {
+            repair.last_error_brief = Some(brief);
+        });
     }
 
     pub async fn load(thread_store: &ThreadStore, thread_id: &str) -> Option<Self> {
@@ -1187,19 +1216,19 @@ impl ExecutionState {
     }
 
     pub fn set_pending_publish_plan(&mut self, plan_sha256: String) {
-        let mut publish = self.publish_state();
-        publish.publish_plan.pending_plan_sha256 = Some(plan_sha256);
-        publish.publish_plan.pending_set_ts = Some(chrono::Utc::now().to_rfc3339());
-        self.set_publish_state(publish);
+        self.with_publish_state_mut(|publish| {
+            publish.publish_plan.pending_plan_sha256 = Some(plan_sha256);
+            publish.publish_plan.pending_set_ts = Some(chrono::Utc::now().to_rfc3339());
+        });
     }
 
     pub fn mark_publish_complete(&mut self, plan_sha256: String) {
-        let mut publish = self.publish_state();
-        publish.publish_plan.last_published_plan_sha256 = Some(plan_sha256);
-        publish.publish_plan.published_ts = Some(chrono::Utc::now().to_rfc3339());
-        publish.publish_plan.pending_plan_sha256 = None;
-        publish.publish_plan.pending_set_ts = None;
-        self.set_publish_state(publish);
+        self.with_publish_state_mut(|publish| {
+            publish.publish_plan.last_published_plan_sha256 = Some(plan_sha256);
+            publish.publish_plan.published_ts = Some(chrono::Utc::now().to_rfc3339());
+            publish.publish_plan.pending_plan_sha256 = None;
+            publish.publish_plan.pending_set_ts = None;
+        });
     }
 
     pub fn set_artifact_focus(
