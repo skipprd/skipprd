@@ -178,6 +178,9 @@ pub(crate) fn replan_backtrack_counter_cap() -> usize {
         .min(20)
 }
 
+#[deprecated(
+    note = "Use transition_dispatcher::apply_phase_directive with PhaseDirective::Transition"
+)]
 pub async fn append_phase_with_intent(
     store: &ThreadStore,
     thread_id: &str,
@@ -188,15 +191,17 @@ pub async fn append_phase_with_intent(
     reason_code: Option<PhaseReasonCode>,
     reason_detail: Option<Value>,
 ) -> Result<(), String> {
-    crate::data_engineer::transition_dispatcher::dispatch_phase_transition(
+    crate::data_engineer::transition_dispatcher::apply_phase_directive(
         store,
         thread_id,
         agent,
         from_phase,
-        phase,
-        intent,
-        reason_code,
-        reason_detail,
+        crate::data_engineer::transition_dispatcher::PhaseDirective::Transition {
+            to: phase,
+            intent,
+            reason_code,
+            reason_detail,
+        },
     )
     .await
 }
@@ -1546,15 +1551,17 @@ mod tests {
         let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
         let store = ThreadStore::new(storage, scope, keyspace);
 
-        append_phase_with_intent(
+        crate::data_engineer::transition_dispatcher::apply_phase_directive(
             &store,
             "tid",
             Some("agent".to_string()),
             Some(Phase::Preflight),
-            Phase::CleansePlan,
-            TransitionIntent::Forward,
-            Some(PhaseReasonCode::PreflightOk),
-            Some(serde_json::json!({"x": 1, "nested": {"y": "z"}})),
+            crate::data_engineer::transition_dispatcher::PhaseDirective::Transition {
+                to: Phase::CleansePlan,
+                intent: TransitionIntent::Forward,
+                reason_code: Some(PhaseReasonCode::PreflightOk),
+                reason_detail: Some(serde_json::json!({"x": 1, "nested": {"y": "z"}})),
+            },
         )
         .await
         .expect("append ok");
@@ -1600,15 +1607,17 @@ mod tests {
         let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
         let store = ThreadStore::new(storage, scope, keyspace);
 
-        append_phase_with_intent(
+        crate::data_engineer::transition_dispatcher::apply_phase_directive(
             &store,
             "tid2",
             Some("agent".to_string()),
             None,
-            Phase::CleanseAuthor,
-            TransitionIntent::Forward,
-            None,
-            None,
+            crate::data_engineer::transition_dispatcher::PhaseDirective::Transition {
+                to: Phase::CleanseAuthor,
+                intent: TransitionIntent::Forward,
+                reason_code: None,
+                reason_detail: None,
+            },
         )
         .await
         .expect("append ok");

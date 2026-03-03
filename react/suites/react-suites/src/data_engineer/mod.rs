@@ -21,6 +21,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 #[cfg(test)]
 use crate::data_engineer::failure_classifier::ValidateFailureClass;
+use crate::data_engineer::phase_actions::{
+    apply_guard_block, apply_phase_transition, plan_status_reason_detail,
+};
 
 pub struct DataEngineerSuite;
 const PLAN_SPEC_PLACEHOLDER_SENTINEL: &str = "__REQUIRES_PLAN_ENRICHMENT__";
@@ -38,6 +41,8 @@ pub mod mutation_gateway;
 pub mod patch_contract;
 #[path = "patch_protocol.rs"]
 pub mod files_patch_repair;
+pub mod phase_actions;
+pub mod phase_gate;
 pub mod plan;
 pub mod ws_plans;
 pub mod plan_kind;
@@ -61,15 +66,6 @@ pub mod state_manager;
 pub mod tool_ops;
 pub mod transition_dispatcher;
 pub mod tools;
-
-fn primary_failed_model_file(
-    last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
-) -> Option<String> {
-    last_validate_failed_models
-        .iter()
-        .map(|fm| fm.file.trim().to_string())
-        .find(|s| !s.is_empty() && s != "(unknown file)")
-}
 
 fn lock_prompt_for_plan(
     kind: &str,
@@ -103,6 +99,33 @@ fn batch_lock_error(reason: &str) -> String {
 fn stable_json_digest<T: Serialize>(value: &T) -> Option<String> {
     let raw = serde_json::to_string(value).ok()?;
     Some(react_core::llm_observability::sha256_hex_str(&raw))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrackKind {
+    Cleanse,
+    Model,
+}
+
+impl TrackKind {
+    fn from_plan_phase(phase: control_flow::Phase) -> Self {
+        match phase {
+            control_flow::Phase::CleansePlan => Self::Cleanse,
+            control_flow::Phase::ModelPlan => Self::Model,
+            _ => Self::Cleanse,
+        }
+    }
+
+    fn is_cleanse(self) -> bool {
+        matches!(self, Self::Cleanse)
+    }
+
+    fn author_phase(self) -> control_flow::Phase {
+        match self {
+            Self::Cleanse => control_flow::Phase::CleanseAuthor,
+            Self::Model => control_flow::Phase::ModelAuthor,
+        }
+    }
 }
 
 /// Interrupt policy used by non-deterministic single-pass modes.
@@ -1967,59 +1990,29 @@ Apply these fixes in the output.",
         current_plan_key: &str,
         current_plan_digest: Option<&str>,
     ) -> bool {
-        let Some(intent) = execution_state.pending_loopback_intent.as_ref() else {
-            return false;
-        };
-        match intent {
-            crate::data_engineer::progress_controller::PendingLoopbackIntent::PatchPlan {
-                phase: intent_phase,
-                entry_plan_key,
-                entry_plan_digest,
-            } => {
-                if *intent_phase != phase {
-                    return false;
-                }
-                let key_changed = entry_plan_key
-                    .as_ref()
-                    .map(|k| k.trim() != current_plan_key.trim())
-                    .unwrap_or(true);
-                let digest_changed = match (entry_plan_digest.as_deref(), current_plan_digest) {
-                    (Some(prev), Some(cur)) => prev.trim() != cur.trim(),
-                    (None, Some(_)) => true,
-                    _ => false,
-                };
-                !(key_changed || digest_changed)
-            }
-            _ => false,
-        }
+        crate::data_engineer::phase_gate::patch_plan_intent_blocks_fast_forward(
+            execution_state,
+            phase,
+            current_plan_key,
+            current_plan_digest,
+        )
     }
 
     fn patch_impl_intent_unsatisfied(
         execution_state: &crate::data_engineer::progress_controller::ExecutionState,
         phase: control_flow::Phase,
     ) -> bool {
-        let Some(intent) = execution_state.pending_loopback_intent.as_ref() else {
-            return false;
-        };
-        match intent {
-            crate::data_engineer::progress_controller::PendingLoopbackIntent::PatchImpl {
-                phase: intent_phase,
-                entry_mutation_epoch,
-            } => *intent_phase == phase && execution_state.mutation_epoch <= *entry_mutation_epoch,
-            _ => false,
-        }
+        crate::data_engineer::phase_gate::patch_impl_intent_unsatisfied(execution_state, phase)
     }
 
     fn derive_single_target_repair_path(
         execution_state: &crate::data_engineer::progress_controller::ExecutionState,
         last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
     ) -> Option<String> {
-        execution_state
-            .single_target_repair_path
-            .as_ref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| primary_failed_model_file(last_validate_failed_models))
+        crate::data_engineer::phase_gate::derive_single_target_repair_path(
+            execution_state,
+            last_validate_failed_models,
+        )
     }
 
     async fn approve_cleanse_plan_draft_and_advance(
@@ -2070,10 +2063,9 @@ Apply these fixes in the output.",
                 .await
                 .map_err(|e| format!("failed to persist pruned-empty cleanse plan: {e}"))?;
             // Stay in plan phase; the next iteration will generate a new plan.
-            control_flow::append_phase_with_intent(
+            apply_phase_transition(
                 thread_store,
                 thread_id,
-                Some("agent".to_string()),
                 Some(phase),
                 phase,
                 control_flow::TransitionIntent::Annotation,
@@ -2094,10 +2086,9 @@ Apply these fixes in the output.",
             crate::data_engineer::plan::save_cleanse_plan(actx, &p)
                 .await
                 .map_err(|e| format!("failed to persist semantically-invalid cleanse plan: {e}"))?;
-            control_flow::append_phase_with_intent(
+            apply_phase_transition(
                 thread_store,
                 thread_id,
-                Some("agent".to_string()),
                 Some(phase),
                 phase,
                 control_flow::TransitionIntent::Annotation,
@@ -2116,10 +2107,9 @@ Apply these fixes in the output.",
             .map_err(|e| format!("failed to persist approved cleanse plan: {e}"))?;
         let _ = Self::clear_pending_loopback_intent(thread_store, thread_id).await;
 
-        control_flow::append_phase_with_intent(
+        apply_phase_transition(
             thread_store,
             thread_id,
-            Some("agent".to_string()),
             Some(phase),
             control_flow::Phase::CleanseAuthor,
             control_flow::TransitionIntent::Forward,
@@ -2159,10 +2149,9 @@ Apply these fixes in the output.",
                 .await
                 .map_err(|e| format!("failed to persist pruned-empty model plan: {e}"))?;
             // Stay in plan phase; the next iteration will generate a new plan.
-            control_flow::append_phase_with_intent(
+            apply_phase_transition(
                 thread_store,
                 thread_id,
-                Some("agent".to_string()),
                 Some(phase),
                 phase,
                 control_flow::TransitionIntent::Annotation,
@@ -2185,10 +2174,9 @@ Apply these fixes in the output.",
             crate::data_engineer::plan::save_model_plan(actx, &p)
                 .await
                 .map_err(|e| format!("failed to persist semantically-invalid model plan: {e}"))?;
-            control_flow::append_phase_with_intent(
+            apply_phase_transition(
                 thread_store,
                 thread_id,
-                Some("agent".to_string()),
                 Some(phase),
                 phase,
                 control_flow::TransitionIntent::Annotation,
@@ -2206,10 +2194,9 @@ Apply these fixes in the output.",
             .map_err(|e| format!("failed to persist approved model plan: {e}"))?;
         let _ = Self::clear_pending_loopback_intent(thread_store, thread_id).await;
 
-        control_flow::append_phase_with_intent(
+        apply_phase_transition(
             thread_store,
             thread_id,
-            Some("agent".to_string()),
             Some(phase),
             control_flow::Phase::ModelAuthor,
             control_flow::TransitionIntent::Forward,
@@ -4177,19 +4164,14 @@ Apply these fixes in the output.",
                 error = %e,
                 "data_engineer: refusing to continue after preflight catalog metadata gate failure"
             );
-            let _ = thread_store
-                .append_step(
-                    thread_id,
-                    react_core::session::ThreadStep::GuardBlock {
-                        phase: Phase::Preflight.as_str().to_string(),
-                        kind: GuardBlockKind::PrecheckFailed,
-                        reason: reason.clone(),
-                        observation: react_core::session::Observation::fail(vec![reason.clone()]),
-                        ts: chrono::Utc::now().to_rfc3339(),
-                        agent: "agent".to_string(),
-                    },
-                )
-                .await;
+            let _ = apply_guard_block(
+                &thread_store,
+                thread_id,
+                Phase::Preflight,
+                GuardBlockKind::PrecheckFailed,
+                reason.clone(),
+            )
+            .await;
             return Err(format!("agent_mode_await_user_forbidden: {}", reason));
         }
 
@@ -4281,47 +4263,30 @@ Apply these fixes in the output.",
                 control_flow::derive_guard_state_from_execution_state(&execution_state);
             // Agent mode is non-interactive: never expose ask-approval/ask-user pathways.
             let allow_ask_approval = false;
-            let replan_backtracks = execution_state.replan_backtracks;
-            if execution_state.stall_count >= execution_state.max_stall_count
-                && matches!(
-                    execution_state.mode,
-                    crate::data_engineer::progress_controller::ExecutionMode::Mutate
-                )
-            {
-                let reason = format!(
-                    "failed to make progress for this thread: execution_state stall_count={} reached max_stall_count={} in mode=mutate",
-                    execution_state.stall_count, execution_state.max_stall_count
-                );
-                let mut es = execution_state.clone();
-                es.mark_failed(reason.clone());
-                let _ = es.save(&thread_store, thread_id).await;
-                return Err(reason);
-            }
-            if replan_backtracks >= max_replan_backtracks {
-                let stop_msg = format!(
-                    "failed to make progress for this thread: observed {} validate/review loopback(s) to plan/author in active track '{}' since the last successful dbt_validate (limit {}). Stopping this thread. Please inspect the latest validate/review errors and apply a targeted fix before rerunning.",
-                    replan_backtracks,
-                    phase.as_str(),
-                    max_replan_backtracks
-                );
-                let step = react_core::session::ThreadStep::GuardBlock {
-                    phase: phase.as_str().to_string(),
-                    kind: GuardBlockKind::BatchLocked,
-                    reason: stop_msg.clone(),
-                    observation: react_core::session::Observation::fail(vec![
-                        "progress_stalled".to_string()
-                    ]),
-                    ts: chrono::Utc::now().to_rfc3339(),
-                    agent: "agent".to_string(),
-                };
-                thread_store
-                    .append_step(thread_id, step)
-                    .await
-                    .map_err(|e| format!("failed to append guard step: {e}"))?;
-                let mut es = execution_state.clone();
-                es.mark_failed(stop_msg.clone());
-                let _ = es.save(&thread_store, thread_id).await;
-                return Err(stop_msg);
+            match crate::data_engineer::phase_gate::evaluate_pre_turn_directive(
+                &execution_state,
+                phase,
+                max_replan_backtracks,
+            ) {
+                crate::data_engineer::phase_gate::PreTurnDirective::Proceed => {}
+                crate::data_engineer::phase_gate::PreTurnDirective::FailFast { kind, reason } => {
+                    crate::data_engineer::transition_dispatcher::apply_phase_directive(
+                        &thread_store,
+                        thread_id,
+                        Some("agent".to_string()),
+                        Some(phase),
+                        crate::data_engineer::transition_dispatcher::PhaseDirective::Block {
+                            phase,
+                            kind,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await?;
+                    let mut es = execution_state.clone();
+                    es.mark_failed(reason.clone());
+                    let _ = es.save(&thread_store, thread_id).await;
+                    return Err(reason);
+                }
             }
 
             // Hard-cutover: validate failure context is sourced from typed execution state only.
@@ -4372,10 +4337,9 @@ Apply these fixes in the output.",
                         }
                     }
                     // Persist transition.
-                    control_flow::append_phase_with_intent(
+                    apply_phase_transition(
                         &thread_store,
                         thread_id,
-                        Some("agent".to_string()),
                         Some(Phase::Preflight),
                         Phase::CleansePlan,
                         control_flow::TransitionIntent::Forward,
@@ -4393,7 +4357,8 @@ Apply these fixes in the output.",
                 Phase::CleansePlan | Phase::ModelPlan => {
                     // Plan phases are read-only discovery + plan authoring. They persist an approved
                     // plan to storage and then drive the subsequent authoring phase deterministically.
-                    let is_cleanse = phase == Phase::CleansePlan;
+                    let track = TrackKind::from_plan_phase(phase);
+                    let is_cleanse = track.is_cleanse();
                     let actx = Self::plan_agent_ctx(thread_id, sctx);
                     let entered_from_actionable_review =
                         execution_state.phase_reason_code == Some(PhaseReasonCode::ReviewPatchPlan);
@@ -4443,10 +4408,9 @@ Apply these fixes in the output.",
                                     let _ =
                                         crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
                                             .await;
-                                    let _ = control_flow::append_phase_with_intent(
+                                    let _ = apply_phase_transition(
                                         &thread_store,
                                         thread_id,
-                                        Some("agent".to_string()),
                                         Some(phase),
                                         phase,
                                         control_flow::TransitionIntent::Annotation,
@@ -4464,17 +4428,14 @@ Apply these fixes in the output.",
                                 let _ =
                                     Self::clear_pending_loopback_intent(&thread_store, thread_id)
                                         .await;
-                                control_flow::append_phase_with_intent(
+                                apply_phase_transition(
                                     &thread_store,
                                     thread_id,
-                                    Some("agent".to_string()),
                                     Some(phase),
-                                    Phase::CleanseAuthor,
+                                    track.author_phase(),
                                     control_flow::TransitionIntent::Forward,
                                     Some(PhaseReasonCode::PlanAlreadyApproved),
-                                    Some(
-                                        serde_json::json!({ "status": format!("{:?}", p.status) }),
-                                    ),
+                                    Some(plan_status_reason_detail(&p.status)),
                                 )
                                 .await?;
                                 continue;
@@ -4510,10 +4471,9 @@ Apply these fixes in the output.",
                                                 "failed to persist cancelled invalid-empty model plan: {e}"
                                             )
                                         })?;
-                                    let _ = control_flow::append_phase_with_intent(
+                                    let _ = apply_phase_transition(
                                         &thread_store,
                                         thread_id,
-                                        Some("agent".to_string()),
                                         Some(phase),
                                         phase,
                                         control_flow::TransitionIntent::Annotation,
@@ -4531,17 +4491,14 @@ Apply these fixes in the output.",
                                 let _ =
                                     Self::clear_pending_loopback_intent(&thread_store, thread_id)
                                         .await;
-                                control_flow::append_phase_with_intent(
+                                apply_phase_transition(
                                     &thread_store,
                                     thread_id,
-                                    Some("agent".to_string()),
                                     Some(phase),
-                                    Phase::ModelAuthor,
+                                    track.author_phase(),
                                     control_flow::TransitionIntent::Forward,
                                     Some(PhaseReasonCode::PlanAlreadyApproved),
-                                    Some(
-                                        serde_json::json!({ "status": format!("{:?}", p.status) }),
-                                    ),
+                                    Some(plan_status_reason_detail(&p.status)),
                                 )
                                 .await?;
                                 continue;
@@ -4567,10 +4524,9 @@ Apply these fixes in the output.",
                                     let _ =
                                         crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
                                             .await;
-                                    let _ = control_flow::append_phase_with_intent(
+                                    let _ = apply_phase_transition(
                                         &thread_store,
                                         thread_id,
-                                        Some("agent".to_string()),
                                         Some(phase),
                                         phase,
                                         control_flow::TransitionIntent::Annotation,
@@ -5245,21 +5201,14 @@ Apply these fixes in the output.",
                                         "Plan failed semantic validation (design-first). Errors:\n- {}",
                                         sem_errors.join("\n- ")
                                     );
-                                    let ts = chrono::Utc::now().to_rfc3339();
-                                    let step = react_core::session::ThreadStep::GuardBlock {
-                                        phase: phase.as_str().to_string(),
-                                        kind: GuardBlockKind::PlanSemanticInvalid,
-                                        reason: reason.clone(),
-                                        observation: react_core::session::Observation::fail(vec![
-                                            reason.clone(),
-                                        ]),
-                                        ts,
-                                        agent: "agent".to_string(),
-                                    };
-                                    thread_store
-                                        .append_step(thread_id, step.clone())
-                                        .await
-                                        .map_err(|e| format!("failed to append guard step: {e}"))?;
+                                    apply_guard_block(
+                                        &thread_store,
+                                        thread_id,
+                                        phase,
+                                        GuardBlockKind::PlanSemanticInvalid,
+                                        reason.clone(),
+                                    )
+                                    .await?;
                                     // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     let tries = Self::bump_subjective_retry(
                                         &thread_store,
@@ -5531,21 +5480,14 @@ Apply these fixes in the output.",
                                         "Plan failed semantic validation (design-first). Errors:\n- {}",
                                         sem_errors.join("\n- ")
                                     );
-                                    let ts = chrono::Utc::now().to_rfc3339();
-                                    let step = react_core::session::ThreadStep::GuardBlock {
-                                        phase: phase.as_str().to_string(),
-                                        kind: GuardBlockKind::PlanSemanticInvalid,
-                                        reason: reason.clone(),
-                                        observation: react_core::session::Observation::fail(vec![
-                                            reason.clone(),
-                                        ]),
-                                        ts,
-                                        agent: "agent".to_string(),
-                                    };
-                                    thread_store
-                                        .append_step(thread_id, step.clone())
-                                        .await
-                                        .map_err(|e| format!("failed to append guard step: {e}"))?;
+                                    apply_guard_block(
+                                        &thread_store,
+                                        thread_id,
+                                        phase,
+                                        GuardBlockKind::PlanSemanticInvalid,
+                                        reason.clone(),
+                                    )
+                                    .await?;
                                     // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     let tries = Self::bump_subjective_retry(
                                         &thread_store,
@@ -5729,10 +5671,9 @@ Apply these fixes in the output.",
                                 None => {
                                     // Recovery: authoring was entered, but no plan exists (e.g. restart/resume drift).
                                     // Bounce back to planning so the thread can rehydrate deterministically.
-                                    control_flow::append_phase_with_intent(
+                                    apply_phase_transition(
                                         &thread_store,
                                         thread_id,
-                                        Some("agent".to_string()),
                                         Some(phase),
                                         Phase::CleansePlan,
                                         control_flow::TransitionIntent::Loopback,
@@ -5758,24 +5699,17 @@ Apply these fixes in the output.",
                                             "failed to persist cancelled non-executable cleanse plan: {e}"
                                         )
                                     })?;
-                                let step = react_core::session::ThreadStep::GuardBlock {
-                                    phase: phase.as_str().to_string(),
-                                    kind: GuardBlockKind::PlanSemanticInvalid,
-                                    reason: reason.clone(),
-                                    observation: react_core::session::Observation::fail(vec![
-                                        reason.clone(),
-                                    ]),
-                                    ts: chrono::Utc::now().to_rfc3339(),
-                                    agent: "agent".to_string(),
-                                };
-                                thread_store
-                                    .append_step(thread_id, step)
-                                    .await
-                                    .map_err(|e| format!("failed to append guard step: {e}"))?;
-                                control_flow::append_phase_with_intent(
+                                apply_guard_block(
                                     &thread_store,
                                     thread_id,
-                                    Some("agent".to_string()),
+                                    phase,
+                                    GuardBlockKind::PlanSemanticInvalid,
+                                    reason.clone(),
+                                )
+                                .await?;
+                                apply_phase_transition(
+                                    &thread_store,
+                                    thread_id,
                                     Some(phase),
                                     Phase::CleansePlan,
                                     control_flow::TransitionIntent::Loopback,
@@ -5838,28 +5772,22 @@ Apply these fixes in the output.",
                                 &next,
                                 &expected_paths,
                             );
-                            let ts = chrono::Utc::now().to_rfc3339();
-                            let step = react_core::session::ThreadStep::GuardBlock {
-                                phase: phase.as_str().to_string(),
-                                kind: GuardBlockKind::BatchLocked,
-                                reason: reason.clone(),
-                                observation: react_core::session::Observation::fail(vec![reason.clone()]),
-                                ts,
-                                agent: "agent".to_string(),
-                            };
-                            thread_store
-                                .append_step(thread_id, step)
-                                .await
-                                .map_err(|e| format!("failed to append guard step: {e}"))?;
+                            apply_guard_block(
+                                &thread_store,
+                                thread_id,
+                                phase,
+                                GuardBlockKind::BatchLocked,
+                                reason.clone(),
+                            )
+                            .await?;
                             return Err(batch_lock_error(&reason));
                         }
                             if plan.status != crate::data_engineer::plan::PlanStatus::Approved
                                 && plan.status != crate::data_engineer::plan::PlanStatus::Completed
                             {
-                                control_flow::append_phase_with_intent(
+                                apply_phase_transition(
                                 &thread_store,
                                 thread_id,
-                                Some("agent".to_string()),
                                 Some(phase),
                                 Phase::CleansePlan,
                                 control_flow::TransitionIntent::Loopback,
@@ -6028,10 +5956,9 @@ Apply these fixes in the output.",
                                         &next_action,
                                         crate::data_engineer::plan::AuthoringNextAction::Validate
                                     ) {
-                                        control_flow::append_phase_with_intent(
+                                        apply_phase_transition(
                                             &thread_store,
                                             thread_id,
-                                            Some("agent".to_string()),
                                             Some(phase),
                                             Phase::CleanseValidate,
                                             control_flow::TransitionIntent::Forward,
@@ -6077,10 +6004,9 @@ Apply these fixes in the output.",
                                             None, // allow freeform file patching for targeted repair
                                         )
                                     } else if crate::data_engineer::plan::snapshot_cleanse_completion(&plan).all_done {
-                                        control_flow::append_phase_with_intent(
+                                        apply_phase_transition(
                                             &thread_store,
                                             thread_id,
-                                            Some("agent".to_string()),
                                             Some(phase),
                                             Phase::CleanseValidate,
                                             control_flow::TransitionIntent::Forward,
@@ -6091,24 +6017,17 @@ Apply these fixes in the output.",
                                         continue;
                                     } else {
                                         let reason = "approved cleanse plan is not executable: no next work-group action while checklist work remains".to_string();
-                                        let step = react_core::session::ThreadStep::GuardBlock {
-                                            phase: phase.as_str().to_string(),
-                                            kind: GuardBlockKind::PlanSemanticInvalid,
-                                            reason: reason.clone(),
-                                            observation: react_core::session::Observation::fail(
-                                                vec![reason.clone()],
-                                            ),
-                                            ts: chrono::Utc::now().to_rfc3339(),
-                                            agent: "agent".to_string(),
-                                        };
-                                        thread_store
-                                            .append_step(thread_id, step)
-                                            .await
-                                            .map_err(|e| format!("failed to append guard step: {e}"))?;
-                                        control_flow::append_phase_with_intent(
+                                        apply_guard_block(
                                             &thread_store,
                                             thread_id,
-                                            Some("agent".to_string()),
+                                            phase,
+                                            GuardBlockKind::PlanSemanticInvalid,
+                                            reason.clone(),
+                                        )
+                                        .await?;
+                                        apply_phase_transition(
+                                            &thread_store,
+                                            thread_id,
                                             Some(phase),
                                             Phase::CleansePlan,
                                             control_flow::TransitionIntent::Loopback,
@@ -6139,10 +6058,9 @@ Apply these fixes in the output.",
                                 None => {
                                     // Recovery: authoring was entered, but no plan exists (e.g. restart/resume drift).
                                     // Bounce back to planning so the thread can rehydrate deterministically.
-                                    control_flow::append_phase_with_intent(
+                                    apply_phase_transition(
                                         &thread_store,
                                         thread_id,
-                                        Some("agent".to_string()),
                                         Some(phase),
                                         Phase::ModelPlan,
                                         control_flow::TransitionIntent::Loopback,
@@ -6163,24 +6081,17 @@ Apply these fixes in the output.",
                                 plan.status = crate::data_engineer::plan::PlanStatus::Cancelled;
                                 let _ =
                                     crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
-                                let step = react_core::session::ThreadStep::GuardBlock {
-                                    phase: phase.as_str().to_string(),
-                                    kind: GuardBlockKind::PlanSemanticInvalid,
-                                    reason: reason.clone(),
-                                    observation: react_core::session::Observation::fail(vec![
-                                        reason.clone(),
-                                    ]),
-                                    ts: chrono::Utc::now().to_rfc3339(),
-                                    agent: "agent".to_string(),
-                                };
-                                thread_store
-                                    .append_step(thread_id, step)
-                                    .await
-                                    .map_err(|e| format!("failed to append guard step: {e}"))?;
-                                control_flow::append_phase_with_intent(
+                                apply_guard_block(
                                     &thread_store,
                                     thread_id,
-                                    Some("agent".to_string()),
+                                    phase,
+                                    GuardBlockKind::PlanSemanticInvalid,
+                                    reason.clone(),
+                                )
+                                .await?;
+                                apply_phase_transition(
+                                    &thread_store,
+                                    thread_id,
                                     Some(phase),
                                     Phase::ModelPlan,
                                     control_flow::TransitionIntent::Loopback,
@@ -6241,28 +6152,22 @@ Apply these fixes in the output.",
                                 &next,
                                 &expected_paths,
                             );
-                            let ts = chrono::Utc::now().to_rfc3339();
-                            let step = react_core::session::ThreadStep::GuardBlock {
-                                phase: phase.as_str().to_string(),
-                                kind: GuardBlockKind::BatchLocked,
-                                reason: reason.clone(),
-                                observation: react_core::session::Observation::fail(vec![reason.clone()]),
-                                ts,
-                                agent: "agent".to_string(),
-                            };
-                            thread_store
-                                .append_step(thread_id, step)
-                                .await
-                                .map_err(|e| format!("failed to append guard step: {e}"))?;
+                            apply_guard_block(
+                                &thread_store,
+                                thread_id,
+                                phase,
+                                GuardBlockKind::BatchLocked,
+                                reason.clone(),
+                            )
+                            .await?;
                             return Err(batch_lock_error(&reason));
                         }
                             if plan.status != crate::data_engineer::plan::PlanStatus::Approved
                                 && plan.status != crate::data_engineer::plan::PlanStatus::Completed
                             {
-                                control_flow::append_phase_with_intent(
+                                apply_phase_transition(
                                 &thread_store,
                                 thread_id,
-                                Some("agent".to_string()),
                                 Some(phase),
                                 Phase::ModelPlan,
                                 control_flow::TransitionIntent::Loopback,
@@ -6502,10 +6407,9 @@ Apply these fixes in the output.",
                                         &next_action,
                                         crate::data_engineer::plan::AuthoringNextAction::Validate
                                     ) {
-                                        control_flow::append_phase_with_intent(
+                                        apply_phase_transition(
                                             &thread_store,
                                             thread_id,
-                                            Some("agent".to_string()),
                                             Some(phase),
                                             Phase::ModelValidate,
                                             control_flow::TransitionIntent::Forward,
@@ -6547,10 +6451,9 @@ Apply these fixes in the output.",
                                         }
                                         (ctx, None)
                                     } else if crate::data_engineer::plan::snapshot_model_completion(&plan).all_done {
-                                        control_flow::append_phase_with_intent(
+                                        apply_phase_transition(
                                             &thread_store,
                                             thread_id,
-                                            Some("agent".to_string()),
                                             Some(phase),
                                             Phase::ModelValidate,
                                             control_flow::TransitionIntent::Forward,
@@ -6561,24 +6464,17 @@ Apply these fixes in the output.",
                                         continue;
                                     } else {
                                         let reason = "approved model plan is not executable: no next work-group action while checklist work remains".to_string();
-                                        let step = react_core::session::ThreadStep::GuardBlock {
-                                            phase: phase.as_str().to_string(),
-                                            kind: GuardBlockKind::PlanSemanticInvalid,
-                                            reason: reason.clone(),
-                                            observation: react_core::session::Observation::fail(
-                                                vec![reason.clone()],
-                                            ),
-                                            ts: chrono::Utc::now().to_rfc3339(),
-                                            agent: "agent".to_string(),
-                                        };
-                                        thread_store
-                                            .append_step(thread_id, step)
-                                            .await
-                                            .map_err(|e| format!("failed to append guard step: {e}"))?;
-                                        control_flow::append_phase_with_intent(
+                                        apply_guard_block(
+                                            &thread_store,
+                                            thread_id,
+                                            phase,
+                                            GuardBlockKind::PlanSemanticInvalid,
+                                            reason.clone(),
+                                        )
+                                        .await?;
+                                        apply_phase_transition(
                                         &thread_store,
                                         thread_id,
-                                        Some("agent".to_string()),
                                         Some(phase),
                                         Phase::ModelPlan,
                                         control_flow::TransitionIntent::Loopback,
@@ -6623,39 +6519,6 @@ Apply these fixes in the output.",
                     } else {
                         None
                     };
-                    if hard_mutation_repair_mode
-                        && single_target_repair_path.is_some()
-                        && execution_state.ladder_step
-                            == crate::data_engineer::progress_controller::RepairLadderStep::Stop
-                    {
-                        let target = single_target_repair_path
-                            .as_deref()
-                            .unwrap_or("(unknown target)")
-                            .trim()
-                            .to_string();
-                        let reason = format!(
-                            "failed to make progress for this thread: deterministic repair ladder reached stop for '{}' after {} attempt(s). Apply a manual fix to the target file and rerun the thread.",
-                            target,
-                            execution_state.attempt_count
-                        );
-                        let ts = chrono::Utc::now().to_rfc3339();
-                        let step = react_core::session::ThreadStep::GuardBlock {
-                            phase: phase.as_str().to_string(),
-                            kind: GuardBlockKind::AuthoringToValidate,
-                            reason: reason.clone(),
-                            observation: react_core::session::Observation::fail(vec![
-                                reason.clone(),
-                            ]),
-                            ts,
-                            agent: "agent".to_string(),
-                        };
-                        thread_store
-                            .append_step(thread_id, step)
-                            .await
-                            .map_err(|e| format!("failed to append guard step: {e}"))?;
-                        return Err(reason);
-                    }
-
                     let (registry, tools_card) = Self::build_tools_for_phase(
                         phase,
                         &phase_guard,
@@ -7109,21 +6972,14 @@ Apply these fixes in the output.",
                                 &gate_state,
                                 phase,
                             ) {
-                                let ts = chrono::Utc::now().to_rfc3339();
-                                let step = react_core::session::ThreadStep::GuardBlock {
-                                    phase: phase.as_str().to_string(),
-                                    kind: GuardBlockKind::AuthoringToValidate,
-                                    reason: reason.clone(),
-                                    observation: react_core::session::Observation::fail(vec![
-                                        reason.clone(),
-                                    ]),
-                                    ts,
-                                    agent: "agent".to_string(),
-                                };
-                                thread_store
-                                    .append_step(thread_id, step.clone())
-                                    .await
-                                    .map_err(|e| format!("failed to append guard step: {e}"))?;
+                                apply_guard_block(
+                                    &thread_store,
+                                    thread_id,
+                                    phase,
+                                    GuardBlockKind::AuthoringToValidate,
+                                    reason.clone(),
+                                )
+                                .await?;
                                 continue;
                             }
                             if Self::patch_impl_intent_unsatisfied(&gate_state, phase) {
@@ -7131,21 +6987,14 @@ Apply these fixes in the output.",
                                     "progress_gate_blocked: review requested implementation patch for phase '{}' and no successful mutation has been recorded since loopback. Apply a mutating file op (patch/rm/mv) before re-validating.",
                                     phase.as_str()
                                 );
-                                let ts = chrono::Utc::now().to_rfc3339();
-                                let step = react_core::session::ThreadStep::GuardBlock {
-                                    phase: phase.as_str().to_string(),
-                                    kind: GuardBlockKind::AuthoringToValidate,
-                                    reason: reason.clone(),
-                                    observation: react_core::session::Observation::fail(vec![
-                                        reason.clone(),
-                                    ]),
-                                    ts,
-                                    agent: "agent".to_string(),
-                                };
-                                thread_store
-                                    .append_step(thread_id, step)
-                                    .await
-                                    .map_err(|e| format!("failed to append guard step: {e}"))?;
+                                apply_guard_block(
+                                    &thread_store,
+                                    thread_id,
+                                    phase,
+                                    GuardBlockKind::AuthoringToValidate,
+                                    reason.clone(),
+                                )
+                                .await?;
                                 continue;
                             }
                             if matches!(
@@ -7163,21 +7012,14 @@ Apply these fixes in the output.",
                                 let actx = Self::agent_tool_ctx(thread_id, sctx);
                                 if !Self::has_any_gold_model_sql(&actx).await {
                                     let reason = "No gold models were found under models/core/ or models/marts/ after ModelAuthor. Gold must be explicitly authored (marts/core SQL) before validating/publishing.";
-                                    let ts = chrono::Utc::now().to_rfc3339();
-                                    let step = react_core::session::ThreadStep::GuardBlock {
-                                        phase: phase.as_str().to_string(),
-                                        kind: GuardBlockKind::MissingGoldModels,
-                                        reason: reason.to_string(),
-                                        observation: react_core::session::Observation::fail(vec![
-                                            reason.to_string(),
-                                        ]),
-                                        ts,
-                                        agent: "agent".to_string(),
-                                    };
-                                    thread_store
-                                        .append_step(thread_id, step.clone())
-                                        .await
-                                        .map_err(|e| format!("failed to append guard step: {e}"))?;
+                                    apply_guard_block(
+                                        &thread_store,
+                                        thread_id,
+                                        phase,
+                                        GuardBlockKind::MissingGoldModels,
+                                        reason.to_string(),
+                                    )
+                                    .await?;
                                     // Hard cutover: same-phase blocks are represented as GuardBlock only.
                                     continue;
                                 }
@@ -7218,10 +7060,9 @@ Apply these fixes in the output.",
                                 has_models,
                             )
                             .await;
-                            control_flow::append_phase_with_intent(
+                            apply_phase_transition(
                                 &thread_store,
                                 thread_id,
-                                Some("agent".to_string()),
                                 Some(phase),
                                 to_phase,
                                 control_flow::TransitionIntent::Forward,
@@ -7305,28 +7146,22 @@ Apply these fixes in the output.",
                         let reason = format!(
                             "Pre-validation normalization failed; fix DBT YAML artifacts before re-validating.\n\n{e}"
                         );
-                        let ts = chrono::Utc::now().to_rfc3339();
-                        let step = react_core::session::ThreadStep::GuardBlock {
-                            phase: phase.as_str().to_string(),
-                            kind: GuardBlockKind::PrecheckFailed,
-                            reason: reason.clone(),
-                            observation: react_core::session::Observation::fail(vec![reason.clone()]),
-                            ts,
-                            agent: "agent".to_string(),
-                        };
-                        thread_store
-                            .append_step(thread_id, step)
-                            .await
-                            .map_err(|e| format!("failed to append guard step: {e}"))?;
+                        apply_guard_block(
+                            &thread_store,
+                            thread_id,
+                            phase,
+                            GuardBlockKind::PrecheckFailed,
+                            reason.clone(),
+                        )
+                        .await?;
                         let to_phase = if phase == Phase::CleanseValidate {
                             Phase::CleanseAuthor
                         } else {
                             Phase::ModelAuthor
                         };
-                        let _ = control_flow::append_phase_with_intent(
+                        let _ = apply_phase_transition(
                             &thread_store,
                             thread_id,
-                            Some("agent".to_string()),
                             Some(phase),
                             to_phase,
                             control_flow::TransitionIntent::Loopback,
@@ -7344,30 +7179,22 @@ Apply these fixes in the output.",
                             .await
                     {
                         let reason = format!("Pre-validation failed; fix DBT YAML artifacts before re-validating.\n\n{e}");
-                        let ts = chrono::Utc::now().to_rfc3339();
-                        let step = react_core::session::ThreadStep::GuardBlock {
-                            phase: phase.as_str().to_string(),
-                            kind: GuardBlockKind::PrecheckFailed,
-                            reason: reason.clone(),
-                            observation: react_core::session::Observation::fail(vec![
-                                reason.clone()
-                            ]),
-                            ts,
-                            agent: "agent".to_string(),
-                        };
-                        thread_store
-                            .append_step(thread_id, step)
-                            .await
-                            .map_err(|e| format!("failed to append guard step: {e}"))?;
+                        apply_guard_block(
+                            &thread_store,
+                            thread_id,
+                            phase,
+                            GuardBlockKind::PrecheckFailed,
+                            reason.clone(),
+                        )
+                        .await?;
                         let to_phase = if phase == Phase::CleanseValidate {
                             Phase::CleanseAuthor
                         } else {
                             Phase::ModelAuthor
                         };
-                        let _ = control_flow::append_phase_with_intent(
+                        let _ = apply_phase_transition(
                             &thread_store,
                             thread_id,
-                            Some("agent".to_string()),
                             Some(phase),
                             to_phase,
                             control_flow::TransitionIntent::Loopback,
@@ -7681,29 +7508,22 @@ Apply these fixes in the output.",
                                 "{}: dbt_validate succeeded but plan checklist work is still pending; returning to authoring",
                                 signal
                             );
-                            let step = react_core::session::ThreadStep::GuardBlock {
-                                phase: phase.as_str().to_string(),
-                                kind: GuardBlockKind::AuthoringCompletion,
-                                reason: reason.clone(),
-                                observation: react_core::session::Observation::fail(vec![
-                                    reason.clone()
-                                ]),
-                                ts: chrono::Utc::now().to_rfc3339(),
-                                agent: "agent".to_string(),
-                            };
-                            thread_store
-                                .append_step(thread_id, step)
-                                .await
-                                .map_err(|e| format!("failed to append guard step: {e}"))?;
+                            apply_guard_block(
+                                &thread_store,
+                                thread_id,
+                                phase,
+                                GuardBlockKind::AuthoringCompletion,
+                                reason.clone(),
+                            )
+                            .await?;
                             let to_phase = if phase == Phase::CleanseValidate {
                                 Phase::CleanseAuthor
                             } else {
                                 Phase::ModelAuthor
                             };
-                            control_flow::append_phase_with_intent(
+                            apply_phase_transition(
                                 &thread_store,
                                 thread_id,
-                                Some("agent".to_string()),
                                 Some(phase),
                                 to_phase,
                                 control_flow::TransitionIntent::Loopback,
@@ -7732,10 +7552,9 @@ Apply these fixes in the output.",
                         } else {
                             Phase::ModelReview
                         };
-                        control_flow::append_phase_with_intent(
+                        apply_phase_transition(
                             &thread_store,
                             thread_id,
-                            Some("agent".to_string()),
                             Some(phase),
                             to_phase,
                             control_flow::TransitionIntent::Forward,
@@ -7937,10 +7756,9 @@ Apply these fixes in the output.",
                                 })?;
                         }
                     }
-                    control_flow::append_phase_with_intent(
+                    apply_phase_transition(
                         &thread_store,
                         thread_id,
-                        Some("agent".to_string()),
                         Some(phase),
                         to_phase,
                         control_flow::TransitionIntent::Loopback,
@@ -7996,13 +7814,14 @@ Apply these fixes in the output.",
                         })
                         .unwrap_or((
                             0,
-                            react_core::session::ThreadStep::GuardBlock {
+                            react_core::session::ThreadStep::Phase {
                                 phase: "unknown".to_string(),
-                                kind: GuardBlockKind::MissingThreadStep,
-                                reason: "missing thread step".to_string(),
-                                observation: react_core::session::Observation::fail(vec![
-                                    "missing thread step".to_string(),
-                                ]),
+                                from_phase: None,
+                                reason_code: Some(PhaseReasonCode::PhaseSet),
+                                reason_detail: Some(serde_json::json!({
+                                    "fallback": "missing_thread_step"
+                                })),
+                                observation: react_core::session::Observation::ok(),
                                 ts: chrono::Utc::now().to_rfc3339(),
                                 agent: "agent".to_string(),
                             },
@@ -8086,10 +7905,9 @@ Apply these fixes in the output.",
                                 Phase::PostPublishReview => Phase::Done,
                                 _ => Phase::Done,
                             };
-                            control_flow::append_phase_with_intent(
+                            apply_phase_transition(
                                 &thread_store,
                                 thread_id,
-                                Some("agent".to_string()),
                                 Some(phase),
                                 next,
                                 control_flow::TransitionIntent::Forward,
@@ -8135,10 +7953,9 @@ Apply these fixes in the output.",
                                 entry_plan_digest,
                             )
                             .await;
-                            control_flow::append_phase_with_intent(
+                            apply_phase_transition(
                                 &thread_store,
                                 thread_id,
-                                Some("agent".to_string()),
                                 Some(phase),
                                 back,
                                 control_flow::TransitionIntent::Loopback,
@@ -8158,10 +7975,9 @@ Apply these fixes in the output.",
                             let _ =
                                 Self::set_pending_patch_impl_intent(&thread_store, thread_id, back)
                                     .await;
-                            control_flow::append_phase_with_intent(
+                            apply_phase_transition(
                                 &thread_store,
                                 thread_id,
-                                Some("agent".to_string()),
                                 Some(phase),
                                 back,
                                 control_flow::TransitionIntent::Loopback,
@@ -8197,10 +8013,9 @@ Apply these fixes in the output.",
                         es.save(&thread_store, thread_id).await.map_err(|e| {
                             format!("failed to persist publish approval consumption state: {e}")
                         })?;
-                        control_flow::append_phase_with_intent(
+                        apply_phase_transition(
                             &thread_store,
                             thread_id,
-                            Some("agent".to_string()),
                             Some(Phase::PublishAwaitApproval),
                             Phase::Publish,
                             control_flow::TransitionIntent::Forward,
@@ -8236,10 +8051,9 @@ Apply these fixes in the output.",
                         es.save(&thread_store, thread_id).await.map_err(|e| {
                             format!("failed to persist publish success state: {e}")
                         })?;
-                        control_flow::append_phase_with_intent(
+                        apply_phase_transition(
                             &thread_store,
                             thread_id,
-                            Some("agent".to_string()),
                             Some(Phase::PublishAwaitApproval),
                             Phase::PostPublishReview,
                             control_flow::TransitionIntent::Forward,
@@ -8268,10 +8082,9 @@ Apply these fixes in the output.",
                                 "publish_await_approval_not_converged_after_retries: retries={retry_count}"
                             ));
                         }
-                        control_flow::append_phase_with_intent(
+                        apply_phase_transition(
                             &thread_store,
                             thread_id,
-                            Some("agent".to_string()),
                             Some(Phase::PublishAwaitApproval),
                             Phase::Publish,
                             control_flow::TransitionIntent::Forward,
@@ -8299,10 +8112,9 @@ Apply these fixes in the output.",
                             "publish_failure_not_converged_after_retries: retries={retry_count}"
                         ));
                     }
-                    control_flow::append_phase_with_intent(
+                    apply_phase_transition(
                         &thread_store,
                         thread_id,
-                        Some("agent".to_string()),
                         Some(Phase::PublishAwaitApproval),
                         Phase::ModelAuthor,
                         control_flow::TransitionIntent::Loopback,
@@ -8360,10 +8172,9 @@ Apply these fixes in the output.",
                         es.save(&thread_store, thread_id).await.map_err(|e| {
                             format!("failed to persist publish confirmed-success state: {e}")
                         })?;
-                        control_flow::append_phase_with_intent(
+                        apply_phase_transition(
                             &thread_store,
                             thread_id,
-                            Some("agent".to_string()),
                             Some(Phase::Publish),
                             Phase::PostPublishReview,
                             control_flow::TransitionIntent::Forward,
@@ -8390,10 +8201,9 @@ Apply these fixes in the output.",
                             "publish_confirmed_failure_not_converged_after_retries: retries={retry_count}"
                         ));
                     }
-                    control_flow::append_phase_with_intent(
+                    apply_phase_transition(
                         &thread_store,
                         thread_id,
-                        Some("agent".to_string()),
                         Some(Phase::Publish),
                         Phase::ModelAuthor,
                         control_flow::TransitionIntent::Loopback,
@@ -10160,6 +9970,30 @@ mod tests {
                 .unwrap_or("")
                 .contains("NoSuchKey"),
             "expected NoSuchKey signature"
+        );
+    }
+
+    #[test]
+    fn run_agent_source_enforces_kernel_transition_and_guard_paths() {
+        let src = include_str!("mod.rs");
+        let normalized: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+        let legacy_transition = ["control_flow::append_phase_with_", "intent", "("].concat();
+        let legacy_guard_block = ["ThreadStep::Guard", "Block"].concat();
+        assert!(
+            !normalized.contains(&legacy_transition),
+            "legacy transition path must not appear in mod.rs"
+        );
+        assert!(
+            !normalized.contains(&legacy_guard_block),
+            "legacy inline GuardBlock construction must not appear in mod.rs"
+        );
+        assert!(
+            normalized.contains("apply_phase_transition("),
+            "kernel transition helper should be used in mod.rs"
+        );
+        assert!(
+            normalized.contains("apply_guard_block("),
+            "kernel guard helper should be used in mod.rs"
         );
     }
 }
