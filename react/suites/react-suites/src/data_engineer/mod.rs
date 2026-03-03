@@ -41,6 +41,7 @@ pub mod patch_contract;
 pub mod files_patch_repair;
 pub mod phase_actions;
 pub mod phase_gate;
+pub mod phase_reason_detail;
 mod phase_author;
 mod phase_plan;
 mod phase_preflight;

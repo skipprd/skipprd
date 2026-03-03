@@ -504,6 +504,88 @@ pub struct ExecutionState {
     pub model_plan_bootstrap_done: bool,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PhaseState {
+    #[serde(default)]
+    pub current_phase: Option<Phase>,
+    #[serde(default)]
+    pub phase_reason_code: Option<PhaseReasonCode>,
+    #[serde(default)]
+    pub phase_reason_detail: Option<Value>,
+    #[serde(default)]
+    pub replan_backtracks: usize,
+    #[serde(default)]
+    pub current_tier: ExecutionTier,
+    #[serde(default)]
+    pub mode: ExecutionMode,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RepairState {
+    #[serde(default)]
+    pub last_validate_ok: Option<bool>,
+    #[serde(default)]
+    pub last_failure_signature: Option<FailureSignature>,
+    #[serde(default)]
+    pub repair_backlog: Vec<RepairTarget>,
+    #[serde(default)]
+    pub hard_mutation_repair_mode: bool,
+    #[serde(default)]
+    pub repair_type: RepairType,
+    #[serde(default)]
+    pub single_target_repair_path: Option<String>,
+    #[serde(default)]
+    pub target_path: Option<String>,
+    #[serde(default)]
+    pub ladder_step: RepairLadderStep,
+    #[serde(default)]
+    pub attempt_count: usize,
+    #[serde(default)]
+    pub mutation_epoch: u64,
+    #[serde(default)]
+    pub repair_started_mutation_epoch: Option<u64>,
+    #[serde(default)]
+    pub consecutive_noop_patches: usize,
+    #[serde(default)]
+    pub stall_count: usize,
+    #[serde(default)]
+    pub max_stall_count: usize,
+    #[serde(default)]
+    pub last_progress_delta: Option<ProgressDelta>,
+    #[serde(default)]
+    pub last_error_brief: Option<String>,
+    #[serde(default)]
+    pub last_error_class: Option<FailureClass>,
+    #[serde(default)]
+    pub last_failed_models: Vec<FailedModelRef>,
+    #[serde(default)]
+    pub pending_loopback_intent: Option<PendingLoopbackIntent>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PublishState {
+    #[serde(default)]
+    pub publish_approval: Option<PublishApprovalState>,
+    #[serde(default)]
+    pub publish_retries: Vec<PublishRetryState>,
+    #[serde(default)]
+    pub publish_plan: PublishPlanState,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestState {
+    #[serde(default)]
+    pub manifest_lookup: ManifestLookupState,
+    #[serde(default)]
+    pub cleanse_plan_bootstrap_done: bool,
+    #[serde(default)]
+    pub model_plan_bootstrap_done: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum DataEngineerEvent {
     ValidatePassed {
@@ -570,6 +652,108 @@ impl ExecutionState {
         self.clear_publish_approval();
         self.reset_publish_retries();
         self.reset_probe_state_on_validate(false);
+    }
+
+    pub fn phase_state(&self) -> PhaseState {
+        PhaseState {
+            current_phase: self.current_phase,
+            phase_reason_code: self.phase_reason_code,
+            phase_reason_detail: self.phase_reason_detail.clone(),
+            replan_backtracks: self.replan_backtracks,
+            current_tier: self.current_tier.clone(),
+            mode: self.mode.clone(),
+        }
+    }
+
+    pub fn set_phase_state(&mut self, phase: PhaseState) {
+        self.current_phase = phase.current_phase;
+        self.phase_reason_code = phase.phase_reason_code;
+        self.phase_reason_detail = phase.phase_reason_detail;
+        self.replan_backtracks = phase.replan_backtracks;
+        self.current_tier = phase.current_tier;
+        self.mode = phase.mode;
+    }
+
+    pub fn repair_state(&self) -> RepairState {
+        RepairState {
+            last_validate_ok: self.last_validate_ok,
+            last_failure_signature: self.last_failure_signature.clone(),
+            repair_backlog: self.repair_backlog.clone(),
+            hard_mutation_repair_mode: self.hard_mutation_repair_mode,
+            repair_type: self.repair_type,
+            single_target_repair_path: self.single_target_repair_path.clone(),
+            target_path: self.target_path.clone(),
+            ladder_step: self.ladder_step.clone(),
+            attempt_count: self.attempt_count,
+            mutation_epoch: self.mutation_epoch,
+            repair_started_mutation_epoch: self.repair_started_mutation_epoch,
+            consecutive_noop_patches: self.consecutive_noop_patches,
+            stall_count: self.stall_count,
+            max_stall_count: self.max_stall_count,
+            last_progress_delta: self.last_progress_delta.clone(),
+            last_error_brief: self.last_error_brief.clone(),
+            last_error_class: self.last_error_class,
+            last_failed_models: self.last_failed_models.clone(),
+            pending_loopback_intent: self.pending_loopback_intent.clone(),
+        }
+    }
+
+    pub fn set_repair_state(&mut self, repair: RepairState) {
+        self.last_validate_ok = repair.last_validate_ok;
+        self.last_failure_signature = repair.last_failure_signature;
+        self.repair_backlog = repair.repair_backlog;
+        self.hard_mutation_repair_mode = repair.hard_mutation_repair_mode;
+        self.repair_type = repair.repair_type;
+        self.single_target_repair_path = repair.single_target_repair_path;
+        self.target_path = repair.target_path;
+        self.ladder_step = repair.ladder_step;
+        self.attempt_count = repair.attempt_count;
+        self.mutation_epoch = repair.mutation_epoch;
+        self.repair_started_mutation_epoch = repair.repair_started_mutation_epoch;
+        self.consecutive_noop_patches = repair.consecutive_noop_patches;
+        self.stall_count = repair.stall_count;
+        self.max_stall_count = repair.max_stall_count;
+        self.last_progress_delta = repair.last_progress_delta;
+        self.last_error_brief = repair.last_error_brief;
+        self.last_error_class = repair.last_error_class;
+        self.last_failed_models = repair.last_failed_models;
+        self.pending_loopback_intent = repair.pending_loopback_intent;
+    }
+
+    pub fn publish_state(&self) -> PublishState {
+        PublishState {
+            publish_approval: self.publish_approval.clone(),
+            publish_retries: self.publish_retries.clone(),
+            publish_plan: self.publish_plan.clone(),
+        }
+    }
+
+    pub fn set_publish_state(&mut self, publish: PublishState) {
+        self.publish_approval = publish.publish_approval;
+        self.publish_retries = publish.publish_retries;
+        self.publish_plan = publish.publish_plan;
+    }
+
+    pub fn probe_state_snapshot(&self) -> ProbeState {
+        self.probe_state.clone()
+    }
+
+    pub fn set_probe_state_snapshot(&mut self, probe: ProbeState) {
+        self.probe_state = probe;
+    }
+
+    pub fn manifest_state(&self) -> ManifestState {
+        ManifestState {
+            manifest_lookup: self.manifest_lookup.clone(),
+            cleanse_plan_bootstrap_done: self.cleanse_plan_bootstrap_done,
+            model_plan_bootstrap_done: self.model_plan_bootstrap_done,
+        }
+    }
+
+    pub fn set_manifest_state(&mut self, manifest: ManifestState) {
+        self.manifest_lookup = manifest.manifest_lookup;
+        self.cleanse_plan_bootstrap_done = manifest.cleanse_plan_bootstrap_done;
+        self.model_plan_bootstrap_done = manifest.model_plan_bootstrap_done;
     }
 
     pub fn reset_manifest_lookup_state(&mut self) {

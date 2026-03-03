@@ -178,34 +178,6 @@ pub(crate) fn replan_backtrack_counter_cap() -> usize {
         .min(20)
 }
 
-#[deprecated(
-    note = "Use transition_dispatcher::apply_phase_directive with PhaseDirective::Transition"
-)]
-pub async fn append_phase_with_intent(
-    store: &ThreadStore,
-    thread_id: &str,
-    agent: Option<String>,
-    from_phase: Option<Phase>,
-    phase: Phase,
-    intent: TransitionIntent,
-    reason_code: Option<PhaseReasonCode>,
-    reason_detail: Option<Value>,
-) -> Result<(), String> {
-    crate::data_engineer::transition_dispatcher::apply_phase_directive(
-        store,
-        thread_id,
-        agent,
-        from_phase,
-        crate::data_engineer::transition_dispatcher::PhaseDirective::Transition {
-            to: phase,
-            intent,
-            reason_code,
-            reason_detail,
-        },
-    )
-    .await
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct DerivedGuardState {
     pub last_validate_failed: bool,

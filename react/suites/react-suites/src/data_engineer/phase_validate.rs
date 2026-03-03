@@ -438,15 +438,24 @@ if matches!(
             to_phase,
             control_flow::TransitionIntent::Loopback,
             Some(PhaseReasonCode::ValidatePassToAuthoring),
-            Some(serde_json::json!({
-                "signal": signal,
-                "plan_key": active_plan_key,
-                "pending_count": completion_snapshot.as_ref().map(|snap| snap.pending_count).unwrap_or(0),
-                "pending_refs": completion_snapshot.as_ref().map(|snap| snap.pending_refs.clone()).unwrap_or_default(),
-                "dbt_validate_observation": obs.observation.clone(),
-                "next_action": "resume_authoring_for_remaining_plan_work",
-                "audit_acceptance": Self::churn_audit_acceptance_criteria(),
-            })),
+            Some(crate::data_engineer::phase_reason_detail::to_value(
+                &crate::data_engineer::phase_reason_detail::ValidatePassToAuthoringDetail {
+                    signal: signal.to_string(),
+                    plan_key: active_plan_key,
+                    pending_count: completion_snapshot
+                        .as_ref()
+                        .map(|snap| snap.pending_count)
+                        .unwrap_or(0),
+                    pending_refs: completion_snapshot
+                        .as_ref()
+                        .map(|snap| snap.pending_refs.clone())
+                        .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
+                        .unwrap_or(serde_json::Value::Array(vec![])),
+                    dbt_validate_observation: obs.observation.clone(),
+                    next_action: "resume_authoring_for_remaining_plan_work".to_string(),
+                    audit_acceptance: Self::churn_audit_acceptance_criteria(),
+                },
+            )),
         )
         .await?;
         return Ok(PhaseExecutorOutcome::Continue);
@@ -469,10 +478,12 @@ if matches!(
         to_phase,
         control_flow::TransitionIntent::Forward,
         Some(PhaseReasonCode::ValidatePassToReview),
-        Some(serde_json::json!({
-            "dbt_validate_observation": obs.observation.clone(),
-            "dbt_validate_step_idx": trigger_step_idx,
-        })),
+        Some(crate::data_engineer::phase_reason_detail::to_value(
+            &crate::data_engineer::phase_reason_detail::ValidatePassToReviewDetail {
+                dbt_validate_observation: obs.observation.clone(),
+                dbt_validate_step_idx: trigger_step_idx,
+            },
+        )),
     )
     .await?;
     return Ok(PhaseExecutorOutcome::Continue);
@@ -673,12 +684,14 @@ apply_phase_transition(
     to_phase,
     control_flow::TransitionIntent::Loopback,
     Some(PhaseReasonCode::ValidateFail),
-    Some(serde_json::json!({
-        "dbt_validate_observation": obs.observation.clone(),
-        "dbt_validate_step_idx": trigger_step_idx,
-        "errors": errs,
-        "facts_bundle": facts_bundle,
-    })),
+    Some(crate::data_engineer::phase_reason_detail::to_value(
+        &crate::data_engineer::phase_reason_detail::ValidateFailDetail {
+            dbt_validate_observation: obs.observation.clone(),
+            dbt_validate_step_idx: trigger_step_idx,
+            errors: errs,
+            facts_bundle: serde_json::to_value(&facts_bundle).unwrap_or(serde_json::Value::Null),
+        },
+    )),
 )
 .await?;
 return Ok(PhaseExecutorOutcome::Continue);
