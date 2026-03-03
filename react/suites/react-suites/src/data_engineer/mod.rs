@@ -183,6 +183,27 @@ impl TrackKind {
             Self::Model => control_flow::Phase::ModelAuthor,
         }
     }
+
+    fn plan_phase(self) -> control_flow::Phase {
+        match self {
+            Self::Cleanse => control_flow::Phase::CleansePlan,
+            Self::Model => control_flow::Phase::ModelPlan,
+        }
+    }
+
+    fn validate_phase(self) -> control_flow::Phase {
+        match self {
+            Self::Cleanse => control_flow::Phase::CleanseValidate,
+            Self::Model => control_flow::Phase::ModelValidate,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cleanse => "cleanse",
+            Self::Model => "model",
+        }
+    }
 }
 
 enum PhaseExecutorOutcome {

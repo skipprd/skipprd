@@ -1,44 +1,24 @@
 use super::*;
 use crate::data_engineer::control_flow::Phase;
 
-fn track_plan_kind(is_cleanse: bool) -> &'static str {
-    if is_cleanse { "cleanse" } else { "model" }
-}
-
-fn track_plan_phase(is_cleanse: bool) -> Phase {
-    if is_cleanse {
-        Phase::CleansePlan
-    } else {
-        Phase::ModelPlan
-    }
-}
-
-fn track_validate_phase(is_cleanse: bool) -> Phase {
-    if is_cleanse {
-        Phase::CleanseValidate
-    } else {
-        Phase::ModelValidate
-    }
-}
-
 async fn transition_plan_missing(
     thread_store: &ThreadStore,
     thread_id: &str,
     phase: Phase,
-    is_cleanse: bool,
+    track: TrackKind,
 ) -> Result<(), String> {
     apply_phase_transition(
         thread_store,
         thread_id,
         Some(phase),
-        track_plan_phase(is_cleanse),
+        track.plan_phase(),
         control_flow::TransitionIntent::Loopback,
         Some(PhaseReasonCode::PlanMissing),
         Some(crate::data_engineer::phase_reason_detail::plan_missing(
-            track_plan_kind(is_cleanse),
+            track.as_str(),
             format!(
                 "authoring entered without an active {} plan; routing back to planning",
-                track_plan_kind(is_cleanse)
+                track.as_str()
             ),
         )),
     )
@@ -49,14 +29,14 @@ async fn transition_plan_not_approved(
     thread_store: &ThreadStore,
     thread_id: &str,
     phase: Phase,
-    is_cleanse: bool,
+    track: TrackKind,
     status: String,
 ) -> Result<(), String> {
     apply_phase_transition(
         thread_store,
         thread_id,
         Some(phase),
-        track_plan_phase(is_cleanse),
+        track.plan_phase(),
         control_flow::TransitionIntent::Loopback,
         Some(PhaseReasonCode::PlanNotApproved),
         Some(crate::data_engineer::phase_reason_detail::plan_not_approved(
@@ -70,7 +50,7 @@ async fn transition_plan_semantic_invalid_loopback(
     thread_store: &ThreadStore,
     thread_id: &str,
     phase: Phase,
-    is_cleanse: bool,
+    track: TrackKind,
     plan_key: String,
     reason: String,
 ) -> Result<(), String> {
@@ -78,7 +58,7 @@ async fn transition_plan_semantic_invalid_loopback(
         thread_store,
         thread_id,
         Some(phase),
-        track_plan_phase(is_cleanse),
+        track.plan_phase(),
         control_flow::TransitionIntent::Loopback,
         Some(PhaseReasonCode::PlanSemanticInvalid),
         Some(crate::data_engineer::phase_reason_detail::plan_semantic_invalid(
@@ -94,7 +74,7 @@ async fn transition_to_track_validate_with_plan_key(
     thread_store: &ThreadStore,
     thread_id: &str,
     phase: Phase,
-    is_cleanse: bool,
+    track: TrackKind,
     reason_code: PhaseReasonCode,
     plan_key: String,
 ) -> Result<(), String> {
@@ -102,7 +82,7 @@ async fn transition_to_track_validate_with_plan_key(
         thread_store,
         thread_id,
         Some(phase),
-        track_validate_phase(is_cleanse),
+        track.validate_phase(),
         control_flow::TransitionIntent::Forward,
         Some(reason_code),
         Some(crate::data_engineer::phase_reason_detail::plan_key(plan_key)),
@@ -148,6 +128,11 @@ let adapter = crate::data_engineer::authoring_driver::adapter_for_phase(phase)
     })?;
 let is_cleanse =
     adapter.kind() == crate::data_engineer::authoring_driver::AuthoringKind::Cleanse;
+let track = if is_cleanse {
+    TrackKind::Cleanse
+} else {
+    TrackKind::Model
+};
 // Treat schema precheck failures as "validate failed" for authoring guard behavior.
 // Otherwise we can bounce Author->Validate->Author without requiring a mutation.
 let entered_from_precheck_failed = execution_state.phase_reason_code
@@ -211,7 +196,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
             None => {
                 // Recovery: authoring was entered, but no plan exists (e.g. restart/resume drift).
                 // Bounce back to planning so the thread can rehydrate deterministically.
-                transition_plan_missing(&thread_store, thread_id, phase, true).await?;
+                transition_plan_missing(&thread_store, thread_id, phase, track).await?;
                 return Ok(PhaseExecutorOutcome::Continue);
             }
         };
@@ -239,7 +224,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 &thread_store,
                 thread_id,
                 phase,
-                true,
+                track,
                 plan_key,
                 reason,
             )
@@ -312,7 +297,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 &thread_store,
                 thread_id,
                 phase,
-                true,
+                track,
                 format!("{:?}", plan.status),
             )
             .await?;
@@ -481,7 +466,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         &thread_store,
                         thread_id,
                         phase,
-                        true,
+                        track,
                         PhaseReasonCode::WorkGroupValidate,
                         plan.plan_key.clone(),
                     )
@@ -528,7 +513,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         &thread_store,
                         thread_id,
                         phase,
-                        true,
+                        track,
                         PhaseReasonCode::PlanTasksDone,
                         plan.plan_key.clone(),
                     )
@@ -548,7 +533,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         &thread_store,
                         thread_id,
                         phase,
-                        true,
+                        track,
                         plan.plan_key.clone(),
                         reason,
                     )
@@ -576,7 +561,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
             None => {
                 // Recovery: authoring was entered, but no plan exists (e.g. restart/resume drift).
                 // Bounce back to planning so the thread can rehydrate deterministically.
-                transition_plan_missing(&thread_store, thread_id, phase, false).await?;
+                transition_plan_missing(&thread_store, thread_id, phase, track).await?;
                 return Ok(PhaseExecutorOutcome::Continue);
             }
         };
@@ -599,7 +584,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 &thread_store,
                 thread_id,
                 phase,
-                false,
+                track,
                 plan_key,
                 reason,
             )
@@ -670,7 +655,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 &thread_store,
                 thread_id,
                 phase,
-                false,
+                track,
                 format!("{:?}", plan.status),
             )
             .await?;
@@ -910,7 +895,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         &thread_store,
                         thread_id,
                         phase,
-                        false,
+                        track,
                         PhaseReasonCode::WorkGroupValidate,
                         plan.plan_key.clone(),
                     )
@@ -953,7 +938,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         &thread_store,
                         thread_id,
                         phase,
-                        false,
+                        track,
                         PhaseReasonCode::PlanTasksDone,
                         plan.plan_key.clone(),
                     )
@@ -973,7 +958,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         &thread_store,
                         thread_id,
                         phase,
-                        false,
+                        track,
                         plan.plan_key.clone(),
                         reason,
                     )
