@@ -1,5 +1,21 @@
 use super::*;
 
+fn actionable_review_plan_detail(
+    plan_key: &str,
+    plan_update_summary: serde_json::Value,
+    entry_step_idx: Option<usize>,
+) -> serde_json::Value {
+    crate::data_engineer::phase_reason_detail::plan_actionable_auto_approved(
+        plan_key,
+        plan_update_summary,
+        entry_step_idx,
+    )
+}
+
+fn auto_approved_plan_detail(source: &str) -> serde_json::Value {
+    crate::data_engineer::phase_reason_detail::plan_auto_approved(source)
+}
+
 impl DataEngineerSuite {
     pub(super) async fn execute_plan_phase(
         thread_store: &ThreadStore,
@@ -207,26 +223,16 @@ if is_cleanse {
                 return Ok(PhaseExecutorOutcome::Continue);
             }
             if entered_from_actionable_review {
-                let mut detail = serde_json::json!({
-                    "plan_key": p.plan_key,
-                    "entry_reason_code": "review_actionable_true"
-                });
                 let plan_update = Self::plan_update_summary_cleanse(
                     prior_cleanse_plan_for_update.as_ref(),
                     &p,
                     actionable_review_entry_step_idx,
                 );
-                if let Some(idx) = actionable_review_entry_step_idx {
-                    if let Some(obj) = detail.as_object_mut() {
-                        obj.insert(
-                            "entry_step_idx".to_string(),
-                            serde_json::json!(idx),
-                        );
-                    }
-                }
-                if let Some(obj) = detail.as_object_mut() {
-                    obj.insert("plan_update_summary".to_string(), plan_update);
-                }
+                let detail = actionable_review_plan_detail(
+                    &p.plan_key,
+                    plan_update,
+                    actionable_review_entry_step_idx,
+                );
                 let advanced = Self::approve_cleanse_plan_draft_and_advance(
                     &thread_store,
                     thread_id,
@@ -248,10 +254,7 @@ if is_cleanse {
                 &actx,
                 thread_state_step_count,
                 PhaseReasonCode::PlanAutoApproved,
-                serde_json::json!({
-                    "auto_approved_in_agent_mode": true,
-                    "source": "existing_draft_plan"
-                }),
+                auto_approved_plan_detail("existing_draft_plan"),
             )
             .await?;
             if advanced {
@@ -264,26 +267,16 @@ if is_cleanse {
     if let Some(p) = crate::data_engineer::plan::load_model_plan(&actx).await {
         if p.status == crate::data_engineer::plan::PlanStatus::Draft {
             if entered_from_actionable_review {
-                let mut detail = serde_json::json!({
-                    "plan_key": p.plan_key,
-                    "entry_reason_code": "review_actionable_true"
-                });
                 let plan_update = Self::plan_update_summary_model(
                     prior_model_plan_for_update.as_ref(),
                     &p,
                     actionable_review_entry_step_idx,
                 );
-                if let Some(idx) = actionable_review_entry_step_idx {
-                    if let Some(obj) = detail.as_object_mut() {
-                        obj.insert(
-                            "entry_step_idx".to_string(),
-                            serde_json::json!(idx),
-                        );
-                    }
-                }
-                if let Some(obj) = detail.as_object_mut() {
-                    obj.insert("plan_update_summary".to_string(), plan_update);
-                }
+                let detail = actionable_review_plan_detail(
+                    &p.plan_key,
+                    plan_update,
+                    actionable_review_entry_step_idx,
+                );
                 let advanced = Self::approve_model_plan_draft_and_advance(
                     &thread_store,
                     thread_id,
@@ -305,10 +298,7 @@ if is_cleanse {
                 &actx,
                 thread_state_step_count,
                 PhaseReasonCode::PlanAutoApproved,
-                serde_json::json!({
-                    "auto_approved_in_agent_mode": true,
-                    "source": "existing_draft_plan"
-                }),
+                auto_approved_plan_detail("existing_draft_plan"),
             )
             .await?;
             if advanced {
@@ -924,26 +914,16 @@ match Agent::run_until_block_non_interactive(
                 Self::reset_subjective_retry(&thread_store, thread_id).await;
             }
             if entered_from_actionable_review {
-                let mut detail = serde_json::json!({
-                    "plan_key": plan.plan_key,
-                    "entry_reason_code": "review_actionable_true"
-                });
                 let plan_update = Self::plan_update_summary_cleanse(
                     prior_cleanse_plan_for_update.as_ref(),
                     &plan,
                     actionable_review_entry_step_idx,
                 );
-                if let Some(idx) = actionable_review_entry_step_idx {
-                    if let Some(obj) = detail.as_object_mut() {
-                        obj.insert(
-                            "entry_step_idx".to_string(),
-                            serde_json::json!(idx),
-                        );
-                    }
-                }
-                if let Some(obj) = detail.as_object_mut() {
-                    obj.insert("plan_update_summary".to_string(), plan_update);
-                }
+                let detail = actionable_review_plan_detail(
+                    &plan.plan_key,
+                    plan_update,
+                    actionable_review_entry_step_idx,
+                );
                 let advanced = Self::approve_cleanse_plan_draft_and_advance(
                     &thread_store,
                     thread_id,
@@ -965,10 +945,7 @@ match Agent::run_until_block_non_interactive(
                 &actx,
                 thread_state_step_count,
                 PhaseReasonCode::PlanAutoApproved,
-                serde_json::json!({
-                    "auto_approved_in_agent_mode": true,
-                    "source": "new_draft_plan"
-                }),
+                auto_approved_plan_detail("new_draft_plan"),
             )
             .await?;
             if advanced {
@@ -1203,26 +1180,16 @@ match Agent::run_until_block_non_interactive(
                 Self::reset_subjective_retry(&thread_store, thread_id).await;
             }
             if entered_from_actionable_review {
-                let mut detail = serde_json::json!({
-                    "plan_key": plan.plan_key,
-                    "entry_reason_code": "review_actionable_true"
-                });
                 let plan_update = Self::plan_update_summary_model(
                     prior_model_plan_for_update.as_ref(),
                     &plan,
                     actionable_review_entry_step_idx,
                 );
-                if let Some(idx) = actionable_review_entry_step_idx {
-                    if let Some(obj) = detail.as_object_mut() {
-                        obj.insert(
-                            "entry_step_idx".to_string(),
-                            serde_json::json!(idx),
-                        );
-                    }
-                }
-                if let Some(obj) = detail.as_object_mut() {
-                    obj.insert("plan_update_summary".to_string(), plan_update);
-                }
+                let detail = actionable_review_plan_detail(
+                    &plan.plan_key,
+                    plan_update,
+                    actionable_review_entry_step_idx,
+                );
                 let advanced = Self::approve_model_plan_draft_and_advance(
                     &thread_store,
                     thread_id,
@@ -1244,10 +1211,7 @@ match Agent::run_until_block_non_interactive(
                 &actx,
                 thread_state_step_count,
                 PhaseReasonCode::PlanAutoApproved,
-                serde_json::json!({
-                    "auto_approved_in_agent_mode": true,
-                    "source": "new_draft_plan"
-                }),
+                auto_approved_plan_detail("new_draft_plan"),
             )
             .await?;
             if advanced {

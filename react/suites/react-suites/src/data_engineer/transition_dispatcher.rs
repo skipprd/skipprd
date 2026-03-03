@@ -60,17 +60,18 @@ pub async fn dispatch_phase_transition(
         .await
         .unwrap_or_else(ExecutionState::new);
     let prev_state = st.clone();
+    let mut phase_state = st.phase_state();
     if let Some(from) = from_phase {
         let is_backtrack =
             is_cleanse_replan_backtrack(from, phase) || is_model_replan_backtrack(from, phase);
         match intent {
             TransitionIntent::Annotation => {}
             TransitionIntent::Forward => {
-                st.replan_backtracks = 0;
+                phase_state.replan_backtracks = 0;
             }
             TransitionIntent::Loopback => {
                 if is_backtrack {
-                    st.replan_backtracks = st
+                    phase_state.replan_backtracks = phase_state
                         .replan_backtracks
                         .saturating_add(1)
                         .min(replan_backtrack_counter_cap());
@@ -85,9 +86,10 @@ pub async fn dispatch_phase_transition(
     if matches!(phase, Phase::CleansePlan | Phase::ModelPlan) && from_phase != Some(phase) {
         st.reset_plan_bootstrap(phase);
     }
-    st.current_phase = Some(phase);
-    st.phase_reason_code = reason_code;
-    st.phase_reason_detail = reason_detail.clone();
+    phase_state.current_phase = Some(phase);
+    phase_state.phase_reason_code = reason_code;
+    phase_state.phase_reason_detail = reason_detail.clone();
+    st.set_phase_state(phase_state);
     state_manager::save_execution_state(store, thread_id, &st).await?;
 
     let agent = agent.unwrap_or_else(|| "unknown".to_string());
@@ -516,6 +518,110 @@ mod tests {
                 ThreadStep::GuardBlock { reason: r, .. } if r.contains("stg_orders.sql")
             )),
             "expected guard block with failed-model fallback target in reason"
+        );
+    }
+
+    #[test]
+    fn control_reason_detail_review_and_publish_paths_use_typed_constructors() {
+        let phase_review_src = include_str!("phase_review.rs");
+        assert!(
+            phase_review_src.contains("phase_reason_detail::review_decision_transition("),
+            "review transitions must use typed reason_detail constructor"
+        );
+        assert!(
+            !phase_review_src.contains("ReviewDecisionTransitionDetail {"),
+            "phase_review should not inline review transition reason_detail struct literal"
+        );
+
+        let phase_publish_src = include_str!("phase_publish.rs");
+        for marker in [
+            "phase_reason_detail::publish_approval_state(",
+            "phase_reason_detail::publish_observation(",
+            "phase_reason_detail::publish_auto_approved(",
+            "phase_reason_detail::publish_failure(",
+        ] {
+            assert!(
+                phase_publish_src.contains(marker),
+                "phase_publish missing typed reason_detail constructor marker: {marker}"
+            );
+        }
+        assert!(
+            !phase_publish_src.contains("PublishFailureDetail {"),
+            "phase_publish should not inline publish failure reason_detail struct literal"
+        );
+    }
+
+    #[test]
+    fn control_critical_publish_reason_details_use_typed_constructors() {
+        let src = include_str!("phase_publish.rs");
+        assert!(
+            src.contains("phase_reason_detail::publish_approval_state("),
+            "publish approval transition must use typed approval-state constructor"
+        );
+        assert!(
+            src.contains("phase_reason_detail::publish_observation("),
+            "publish success transitions must use typed observation constructor"
+        );
+        assert!(
+            src.contains("phase_reason_detail::publish_auto_approved("),
+            "publish await-approval loop must use typed auto-approved constructor"
+        );
+        assert!(
+            src.contains("phase_reason_detail::publish_failure("),
+            "publish failure transitions must use typed failure constructor"
+        );
+        assert!(
+            !src.contains("PublishApprovalStateDetail {"),
+            "phase_publish must not inline PublishApprovalStateDetail literals in transition paths"
+        );
+        assert!(
+            !src.contains("PublishObservationDetail {"),
+            "phase_publish must not inline PublishObservationDetail literals in transition paths"
+        );
+        assert!(
+            !src.contains("PublishAutoApprovedDetail {"),
+            "phase_publish must not inline PublishAutoApprovedDetail literals in transition paths"
+        );
+        assert!(
+            !src.contains("PublishFailureDetail {"),
+            "phase_publish must not inline PublishFailureDetail literals in transition paths"
+        );
+    }
+
+    #[test]
+    fn control_critical_author_reason_details_use_typed_constructors() {
+        let src = include_str!("phase_author.rs");
+        assert!(
+            src.contains("phase_reason_detail::plan_missing("),
+            "authoring plan-missing loopback must use typed constructor"
+        );
+        assert!(
+            src.contains("phase_reason_detail::plan_not_approved("),
+            "authoring plan-not-approved loopback must use typed constructor"
+        );
+        assert!(
+            src.contains("phase_reason_detail::plan_semantic_invalid("),
+            "authoring semantic-invalid loopback must use typed constructor"
+        );
+        assert!(
+            src.contains("phase_reason_detail::plan_key("),
+            "authoring->validate transitions must use typed plan-key constructor"
+        );
+        assert!(
+            !src.contains("PlanMissingDetail {"),
+            "phase_author must not inline PlanMissingDetail literals in transition paths"
+        );
+        assert!(
+            !src.contains("PlanNotApprovedDetail {"),
+            "phase_author must not inline PlanNotApprovedDetail literals in transition paths"
+        );
+        assert!(
+            !src.contains("PlanSemanticInvalidDetail {"),
+            "phase_author must not inline PlanSemanticInvalidDetail literals in transition paths"
+        );
+        assert!(
+            !src.contains("PlanKeyDetail {"),
+            "phase_author must not inline PlanKeyDetail literals in transition paths"
         );
     }
 }

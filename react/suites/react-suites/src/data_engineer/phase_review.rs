@@ -118,16 +118,16 @@ impl DataEngineerSuite {
             meta: serde_json::to_value(&meta).ok(),
         });
 
-        let reason_detail = serde_json::json!({
-            "review_phase": phase.as_str(),
-            "meta": meta,
-            "answer": answer,
-            "forced_progress_guard": forced_progress,
-            "forced_progress_by_subjective_retry": forced_by_subjective_retry,
-            "review_subjective_retry_count": review_retry_count,
-            "trigger_step_idx": trigger_step_idx,
-            "trigger_step": trigger_step,
-        });
+        let reason_detail = crate::data_engineer::phase_reason_detail::review_decision_transition(
+            phase.as_str(),
+            serde_json::to_value(&meta).unwrap_or(serde_json::Value::Null),
+            answer.clone(),
+            forced_progress,
+            forced_by_subjective_retry,
+            review_retry_count,
+            trigger_step_idx,
+            serde_json::to_value(&trigger_step).unwrap_or(serde_json::Value::Null),
+        );
 
         match meta.decision {
             ReviewDecision::Proceed => {

@@ -39,9 +39,9 @@ impl DataEngineerSuite {
                 control_flow::Phase::Publish,
                 control_flow::TransitionIntent::Forward,
                 Some(PhaseReasonCode::UserApprovedPublish),
-                Some(serde_json::json!({
-                    "approval_state": es.publish_approval,
-                })),
+                Some(crate::data_engineer::phase_reason_detail::publish_approval_state(
+                    serde_json::to_value(&es.publish_approval).unwrap_or(serde_json::Value::Null),
+                )),
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -77,9 +77,9 @@ impl DataEngineerSuite {
                 control_flow::Phase::PostPublishReview,
                 control_flow::TransitionIntent::Forward,
                 Some(PhaseReasonCode::PublishSuccess),
-                Some(serde_json::json!({
-                    "publish_observation": obs,
-                })),
+                Some(crate::data_engineer::phase_reason_detail::publish_observation(
+                    obs.clone(),
+                )),
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -108,10 +108,9 @@ impl DataEngineerSuite {
                 control_flow::Phase::Publish,
                 control_flow::TransitionIntent::Forward,
                 Some(PhaseReasonCode::UserApprovedPublish),
-                Some(serde_json::json!({
-                    "auto_approved_in_agent_mode": true,
-                    "publish_observation": obs,
-                })),
+                Some(crate::data_engineer::phase_reason_detail::publish_auto_approved(
+                    obs.clone(),
+                )),
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -137,10 +136,10 @@ impl DataEngineerSuite {
             control_flow::Phase::ModelAuthor,
             control_flow::TransitionIntent::Loopback,
             Some(PhaseReasonCode::PublishFail),
-            Some(serde_json::json!({
-                "publish_observation": obs,
-                "publish_failure_retry_count": retry_count,
-            })),
+            Some(crate::data_engineer::phase_reason_detail::publish_failure(
+                obs,
+                retry_count,
+            )),
         )
         .await?;
         Ok(PhaseExecutorOutcome::Continue)
@@ -198,9 +197,9 @@ impl DataEngineerSuite {
                 control_flow::Phase::PostPublishReview,
                 control_flow::TransitionIntent::Forward,
                 Some(PhaseReasonCode::PublishConfirmedSuccess),
-                Some(serde_json::json!({
-                    "publish_observation": obs,
-                })),
+                Some(crate::data_engineer::phase_reason_detail::publish_observation(
+                    obs.clone(),
+                )),
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -226,10 +225,10 @@ impl DataEngineerSuite {
             control_flow::Phase::ModelAuthor,
             control_flow::TransitionIntent::Loopback,
             Some(PhaseReasonCode::PublishConfirmedFail),
-            Some(serde_json::json!({
-                "publish_observation": obs,
-                "publish_failure_retry_count": retry_count,
-            })),
+            Some(crate::data_engineer::phase_reason_detail::publish_failure(
+                obs,
+                retry_count,
+            )),
         )
         .await?;
         Ok(PhaseExecutorOutcome::Continue)

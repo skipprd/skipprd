@@ -1,6 +1,129 @@
 use super::*;
 use crate::data_engineer::control_flow::Phase;
 
+fn track_plan_kind(is_cleanse: bool) -> &'static str {
+    if is_cleanse { "cleanse" } else { "model" }
+}
+
+fn track_plan_phase(is_cleanse: bool) -> Phase {
+    if is_cleanse {
+        Phase::CleansePlan
+    } else {
+        Phase::ModelPlan
+    }
+}
+
+fn track_validate_phase(is_cleanse: bool) -> Phase {
+    if is_cleanse {
+        Phase::CleanseValidate
+    } else {
+        Phase::ModelValidate
+    }
+}
+
+async fn transition_plan_missing(
+    thread_store: &ThreadStore,
+    thread_id: &str,
+    phase: Phase,
+    is_cleanse: bool,
+) -> Result<(), String> {
+    apply_phase_transition(
+        thread_store,
+        thread_id,
+        Some(phase),
+        track_plan_phase(is_cleanse),
+        control_flow::TransitionIntent::Loopback,
+        Some(PhaseReasonCode::PlanMissing),
+        Some(crate::data_engineer::phase_reason_detail::plan_missing(
+            track_plan_kind(is_cleanse),
+            format!(
+                "authoring entered without an active {} plan; routing back to planning",
+                track_plan_kind(is_cleanse)
+            ),
+        )),
+    )
+    .await
+}
+
+async fn transition_plan_not_approved(
+    thread_store: &ThreadStore,
+    thread_id: &str,
+    phase: Phase,
+    is_cleanse: bool,
+    status: String,
+) -> Result<(), String> {
+    apply_phase_transition(
+        thread_store,
+        thread_id,
+        Some(phase),
+        track_plan_phase(is_cleanse),
+        control_flow::TransitionIntent::Loopback,
+        Some(PhaseReasonCode::PlanNotApproved),
+        Some(crate::data_engineer::phase_reason_detail::plan_not_approved(
+            status,
+        )),
+    )
+    .await
+}
+
+async fn transition_plan_semantic_invalid_loopback(
+    thread_store: &ThreadStore,
+    thread_id: &str,
+    phase: Phase,
+    is_cleanse: bool,
+    plan_key: String,
+    reason: String,
+) -> Result<(), String> {
+    apply_phase_transition(
+        thread_store,
+        thread_id,
+        Some(phase),
+        track_plan_phase(is_cleanse),
+        control_flow::TransitionIntent::Loopback,
+        Some(PhaseReasonCode::PlanSemanticInvalid),
+        Some(crate::data_engineer::phase_reason_detail::plan_semantic_invalid(
+            plan_key,
+            reason,
+            DataEngineerSuite::churn_audit_acceptance_criteria(),
+        )),
+    )
+    .await
+}
+
+async fn transition_to_track_validate_with_plan_key(
+    thread_store: &ThreadStore,
+    thread_id: &str,
+    phase: Phase,
+    is_cleanse: bool,
+    reason_code: PhaseReasonCode,
+    plan_key: String,
+) -> Result<(), String> {
+    apply_phase_transition(
+        thread_store,
+        thread_id,
+        Some(phase),
+        track_validate_phase(is_cleanse),
+        control_flow::TransitionIntent::Forward,
+        Some(reason_code),
+        Some(crate::data_engineer::phase_reason_detail::plan_key(plan_key)),
+    )
+    .await
+}
+
+async fn track_completion_snapshot_all_done(actx: &AgentCtx, is_cleanse: bool) -> bool {
+    if is_cleanse {
+        crate::data_engineer::plan::load_cleanse_plan(actx)
+            .await
+            .map(|p| crate::data_engineer::plan::snapshot_cleanse_completion(&p).all_done)
+            .unwrap_or(false)
+    } else {
+        crate::data_engineer::plan::load_model_plan(actx)
+            .await
+            .map(|p| crate::data_engineer::plan::snapshot_model_completion(&p).all_done)
+            .unwrap_or(false)
+    }
+}
+
 impl DataEngineerSuite {
     pub(super) async fn execute_author_phase(
         thread_store: &ThreadStore,
@@ -88,21 +211,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
             None => {
                 // Recovery: authoring was entered, but no plan exists (e.g. restart/resume drift).
                 // Bounce back to planning so the thread can rehydrate deterministically.
-                apply_phase_transition(
-                    &thread_store,
-                    thread_id,
-                    Some(phase),
-                    Phase::CleansePlan,
-                    control_flow::TransitionIntent::Loopback,
-                    Some(PhaseReasonCode::PlanMissing),
-                    Some(crate::data_engineer::phase_reason_detail::to_value(
-                        &crate::data_engineer::phase_reason_detail::PlanMissingDetail {
-                            plan_kind: "cleanse".to_string(),
-                            note: "authoring entered without an active cleanse plan; routing back to planning".to_string(),
-                        },
-                    )),
-                )
-                .await?;
+                transition_plan_missing(&thread_store, thread_id, phase, true).await?;
                 return Ok(PhaseExecutorOutcome::Continue);
             }
         };
@@ -126,20 +235,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 reason.clone(),
             )
             .await?;
-            apply_phase_transition(
+            transition_plan_semantic_invalid_loopback(
                 &thread_store,
                 thread_id,
-                Some(phase),
-                Phase::CleansePlan,
-                control_flow::TransitionIntent::Loopback,
-                Some(PhaseReasonCode::PlanSemanticInvalid),
-                Some(crate::data_engineer::phase_reason_detail::to_value(
-                    &crate::data_engineer::phase_reason_detail::PlanSemanticInvalidDetail {
-                        plan_key,
-                        reason,
-                        audit_acceptance: Self::churn_audit_acceptance_criteria(),
-                    },
-                )),
+                phase,
+                true,
+                plan_key,
+                reason,
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -206,20 +308,14 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
         if plan.status != crate::data_engineer::plan::PlanStatus::Approved
             && plan.status != crate::data_engineer::plan::PlanStatus::Completed
         {
-            apply_phase_transition(
-            &thread_store,
-            thread_id,
-            Some(phase),
-            Phase::CleansePlan,
-            control_flow::TransitionIntent::Loopback,
-            Some(PhaseReasonCode::PlanNotApproved),
-            Some(crate::data_engineer::phase_reason_detail::to_value(
-                &crate::data_engineer::phase_reason_detail::PlanNotApprovedDetail {
-                    status: format!("{:?}", plan.status),
-                },
-            )),
-        )
-        .await?;
+            transition_plan_not_approved(
+                &thread_store,
+                thread_id,
+                phase,
+                true,
+                format!("{:?}", plan.status),
+            )
+            .await?;
             return Ok(PhaseExecutorOutcome::Continue);
         }
         // Work-group driven selection only (hard cutover).
@@ -381,18 +477,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                     &next_action,
                     crate::data_engineer::plan::AuthoringNextAction::Validate
                 ) {
-                    apply_phase_transition(
+                    transition_to_track_validate_with_plan_key(
                         &thread_store,
                         thread_id,
-                        Some(phase),
-                        Phase::CleanseValidate,
-                        control_flow::TransitionIntent::Forward,
-                        Some(PhaseReasonCode::WorkGroupValidate),
-                        Some(crate::data_engineer::phase_reason_detail::to_value(
-                            &crate::data_engineer::phase_reason_detail::PlanKeyDetail {
-                                plan_key: plan.plan_key.clone(),
-                            },
-                        )),
+                        phase,
+                        true,
+                        PhaseReasonCode::WorkGroupValidate,
+                        plan.plan_key.clone(),
                     )
                     .await?;
                     return Ok(PhaseExecutorOutcome::Continue);
@@ -433,18 +524,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         None, // allow freeform file patching for targeted repair
                     )
                 } else if crate::data_engineer::plan::snapshot_cleanse_completion(&plan).all_done {
-                    apply_phase_transition(
+                    transition_to_track_validate_with_plan_key(
                         &thread_store,
                         thread_id,
-                        Some(phase),
-                        Phase::CleanseValidate,
-                        control_flow::TransitionIntent::Forward,
-                        Some(PhaseReasonCode::PlanTasksDone),
-                        Some(crate::data_engineer::phase_reason_detail::to_value(
-                            &crate::data_engineer::phase_reason_detail::PlanKeyDetail {
-                                plan_key: plan.plan_key.clone(),
-                            },
-                        )),
+                        phase,
+                        true,
+                        PhaseReasonCode::PlanTasksDone,
+                        plan.plan_key.clone(),
                     )
                     .await?;
                     return Ok(PhaseExecutorOutcome::Continue);
@@ -458,20 +544,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         reason.clone(),
                     )
                     .await?;
-                    apply_phase_transition(
+                    transition_plan_semantic_invalid_loopback(
                         &thread_store,
                         thread_id,
-                        Some(phase),
-                        Phase::CleansePlan,
-                        control_flow::TransitionIntent::Loopback,
-                        Some(PhaseReasonCode::PlanSemanticInvalid),
-                        Some(crate::data_engineer::phase_reason_detail::to_value(
-                            &crate::data_engineer::phase_reason_detail::PlanSemanticInvalidDetail {
-                                plan_key: plan.plan_key.clone(),
-                                reason,
-                                audit_acceptance: Self::churn_audit_acceptance_criteria(),
-                            },
-                        )),
+                        phase,
+                        true,
+                        plan.plan_key.clone(),
+                        reason,
                     )
                     .await?;
                     return Ok(PhaseExecutorOutcome::Continue);
@@ -497,21 +576,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
             None => {
                 // Recovery: authoring was entered, but no plan exists (e.g. restart/resume drift).
                 // Bounce back to planning so the thread can rehydrate deterministically.
-                apply_phase_transition(
-                    &thread_store,
-                    thread_id,
-                    Some(phase),
-                    Phase::ModelPlan,
-                    control_flow::TransitionIntent::Loopback,
-                    Some(PhaseReasonCode::PlanMissing),
-                    Some(crate::data_engineer::phase_reason_detail::to_value(
-                        &crate::data_engineer::phase_reason_detail::PlanMissingDetail {
-                            plan_kind: "model".to_string(),
-                            note: "authoring entered without an active model plan; routing back to planning".to_string(),
-                        },
-                    )),
-                )
-                .await?;
+                transition_plan_missing(&thread_store, thread_id, phase, false).await?;
                 return Ok(PhaseExecutorOutcome::Continue);
             }
         };
@@ -530,20 +595,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 reason.clone(),
             )
             .await?;
-            apply_phase_transition(
+            transition_plan_semantic_invalid_loopback(
                 &thread_store,
                 thread_id,
-                Some(phase),
-                Phase::ModelPlan,
-                control_flow::TransitionIntent::Loopback,
-                Some(PhaseReasonCode::PlanSemanticInvalid),
-                Some(crate::data_engineer::phase_reason_detail::to_value(
-                    &crate::data_engineer::phase_reason_detail::PlanSemanticInvalidDetail {
-                        plan_key,
-                        reason,
-                        audit_acceptance: Self::churn_audit_acceptance_criteria(),
-                    },
-                )),
+                phase,
+                false,
+                plan_key,
+                reason,
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -608,20 +666,14 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
         if plan.status != crate::data_engineer::plan::PlanStatus::Approved
             && plan.status != crate::data_engineer::plan::PlanStatus::Completed
         {
-            apply_phase_transition(
-            &thread_store,
-            thread_id,
-            Some(phase),
-            Phase::ModelPlan,
-            control_flow::TransitionIntent::Loopback,
-            Some(PhaseReasonCode::PlanNotApproved),
-            Some(crate::data_engineer::phase_reason_detail::to_value(
-                &crate::data_engineer::phase_reason_detail::PlanNotApprovedDetail {
-                    status: format!("{:?}", plan.status),
-                },
-            )),
-        )
-    .await?;
+            transition_plan_not_approved(
+                &thread_store,
+                thread_id,
+                phase,
+                false,
+                format!("{:?}", plan.status),
+            )
+            .await?;
             return Ok(PhaseExecutorOutcome::Continue);
         }
         // Work-group driven selection only (hard cutover).
@@ -854,18 +906,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                     &next_action,
                     crate::data_engineer::plan::AuthoringNextAction::Validate
                 ) {
-                    apply_phase_transition(
+                    transition_to_track_validate_with_plan_key(
                         &thread_store,
                         thread_id,
-                        Some(phase),
-                        Phase::ModelValidate,
-                        control_flow::TransitionIntent::Forward,
-                        Some(PhaseReasonCode::WorkGroupValidate),
-                        Some(crate::data_engineer::phase_reason_detail::to_value(
-                            &crate::data_engineer::phase_reason_detail::PlanKeyDetail {
-                                plan_key: plan.plan_key.clone(),
-                            },
-                        )),
+                        phase,
+                        false,
+                        PhaseReasonCode::WorkGroupValidate,
+                        plan.plan_key.clone(),
                     )
                     .await?;
                     return Ok(PhaseExecutorOutcome::Continue);
@@ -902,18 +949,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                     }
                     (ctx, None)
                 } else if crate::data_engineer::plan::snapshot_model_completion(&plan).all_done {
-                    apply_phase_transition(
+                    transition_to_track_validate_with_plan_key(
                         &thread_store,
                         thread_id,
-                        Some(phase),
-                        Phase::ModelValidate,
-                        control_flow::TransitionIntent::Forward,
-                        Some(PhaseReasonCode::PlanTasksDone),
-                        Some(crate::data_engineer::phase_reason_detail::to_value(
-                            &crate::data_engineer::phase_reason_detail::PlanKeyDetail {
-                                plan_key: plan.plan_key.clone(),
-                            },
-                        )),
+                        phase,
+                        false,
+                        PhaseReasonCode::PlanTasksDone,
+                        plan.plan_key.clone(),
                     )
                     .await?;
                     return Ok(PhaseExecutorOutcome::Continue);
@@ -927,22 +969,15 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         reason.clone(),
                     )
                     .await?;
-                    apply_phase_transition(
-                    &thread_store,
-                    thread_id,
-                    Some(phase),
-                    Phase::ModelPlan,
-                    control_flow::TransitionIntent::Loopback,
-                    Some(PhaseReasonCode::PlanSemanticInvalid),
-                    Some(crate::data_engineer::phase_reason_detail::to_value(
-                        &crate::data_engineer::phase_reason_detail::PlanSemanticInvalidDetail {
-                            plan_key: plan.plan_key.clone(),
-                            reason,
-                            audit_acceptance: Self::churn_audit_acceptance_criteria(),
-                        },
-                    )),
-                )
-                .await?;
+                    transition_plan_semantic_invalid_loopback(
+                        &thread_store,
+                        thread_id,
+                        phase,
+                        false,
+                        plan.plan_key.clone(),
+                        reason,
+                    )
+                    .await?;
                     return Ok(PhaseExecutorOutcome::Continue);
                 }
             }
@@ -1487,26 +1522,8 @@ match Agent::run_until_block_non_interactive(
         }
 
         // Plan-driven authoring: do NOT advance to validate until the approved plan's tasks are done.
-        if is_cleanse {
-            if let Some(p) =
-                crate::data_engineer::plan::load_cleanse_plan(&actx).await
-            {
-                if !crate::data_engineer::plan::snapshot_cleanse_completion(&p)
-                    .all_done
-                {
-                    return Ok(PhaseExecutorOutcome::Continue);
-                }
-            }
-        } else {
-            if let Some(p) =
-                crate::data_engineer::plan::load_model_plan(&actx).await
-            {
-                if !crate::data_engineer::plan::snapshot_model_completion(&p)
-                    .all_done
-                {
-                    return Ok(PhaseExecutorOutcome::Continue);
-                }
-            }
+        if !track_completion_snapshot_all_done(&actx, is_cleanse).await {
+            return Ok(PhaseExecutorOutcome::Continue);
         }
 
         let to_phase = if is_cleanse {

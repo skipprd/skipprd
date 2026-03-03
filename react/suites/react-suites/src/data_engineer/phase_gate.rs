@@ -19,24 +19,26 @@ pub fn evaluate_pre_turn_directive(
     phase: Phase,
     max_replan_backtracks: usize,
 ) -> PreTurnDirective {
-    if execution_state.stall_count >= execution_state.max_stall_count
-        && matches!(execution_state.mode, ExecutionMode::Mutate)
+    let phase_state = execution_state.phase_state();
+    let repair_state = execution_state.repair_state();
+    if repair_state.stall_count >= repair_state.max_stall_count
+        && matches!(phase_state.mode, ExecutionMode::Mutate)
     {
         return PreTurnDirective::FailFast {
             kind: GuardBlockKind::AuthoringToValidate,
             reason: format!(
                 "failed to make progress for this thread: execution_state stall_count={} reached max_stall_count={} in mode=mutate",
-                execution_state.stall_count, execution_state.max_stall_count
+                repair_state.stall_count, repair_state.max_stall_count
             ),
         };
     }
 
-    if execution_state.replan_backtracks >= max_replan_backtracks {
+    if phase_state.replan_backtracks >= max_replan_backtracks {
         return PreTurnDirective::FailFast {
             kind: GuardBlockKind::BatchLocked,
             reason: format!(
                 "failed to make progress for this thread: observed {} validate/review loopback(s) to plan/author in active track '{}' since the last successful dbt_validate (limit {}). Stopping this thread. Please inspect the latest validate/review errors and apply a targeted fix before rerunning.",
-                execution_state.replan_backtracks,
+                phase_state.replan_backtracks,
                 phase.as_str(),
                 max_replan_backtracks
             ),
@@ -50,9 +52,9 @@ pub fn evaluate_pre_turn_directive(
         .unwrap_or(&[]);
     let single_target_repair_path =
         derive_single_target_repair_path(execution_state, fallback_failed_models);
-    if execution_state.hard_mutation_repair_mode
+    if repair_state.hard_mutation_repair_mode
         && single_target_repair_path.is_some()
-        && execution_state.ladder_step == RepairLadderStep::Stop
+        && repair_state.ladder_step == RepairLadderStep::Stop
     {
         let target = single_target_repair_path
             .as_deref()
@@ -64,7 +66,7 @@ pub fn evaluate_pre_turn_directive(
             reason: format!(
                 "failed to make progress for this thread: deterministic repair ladder reached stop for '{}' after {} attempt(s). Apply a manual fix to the target file and rerun the thread.",
                 target,
-                execution_state.attempt_count
+                repair_state.attempt_count
             ),
         };
     }
@@ -78,7 +80,8 @@ pub fn patch_plan_intent_blocks_fast_forward(
     current_plan_key: &str,
     current_plan_digest: Option<&str>,
 ) -> bool {
-    let Some(intent) = execution_state.pending_loopback_intent.as_ref() else {
+    let repair = execution_state.repair_state();
+    let Some(intent) = repair.pending_loopback_intent.as_ref() else {
         return false;
     };
     match intent {
@@ -106,14 +109,15 @@ pub fn patch_plan_intent_blocks_fast_forward(
 }
 
 pub fn patch_impl_intent_unsatisfied(execution_state: &ExecutionState, phase: Phase) -> bool {
-    let Some(intent) = execution_state.pending_loopback_intent.as_ref() else {
+    let repair = execution_state.repair_state();
+    let Some(intent) = repair.pending_loopback_intent.as_ref() else {
         return false;
     };
     match intent {
         PendingLoopbackIntent::PatchImpl {
             phase: intent_phase,
             entry_mutation_epoch,
-        } => *intent_phase == phase && execution_state.mutation_epoch <= *entry_mutation_epoch,
+        } => *intent_phase == phase && repair.mutation_epoch <= *entry_mutation_epoch,
         _ => false,
     }
 }
@@ -122,7 +126,8 @@ pub fn derive_single_target_repair_path(
     execution_state: &ExecutionState,
     last_validate_failed_models: &[FailedModelRef],
 ) -> Option<String> {
-    execution_state
+    let repair = execution_state.repair_state();
+    repair
         .single_target_repair_path
         .as_ref()
         .map(|s| s.trim().to_string())
@@ -258,5 +263,71 @@ mod tests {
                 _ => panic!("unexpected directive for case={}", c.name),
             }
         }
+    }
+
+    #[test]
+    fn control_critical_plan_and_review_reason_details_use_typed_constructors() {
+        let phase_plan_src = include_str!("phase_plan.rs");
+        assert!(
+            phase_plan_src.contains("phase_reason_detail::plan_actionable_auto_approved("),
+            "phase_plan must use typed constructor for review-actionable auto-approval detail"
+        );
+        assert!(
+            phase_plan_src.contains("phase_reason_detail::plan_auto_approved("),
+            "phase_plan must use typed constructor for plan auto-approval detail"
+        );
+        assert!(
+            !phase_plan_src.contains("PlanActionableAutoApprovedDetail {"),
+            "phase_plan must not inline PlanActionableAutoApprovedDetail literals in transition paths"
+        );
+        assert!(
+            !phase_plan_src.contains("PlanAutoApprovedDetail {"),
+            "phase_plan must not inline PlanAutoApprovedDetail literals in transition paths"
+        );
+
+        let phase_review_src = include_str!("phase_review.rs");
+        assert!(
+            phase_review_src.contains("phase_reason_detail::review_decision_transition("),
+            "phase_review must use typed constructor for review decision transitions"
+        );
+        assert!(
+            !phase_review_src.contains("ReviewDecisionTransitionDetail {"),
+            "phase_review must not inline ReviewDecisionTransitionDetail literals in transition paths"
+        );
+    }
+
+    #[test]
+    fn control_reason_detail_plan_and_author_paths_use_typed_constructors() {
+        let phase_plan_src = include_str!("phase_plan.rs");
+        assert!(
+            phase_plan_src.contains("phase_reason_detail::plan_actionable_auto_approved("),
+            "plan actionable auto-approval transitions must use typed detail constructor"
+        );
+        assert!(
+            phase_plan_src.contains("phase_reason_detail::plan_auto_approved("),
+            "plan auto-approved transitions must use typed detail constructor"
+        );
+        assert!(
+            !phase_plan_src.contains("\"entry_reason_code\": \"review_actionable_true\""),
+            "phase_plan should not inline review_actionable_true reason_detail JSON"
+        );
+        assert!(
+            !phase_plan_src.contains("\"auto_approved_in_agent_mode\": true"),
+            "phase_plan should not inline auto_approved reason_detail JSON"
+        );
+
+        let plan_helpers_src = include_str!("plan_review_helpers.rs");
+        assert!(
+            plan_helpers_src.contains("AuthoringCompleteReasonDetail"),
+            "authoring-complete transition detail must use typed constructor"
+        );
+        assert!(
+            plan_helpers_src.contains("PlanPrunedEmptyDetail"),
+            "plan-pruned-empty transition detail must use typed constructor"
+        );
+        assert!(
+            plan_helpers_src.contains("PlanSemanticInvalidErrorsDetail"),
+            "plan semantic-invalid transition detail must use typed constructor"
+        );
     }
 }

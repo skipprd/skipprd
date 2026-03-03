@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 
 use react_core::control_flow::PhaseReasonCode;
 use react_core::session::ThreadStore;
@@ -683,6 +684,7 @@ impl ExecutionState {
         self.replan_backtracks = phase.replan_backtracks;
         self.current_tier = phase.current_tier;
         self.mode = phase.mode;
+        self.debug_assert_invariants();
     }
 
     pub fn repair_state(&self) -> RepairState {
@@ -729,6 +731,7 @@ impl ExecutionState {
         self.last_error_class = repair.last_error_class;
         self.last_failed_models = repair.last_failed_models;
         self.pending_loopback_intent = repair.pending_loopback_intent;
+        self.debug_assert_invariants();
     }
 
     pub fn publish_state(&self) -> PublishState {
@@ -743,6 +746,7 @@ impl ExecutionState {
         self.publish_approval = publish.publish_approval;
         self.publish_retries = publish.publish_retries;
         self.publish_plan = publish.publish_plan;
+        self.debug_assert_invariants();
     }
 
     pub fn probe_state_snapshot(&self) -> ProbeState {
@@ -751,6 +755,7 @@ impl ExecutionState {
 
     pub fn set_probe_state_snapshot(&mut self, probe: ProbeState) {
         self.probe_state = probe;
+        self.debug_assert_invariants();
     }
 
     pub fn manifest_state(&self) -> ManifestState {
@@ -765,34 +770,42 @@ impl ExecutionState {
         self.manifest_lookup = manifest.manifest_lookup;
         self.cleanse_plan_bootstrap_done = manifest.cleanse_plan_bootstrap_done;
         self.model_plan_bootstrap_done = manifest.model_plan_bootstrap_done;
+        self.debug_assert_invariants();
     }
 
     pub fn reset_manifest_lookup_state(&mut self) {
-        self.manifest_lookup = ManifestLookupState::default();
+        let mut manifest = self.manifest_state();
+        manifest.manifest_lookup = ManifestLookupState::default();
+        self.set_manifest_state(manifest);
     }
 
     pub fn needs_plan_bootstrap(&self, phase: Phase) -> bool {
+        let manifest = self.manifest_state();
         match phase {
-            Phase::CleansePlan => !self.cleanse_plan_bootstrap_done,
-            Phase::ModelPlan => !self.model_plan_bootstrap_done,
+            Phase::CleansePlan => !manifest.cleanse_plan_bootstrap_done,
+            Phase::ModelPlan => !manifest.model_plan_bootstrap_done,
             _ => false,
         }
     }
 
     pub fn mark_plan_bootstrap_done(&mut self, phase: Phase) {
+        let mut manifest = self.manifest_state();
         match phase {
-            Phase::CleansePlan => self.cleanse_plan_bootstrap_done = true,
-            Phase::ModelPlan => self.model_plan_bootstrap_done = true,
+            Phase::CleansePlan => manifest.cleanse_plan_bootstrap_done = true,
+            Phase::ModelPlan => manifest.model_plan_bootstrap_done = true,
             _ => {}
         }
+        self.set_manifest_state(manifest);
     }
 
     pub fn reset_plan_bootstrap(&mut self, phase: Phase) {
+        let mut manifest = self.manifest_state();
         match phase {
-            Phase::CleansePlan => self.cleanse_plan_bootstrap_done = false,
-            Phase::ModelPlan => self.model_plan_bootstrap_done = false,
+            Phase::CleansePlan => manifest.cleanse_plan_bootstrap_done = false,
+            Phase::ModelPlan => manifest.model_plan_bootstrap_done = false,
             _ => {}
         }
+        self.set_manifest_state(manifest);
     }
 
     pub fn note_manifest_lookup_attempt(
@@ -801,45 +814,52 @@ impl ExecutionState {
         success: bool,
         failure_kind: Option<ManifestLookupFailureKind>,
     ) {
+        let mut manifest = self.manifest_state();
         if matches!(
             path_kind,
             ManifestLookupPathKind::Ambiguous | ManifestLookupPathKind::NonCanonical
         ) {
-            self.manifest_lookup.noncanonical_attempt_count =
-                self.manifest_lookup.noncanonical_attempt_count.saturating_add(1);
+            manifest.manifest_lookup.noncanonical_attempt_count = manifest
+                .manifest_lookup
+                .noncanonical_attempt_count
+                .saturating_add(1);
         }
         if success {
             if path_kind == ManifestLookupPathKind::CanonicalTarget {
-                self.manifest_lookup.canonical_success_count = self
+                manifest.manifest_lookup.canonical_success_count = manifest
                     .manifest_lookup
                     .canonical_success_count
                     .saturating_add(1);
             }
-            self.manifest_lookup.retry_suppressed = self.manifest_lookup.repeated_failure_count >= 2
-                && self.manifest_lookup.canonical_success_count == 0;
+            manifest.manifest_lookup.retry_suppressed =
+                manifest.manifest_lookup.repeated_failure_count >= 2
+                    && manifest.manifest_lookup.canonical_success_count == 0;
+            self.set_manifest_state(manifest);
             return;
         }
         if let Some(kind) = failure_kind {
             let signature = format!("{}:{path_kind:?}", kind.as_str());
-            let repeated = if self
+            let repeated = if manifest
                 .manifest_lookup
                 .failure_signature
                 .as_deref()
                 .map(|s| s == signature.as_str())
                 .unwrap_or(false)
             {
-                self.manifest_lookup
+                manifest
+                    .manifest_lookup
                     .repeated_failure_count
                     .saturating_add(1)
             } else {
                 1
             };
-            self.manifest_lookup.failure_signature = Some(signature);
-            self.manifest_lookup.repeated_failure_count = repeated;
+            manifest.manifest_lookup.failure_signature = Some(signature);
+            manifest.manifest_lookup.repeated_failure_count = repeated;
         }
-        self.manifest_lookup.retry_suppressed =
-            self.manifest_lookup.repeated_failure_count >= 2
-                && self.manifest_lookup.canonical_success_count == 0;
+        manifest.manifest_lookup.retry_suppressed =
+            manifest.manifest_lookup.repeated_failure_count >= 2
+                && manifest.manifest_lookup.canonical_success_count == 0;
+        self.set_manifest_state(manifest);
     }
 
     pub fn apply_validate_failure(
@@ -1013,15 +1033,17 @@ impl ExecutionState {
     }
 
     pub fn probe_requirement_status(&self) -> ProbeRequirementStatus {
-        if self.last_validate_ok != Some(false) || !self.probe_state.required {
+        let repair = self.repair_state();
+        let probe = self.probe_state_snapshot();
+        if repair.last_validate_ok != Some(false) || !probe.required {
             return ProbeRequirementStatus::NotRequired;
         }
-        if self.probe_state.meaningful_attempts == 0 {
+        if probe.meaningful_attempts == 0 {
             return ProbeRequirementStatus::Required;
         }
-        if self.probe_state.repeated_signature_streak >= 3
-            || self.probe_state.non_meaningful_attempts >= 3
-            || self.probe_state.failed_attempts >= 3
+        if probe.repeated_signature_streak >= 3
+            || probe.non_meaningful_attempts >= 3
+            || probe.failed_attempts >= 3
         {
             return ProbeRequirementStatus::ExhaustedRequireMutation;
         }
@@ -1283,6 +1305,110 @@ impl ExecutionState {
                 self.set_repair_state(repair);
             }
         }
+        self.debug_assert_invariants();
+    }
+
+    pub fn validate_invariants(&self) -> Result<(), String> {
+        let mut violations = Vec::new();
+        self.collect_phase_coherence_violations(&mut violations);
+        self.collect_repair_ladder_coherence_violations(&mut violations);
+        self.collect_publish_coherence_violations(&mut violations);
+        self.collect_probe_lifecycle_violations(&mut violations);
+        if violations.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "execution_state invariant violation(s): {}",
+            violations.join("; ")
+        ))
+    }
+
+    fn collect_phase_coherence_violations(&self, violations: &mut Vec<String>) {
+        let phase = self.phase_state();
+        if phase.phase_reason_code.is_some() && phase.current_phase.is_none() {
+            violations.push("phase_reason_code set while current_phase is none".to_string());
+        }
+        if phase.phase_reason_detail.is_some() && phase.current_phase.is_none() {
+            violations.push("phase_reason_detail set while current_phase is none".to_string());
+        }
+    }
+
+    fn collect_repair_ladder_coherence_violations(&self, violations: &mut Vec<String>) {
+        let repair = self.repair_state();
+        if repair.ladder_step != RepairLadderStep::PatchTarget && !repair.hard_mutation_repair_mode {
+            violations.push(
+                "repair ladder advanced while hard_mutation_repair_mode is disabled".to_string(),
+            );
+        }
+        if repair.ladder_step == RepairLadderStep::Stop && repair.attempt_count < 2 {
+            violations.push("repair ladder reached stop before two attempts".to_string());
+        }
+        if let Some(single_target) = repair
+            .single_target_repair_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let target = repair.target_path.as_deref().map(str::trim);
+            if target != Some(single_target) {
+                violations.push(
+                    "single_target_repair_path must match target_path when present".to_string(),
+                );
+            }
+        }
+        if repair.hard_mutation_repair_mode && repair.repair_type == RepairType::Unknown {
+            violations.push("hard_mutation_repair_mode requires non-unknown repair_type".to_string());
+        }
+    }
+
+    fn collect_publish_coherence_violations(&self, violations: &mut Vec<String>) {
+        let publish = self.publish_state();
+        if let Some(approval) = publish.publish_approval.as_ref() {
+            if approval.ts.trim().is_empty() {
+                violations.push("publish_approval timestamp must be non-empty".to_string());
+            }
+        }
+        let mut kinds = HashSet::new();
+        for retry in &publish.publish_retries {
+            if retry.count == 0 {
+                violations.push(format!("publish retry {:?} has zero count", retry.kind));
+            }
+            if !kinds.insert(retry.kind) {
+                violations.push(format!("duplicate publish retry entry for {:?}", retry.kind));
+            }
+        }
+    }
+
+    fn collect_probe_lifecycle_violations(&self, violations: &mut Vec<String>) {
+        let repair = self.repair_state();
+        let probe = self.probe_state_snapshot();
+        if probe.required && repair.last_validate_ok != Some(false) {
+            violations.push(
+                "probe.required can only be true while last_validate_ok is false".to_string(),
+            );
+        }
+        let classified_attempts = probe
+            .meaningful_attempts
+            .saturating_add(probe.non_meaningful_attempts)
+            .saturating_add(probe.failed_attempts);
+        if classified_attempts > probe.attempts_total {
+            violations.push(
+                "probe attempt counters exceed attempts_total".to_string(),
+            );
+        }
+        if probe.repeated_signature_streak > probe.attempts_total {
+            violations.push(
+                "probe repeated_signature_streak exceeds attempts_total".to_string(),
+            );
+        }
+    }
+
+    fn debug_assert_invariants(&self) {
+        debug_assert!(
+            self.validate_invariants().is_ok(),
+            "invalid execution state: {:?}",
+            self.validate_invariants()
+        );
     }
 }
 
@@ -1826,6 +1952,52 @@ mod tests {
         assert!(st.single_target_repair_path.is_none());
         assert!(st.target_path.is_none());
         assert!(st.last_failed_models.is_empty());
+    }
+
+    #[test]
+    fn invariants_reject_phase_reason_without_current_phase() {
+        let mut st = ExecutionState::new();
+        st.current_phase = None;
+        st.phase_reason_code = Some(PhaseReasonCode::PhaseSet);
+        let err = st.validate_invariants().expect_err("invariants must fail");
+        assert!(err.contains("phase_reason_code set while current_phase is none"));
+    }
+
+    #[test]
+    fn invariants_reject_repair_ladder_stop_without_required_attempts() {
+        let mut st = ExecutionState::new();
+        st.hard_mutation_repair_mode = true;
+        st.repair_type = RepairType::SqlTarget;
+        st.ladder_step = RepairLadderStep::Stop;
+        st.attempt_count = 1;
+        let err = st.validate_invariants().expect_err("invariants must fail");
+        assert!(err.contains("repair ladder reached stop before two attempts"));
+    }
+
+    #[test]
+    fn invariants_reject_duplicate_publish_retry_entries() {
+        let mut st = ExecutionState::new();
+        st.publish_retries = vec![
+            PublishRetryState {
+                kind: PublishRetryKind::AwaitApprovalLoop,
+                count: 1,
+            },
+            PublishRetryState {
+                kind: PublishRetryKind::AwaitApprovalLoop,
+                count: 2,
+            },
+        ];
+        let err = st.validate_invariants().expect_err("invariants must fail");
+        assert!(err.contains("duplicate publish retry entry"));
+    }
+
+    #[test]
+    fn invariants_reject_probe_required_when_last_validate_not_failed() {
+        let mut st = ExecutionState::new();
+        st.last_validate_ok = Some(true);
+        st.probe_state.required = true;
+        let err = st.validate_invariants().expect_err("invariants must fail");
+        assert!(err.contains("probe.required can only be true"));
     }
 
     #[tokio::test]
