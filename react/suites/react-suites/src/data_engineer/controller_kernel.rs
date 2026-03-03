@@ -2,12 +2,6 @@ use crate::data_engineer::retry_budget;
 use crate::data_engineer::{plan, retry_budget::RetryBudget};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug)]
-pub enum PlanTrack {
-    Cleanse,
-    Model,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GuardReason {
@@ -65,17 +59,8 @@ pub fn batch_lock_error_message(reason: BatchLockReason) -> &'static str {
     }
 }
 
-impl PlanTrack {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Cleanse => "cleanse",
-            Self::Model => "model",
-        }
-    }
-}
-
 pub fn build_batch_lock_prompt(
-    track: PlanTrack,
+    track: crate::data_engineer::track_spec::TrackKind,
     plan_key: &str,
     consecutive: usize,
     total: usize,

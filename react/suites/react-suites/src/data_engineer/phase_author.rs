@@ -519,18 +519,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
         }
 
         // Explicit execution context for hierarchical UI (best-effort).
-        let next_item =
-            crate::data_engineer::plan::cleanse_next_work_item_ctx(&plan);
-        actx.exec_ctx = Some(react_core::session::ExecutionContext {
-            plan_kind: Some(react_core::session::ExecutionPlanKind::new("cleanse")),
-            plan_key: Some(plan.plan_key.clone()),
-            workgroup_id: next_item.as_ref().map(|x| x.workgroup_id.clone()),
-            task_id: next_item.as_ref().map(|x| x.task_id.clone()),
-            checklist_item_id: next_item
-                .as_ref()
-                .map(|x| x.checklist_item_id.clone()),
-            data: std::collections::BTreeMap::new(),
-        });
+        let next_item = crate::data_engineer::plan::cleanse_next_work_item_ctx(&plan);
+        crate::data_engineer::phase_author_lifecycle::bind_execution_context(
+            &mut actx,
+            track,
+            plan.plan_key.clone(),
+            next_item,
+        );
         // Hard stop: if plan-batched authoring is locked due to too many consecutive failures,
         // return control to the user with a single actionable message (do not loop).
         if plan.progress.consecutive_batch_failures
@@ -539,20 +534,14 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
         let next =
             crate::data_engineer::plan::cleanse_next_authoring_action(&plan)
                 .author_sql_ids();
-        let mut expected_paths: Vec<String> = Vec::new();
-        for ds in next.iter() {
-            if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
-                if let Some(p) = t.expected_model_path.as_deref() {
-                    if !p.trim().is_empty() {
-                        expected_paths.push(p.trim().to_string());
-                    }
-                }
-            }
-        }
-        expected_paths.sort();
-        expected_paths.dedup();
+        let expected_paths = crate::data_engineer::phase_author_lifecycle::collect_expected_paths(
+            &plan.tasks,
+            &next,
+            |task| task.dataset_id.as_str(),
+            |task| task.expected_model_path.as_deref(),
+        );
         let reason = lock_prompt_for_plan(
-            "cleanse",
+            track,
             &plan.plan_key,
             plan.progress.consecutive_batch_failures,
             plan.progress.total_batch_failures,
@@ -623,20 +612,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                     )
                     .trim()
                     .to_string();
-                let mut expected_paths: Vec<String> = Vec::new();
-                for ds in ids.iter() {
-                    if let Some(t) =
-                        plan.tasks.iter().find(|t| t.dataset_id == *ds)
-                    {
-                        if let Some(p) = t.expected_model_path.as_deref() {
-                            if !p.trim().is_empty() {
-                                expected_paths.push(p.trim().to_string());
-                            }
-                        }
-                    }
-                }
-                expected_paths.sort();
-                expected_paths.dedup();
+                let expected_paths =
+                    crate::data_engineer::phase_author_lifecycle::collect_expected_paths(
+                        &plan.tasks,
+                        ids,
+                        |task| task.dataset_id.as_str(),
+                        |task| task.expected_model_path.as_deref(),
+                    );
                 let mut ctx = format!(
                     "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
                     plan.plan_key,
@@ -692,20 +674,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                     )
                     .trim()
                     .to_string();
-                let mut expected_paths: Vec<String> = Vec::new();
-                for ds in ids.iter() {
-                    if let Some(t) =
-                        plan.tasks.iter().find(|t| t.dataset_id == *ds)
-                    {
-                        if let Some(p) = t.expected_model_path.as_deref() {
-                            if !p.trim().is_empty() {
-                                expected_paths.push(p.trim().to_string());
-                            }
-                        }
-                    }
-                }
-                expected_paths.sort();
-                expected_paths.dedup();
+                let expected_paths =
+                    crate::data_engineer::phase_author_lifecycle::collect_expected_paths(
+                        &plan.tasks,
+                        ids,
+                        |task| task.dataset_id.as_str(),
+                        |task| task.expected_model_path.as_deref(),
+                    );
                 let mut ctx = format!(
                     "Approved cleanse plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_cleanse_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
                     plan.plan_key,
@@ -844,38 +819,27 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
         }
 
         // Explicit execution context for hierarchical UI (best-effort).
-        let next_item =
-            crate::data_engineer::plan::model_next_work_item_ctx(&plan);
-        actx.exec_ctx = Some(react_core::session::ExecutionContext {
-            plan_kind: Some(react_core::session::ExecutionPlanKind::new("model")),
-            plan_key: Some(plan.plan_key.clone()),
-            workgroup_id: next_item.as_ref().map(|x| x.workgroup_id.clone()),
-            task_id: next_item.as_ref().map(|x| x.task_id.clone()),
-            checklist_item_id: next_item
-                .as_ref()
-                .map(|x| x.checklist_item_id.clone()),
-            data: std::collections::BTreeMap::new(),
-        });
+        let next_item = crate::data_engineer::plan::model_next_work_item_ctx(&plan);
+        crate::data_engineer::phase_author_lifecycle::bind_execution_context(
+            &mut actx,
+            track,
+            plan.plan_key.clone(),
+            next_item,
+        );
         if plan.progress.consecutive_batch_failures
         >= crate::data_engineer::controller_kernel::max_consecutive_batch_failures()
     {
         let next =
             crate::data_engineer::plan::model_next_authoring_action(&plan)
                 .author_sql_ids();
-        let mut expected_paths: Vec<String> = Vec::new();
-        for n in next.iter() {
-            if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
-                if let Some(p) = t.expected_model_path.as_deref() {
-                    if !p.trim().is_empty() {
-                        expected_paths.push(p.trim().to_string());
-                    }
-                }
-            }
-        }
-        expected_paths.sort();
-        expected_paths.dedup();
+        let expected_paths = crate::data_engineer::phase_author_lifecycle::collect_expected_paths(
+            &plan.tasks,
+            &next,
+            |task| task.name.as_str(),
+            |task| task.expected_model_path.as_deref(),
+        );
         let reason = lock_prompt_for_plan(
-            "model",
+            track,
             &plan.plan_key,
             plan.progress.consecutive_batch_failures,
             plan.progress.total_batch_failures,
@@ -945,18 +909,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                     )
                     .trim()
                     .to_string();
-                let mut expected_paths: Vec<String> = Vec::new();
-                for n in ids.iter() {
-                    if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
-                        if let Some(p) = t.expected_model_path.as_deref() {
-                            if !p.trim().is_empty() {
-                                expected_paths.push(p.trim().to_string());
-                            }
-                        }
-                    }
-                }
-                expected_paths.sort();
-                expected_paths.dedup();
+                let expected_paths =
+                    crate::data_engineer::phase_author_lifecycle::collect_expected_paths(
+                        &plan.tasks,
+                        ids,
+                        |task| task.name.as_str(),
+                        |task| task.expected_model_path.as_deref(),
+                    );
                 let mut ctx = format!(
                     "Approved model plan (stored at: {}).\nPending schema checklist work (checklist_item_id={} ; max 5):\n- {}\n\nNext action: call apply_next_model_schema_batch (do NOT call file directly).\n\nExpected model SQL paths:\n- {}\n",
                     plan.plan_key,
@@ -1082,18 +1041,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                     }
                 }
 
-                let mut expected_paths: Vec<String> = Vec::new();
-                for n in ids.iter() {
-                    if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
-                        if let Some(p) = t.expected_model_path.as_deref() {
-                            if !p.trim().is_empty() {
-                                expected_paths.push(p.trim().to_string());
-                            }
-                        }
-                    }
-                }
-                expected_paths.sort();
-                expected_paths.dedup();
+                let expected_paths =
+                    crate::data_engineer::phase_author_lifecycle::collect_expected_paths(
+                        &plan.tasks,
+                        ids,
+                        |task| task.name.as_str(),
+                        |task| task.expected_model_path.as_deref(),
+                    );
                 let checklist_item_id = actx
                     .exec_ctx
                     .as_ref()

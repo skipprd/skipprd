@@ -462,21 +462,25 @@ pub async fn save_model_plan_grounded(
     save_model_plan(ctx, &grounded.0).await
 }
 
-pub fn cleanse_next_batch(plan: &CleansePlan) -> Vec<String> {
-    for batch in plan.batches.iter() {
+fn next_sql_batch_from_plan<T>(
+    batches: &[Vec<String>],
+    tasks: &[T],
+    task_id: impl Fn(&T) -> &str,
+    checklist: impl Fn(&T) -> &[PlanChecklistItem],
+) -> Vec<String> {
+    for batch in batches.iter() {
         let mut out: Vec<String> = Vec::new();
-        for ds in batch.iter() {
-            if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
+        for item in batch.iter() {
+            if let Some(task) = tasks.iter().find(|t| task_id(t) == item) {
                 // "Next batch" is defined as "next SQL authoring work", not "overall task not done".
-                // This avoids repeatedly scheduling a dataset when only schema/validate checklist
-                // items remain.
-                let st = checklist_status(&t.checklist, CHECKLIST_SQL_MODEL);
+                // This avoids repeatedly scheduling a task when only schema/validate checklist items remain.
+                let st = checklist_status(checklist(task), CHECKLIST_SQL_MODEL);
                 if st != ChecklistItemStatus::Done && is_runnable_checklist_status(st) {
-                    out.push(ds.clone());
+                    out.push(item.clone());
                 }
             } else {
-                // If the plan batches reference a dataset not present in tasks, still allow it.
-                out.push(ds.clone());
+                // If the plan batches reference a task not present in tasks, still allow it.
+                out.push(item.clone());
             }
             if out.len() >= 5 {
                 break;
@@ -487,103 +491,92 @@ pub fn cleanse_next_batch(plan: &CleansePlan) -> Vec<String> {
         }
     }
     vec![]
+}
+
+pub fn cleanse_next_batch(plan: &CleansePlan) -> Vec<String> {
+    next_sql_batch_from_plan(
+        &plan.batches,
+        &plan.tasks,
+        |t| t.dataset_id.as_str(),
+        |t| &t.checklist,
+    )
 }
 
 pub fn model_next_batch(plan: &ModelPlan) -> Vec<String> {
-    for batch in plan.batches.iter() {
-        let mut out: Vec<String> = Vec::new();
-        for name in batch.iter() {
-            if let Some(t) = plan.tasks.iter().find(|t| t.name == *name) {
-                let st = checklist_status(&t.checklist, CHECKLIST_SQL_MODEL);
-                if st != ChecklistItemStatus::Done && is_runnable_checklist_status(st) {
-                    out.push(name.clone());
-                }
-            } else {
-                out.push(name.clone());
-            }
-            if out.len() >= 5 {
-                break;
-            }
+    next_sql_batch_from_plan(
+        &plan.batches,
+        &plan.tasks,
+        |t| t.name.as_str(),
+        |t| &t.checklist,
+    )
+}
+
+fn executable_plan_issues<T>(
+    tasks: &[T],
+    batches: &[Vec<String>],
+    work_groups: &[PlanWorkGroup],
+    task_id: impl Fn(&T) -> &str,
+    checklist: impl Fn(&T) -> &[PlanChecklistItem],
+    all_done: bool,
+    next_action: AuthoringNextAction,
+) -> Vec<String> {
+    let mut issues: Vec<String> = Vec::new();
+    if tasks.is_empty() {
+        issues.push("tasks is empty".to_string());
+    }
+    if batches.is_empty() {
+        issues.push("batches is empty".to_string());
+    }
+    if work_groups.is_empty() {
+        issues.push("work_groups is empty".to_string());
+    }
+    for task in tasks.iter() {
+        let task_key = task_id(task).to_string();
+        let missing = missing_required_checklist_items(checklist(task));
+        if !missing.is_empty() {
+            issues.push(format!(
+                "task {} missing checklist items: {}",
+                task_key,
+                missing.join(", ")
+            ));
         }
-        if !out.is_empty() {
-            return out;
+        for checklist_id in required_checklist_item_ids() {
+            if !work_groups_cover_task_checklist(work_groups, &task_key, checklist_id) {
+                issues.push(format!(
+                    "task {} checklist '{}' missing work-group scheduling",
+                    task_key, checklist_id
+                ));
+            }
         }
     }
-    vec![]
+    if !all_done && matches!(next_action, AuthoringNextAction::None) {
+        issues.push("plan has pending checklist work but no actionable work-group".to_string());
+    }
+    issues
 }
 
 pub fn cleanse_executable_plan_issues(plan: &CleansePlan) -> Vec<String> {
-    let mut issues: Vec<String> = Vec::new();
-    if plan.tasks.is_empty() {
-        issues.push("tasks is empty".to_string());
-    }
-    if plan.batches.is_empty() {
-        issues.push("batches is empty".to_string());
-    }
-    if plan.work_groups.is_empty() {
-        issues.push("work_groups is empty".to_string());
-    }
-    for t in plan.tasks.iter() {
-        let missing = missing_required_checklist_items(&t.checklist);
-        if !missing.is_empty() {
-            issues.push(format!(
-                "task {} missing checklist items: {}",
-                t.dataset_id,
-                missing.join(", ")
-            ));
-        }
-        for checklist_id in required_checklist_item_ids() {
-            if !work_groups_cover_task_checklist(&plan.work_groups, &t.dataset_id, checklist_id) {
-                issues.push(format!(
-                    "task {} checklist '{}' missing work-group scheduling",
-                    t.dataset_id, checklist_id
-                ));
-            }
-        }
-    }
-    if !cleanse_all_done(plan)
-        && matches!(cleanse_next_authoring_action(plan), AuthoringNextAction::None)
-    {
-        issues.push("plan has pending checklist work but no actionable work-group".to_string());
-    }
-    issues
+    executable_plan_issues(
+        &plan.tasks,
+        &plan.batches,
+        &plan.work_groups,
+        |t| t.dataset_id.as_str(),
+        |t| &t.checklist,
+        cleanse_all_done(plan),
+        cleanse_next_authoring_action(plan),
+    )
 }
 
 pub fn model_executable_plan_issues(plan: &ModelPlan) -> Vec<String> {
-    let mut issues: Vec<String> = Vec::new();
-    if plan.tasks.is_empty() {
-        issues.push("tasks is empty".to_string());
-    }
-    if plan.batches.is_empty() {
-        issues.push("batches is empty".to_string());
-    }
-    if plan.work_groups.is_empty() {
-        issues.push("work_groups is empty".to_string());
-    }
-    for t in plan.tasks.iter() {
-        let missing = missing_required_checklist_items(&t.checklist);
-        if !missing.is_empty() {
-            issues.push(format!(
-                "task {} missing checklist items: {}",
-                t.name,
-                missing.join(", ")
-            ));
-        }
-        for checklist_id in required_checklist_item_ids() {
-            if !work_groups_cover_task_checklist(&plan.work_groups, &t.name, checklist_id) {
-                issues.push(format!(
-                    "task {} checklist '{}' missing work-group scheduling",
-                    t.name, checklist_id
-                ));
-            }
-        }
-    }
-    if !model_all_done(plan)
-        && matches!(model_next_authoring_action(plan), AuthoringNextAction::None)
-    {
-        issues.push("plan has pending checklist work but no actionable work-group".to_string());
-    }
-    issues
+    executable_plan_issues(
+        &plan.tasks,
+        &plan.batches,
+        &plan.work_groups,
+        |t| t.name.as_str(),
+        |t| &t.checklist,
+        model_all_done(plan),
+        model_next_authoring_action(plan),
+    )
 }
 
 fn group_is_complete_cleanse(plan: &CleansePlan, g: &PlanWorkGroup) -> bool {
@@ -837,24 +830,7 @@ pub fn model_next_work_item_ctx(plan: &ModelPlan) -> Option<NextWorkItemCtx> {
 }
 
 pub fn cleanse_pending_schema_contracts(plan: &CleansePlan) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for batch in plan.batches.iter() {
-        for ds in batch.iter() {
-            let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) else {
-                continue;
-            };
-            if checklist_status(&t.checklist, CHECKLIST_SQL_MODEL) == ChecklistItemStatus::Done
-                && checklist_status(&t.checklist, CHECKLIST_SCHEMA_CONTRACT)
-                    != ChecklistItemStatus::Done
-            {
-                out.push(ds.clone());
-                if out.len() >= 5 {
-                    return out;
-                }
-            }
-        }
-    }
-    out
+    cleanse_pending_for_checklist(plan, CHECKLIST_SQL_MODEL, CHECKLIST_SCHEMA_CONTRACT)
 }
 
 /// Pending work for an arbitrary checklist item (cleanse plan).
@@ -871,46 +847,18 @@ pub fn cleanse_pending_for_checklist(
     if prereq.is_empty() || target.is_empty() {
         return vec![];
     }
-    let mut out: Vec<String> = Vec::new();
-    for batch in plan.batches.iter() {
-        for ds in batch.iter() {
-            let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) else {
-                continue;
-            };
-            if checklist_status(&t.checklist, prereq) != ChecklistItemStatus::Done {
-                continue;
-            }
-            let st = checklist_status(&t.checklist, target);
-            if st != ChecklistItemStatus::Done && is_runnable_checklist_status(st) {
-                out.push(ds.clone());
-                if out.len() >= 5 {
-                    return out;
-                }
-            }
-        }
-    }
-    out
+    pending_for_checklist_from_plan(
+        &plan.batches,
+        &plan.tasks,
+        |t| t.dataset_id.as_str(),
+        |t| &t.checklist,
+        prereq,
+        target,
+    )
 }
 
 pub fn model_pending_schema_contracts(plan: &ModelPlan) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for batch in plan.batches.iter() {
-        for name in batch.iter() {
-            let Some(t) = plan.tasks.iter().find(|t| t.name == *name) else {
-                continue;
-            };
-            if checklist_status(&t.checklist, CHECKLIST_SQL_MODEL) == ChecklistItemStatus::Done
-                && checklist_status(&t.checklist, CHECKLIST_SCHEMA_CONTRACT)
-                    != ChecklistItemStatus::Done
-            {
-                out.push(name.clone());
-                if out.len() >= 5 {
-                    return out;
-                }
-            }
-        }
-    }
-    out
+    model_pending_for_checklist(plan, CHECKLIST_SQL_MODEL, CHECKLIST_SCHEMA_CONTRACT)
 }
 
 /// Pending work for an arbitrary checklist item (model plan).
@@ -924,18 +872,36 @@ pub fn model_pending_for_checklist(
     if prereq.is_empty() || target.is_empty() {
         return vec![];
     }
+    pending_for_checklist_from_plan(
+        &plan.batches,
+        &plan.tasks,
+        |t| t.name.as_str(),
+        |t| &t.checklist,
+        prereq,
+        target,
+    )
+}
+
+fn pending_for_checklist_from_plan<T>(
+    batches: &[Vec<String>],
+    tasks: &[T],
+    task_id: impl Fn(&T) -> &str,
+    checklist: impl Fn(&T) -> &[PlanChecklistItem],
+    prereq: &str,
+    target: &str,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for batch in plan.batches.iter() {
-        for name in batch.iter() {
-            let Some(t) = plan.tasks.iter().find(|t| t.name == *name) else {
+    for batch in batches.iter() {
+        for item in batch.iter() {
+            let Some(task) = tasks.iter().find(|t| task_id(t) == item) else {
                 continue;
             };
-            if checklist_status(&t.checklist, prereq) != ChecklistItemStatus::Done {
+            if checklist_status(checklist(task), prereq) != ChecklistItemStatus::Done {
                 continue;
             }
-            let st = checklist_status(&t.checklist, target);
+            let st = checklist_status(checklist(task), target);
             if st != ChecklistItemStatus::Done && is_runnable_checklist_status(st) {
-                out.push(name.clone());
+                out.push(item.clone());
                 if out.len() >= 5 {
                     return out;
                 }

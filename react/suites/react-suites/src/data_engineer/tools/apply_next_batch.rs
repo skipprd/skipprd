@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use serde_json::Value;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
@@ -15,7 +14,6 @@ use crate::data_engineer::plan::{CleansePlan, ModelPlan};
 use crate::data_engineer::progress_controller::{
     BatchFailureKind, DataEngineerEvent, ExecutionTier, FailedModelRef,
 };
-use crate::data_engineer::state_manager;
 use crate::data_engineer::tools;
 
 fn extract_string_arg(args: &Value, key: &str) -> Option<String> {
@@ -80,51 +78,11 @@ fn mark_needs_update_model(plan: &mut ModelPlan, names: &[String], note: &str) {
 fn sql_model_checklist_status(items: &[plan::PlanChecklistItem]) -> plan::ChecklistItemStatus {
     items
         .iter()
-        .find(|it| it.checklist_item_id == "sql_model")
+        .find(|it| it.checklist_item_id == plan::CHECKLIST_SQL_MODEL)
         .map(|it| it.status)
         .unwrap_or(plan::ChecklistItemStatus::Pending)
 }
 
-fn classify_batch_failure_kind(errors: &[String]) -> BatchFailureKind {
-    let joined = errors.join("\n").to_ascii_lowercase();
-    if joined.contains("sql validation failed")
-        || joined.contains("column_not_found")
-        || joined.contains("compilation error")
-        || joined.contains("runtime error")
-    {
-        return BatchFailureKind::SqlValidation;
-    }
-    if joined.contains("schema")
-        || joined.contains("contract")
-        || joined.contains("yaml")
-        || joined.contains("parse")
-    {
-        return BatchFailureKind::SchemaOrContract;
-    }
-    if joined.contains("service error")
-        || joined.contains("timeout")
-        || joined.contains("throttle")
-        || joined.contains("temporar")
-        || joined.contains("http 502")
-        || joined.contains("http 503")
-        || joined.contains("http 504")
-    {
-        return BatchFailureKind::InfraTransient;
-    }
-    BatchFailureKind::Unknown
-}
-
-async fn emit_batch_event(ctx: &AgentCtx, event: DataEngineerEvent) -> Result<(), String> {
-    let Some(thread_store) = ctx.thread_store.as_ref() else {
-        return Ok(());
-    };
-    let Some(thread_id) = ctx.thread_id.as_deref() else {
-        return Ok(());
-    };
-    state_manager::apply_execution_event(thread_store, thread_id, event)
-        .await
-        .map(|_| ())
-}
 
 #[derive(Clone)]
 pub struct ApplyNextCleanseBatchTool {
@@ -333,7 +291,7 @@ impl Tool for ApplyNextCleanseBatchTool {
                     &batch,
                     &format!("apply_next_cleanse_batch failed: {}", e.trim()),
                 );
-                let kind = classify_batch_failure_kind(&[e.clone()]);
+                let kind = crate::data_engineer::tools::batch_sql_runner::classify_batch_failure_kind(&[e.clone()]);
                 controller_kernel::note_batch_result_with_failure_kind(
                     &mut plan.progress,
                     false,
@@ -354,24 +312,18 @@ impl Tool for ApplyNextCleanseBatchTool {
 
         // Normalize the result shape we emit so plan progress derivation can be deterministic.
         let ok = res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-        let succeeded: Vec<String> = res
-            .get("succeeded_dataset_ids")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let succeeded =
+            crate::data_engineer::tools::batch_sql_runner::parse_succeeded_ids(
+                &res,
+                "succeeded_dataset_ids",
+            );
         let attempted: Vec<String> = batch.clone();
 
         // Compute failed as attempted - succeeded.
-        let succ_set: HashSet<String> = succeeded.iter().cloned().collect();
-        let failed: Vec<String> = attempted
-            .iter()
-            .filter(|ds| !succ_set.contains(*ds))
-            .cloned()
-            .collect();
+        let failed = crate::data_engineer::tools::batch_sql_runner::derive_failed_ids(
+            &attempted,
+            &succeeded,
+        );
 
         // Update task statuses.
         for ds in succeeded.iter() {
@@ -388,12 +340,10 @@ impl Tool for ApplyNextCleanseBatchTool {
         }
         let mut failure_kind_for_budget: Option<BatchFailureKind> = None;
         if !failed.is_empty() || !ok {
-            let err = res
-                .get("errors")
-                .and_then(|v| v.as_array())
-                .and_then(|a| a.first())
-                .and_then(|v| v.as_str())
-                .unwrap_or("batch failed");
+            let err = crate::data_engineer::tools::batch_sql_runner::extract_first_error(
+                &res,
+                "batch failed",
+            );
             let note = format!("apply_next_cleanse_batch failed: {}", err.trim());
             let _ = note;
             for ds in failed.iter() {
@@ -420,23 +370,15 @@ impl Tool for ApplyNextCleanseBatchTool {
                     file: expected_path.unwrap_or_default(),
                 });
             }
-            let errors: Vec<String> = res
-                .get("errors")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let kind = classify_batch_failure_kind(&errors);
+            let errors = crate::data_engineer::tools::batch_sql_runner::extract_errors(&res);
+            let kind = crate::data_engineer::tools::batch_sql_runner::classify_batch_failure_kind(&errors);
             failure_kind_for_budget = Some(kind);
             let brief = if err.trim().is_empty() {
                 "apply_next_cleanse_batch failed".to_string()
             } else {
-                err.to_string()
+                err
             };
-            emit_batch_event(
+            crate::data_engineer::tools::batch_sql_runner::emit_batch_event(
                 ctx,
                 DataEngineerEvent::BatchAuthoringFailed {
                     tier: ExecutionTier::Cleanse,
@@ -447,7 +389,7 @@ impl Tool for ApplyNextCleanseBatchTool {
             )
             .await?;
         } else {
-            emit_batch_event(
+            crate::data_engineer::tools::batch_sql_runner::emit_batch_event(
                 ctx,
                 DataEngineerEvent::BatchAuthoringRecovered,
             )
@@ -723,7 +665,7 @@ impl Tool for ApplyNextModelBatchTool {
                     &batch_names,
                     &format!("apply_next_model_batch failed: {}", e.trim()),
                 );
-                let kind = classify_batch_failure_kind(&[e.clone()]);
+                let kind = crate::data_engineer::tools::batch_sql_runner::classify_batch_failure_kind(&[e.clone()]);
                 controller_kernel::note_batch_result_with_failure_kind(
                     &mut plan.progress,
                     false,
@@ -743,21 +685,15 @@ impl Tool for ApplyNextModelBatchTool {
         };
 
         let ok = res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-        let succeeded: Vec<String> = res
-            .get("succeeded_item_names")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let succ_set: HashSet<String> = succeeded.iter().cloned().collect();
-        let failed: Vec<String> = batch_names
-            .iter()
-            .filter(|n| !succ_set.contains(*n))
-            .cloned()
-            .collect();
+        let succeeded =
+            crate::data_engineer::tools::batch_sql_runner::parse_succeeded_ids(
+                &res,
+                "succeeded_item_names",
+            );
+        let failed = crate::data_engineer::tools::batch_sql_runner::derive_failed_ids(
+            &batch_names,
+            &succeeded,
+        );
 
         for n in succeeded.iter() {
             if checklist_item_id == plan::CHECKLIST_SQL_MODEL {
@@ -773,13 +709,10 @@ impl Tool for ApplyNextModelBatchTool {
         }
         let mut failure_kind_for_budget: Option<BatchFailureKind> = None;
         if !failed.is_empty() || !ok {
-            let err = res
-                .get("errors")
-                .and_then(|v| v.as_array())
-                .and_then(|a| a.first())
-                .and_then(|v| v.as_str())
-                .unwrap_or("batch failed");
-            let _ = err;
+            let err = crate::data_engineer::tools::batch_sql_runner::extract_first_error(
+                &res,
+                "batch failed",
+            );
             for n in failed.iter() {
                 if checklist_item_id == plan::CHECKLIST_SQL_MODEL {
                     plan::model_mark_needs_update(&mut plan, n);
@@ -804,23 +737,15 @@ impl Tool for ApplyNextModelBatchTool {
                     file: expected_path.unwrap_or_default(),
                 });
             }
-            let errors: Vec<String> = res
-                .get("errors")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let kind = classify_batch_failure_kind(&errors);
+            let errors = crate::data_engineer::tools::batch_sql_runner::extract_errors(&res);
+            let kind = crate::data_engineer::tools::batch_sql_runner::classify_batch_failure_kind(&errors);
             failure_kind_for_budget = Some(kind);
             let brief = if err.trim().is_empty() {
                 "apply_next_model_batch failed".to_string()
             } else {
-                err.to_string()
+                err
             };
-            emit_batch_event(
+            crate::data_engineer::tools::batch_sql_runner::emit_batch_event(
                 ctx,
                 DataEngineerEvent::BatchAuthoringFailed {
                     tier: ExecutionTier::Model,
@@ -831,7 +756,7 @@ impl Tool for ApplyNextModelBatchTool {
             )
             .await?;
         } else {
-            emit_batch_event(
+            crate::data_engineer::tools::batch_sql_runner::emit_batch_event(
                 ctx,
                 DataEngineerEvent::BatchAuthoringRecovered,
             )
@@ -872,5 +797,355 @@ impl Tool for ApplyNextModelBatchTool {
             "errors": top_errors,
             "inner": res,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::llm::{ChatMessage, LargeLanguageModel};
+    use react_core::scope::RequestScope;
+    use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct ScriptedLlm {
+        replies: Mutex<Vec<String>>,
+    }
+
+    impl LargeLanguageModel for ScriptedLlm {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
+            let mut g = self
+                .replies
+                .lock()
+                .map_err(|_| "mutex poisoned".to_string())?;
+            if g.is_empty() {
+                return Err("no more replies".to_string());
+            }
+            Ok(g.remove(0))
+        }
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(vec![])
+        }
+    }
+
+    fn minimal_cfg() -> Arc<crate::config::ReactResolvedConfig> {
+        Arc::new(crate::config::ReactResolvedConfig {
+            server: crate::config::ServerResolved { port: 1 },
+            storage: crate::config::StorageResolved {
+                mode: react_core::resolved_config::StorageMode::Local,
+                bucket: None,
+                path: None,
+            },
+            scope: RequestScope {
+                tenant: "t".to_string(),
+                workspace: "w".to_string(),
+                project_id: "p".to_string(),
+            },
+            llm: crate::config::LlmResolved::default(),
+            providers: crate::config::ProvidersResolved {
+                warehouse: crate::config::WarehouseResolved {
+                    kind: react_core::resolved_config::WarehouseKind::Athena,
+                    container: "AwsDataCatalog".to_string(),
+                    namespace: "test_raw".to_string(),
+                    extras: serde_json::json!({"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"}),
+                },
+                catalog: crate::config::CatalogResolved {
+                    enabled: false,
+                    refresh_secs: 60,
+                    max_concurrency: 8,
+                },
+                dbt: crate::config::DbtResolved {
+                    enabled: true,
+                    profiles_dir: None,
+                    target: "athena".to_string(),
+                    naming: crate::config::DbtNamingResolved {
+                        target_schema: "test".to_string(),
+                        silver_suffix: "silver".to_string(),
+                        gold_suffix: "warehouse".to_string(),
+                    },
+                    runner: "host".to_string(),
+                    docker_image: None,
+                    docker_platform: None,
+                    docker_network: None,
+                    docker_mount_aws_dir: false,
+                },
+                vector: crate::config::VectorResolved { enabled: false },
+            },
+        })
+    }
+
+    fn test_ctx(thread_id: &str) -> AgentCtx {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
+            replies: Mutex::new(vec![]),
+        });
+        AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 2,
+            thread_id: Some(thread_id.to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(react_core::agent::DefaultPolicy),
+            llm,
+            storage,
+            scope: RequestScope {
+                tenant: "t".to_string(),
+                workspace: "w".to_string(),
+                project_id: "p".to_string(),
+            },
+            keyspace,
+            query: None,
+            warehouse: Arc::new(react_core::providers::NullWarehouseProvider::default()),
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            exec_ctx: None,
+            resolved_config: Some(minimal_cfg()),
+        }
+    }
+
+    async fn seed_cleanse_plan(ctx: &AgentCtx, sql_done: bool, schema_done: bool, locked: bool) {
+        let mut checklist = plan::canonical_task_checklist(true);
+        if let Some(item) = checklist
+            .iter_mut()
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SQL_MODEL)
+        {
+            item.status = if sql_done {
+                plan::ChecklistItemStatus::Done
+            } else {
+                plan::ChecklistItemStatus::Pending
+            };
+        }
+        if let Some(item) = checklist
+            .iter_mut()
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SCHEMA_CONTRACT)
+        {
+            item.status = if schema_done {
+                plan::ChecklistItemStatus::Done
+            } else {
+                plan::ChecklistItemStatus::Pending
+            };
+        }
+        let batches = vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]];
+        let mut progress = plan::PlanProgress::default();
+        if locked {
+            progress.consecutive_batch_failures = controller_kernel::max_consecutive_batch_failures();
+        }
+        let plan_doc = plan::CleansePlan {
+            plan_key: plan::new_cleanse_plan_key(ctx),
+            status: plan::PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![plan::CleanseTask {
+                dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
+                expected_model_path: Some("models/staging/stg_test_raw_raw_customers.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: plan::CleanseImplementationSpec {
+                    spec_version: 1,
+                    row_preserving: true,
+                    output_fields: vec![plan::OutputFieldSpec {
+                        name: "customer_id_raw".to_string(),
+                        kind: plan::FieldKind::Raw,
+                        source_columns: vec!["customer_id".to_string()],
+                        expression: "customer_id as customer_id_raw (raw)".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    prohibited_ops: vec![],
+                },
+                status: plan::TaskStatus::InProgress,
+                checklist,
+            }],
+            batches: batches.clone(),
+            work_groups: plan::canonical_work_groups_from_batches(&batches, "cleanse"),
+            mutations: vec![],
+            progress,
+        };
+        plan::save_cleanse_plan(ctx, &plan_doc).await.unwrap();
+    }
+
+    async fn seed_model_plan(ctx: &AgentCtx, sql_done: bool, schema_done: bool, locked: bool) {
+        let stg_rel = "models/staging/stg_test_raw_raw_customers.sql";
+        let stg_key = crate::data_engineer::files_store::join_storage_key(ctx, stg_rel);
+        ctx.storage
+            .put_bytes(
+                &stg_key,
+                b"select 1 as customer_id, 'x' as email",
+                "text/sql",
+            )
+            .await
+            .unwrap();
+
+        let mut checklist = plan::canonical_task_checklist(false);
+        if let Some(item) = checklist
+            .iter_mut()
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SQL_MODEL)
+        {
+            item.status = if sql_done {
+                plan::ChecklistItemStatus::Done
+            } else {
+                plan::ChecklistItemStatus::Pending
+            };
+        }
+        if let Some(item) = checklist
+            .iter_mut()
+            .find(|it| it.checklist_item_id == plan::CHECKLIST_SCHEMA_CONTRACT)
+        {
+            item.status = if schema_done {
+                plan::ChecklistItemStatus::Done
+            } else {
+                plan::ChecklistItemStatus::Pending
+            };
+        }
+        let batches = vec![vec!["dim_customers".to_string()]];
+        let mut progress = plan::PlanProgress::default();
+        if locked {
+            progress.consecutive_batch_failures = controller_kernel::max_consecutive_batch_failures();
+        }
+        let plan_doc = plan::ModelPlan {
+            plan_key: plan::new_model_plan_key(ctx),
+            status: plan::PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![plan::ModelTask {
+                name: "dim_customers".to_string(),
+                folder: "marts".to_string(),
+                goal: "g".to_string(),
+                inputs: vec!["stg_test_raw_raw_customers".to_string()],
+                expected_model_path: Some("models/marts/dim_customers.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: plan::ModelImplementationSpec {
+                    spec_version: 1,
+                    grain: "1 row per customer".to_string(),
+                    inputs: vec!["stg_test_raw_raw_customers".to_string()],
+                    joins: vec![],
+                    metrics: vec![],
+                    output_fields: vec![plan::OutputFieldSpec {
+                        name: "customer_id".to_string(),
+                        kind: plan::FieldKind::Clean,
+                        source_columns: vec!["customer_id".to_string()],
+                        expression: "customer_id passthrough".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    assumptions: vec![],
+                },
+                status: plan::TaskStatus::InProgress,
+                checklist,
+            }],
+            batches: batches.clone(),
+            work_groups: plan::canonical_work_groups_from_batches(&batches, "model"),
+            mutations: vec![],
+            progress,
+        };
+        plan::save_model_plan(ctx, &plan_doc).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_next_cleanse_batch_contract_defer_schema() {
+        let ctx = test_ctx("tid-cleanse-defer-schema");
+        seed_cleanse_plan(&ctx, true, false, false).await;
+        let res = ApplyNextCleanseBatchTool { datasets: None }
+            .call(serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(res.get("kind").and_then(|v| v.as_str()), Some("defer_schema_batch"));
+        assert_eq!(
+            res.get("attempted_dataset_ids").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(0)
+        );
+        assert_eq!(
+            res.get("succeeded_dataset_ids").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(0)
+        );
+        assert_eq!(
+            res.get("failed_dataset_ids").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_next_cleanse_batch_contract_defer_validate() {
+        let ctx = test_ctx("tid-cleanse-defer-validate");
+        seed_cleanse_plan(&ctx, true, true, false).await;
+        let res = ApplyNextCleanseBatchTool { datasets: None }
+            .call(serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(res.get("kind").and_then(|v| v.as_str()), Some("defer_validate"));
+        assert_eq!(
+            res.get("attempted_dataset_ids").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_next_cleanse_batch_contract_batch_locked() {
+        let ctx = test_ctx("tid-cleanse-locked");
+        seed_cleanse_plan(&ctx, false, false, true).await;
+        let res = ApplyNextCleanseBatchTool { datasets: None }
+            .call(serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(res.get("kind").and_then(|v| v.as_str()), Some("batch_locked"));
+        assert_eq!(
+            res.get("attempted_dataset_ids").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_next_model_batch_contract_defer_schema() {
+        let ctx = test_ctx("tid-model-defer-schema");
+        seed_model_plan(&ctx, true, false, false).await;
+        let res = ApplyNextModelBatchTool
+            .call(serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(res.get("kind").and_then(|v| v.as_str()), Some("defer_schema_batch"));
+        assert_eq!(
+            res.get("attempted_item_names").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_next_model_batch_contract_defer_validate() {
+        let ctx = test_ctx("tid-model-defer-validate");
+        seed_model_plan(&ctx, true, true, false).await;
+        let res = ApplyNextModelBatchTool
+            .call(serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(res.get("kind").and_then(|v| v.as_str()), Some("defer_validate"));
+        assert_eq!(
+            res.get("attempted_item_names").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_next_model_batch_contract_batch_locked() {
+        let ctx = test_ctx("tid-model-locked");
+        seed_model_plan(&ctx, false, false, true).await;
+        let res = ApplyNextModelBatchTool
+            .call(serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(res.get("kind").and_then(|v| v.as_str()), Some("batch_locked"));
+        assert_eq!(
+            res.get("attempted_item_names").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(0)
+        );
     }
 }

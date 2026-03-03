@@ -1,5 +1,6 @@
 use super::*;
 use crate::data_engineer::phase_contract::{commit_phase_decision, PhaseDecision};
+use crate::data_engineer::phase_plan_lifecycle::TrackPlanDoc;
 
 fn actionable_review_plan_detail(
     plan_key: &str,
@@ -34,180 +35,110 @@ impl DataEngineerSuite {
 
 // Plan phases are read-only discovery + plan authoring. They persist an approved
 // plan to storage and then drive the subsequent authoring phase deterministically.
-let track = TrackKind::from_plan_phase(phase);
+let track = TrackKind::try_from_plan_phase(phase)?;
 let is_cleanse = track.is_cleanse();
 let actx = Self::plan_agent_ctx(thread_id, sctx);
 let entered_from_actionable_review =
     execution_state.phase_reason_code == Some(PhaseReasonCode::ReviewPatchPlan);
 let actionable_review_entry_step_idx =
     entered_from_actionable_review.then_some(thread_state_step_count);
-let prior_cleanse_plan_for_update =
-    if entered_from_actionable_review && is_cleanse {
-        crate::data_engineer::plan::load_cleanse_plan_any(&actx).await
-    } else {
-        None
-    };
-let prior_model_plan_for_update =
-    if entered_from_actionable_review && !is_cleanse {
-        crate::data_engineer::plan::load_model_plan_any(&actx).await
-    } else {
-        None
-    };
+let prior_plan_for_update = if entered_from_actionable_review {
+    match track {
+        TrackKind::Cleanse => {
+            crate::data_engineer::phase_plan_lifecycle::load_any_plan_for_spec::<crate::data_engineer::CleanseSpec>(&actx).await
+        }
+        TrackKind::Model => {
+            crate::data_engineer::phase_plan_lifecycle::load_any_plan_for_spec::<crate::data_engineer::ModelSpec>(&actx).await
+        }
+    }
+} else {
+    None
+};
 
 // Agent-mode hard cutover: no ask/reply approval semantics.
 // Plan transitions are deterministic and state-driven; free-form question text
 // must never be interpreted as approve/reject in this mode.
 
-// If an approved plan already exists (oldest active plan for this thread), move forward (idempotent).
-if is_cleanse {
-    if let Some(mut p) =
-        crate::data_engineer::plan::load_cleanse_plan(&actx).await
-    {
-        let current_digest = stable_json_digest(&p);
-        if matches!(
-            p.status,
-            crate::data_engineer::plan::PlanStatus::Approved
-                | crate::data_engineer::plan::PlanStatus::Completed
+// If an approved/draft plan already exists (oldest active plan for this thread), move forward.
+if let Some(mut existing_plan) =
+    match track {
+        TrackKind::Cleanse => {
+            crate::data_engineer::phase_plan_lifecycle::load_active_plan_for_spec::<crate::data_engineer::CleanseSpec>(&actx).await
+        }
+        TrackKind::Model => {
+            crate::data_engineer::phase_plan_lifecycle::load_active_plan_for_spec::<crate::data_engineer::ModelSpec>(&actx).await
+        }
+    }
+{
+    let current_digest = match &existing_plan {
+        TrackPlanDoc::Cleanse(plan) => stable_json_digest(plan),
+        TrackPlanDoc::Model(plan) => stable_json_digest(plan),
+    };
+    if matches!(
+        existing_plan.status(),
+        crate::data_engineer::plan::PlanStatus::Approved
+            | crate::data_engineer::plan::PlanStatus::Completed
+    ) {
+        if crate::data_engineer::phase_gate::patch_plan_intent_blocks_fast_forward(
+            &execution_state,
+            phase,
+            existing_plan.plan_key(),
+            current_digest.as_deref(),
         ) {
-            if crate::data_engineer::phase_gate::patch_plan_intent_blocks_fast_forward(
-                &execution_state,
-                phase,
-                &p.plan_key,
-                current_digest.as_deref(),
-            ) {
-                // Review requested a plan patch; do not bypass plan regeneration via old approved/completed plan.
-                return Ok(PhaseExecutorOutcome::Continue);
-            }
-            // Safety: an empty/invalid approved plan would cause authoring to fast-forward.
-            if p.tasks.is_empty() || p.batches.is_empty() {
-                let plan_key = p.plan_key.clone();
-                p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-                let _ =
-                    crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
-                        .await;
-                commit_phase_decision(
-                    &thread_store,
-                    thread_id,
-                    Some(phase),
-                    PhaseDecision::annotation(
-                        phase,
-                        Some(PhaseReasonCode::PlanInvalidEmpty),
-                        Some(crate::data_engineer::phase_reason_detail::to_value(
-                            &crate::data_engineer::phase_reason_detail::PlanInvalidEmptyDetail {
-                                plan_key,
-                                status: format!("{:?}", p.status),
-                                tasks_len: p.tasks.len(),
-                                batches_len: p.batches.len(),
-                            },
-                        )),
-                    ),
-                )
-                .await?;
-                return Ok(PhaseExecutorOutcome::Continue);
-            }
-            crate::data_engineer::state_manager::mutate_execution_state(
-                &thread_store,
-                thread_id,
-                |es| es.clear_pending_loopback_intent(),
-            )
-            .await
-            .map(|_| ())?;
+            // Review requested a plan patch; do not bypass plan regeneration via old approved/completed plan.
+            return Ok(PhaseExecutorOutcome::Continue);
+        }
+        // Safety: an empty/invalid approved plan would cause authoring to fast-forward.
+        if existing_plan.is_empty() {
+            let plan_key = existing_plan.plan_key().to_string();
+            existing_plan.set_status(crate::data_engineer::plan::PlanStatus::Cancelled);
+            crate::data_engineer::phase_plan_lifecycle::save_plan(&actx, &existing_plan).await?;
             commit_phase_decision(
                 &thread_store,
                 thread_id,
                 Some(phase),
-                PhaseDecision::forward(
-                    track.author_phase(),
-                    Some(PhaseReasonCode::PlanAlreadyApproved),
-                    Some(plan_status_reason_detail(&p.status)),
+                PhaseDecision::annotation(
+                    phase,
+                    Some(PhaseReasonCode::PlanInvalidEmpty),
+                    Some(crate::data_engineer::phase_reason_detail::to_value(
+                        &crate::data_engineer::phase_reason_detail::PlanInvalidEmptyDetail {
+                            plan_key,
+                            status: format!("{:?}", existing_plan.status()),
+                            tasks_len: existing_plan.tasks_len(),
+                            batches_len: existing_plan.batches_len(),
+                        },
+                    )),
                 ),
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
         }
+        crate::data_engineer::state_manager::mutate_execution_state(
+            &thread_store,
+            thread_id,
+            |es| es.clear_pending_loopback_intent(),
+        )
+        .await
+        .map(|_| ())?;
+        commit_phase_decision(
+            &thread_store,
+            thread_id,
+            Some(phase),
+            PhaseDecision::forward(
+                track.author_phase(),
+                Some(PhaseReasonCode::PlanAlreadyApproved),
+                Some(plan_status_reason_detail(&existing_plan.status())),
+            ),
+        )
+        .await?;
+        return Ok(PhaseExecutorOutcome::Continue);
     }
-} else {
-    if let Some(mut p) =
-        crate::data_engineer::plan::load_model_plan(&actx).await
-    {
-        let current_digest = stable_json_digest(&p);
-        if matches!(
-            p.status,
-            crate::data_engineer::plan::PlanStatus::Approved
-                | crate::data_engineer::plan::PlanStatus::Completed
-        ) {
-            if crate::data_engineer::phase_gate::patch_plan_intent_blocks_fast_forward(
-                &execution_state,
-                phase,
-                &p.plan_key,
-                current_digest.as_deref(),
-            ) {
-                // Review requested a plan patch; do not bypass plan regeneration via old approved/completed plan.
-                return Ok(PhaseExecutorOutcome::Continue);
-            }
-            // Safety: an empty/invalid approved plan would cause authoring to fast-forward.
-            if p.tasks.is_empty() || p.batches.is_empty() {
-                let plan_key = p.plan_key.clone();
-                p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-                crate::data_engineer::plan::save_model_plan(&actx, &p)
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "failed to persist cancelled invalid-empty model plan: {e}"
-                        )
-                    })?;
-                commit_phase_decision(
-                    &thread_store,
-                    thread_id,
-                    Some(phase),
-                    PhaseDecision::annotation(
-                        phase,
-                        Some(PhaseReasonCode::PlanInvalidEmpty),
-                        Some(crate::data_engineer::phase_reason_detail::to_value(
-                            &crate::data_engineer::phase_reason_detail::PlanInvalidEmptyDetail {
-                                plan_key,
-                                status: format!("{:?}", p.status),
-                                tasks_len: p.tasks.len(),
-                                batches_len: p.batches.len(),
-                            },
-                        )),
-                    ),
-                )
-                .await?;
-                return Ok(PhaseExecutorOutcome::Continue);
-            }
-            crate::data_engineer::state_manager::mutate_execution_state(
-                &thread_store,
-                thread_id,
-                |es| es.clear_pending_loopback_intent(),
-            )
-            .await
-            .map(|_| ())?;
-            commit_phase_decision(
-                &thread_store,
-                thread_id,
-                Some(phase),
-                PhaseDecision::forward(
-                    track.author_phase(),
-                    Some(PhaseReasonCode::PlanAlreadyApproved),
-                    Some(plan_status_reason_detail(&p.status)),
-                ),
-            )
-            .await?;
-            return Ok(PhaseExecutorOutcome::Continue);
-        }
-    }
-}
-
-// If there is an existing draft plan (oldest active), re-ask approval rather than creating a new plan.
-if is_cleanse {
-    if let Some(mut p) =
-        crate::data_engineer::plan::load_cleanse_plan(&actx).await
-    {
-        if p.status == crate::data_engineer::plan::PlanStatus::Draft {
-            let removed_non_raw = Self::enforce_cleanse_plan_raw_only(&mut p);
+    if existing_plan.status() == crate::data_engineer::plan::PlanStatus::Draft {
+        let mut removed_non_raw = 0usize;
+        if let TrackPlanDoc::Cleanse(plan) = &mut existing_plan {
+            removed_non_raw = Self::enforce_cleanse_plan_raw_only(plan);
             if removed_non_raw > 0 {
-                crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
+                crate::data_engineer::phase_plan_lifecycle::save_plan(&actx, &existing_plan)
                     .await
                     .map_err(|e| {
                         format!(
@@ -215,115 +146,130 @@ if is_cleanse {
                         )
                     })?;
             }
-            if p.tasks.is_empty() || p.batches.is_empty() {
-                let plan_key = p.plan_key.clone();
-                p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-                crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
-                    .await
-                    .map_err(|e| format!("failed to persist cancelled cleanse draft plan: {e}"))?;
-                commit_phase_decision(
-                    &thread_store,
-                    thread_id,
-                    Some(phase),
-                    PhaseDecision::annotation(
+        }
+        if existing_plan.is_empty() {
+            let plan_key = existing_plan.plan_key().to_string();
+            existing_plan.set_status(crate::data_engineer::plan::PlanStatus::Cancelled);
+            crate::data_engineer::phase_plan_lifecycle::save_plan(&actx, &existing_plan).await?;
+            let detail = match existing_plan {
+                TrackPlanDoc::Cleanse(_) => crate::data_engineer::phase_reason_detail::to_value(
+                    &crate::data_engineer::phase_reason_detail::CleanseDraftUngroundedDetail {
+                        plan_key,
+                        reason: "draft_cleanse_plan_not_raw_grounded".to_string(),
+                        removed_non_raw,
+                    },
+                ),
+                TrackPlanDoc::Model(_) => crate::data_engineer::phase_reason_detail::to_value(
+                    &crate::data_engineer::phase_reason_detail::PlanInvalidEmptyDetail {
+                        plan_key,
+                        status: format!("{:?}", existing_plan.status()),
+                        tasks_len: existing_plan.tasks_len(),
+                        batches_len: existing_plan.batches_len(),
+                    },
+                ),
+            };
+            commit_phase_decision(
+                &thread_store,
+                thread_id,
+                Some(phase),
+                PhaseDecision::annotation(phase, Some(PhaseReasonCode::PlanInvalidEmpty), Some(detail)),
+            )
+            .await?;
+            return Ok(PhaseExecutorOutcome::Continue);
+        }
+        if entered_from_actionable_review {
+            let detail = match &existing_plan {
+                TrackPlanDoc::Cleanse(plan) => {
+                    let plan_update = Self::plan_update_summary_cleanse(
+                        match prior_plan_for_update.as_ref() {
+                            Some(TrackPlanDoc::Cleanse(prior)) => Some(prior),
+                            _ => None,
+                        },
+                        plan,
+                        actionable_review_entry_step_idx,
+                    );
+                    actionable_review_plan_detail(
+                        &plan.plan_key,
+                        plan_update,
+                        actionable_review_entry_step_idx,
+                    )
+                }
+                TrackPlanDoc::Model(plan) => {
+                    let plan_update = Self::plan_update_summary_model(
+                        match prior_plan_for_update.as_ref() {
+                            Some(TrackPlanDoc::Model(prior)) => Some(prior),
+                            _ => None,
+                        },
+                        plan,
+                        actionable_review_entry_step_idx,
+                    );
+                    actionable_review_plan_detail(
+                        &plan.plan_key,
+                        plan_update,
+                        actionable_review_entry_step_idx,
+                    )
+                }
+            };
+            let advanced = match &existing_plan {
+                TrackPlanDoc::Cleanse(_) => {
+                    Self::approve_cleanse_plan_draft_and_advance(
+                        &thread_store,
+                        thread_id,
                         phase,
-                        Some(PhaseReasonCode::PlanInvalidEmpty),
-                        Some(crate::data_engineer::phase_reason_detail::to_value(
-                            &crate::data_engineer::phase_reason_detail::CleanseDraftUngroundedDetail {
-                                plan_key,
-                                reason: "draft_cleanse_plan_not_raw_grounded".to_string(),
-                                removed_non_raw,
-                            },
-                        )),
-                    ),
-                )
-                .await?;
+                        &actx,
+                        thread_state_step_count,
+                        PhaseReasonCode::PlanAutoApproved,
+                        detail,
+                    )
+                    .await?
+                }
+                TrackPlanDoc::Model(_) => {
+                    Self::approve_model_plan_draft_and_advance(
+                        &thread_store,
+                        thread_id,
+                        phase,
+                        &actx,
+                        thread_state_step_count,
+                        PhaseReasonCode::PlanAutoApproved,
+                        detail,
+                    )
+                    .await?
+                }
+            };
+            if advanced {
                 return Ok(PhaseExecutorOutcome::Continue);
             }
-            if entered_from_actionable_review {
-                let plan_update = Self::plan_update_summary_cleanse(
-                    prior_cleanse_plan_for_update.as_ref(),
-                    &p,
-                    actionable_review_entry_step_idx,
-                );
-                let detail = actionable_review_plan_detail(
-                    &p.plan_key,
-                    plan_update,
-                    actionable_review_entry_step_idx,
-                );
-                let advanced = Self::approve_cleanse_plan_draft_and_advance(
+        }
+        let advanced = match existing_plan {
+            TrackPlanDoc::Cleanse(_) => {
+                Self::approve_cleanse_plan_draft_and_advance(
                     &thread_store,
                     thread_id,
                     phase,
                     &actx,
                     thread_state_step_count,
                     PhaseReasonCode::PlanAutoApproved,
-                    detail,
+                    auto_approved_plan_detail("existing_draft_plan"),
                 )
-                .await?;
-                if advanced {
-                    return Ok(PhaseExecutorOutcome::Continue);
-                }
+                .await?
             }
-            let advanced = Self::approve_cleanse_plan_draft_and_advance(
-                &thread_store,
-                thread_id,
-                phase,
-                &actx,
-                thread_state_step_count,
-                PhaseReasonCode::PlanAutoApproved,
-                auto_approved_plan_detail("existing_draft_plan"),
-            )
-            .await?;
-            if advanced {
-                return Ok(PhaseExecutorOutcome::Continue);
-            }
-            return Ok(PhaseExecutorOutcome::Continue);
-        }
-    }
-} else {
-    if let Some(p) = crate::data_engineer::plan::load_model_plan(&actx).await {
-        if p.status == crate::data_engineer::plan::PlanStatus::Draft {
-            if entered_from_actionable_review {
-                let plan_update = Self::plan_update_summary_model(
-                    prior_model_plan_for_update.as_ref(),
-                    &p,
-                    actionable_review_entry_step_idx,
-                );
-                let detail = actionable_review_plan_detail(
-                    &p.plan_key,
-                    plan_update,
-                    actionable_review_entry_step_idx,
-                );
-                let advanced = Self::approve_model_plan_draft_and_advance(
+            TrackPlanDoc::Model(_) => {
+                Self::approve_model_plan_draft_and_advance(
                     &thread_store,
                     thread_id,
                     phase,
                     &actx,
                     thread_state_step_count,
                     PhaseReasonCode::PlanAutoApproved,
-                    detail,
+                    auto_approved_plan_detail("existing_draft_plan"),
                 )
-                .await?;
-                if advanced {
-                    return Ok(PhaseExecutorOutcome::Continue);
-                }
+                .await?
             }
-            let advanced = Self::approve_model_plan_draft_and_advance(
-                &thread_store,
-                thread_id,
-                phase,
-                &actx,
-                thread_state_step_count,
-                PhaseReasonCode::PlanAutoApproved,
-                auto_approved_plan_detail("existing_draft_plan"),
-            )
-            .await?;
-            if advanced {
-                return Ok(PhaseExecutorOutcome::Continue);
-            }
+        };
+        if advanced {
             return Ok(PhaseExecutorOutcome::Continue);
         }
+        return Ok(PhaseExecutorOutcome::Continue);
     }
 }
 
@@ -933,7 +879,10 @@ match Agent::run_until_block_non_interactive(
             }
             if entered_from_actionable_review {
                 let plan_update = Self::plan_update_summary_cleanse(
-                    prior_cleanse_plan_for_update.as_ref(),
+                    match prior_plan_for_update.as_ref() {
+                        Some(TrackPlanDoc::Cleanse(prior)) => Some(prior),
+                        _ => None,
+                    },
                     &plan,
                     actionable_review_entry_step_idx,
                 );
@@ -1199,7 +1148,10 @@ match Agent::run_until_block_non_interactive(
             }
             if entered_from_actionable_review {
                 let plan_update = Self::plan_update_summary_model(
-                    prior_model_plan_for_update.as_ref(),
+                    match prior_plan_for_update.as_ref() {
+                        Some(TrackPlanDoc::Model(prior)) => Some(prior),
+                        _ => None,
+                    },
                     &plan,
                     actionable_review_entry_step_idx,
                 );

@@ -102,7 +102,9 @@ pub mod phase_contract;
 pub mod phase_gate;
 pub mod phase_reason_detail;
 mod phase_author;
+mod phase_author_lifecycle;
 mod phase_plan;
+mod phase_plan_lifecycle;
 mod phase_preflight;
 mod phase_publish;
 mod phase_review;
@@ -134,23 +136,20 @@ pub mod sql_first;
 pub mod state_manager;
 pub mod tool_ops;
 mod tool_registry_builder;
+mod track_spec;
 pub mod transition_dispatcher;
 pub mod tools;
 mod workflow_node;
+pub(crate) use track_spec::{CleanseSpec, ModelSpec, TrackKind};
 
 fn lock_prompt_for_plan(
-    kind: &str,
+    track: crate::data_engineer::track_spec::TrackKind,
     plan_key: &str,
     consecutive: usize,
     total: usize,
     next_items: &[String],
     expected_paths: &[String],
 ) -> String {
-    let track = if kind.eq_ignore_ascii_case("cleanse") {
-        crate::data_engineer::controller_kernel::PlanTrack::Cleanse
-    } else {
-        crate::data_engineer::controller_kernel::PlanTrack::Model
-    };
     crate::data_engineer::controller_kernel::build_batch_lock_prompt(
         track,
         plan_key,
@@ -170,54 +169,6 @@ fn batch_lock_error(reason: &str) -> String {
 fn stable_json_digest<T: Serialize>(value: &T) -> Option<String> {
     let raw = serde_json::to_string(value).ok()?;
     Some(react_core::llm_observability::sha256_hex_str(&raw))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TrackKind {
-    Cleanse,
-    Model,
-}
-
-impl TrackKind {
-    fn from_plan_phase(phase: control_flow::Phase) -> Self {
-        match phase {
-            control_flow::Phase::CleansePlan => Self::Cleanse,
-            control_flow::Phase::ModelPlan => Self::Model,
-            _ => Self::Cleanse,
-        }
-    }
-
-    fn is_cleanse(self) -> bool {
-        matches!(self, Self::Cleanse)
-    }
-
-    fn author_phase(self) -> control_flow::Phase {
-        match self {
-            Self::Cleanse => control_flow::Phase::CleanseAuthor,
-            Self::Model => control_flow::Phase::ModelAuthor,
-        }
-    }
-
-    fn plan_phase(self) -> control_flow::Phase {
-        match self {
-            Self::Cleanse => control_flow::Phase::CleansePlan,
-            Self::Model => control_flow::Phase::ModelPlan,
-        }
-    }
-
-    fn validate_phase(self) -> control_flow::Phase {
-        match self {
-            Self::Cleanse => control_flow::Phase::CleanseValidate,
-            Self::Model => control_flow::Phase::ModelValidate,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Cleanse => "cleanse",
-            Self::Model => "model",
-        }
-    }
 }
 
 enum PhaseExecutorOutcome {

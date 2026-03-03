@@ -17,24 +17,6 @@ use crate::data_engineer::references::DatasetRef;
 use crate::data_engineer::schema_policy;
 use crate::data_engineer::tools::files_tool;
 
-fn classify_schema_batch_failure_kind(msg: &str) -> crate::data_engineer::progress_controller::BatchFailureKind {
-    let s = msg.to_ascii_lowercase();
-    if s.contains("service error")
-        || s.contains("timeout")
-        || s.contains("temporar")
-        || s.contains("throttle")
-        || s.contains("http 502")
-        || s.contains("http 503")
-        || s.contains("http 504")
-    {
-        return crate::data_engineer::progress_controller::BatchFailureKind::InfraTransient;
-    }
-    if s.contains("schema") || s.contains("yaml") || s.contains("contract") || s.contains("parse") {
-        return crate::data_engineer::progress_controller::BatchFailureKind::SchemaOrContract;
-    }
-    crate::data_engineer::progress_controller::BatchFailureKind::Unknown
-}
-
 fn escape_yaml_doc_preamble(s: String) -> String {
     // serde_yaml may emit a leading `---\n`; keep stored files clean and consistent.
     s.trim_start_matches("---\n").to_string()
@@ -224,13 +206,8 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
-        let checklist_item_id = ctx
-            .exec_ctx
-            .as_ref()
-            .and_then(|c| c.checklist_item_id.as_ref())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| plan::CHECKLIST_SCHEMA_CONTRACT.to_string());
+        let checklist_item_id =
+            crate::data_engineer::tools::batch_schema_runner::resolve_checklist_item_id(ctx);
 
         let mut plan = plan::load_cleanse_plan_any(ctx)
             .await
@@ -501,7 +478,9 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
         let failure_kind = if failed.is_empty() {
             None
         } else {
-            Some(classify_schema_batch_failure_kind(&errors.join("\n")))
+            Some(crate::data_engineer::tools::batch_sql_runner::classify_schema_batch_failure_kind(
+                &errors.join("\n"),
+            ))
         };
         let budget = controller_kernel::note_batch_result_with_failure_kind(
             &mut plan.progress,
@@ -552,13 +531,8 @@ impl Tool for ApplyNextModelSchemaBatchTool {
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
-        let checklist_item_id = ctx
-            .exec_ctx
-            .as_ref()
-            .and_then(|c| c.checklist_item_id.as_ref())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| plan::CHECKLIST_SCHEMA_CONTRACT.to_string());
+        let checklist_item_id =
+            crate::data_engineer::tools::batch_schema_runner::resolve_checklist_item_id(ctx);
 
         let mut plan = plan::load_model_plan_any(ctx)
             .await
@@ -731,39 +705,14 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             {
                 Ok(v) => v,
                 Err(e) => {
-                    for n in names.iter() {
-                        plan::model_schema_contract_mark_needs_update(&mut plan, n);
-                    }
-                    let budget = controller_kernel::note_batch_result_with_failure_kind(
-                        &mut plan.progress,
-                        false,
-                        Some(classify_schema_batch_failure_kind(&e)),
-                    );
-                    plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
-                        format!(
-                            "failed to persist model schema batch failure state after patch error: {save_err}"
-                        )
-                    })?;
-                    if budget.exhausted() {
-                        return Ok(serde_json::json!({
-                            "ok": false,
-                            "kind": "batch_locked",
-                            "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
-                            "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
-                            "checklist_item_id": checklist_item_id,
-                            "attempted_item_names": attempted_names.clone(),
-                            "succeeded_item_names": [],
-                            "failed_item_names": attempted_names.clone(),
-                            "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
-                        }));
-                    }
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "attempted_item_names": attempted_names.clone(),
-                        "succeeded_item_names": [],
-                        "failed_item_names": attempted_names,
-                        "errors": [format!("models/schema.yml patch failed: {e}")],
-                    }));
+                    return crate::data_engineer::tools::batch_schema_runner::fail_model_schema_batch(
+                        ctx,
+                        &mut plan,
+                        &attempted_names,
+                        &checklist_item_id,
+                        format!("models/schema.yml patch failed: {e}"),
+                    )
+                    .await;
                 }
             };
 
@@ -775,39 +724,14 @@ impl Tool for ApplyNextModelSchemaBatchTool {
         ) {
             Ok(v) => v,
             Err(e) => {
-                for n in names.iter() {
-                    plan::model_schema_contract_mark_needs_update(&mut plan, n);
-                }
-                let budget = controller_kernel::note_batch_result_with_failure_kind(
-                    &mut plan.progress,
-                    false,
-                    Some(classify_schema_batch_failure_kind(&e)),
-                );
-                plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
-                    format!(
-                        "failed to persist model schema batch failure state after post-check error: {save_err}"
-                    )
-                })?;
-                if budget.exhausted() {
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "kind": "batch_locked",
-                        "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
-                        "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
-                        "checklist_item_id": checklist_item_id,
-                        "attempted_item_names": attempted_names.clone(),
-                        "succeeded_item_names": [],
-                        "failed_item_names": attempted_names.clone(),
-                        "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
-                    }));
-                }
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "attempted_item_names": attempted_names.clone(),
-                    "succeeded_item_names": [],
-                    "failed_item_names": attempted_names,
-                    "errors": [format!("models/schema.yml post-check failed: {e}")],
-                }));
+                return crate::data_engineer::tools::batch_schema_runner::fail_model_schema_batch(
+                    ctx,
+                    &mut plan,
+                    &attempted_names,
+                    &checklist_item_id,
+                    format!("models/schema.yml post-check failed: {e}"),
+                )
+                .await;
             }
         };
 
@@ -817,39 +741,14 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             .put_bytes(&key, sanitized_text.as_bytes(), "text/yaml")
             .await
         {
-            for n in names.iter() {
-                plan::model_schema_contract_mark_needs_update(&mut plan, n);
-            }
-            let budget = controller_kernel::note_batch_result_with_failure_kind(
-                &mut plan.progress,
-                false,
-                Some(classify_schema_batch_failure_kind(&e.to_string())),
-            );
-            plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
-                format!(
-                    "failed to persist model schema batch failure state after write error: {save_err}"
-                )
-            })?;
-            if budget.exhausted() {
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "kind": "batch_locked",
-                    "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
-                    "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
-                    "checklist_item_id": checklist_item_id,
-                    "attempted_item_names": attempted_names.clone(),
-                    "succeeded_item_names": [],
-                    "failed_item_names": attempted_names.clone(),
-                    "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
-                }));
-            }
-            return Ok(serde_json::json!({
-                "ok": false,
-                "attempted_item_names": attempted_names.clone(),
-                "succeeded_item_names": [],
-                "failed_item_names": attempted_names,
-                "errors": [format!("failed to write {}: {}", expected_rel, e)],
-            }));
+            return crate::data_engineer::tools::batch_schema_runner::fail_model_schema_batch(
+                ctx,
+                &mut plan,
+                &attempted_names,
+                &checklist_item_id,
+                format!("failed to write {}: {}", expected_rel, e),
+            )
+            .await;
         }
 
         for n in names.iter() {
