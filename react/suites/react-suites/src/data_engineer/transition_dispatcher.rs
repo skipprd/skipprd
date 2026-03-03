@@ -607,4 +607,59 @@ mod tests {
             "phase_author must not inline PlanKeyDetail literals in transition paths"
         );
     }
+
+    #[test]
+    fn publish_await_phase_is_side_effect_free() {
+        let src = include_str!("phase_publish.rs");
+        let Some(await_start) = src.find("pub(super) async fn execute_publish_await_approval_phase")
+        else {
+            panic!("phase_publish missing execute_publish_await_approval_phase");
+        };
+        let Some(publish_start) = src.find("pub(super) async fn execute_publish_phase") else {
+            panic!("phase_publish missing execute_publish_phase");
+        };
+        let await_section = &src[await_start..publish_start];
+        assert!(
+            !await_section.contains("call_and_record_tool("),
+            "publish_await_approval must not invoke publish side-effect tools"
+        );
+        assert!(
+            await_section.contains("gate_publish_progress"),
+            "publish_await_approval must enforce explicit approval gate"
+        );
+    }
+
+    #[test]
+    fn review_unknown_tier_routing_is_phase_aware() {
+        let src = include_str!("phase_review.rs");
+        assert!(
+            src.contains("effective_review_tier"),
+            "phase_review should use phase-aware review tier normalization"
+        );
+        assert!(
+            src.contains("patch_plan_target_phase"),
+            "phase_review should route patch-plan through centralized helper"
+        );
+        assert!(
+            src.contains("patch_impl_target_phase"),
+            "phase_review should route patch-impl through centralized helper"
+        );
+        assert!(
+            src.contains("effective_review_tier(phase, tier)"),
+            "unknown review tier should normalize through phase-aware helper"
+        );
+    }
+
+    #[test]
+    fn preflight_uses_phase_contract_decision_commit() {
+        let src = include_str!("phase_preflight.rs");
+        assert!(
+            src.contains("commit_phase_decision"),
+            "phase_preflight should commit transitions through the shared phase contract helper"
+        );
+        assert!(
+            src.contains("PhaseDecision::forward"),
+            "phase_preflight should use shared phase decision constructors"
+        );
+    }
 }

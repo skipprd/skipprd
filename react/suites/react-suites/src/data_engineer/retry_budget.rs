@@ -1,4 +1,5 @@
 use crate::data_engineer::plan;
+use crate::data_engineer::progress_controller::BatchFailureKind;
 
 pub const MAX_CONSECUTIVE_BATCH_FAILURES: usize = 3;
 
@@ -46,6 +47,21 @@ pub fn note_batch_result(progress: &mut plan::PlanProgress, ok: bool) -> RetryBu
     batch_budget(progress)
 }
 
+pub fn note_batch_result_with_failure_kind(
+    progress: &mut plan::PlanProgress,
+    ok: bool,
+    failure_kind: Option<BatchFailureKind>,
+) -> RetryBudget {
+    if ok {
+        return note_batch_result(progress, true);
+    }
+    if matches!(failure_kind, Some(BatchFailureKind::InfraTransient)) {
+        // Transient upstream outages must not consume deterministic batch-lock budget.
+        return batch_budget(progress);
+    }
+    note_batch_result(progress, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,5 +80,17 @@ mod tests {
         let b3 = note_batch_result(&mut progress, true);
         assert_eq!(b3.used, 0);
         assert_eq!(progress.total_batch_failures, 2);
+    }
+
+    #[test]
+    fn infra_transient_failure_does_not_consume_budget() {
+        let mut progress = plan::PlanProgress::default();
+        let budget = note_batch_result_with_failure_kind(
+            &mut progress,
+            false,
+            Some(BatchFailureKind::InfraTransient),
+        );
+        assert_eq!(budget.used, 0);
+        assert_eq!(progress.total_batch_failures, 0);
     }
 }

@@ -141,6 +141,23 @@ fn llm_inflight_limiter() -> &'static InflightLimiter {
 }
 
 impl LlmRouter {
+    fn is_retryable_http_status(status: u16) -> bool {
+        matches!(status, 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504)
+    }
+
+    fn status_backoff_ms(attempt: usize, retry_after_secs: Option<u64>) -> u64 {
+        let base = retry_after_secs
+            .map(|secs| secs.saturating_mul(1000))
+            .unwrap_or_else(|| 500u64.saturating_mul(1u64 << (attempt as u32 - 1)));
+        base.min(15_000)
+    }
+
+    fn transient_backoff_ms(attempt: usize) -> u64 {
+        250u64
+            .saturating_mul(1u64 << (attempt as u32 - 1))
+            .min(5_000)
+    }
+
     pub fn new() -> Self {
         let adapter = pick_adapter_from_config();
         let retry_policy = HttpRetryPolicy::from_env();
@@ -506,16 +523,11 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
                     ))
                 }
                 Err(ureq::Error::Status(s, rr)) => {
-                    if s == 429 && attempt < self.retry_policy.max_retries {
-                        let retry_after =
-                            rr.header("retry-after").and_then(|v| v.parse::<u64>().ok());
-                        let backoff_ms = retry_after
-                            .map(|secs| secs.saturating_mul(1000))
-                            .unwrap_or_else(|| {
-                                500u64
-                                    .saturating_mul(1u64 << (attempt as u32 - 1))
-                                    .min(5_000)
-                            });
+                    if Self::is_retryable_http_status(s as u16) && attempt < self.retry_policy.max_retries {
+                        let retry_after = rr
+                            .header("retry-after")
+                            .and_then(|v| v.parse::<u64>().ok());
+                        let backoff_ms = Self::status_backoff_ms(attempt, retry_after);
                         let jitter = rand::random::<u64>() % 250;
                         std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
                         continue;
@@ -530,9 +542,7 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
                         || es.contains("connection")
                         || es.contains("temporarily");
                     if transient && attempt < self.retry_policy.max_retries {
-                        let backoff_ms = 250u64
-                            .saturating_mul(1u64 << (attempt as u32 - 1))
-                            .min(2_000);
+                        let backoff_ms = Self::transient_backoff_ms(attempt);
                         let jitter = rand::random::<u64>() % 250;
                         std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
                         continue;
@@ -567,16 +577,11 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
                     ))
                 }
                 Err(ureq::Error::Status(s, rr)) => {
-                    if s == 429 && attempt < self.retry_policy.max_retries {
-                        let retry_after =
-                            rr.header("retry-after").and_then(|v| v.parse::<u64>().ok());
-                        let backoff_ms = retry_after
-                            .map(|secs| secs.saturating_mul(1000))
-                            .unwrap_or_else(|| {
-                                500u64
-                                    .saturating_mul(1u64 << (attempt as u32 - 1))
-                                    .min(5_000)
-                            });
+                    if Self::is_retryable_http_status(s as u16) && attempt < self.retry_policy.max_retries {
+                        let retry_after = rr
+                            .header("retry-after")
+                            .and_then(|v| v.parse::<u64>().ok());
+                        let backoff_ms = Self::status_backoff_ms(attempt, retry_after);
                         let jitter = rand::random::<u64>() % 250;
                         std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
                         continue;
@@ -591,9 +596,7 @@ Increase max_output_tokens for this call. thread_id={} call_id={} prompt_id={} m
                         || es.contains("connection")
                         || es.contains("temporarily");
                     if transient && attempt < self.retry_policy.max_retries {
-                        let backoff_ms = 250u64
-                            .saturating_mul(1u64 << (attempt as u32 - 1))
-                            .min(2_000);
+                        let backoff_ms = Self::transient_backoff_ms(attempt);
                         let jitter = rand::random::<u64>() % 250;
                         std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
                         continue;

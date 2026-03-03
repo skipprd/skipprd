@@ -8,6 +8,31 @@ use crate::suite::SuiteCtx;
 use react_core::control_flow::{PhaseReasonCode, ReviewDecision, ReviewDecisionMeta, ReviewTier};
 use react_core::session::ThreadStore;
 
+fn effective_review_tier(phase: control_flow::Phase, tier: ReviewTier) -> ReviewTier {
+    if tier != ReviewTier::Unknown {
+        return tier;
+    }
+    match phase {
+        control_flow::Phase::CleanseReview => ReviewTier::Silver,
+        control_flow::Phase::ModelReview | control_flow::Phase::PostPublishReview => ReviewTier::Gold,
+        _ => ReviewTier::Unknown,
+    }
+}
+
+fn patch_plan_target_phase(phase: control_flow::Phase, tier: ReviewTier) -> control_flow::Phase {
+    match effective_review_tier(phase, tier) {
+        ReviewTier::Silver => control_flow::Phase::CleansePlan,
+        ReviewTier::Gold | ReviewTier::Unknown => control_flow::Phase::ModelPlan,
+    }
+}
+
+fn patch_impl_target_phase(phase: control_flow::Phase, tier: ReviewTier) -> control_flow::Phase {
+    match effective_review_tier(phase, tier) {
+        ReviewTier::Silver => control_flow::Phase::CleanseAuthor,
+        ReviewTier::Gold | ReviewTier::Unknown => control_flow::Phase::ModelAuthor,
+    }
+}
+
 impl DataEngineerSuite {
     pub(super) async fn execute_review_phase(
         thread_store: &ThreadStore,
@@ -131,17 +156,43 @@ impl DataEngineerSuite {
 
         match meta.decision {
             ReviewDecision::Proceed => {
-                let _ = crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+                crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
                     thread_store,
                     thread_id,
                 )
-                .await;
+                .await
+                .or_else(|e| {
+                    if e.contains("not found") {
+                        Ok(())
+                    } else {
+                        Err(format!("failed to clear pending loopback intent: {e}"))
+                    }
+                })?;
                 let next = match phase {
                     control_flow::Phase::CleanseReview => control_flow::Phase::ModelPlan,
                     control_flow::Phase::ModelReview => control_flow::Phase::PublishAwaitApproval,
                     control_flow::Phase::PostPublishReview => control_flow::Phase::Done,
                     _ => control_flow::Phase::Done,
                 };
+                if next == control_flow::Phase::PublishAwaitApproval {
+                    let mut st =
+                        crate::data_engineer::progress_controller::ExecutionState::load_strict(
+                            thread_store,
+                            thread_id,
+                        )
+                        .await?
+                        .unwrap_or_else(
+                            crate::data_engineer::progress_controller::ExecutionState::new,
+                        );
+                    st.set_publish_approval(
+                        crate::data_engineer::progress_controller::PublishApprovalDecision::Approved,
+                    );
+                    st.save(thread_store, thread_id).await.map_err(|e| {
+                        format!(
+                            "failed to persist explicit publish approval on model review proceed: {e}"
+                        )
+                    })?;
+                }
                 apply_phase_transition(
                     thread_store,
                     thread_id,
@@ -155,11 +206,7 @@ impl DataEngineerSuite {
                 Ok(PhaseExecutorOutcome::Continue)
             }
             ReviewDecision::PatchPlan => {
-                let back = match meta.tier {
-                    ReviewTier::Silver => control_flow::Phase::CleansePlan,
-                    ReviewTier::Gold => control_flow::Phase::ModelPlan,
-                    ReviewTier::Unknown => control_flow::Phase::ModelPlan,
-                };
+                let back = patch_plan_target_phase(phase, meta.tier);
                 let plan_actx = Self::plan_agent_ctx(thread_id, sctx);
                 let (entry_plan_key, entry_plan_digest) = match back {
                     control_flow::Phase::CleansePlan => {
@@ -199,11 +246,7 @@ impl DataEngineerSuite {
                 Ok(PhaseExecutorOutcome::Continue)
             }
             ReviewDecision::PatchImpl => {
-                let back = match meta.tier {
-                    ReviewTier::Silver => control_flow::Phase::CleanseAuthor,
-                    ReviewTier::Gold => control_flow::Phase::ModelAuthor,
-                    ReviewTier::Unknown => control_flow::Phase::ModelAuthor,
-                };
+                let back = patch_impl_target_phase(phase, meta.tier);
                 let _ = crate::data_engineer::loopback_intents::set_pending_patch_impl_intent(
                     thread_store,
                     thread_id,

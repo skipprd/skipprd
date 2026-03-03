@@ -1,4 +1,3 @@
-use crate::data_engineer::phase_actions::apply_phase_transition;
 use crate::data_engineer::{control_flow, DataEngineerSuite, PhaseExecutorOutcome};
 use crate::suite::SuiteCtx;
 use react_core::control_flow::PhaseReasonCode;
@@ -38,18 +37,19 @@ impl DataEngineerSuite {
                 ));
             }
         }
-        apply_phase_transition(
+        crate::data_engineer::phase_contract::commit_phase_decision(
             thread_store,
             thread_id,
             Some(control_flow::Phase::Preflight),
-            control_flow::Phase::CleansePlan,
-            control_flow::TransitionIntent::Forward,
-            Some(PhaseReasonCode::PreflightOk),
-            Some(serde_json::json!({
-                "dbt_project_key": key,
-                "has_query_provider": sctx.query.is_some(),
-                "has_dbt_provider": sctx.dbt.is_some(),
-            })),
+            crate::data_engineer::phase_contract::PhaseDecision::forward(
+                control_flow::Phase::CleansePlan,
+                Some(PhaseReasonCode::PreflightOk),
+                Some(serde_json::json!({
+                    "dbt_project_key": key,
+                    "has_query_provider": sctx.query.is_some(),
+                    "has_dbt_provider": sctx.dbt.is_some(),
+                })),
+            ),
         )
         .await?;
         Ok(PhaseExecutorOutcome::Continue)

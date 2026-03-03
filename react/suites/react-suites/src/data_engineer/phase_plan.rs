@@ -84,7 +84,7 @@ if is_cleanse {
                 let _ =
                     crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
                         .await;
-                let _ = apply_phase_transition(
+                apply_phase_transition(
                     &thread_store,
                     thread_id,
                     Some(phase),
@@ -103,12 +103,18 @@ if is_cleanse {
                 .await?;
                 return Ok(PhaseExecutorOutcome::Continue);
             }
-            let _ =
-                crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
-                    &thread_store,
-                    thread_id,
-                )
-                    .await;
+            crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+                &thread_store,
+                thread_id,
+            )
+            .await
+            .or_else(|e| {
+                if e.contains("not found") {
+                    Ok(())
+                } else {
+                    Err(format!("failed to clear pending loopback intent: {e}"))
+                }
+            })?;
             apply_phase_transition(
                 &thread_store,
                 thread_id,
@@ -152,7 +158,7 @@ if is_cleanse {
                             "failed to persist cancelled invalid-empty model plan: {e}"
                         )
                     })?;
-                let _ = apply_phase_transition(
+                apply_phase_transition(
                     &thread_store,
                     thread_id,
                     Some(phase),
@@ -171,12 +177,18 @@ if is_cleanse {
                 .await?;
                 return Ok(PhaseExecutorOutcome::Continue);
             }
-            let _ =
-                crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
-                    &thread_store,
-                    thread_id,
-                )
-                    .await;
+            crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+                &thread_store,
+                thread_id,
+            )
+            .await
+            .or_else(|e| {
+                if e.contains("not found") {
+                    Ok(())
+                } else {
+                    Err(format!("failed to clear pending loopback intent: {e}"))
+                }
+            })?;
             apply_phase_transition(
                 &thread_store,
                 thread_id,
@@ -200,17 +212,21 @@ if is_cleanse {
         if p.status == crate::data_engineer::plan::PlanStatus::Draft {
             let removed_non_raw = Self::enforce_cleanse_plan_raw_only(&mut p);
             if removed_non_raw > 0 {
-                let _ =
-                    crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
-                        .await;
+                crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "failed to persist cleanse draft after raw-only enforcement: {e}"
+                        )
+                    })?;
             }
             if p.tasks.is_empty() || p.batches.is_empty() {
                 let plan_key = p.plan_key.clone();
                 p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
-                let _ =
-                    crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
-                        .await;
-                let _ = apply_phase_transition(
+                crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
+                    .await
+                    .map_err(|e| format!("failed to persist cancelled cleanse draft plan: {e}"))?;
+                apply_phase_transition(
                     &thread_store,
                     thread_id,
                     Some(phase),
@@ -225,7 +241,7 @@ if is_cleanse {
                         },
                     )),
                 )
-                .await;
+                .await?;
                 return Ok(PhaseExecutorOutcome::Continue);
             }
             if entered_from_actionable_review {

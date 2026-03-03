@@ -86,6 +86,7 @@ pub mod patch_contract;
 pub mod files_patch_repair;
 mod loopback_intents;
 pub mod phase_actions;
+pub mod phase_contract;
 pub mod phase_gate;
 pub mod phase_reason_detail;
 mod phase_author;
@@ -947,7 +948,29 @@ impl DataEngineerSuite {
                 }
             }
         }
-        let out = Self::ensure_catalog_bootstrap(sctx).await?;
+        let bootstrap_timeout_secs = std::env::var("DE_CATALOG_BOOTSTRAP_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300)
+            .max(30)
+            .min(1800);
+        let out = match tokio::time::timeout(
+            std::time::Duration::from_secs(bootstrap_timeout_secs),
+            Self::ensure_catalog_bootstrap(sctx),
+        )
+        .await
+        {
+            Ok(v) => v?,
+            Err(_) => {
+                tracing::warn!(
+                    "data_engineer: catalog bootstrap timed out after {}s; continuing best-effort",
+                    bootstrap_timeout_secs
+                );
+                CatalogBootstrapOutcome {
+                    metadata_complete: false,
+                }
+            }
+        };
         let status = if out.metadata_complete {
             "ready".to_string()
         } else {
@@ -2692,6 +2715,16 @@ Apply these fixes in the output.",
             let phase = execution_state
                 .current_phase
                 .unwrap_or(control_flow::Phase::Preflight);
+            if matches!(
+                phase,
+                control_flow::Phase::CleanseValidate | control_flow::Phase::ModelValidate
+            ) && execution_state.mode
+                == crate::data_engineer::progress_controller::ExecutionMode::Done
+            {
+                if Self::reconcile_done_validate_phase(&thread_store, thread_id, phase, sctx).await? {
+                    continue;
+                }
+            }
             let thread_state_step_count = thread_store
                 .get_thread_state(thread_id)
                 .await

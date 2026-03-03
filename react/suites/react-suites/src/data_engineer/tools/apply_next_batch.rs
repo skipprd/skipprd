@@ -105,6 +105,9 @@ fn classify_batch_failure_kind(errors: &[String]) -> BatchFailureKind {
         || joined.contains("timeout")
         || joined.contains("throttle")
         || joined.contains("temporar")
+        || joined.contains("http 502")
+        || joined.contains("http 503")
+        || joined.contains("http 504")
     {
         return BatchFailureKind::InfraTransient;
     }
@@ -330,7 +333,12 @@ impl Tool for ApplyNextCleanseBatchTool {
                     &batch,
                     &format!("apply_next_cleanse_batch failed: {}", e.trim()),
                 );
-                controller_kernel::note_batch_result(&mut plan.progress, false);
+                let kind = classify_batch_failure_kind(&[e.clone()]);
+                controller_kernel::note_batch_result_with_failure_kind(
+                    &mut plan.progress,
+                    false,
+                    Some(kind),
+                );
                 plan::save_cleanse_plan(ctx, &plan)
                     .await
                     .map_err(|e| format!("failed to save cleanse plan after batch tool failure: {e}"))?;
@@ -378,6 +386,7 @@ impl Tool for ApplyNextCleanseBatchTool {
                 );
             }
         }
+        let mut failure_kind_for_budget: Option<BatchFailureKind> = None;
         if !failed.is_empty() || !ok {
             let err = res
                 .get("errors")
@@ -421,6 +430,7 @@ impl Tool for ApplyNextCleanseBatchTool {
                 })
                 .unwrap_or_default();
             let kind = classify_batch_failure_kind(&errors);
+            failure_kind_for_budget = Some(kind);
             let brief = if err.trim().is_empty() {
                 "apply_next_cleanse_batch failed".to_string()
             } else {
@@ -443,7 +453,11 @@ impl Tool for ApplyNextCleanseBatchTool {
             )
             .await?;
         }
-        let budget = controller_kernel::note_batch_result(&mut plan.progress, ok && failed.is_empty());
+        let budget = controller_kernel::note_batch_result_with_failure_kind(
+            &mut plan.progress,
+            ok && failed.is_empty(),
+            failure_kind_for_budget,
+        );
         plan::save_cleanse_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to save cleanse plan after batch reconciliation: {e}"))?;
@@ -709,7 +723,12 @@ impl Tool for ApplyNextModelBatchTool {
                     &batch_names,
                     &format!("apply_next_model_batch failed: {}", e.trim()),
                 );
-                controller_kernel::note_batch_result(&mut plan.progress, false);
+                let kind = classify_batch_failure_kind(&[e.clone()]);
+                controller_kernel::note_batch_result_with_failure_kind(
+                    &mut plan.progress,
+                    false,
+                    Some(kind),
+                );
                 plan::save_model_plan(ctx, &plan)
                     .await
                     .map_err(|e| format!("failed to save model plan after batch tool failure: {e}"))?;
@@ -752,6 +771,7 @@ impl Tool for ApplyNextModelBatchTool {
                 );
             }
         }
+        let mut failure_kind_for_budget: Option<BatchFailureKind> = None;
         if !failed.is_empty() || !ok {
             let err = res
                 .get("errors")
@@ -794,6 +814,7 @@ impl Tool for ApplyNextModelBatchTool {
                 })
                 .unwrap_or_default();
             let kind = classify_batch_failure_kind(&errors);
+            failure_kind_for_budget = Some(kind);
             let brief = if err.trim().is_empty() {
                 "apply_next_model_batch failed".to_string()
             } else {
@@ -817,7 +838,11 @@ impl Tool for ApplyNextModelBatchTool {
             .await?;
         }
 
-        let budget = controller_kernel::note_batch_result(&mut plan.progress, ok && failed.is_empty());
+        let budget = controller_kernel::note_batch_result_with_failure_kind(
+            &mut plan.progress,
+            ok && failed.is_empty(),
+            failure_kind_for_budget,
+        );
         plan::save_model_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to save model plan after batch reconciliation: {e}"))?;

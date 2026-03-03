@@ -104,6 +104,68 @@ async fn track_completion_snapshot_all_done(actx: &AgentCtx, is_cleanse: bool) -
     }
 }
 
+fn build_failed_target_context_lines(
+    last_validate_brief: &Option<String>,
+    last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
+) -> String {
+    let mut out = String::new();
+    if !last_validate_failed_models.is_empty() {
+        for fm in last_validate_failed_models.iter().take(6) {
+            let name = if fm.name.trim().is_empty() {
+                "unknown_model"
+            } else {
+                fm.name.as_str()
+            };
+            let file = if fm.file.trim().is_empty() {
+                "(unknown file)"
+            } else {
+                fm.file.as_str()
+            };
+            out.push_str(&format!("- {} ({})\n", name, file));
+        }
+    } else if let Some(ref brief) = *last_validate_brief {
+        out.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
+        out.push_str("\nLast dbt_validate summary:\n");
+        out.push_str(brief);
+        out.push('\n');
+    } else {
+        out.push_str("- (unknown failing model) — no failing-model evidence found.\n");
+    }
+    out
+}
+
+fn build_repair_mode_context(
+    track: TrackKind,
+    plan_key: &str,
+    last_validate_brief: &Option<String>,
+    last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
+    defer_schema_work: bool,
+    all_tasks_done_but_validate_failed: bool,
+) -> String {
+    let kind = track.as_str();
+    let mut ctx = if all_tasks_done_but_validate_failed {
+        format!(
+            "Approved {kind} plan (stored at: {plan_key}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with file op=patch|rm|mv; if patching, use Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
+            crate::data_engineer::patch_contract::single_file_patch_good_example_json()
+        )
+    } else {
+        format!(
+            "Approved {kind} plan (stored at: {plan_key}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call file with a mutating op (patch|rm|mv) scoped to a repair target path.\n- If using patch: args.path + args.patch_text (Cursor/Aider hunks-only: '@@ ... @@'; no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
+            crate::data_engineer::patch_contract::single_file_patch_good_example_json()
+        )
+    };
+    ctx.push_str(&build_failed_target_context_lines(
+        last_validate_brief,
+        last_validate_failed_models,
+    ));
+    if defer_schema_work {
+        ctx.push_str(
+            "\nIMPORTANT: Defer any new checklist expansion or schema contract work until dbt_validate passes.\n",
+        );
+    }
+    ctx
+}
+
 impl DataEngineerSuite {
     pub(super) async fn execute_author_phase(
         thread_store: &ThreadStore,
@@ -319,34 +381,14 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
         {
             // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
             // Even if schema checklist work remains, fix failing SQL targets first.
-            let mut ctx = format!(
-                "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call file with a mutating op (patch|rm|mv) scoped to a repair target path.\n- If using patch: args.path + args.patch_text (Cursor/Aider hunks-only: '@@ ... @@'; no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
-                plan.plan_key,
-                crate::data_engineer::patch_contract::single_file_patch_good_example_json()
+            let ctx = build_repair_mode_context(
+                track,
+                &plan.plan_key,
+                last_validate_brief,
+                last_validate_failed_models,
+                true,
+                false,
             );
-            if !last_validate_failed_models.is_empty() {
-                for fm in last_validate_failed_models.iter().take(6) {
-                    let name = if fm.name.trim().is_empty() {
-                        "unknown_model"
-                    } else {
-                        fm.name.as_str()
-                    };
-                    let file = if fm.file.trim().is_empty() {
-                        "(unknown file)"
-                    } else {
-                        fm.file.as_str()
-                    };
-                    ctx.push_str(&format!("- {} ({})\n", name, file));
-                }
-            } else if let Some(ref brief) = last_validate_brief {
-                ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
-                ctx.push_str("\nLast dbt_validate summary:\n");
-                ctx.push_str(brief);
-                ctx.push('\n');
-            } else {
-                ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
-            }
-            ctx.push_str("\nIMPORTANT: Defer any new checklist expansion or schema contract work until dbt_validate passes.\n");
             (ctx, None)
         } else if hard_mutation_repair_mode {
             // Schema/precheck failures: prefer schema batch tools when schema checklist work remains.
@@ -477,33 +519,14 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 // If validation previously failed, do NOT bounce straight back to validate.
                 // Run a repair authoring pass grounded in the failing model/file evidence.
                 if guard.last_validate_failed {
-                    let mut ctx = format!(
-                "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with file op=patch|rm|mv; if patching, use Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
-                    plan.plan_key,
-                    crate::data_engineer::patch_contract::single_file_patch_good_example_json()
-                );
-                    if !last_validate_failed_models.is_empty() {
-                        for fm in last_validate_failed_models.iter().take(6) {
-                            let name = if fm.name.trim().is_empty() {
-                                "unknown_model"
-                            } else {
-                                fm.name.as_str()
-                            };
-                            let file = if fm.file.trim().is_empty() {
-                                "(unknown file)"
-                            } else {
-                                fm.file.as_str()
-                            };
-                            ctx.push_str(&format!("- {} ({})\n", name, file));
-                        }
-                    } else if let Some(ref brief) = last_validate_brief {
-                        ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
-                        ctx.push_str("\nLast dbt_validate summary:\n");
-                        ctx.push_str(brief);
-                        ctx.push('\n');
-                    } else {
-                        ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
-                    }
+                    let ctx = build_repair_mode_context(
+                        track,
+                        &plan.plan_key,
+                        last_validate_brief,
+                        last_validate_failed_models,
+                        false,
+                        true,
+                    );
                     (
                         ctx,
                         None, // allow freeform file patching for targeted repair
@@ -677,34 +700,14 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
         {
             // Repair-first routing: dbt_validate failed for a SQL/runtime-class reason.
             // Even if schema checklist work remains, fix failing SQL targets first.
-            let mut ctx = format!(
-                "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nNext action: call file with a mutating op (patch|rm|mv) scoped to a repair target path.\n- If using patch: args.path + args.patch_text (Cursor/Aider hunks-only: '@@ ... @@'; no ---/+++ headers).\nExample args: {}\n\nRepair targets:\n",
-                plan.plan_key,
-                crate::data_engineer::patch_contract::single_file_patch_good_example_json()
+            let ctx = build_repair_mode_context(
+                track,
+                &plan.plan_key,
+                last_validate_brief,
+                last_validate_failed_models,
+                true,
+                false,
             );
-            if !last_validate_failed_models.is_empty() {
-                for fm in last_validate_failed_models.iter().take(6) {
-                    let name = if fm.name.trim().is_empty() {
-                        "unknown_model"
-                    } else {
-                        fm.name.as_str()
-                    };
-                    let file = if fm.file.trim().is_empty() {
-                        "(unknown file)"
-                    } else {
-                        fm.file.as_str()
-                    };
-                    ctx.push_str(&format!("- {} ({})\n", name, file));
-                }
-            } else if let Some(ref brief) = last_validate_brief {
-                ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
-                ctx.push_str("\nLast dbt_validate summary:\n");
-                ctx.push_str(brief);
-                ctx.push('\n');
-            } else {
-                ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
-            }
-            ctx.push_str("\nIMPORTANT: Defer any new checklist expansion or schema contract work until dbt_validate passes.\n");
             (ctx, None)
         } else if hard_mutation_repair_mode {
             if let crate::data_engineer::plan::AuthoringNextAction::AuthorSchema(ids) =
@@ -905,33 +908,14 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
 
                 if guard.last_validate_failed {
                     // Same repair-mode behavior as cleanse: run authoring to patch failing files.
-                    let mut ctx = format!(
-                "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with file op=patch|rm|mv; if patching, use Cursor/Aider hunks-only patch_text).\nExample args: {}\n",
-                plan.plan_key,
-                crate::data_engineer::patch_contract::single_file_patch_good_example_json()
-            );
-                    if !last_validate_failed_models.is_empty() {
-                        for fm in last_validate_failed_models.iter().take(6) {
-                            let name = if fm.name.trim().is_empty() {
-                                "unknown_model"
-                            } else {
-                                fm.name.as_str()
-                            };
-                            let file = if fm.file.trim().is_empty() {
-                                "(unknown file)"
-                            } else {
-                                fm.file.as_str()
-                            };
-                            ctx.push_str(&format!("- {} ({})\n", name, file));
-                        }
-                    } else if let Some(ref brief) = last_validate_brief {
-                        ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
-                        ctx.push_str("\nLast dbt_validate summary:\n");
-                        ctx.push_str(brief);
-                        ctx.push('\n');
-                    } else {
-                        ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
-                    }
+                    let ctx = build_repair_mode_context(
+                        track,
+                        &plan.plan_key,
+                        last_validate_brief,
+                        last_validate_failed_models,
+                        false,
+                        true,
+                    );
                     (ctx, None)
                 } else if crate::data_engineer::plan::snapshot_model_completion(&plan).all_done {
                     transition_to_track_validate_with_plan_key(
@@ -1485,11 +1469,20 @@ match Agent::run_until_block_non_interactive(
             gate_state.pending_loopback_intent.as_ref(),
             Some(crate::data_engineer::progress_controller::PendingLoopbackIntent::PatchImpl { phase: p, .. }) if *p == phase
         ) {
-            let _ = crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+            crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
                 &thread_store,
                 thread_id,
             )
-            .await;
+            .await
+            .or_else(|e| {
+                if e.contains("not found") {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "failed to clear pending patch-impl loopback intent: {e}"
+                    ))
+                }
+            })?;
         }
 
         // Model authoring must actually produce at least one gold model SQL file.

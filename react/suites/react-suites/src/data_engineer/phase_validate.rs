@@ -2,6 +2,132 @@ use super::*;
 use crate::data_engineer::control_flow::Phase;
 
 impl DataEngineerSuite {
+    async fn transition_after_validate_pass(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+        phase: Phase,
+        completion_snapshot: Option<crate::data_engineer::plan::PlanCompletionSnapshot>,
+        active_plan_key: Option<String>,
+        dbt_validate_observation: serde_json::Value,
+        signal: &str,
+    ) -> Result<(), String> {
+        if completion_snapshot
+            .as_ref()
+            .map(|snap| !snap.all_done)
+            .unwrap_or(false)
+        {
+            let reason = format!(
+                "{}: dbt_validate succeeded but plan checklist work is still pending; returning to authoring",
+                signal
+            );
+            apply_guard_block(
+                thread_store,
+                thread_id,
+                phase,
+                GuardBlockKind::AuthoringCompletion,
+                reason.clone(),
+            )
+            .await?;
+            let to_phase = if phase == Phase::CleanseValidate {
+                Phase::CleanseAuthor
+            } else {
+                Phase::ModelAuthor
+            };
+            apply_phase_transition(
+                thread_store,
+                thread_id,
+                Some(phase),
+                to_phase,
+                control_flow::TransitionIntent::Loopback,
+                Some(PhaseReasonCode::ValidatePassToAuthoring),
+                Some(crate::data_engineer::phase_reason_detail::to_value(
+                    &crate::data_engineer::phase_reason_detail::ValidatePassToAuthoringDetail {
+                        signal: signal.to_string(),
+                        plan_key: active_plan_key,
+                        pending_count: completion_snapshot
+                            .as_ref()
+                            .map(|snap| snap.pending_count)
+                            .unwrap_or(0),
+                        pending_refs: completion_snapshot
+                            .as_ref()
+                            .map(|snap| snap.pending_refs.clone())
+                            .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
+                            .unwrap_or(serde_json::Value::Array(vec![])),
+                        dbt_validate_observation,
+                        next_action: "resume_authoring_for_remaining_plan_work".to_string(),
+                        audit_acceptance: Self::churn_audit_acceptance_criteria(),
+                    },
+                )),
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let to_phase = if phase == Phase::CleanseValidate {
+            Phase::CleanseReview
+        } else {
+            Phase::ModelReview
+        };
+        let trigger_step_idx = thread_store
+            .get(thread_id)
+            .await
+            .map(|l| l.steps.len().saturating_sub(1))
+            .unwrap_or(0);
+        apply_phase_transition(
+            thread_store,
+            thread_id,
+            Some(phase),
+            to_phase,
+            control_flow::TransitionIntent::Forward,
+            Some(PhaseReasonCode::ValidatePassToReview),
+            Some(crate::data_engineer::phase_reason_detail::to_value(
+                &crate::data_engineer::phase_reason_detail::ValidatePassToReviewDetail {
+                    dbt_validate_observation,
+                    dbt_validate_step_idx: trigger_step_idx,
+                },
+            )),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub(super) async fn reconcile_done_validate_phase(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+        phase: crate::data_engineer::control_flow::Phase,
+        sctx: &SuiteCtx,
+    ) -> Result<bool, String> {
+        if !matches!(phase, Phase::CleanseValidate | Phase::ModelValidate) {
+            return Ok(false);
+        }
+        let actx = Self::agent_tool_ctx(thread_id, sctx);
+        let mut completion_snapshot: Option<crate::data_engineer::plan::PlanCompletionSnapshot> = None;
+        let mut active_plan_key: Option<String> = None;
+        if phase == Phase::CleanseValidate {
+            if let Some(p) = crate::data_engineer::plan::load_cleanse_plan_any(&actx).await {
+                completion_snapshot = Some(crate::data_engineer::plan::snapshot_cleanse_completion(&p));
+                active_plan_key = Some(p.plan_key.clone());
+            }
+        } else if let Some(p) = crate::data_engineer::plan::load_model_plan_any(&actx).await {
+            completion_snapshot = Some(crate::data_engineer::plan::snapshot_model_completion(&p));
+            active_plan_key = Some(p.plan_key.clone());
+        }
+
+        Self::transition_after_validate_pass(
+            thread_store,
+            thread_id,
+            phase,
+            completion_snapshot,
+            active_plan_key,
+            serde_json::json!({
+                "recovered_validate_done_state": true
+            }),
+            "ValidateDoneStateRecoveredPlanIncomplete",
+        )
+        .await?;
+        Ok(true)
+    }
+
     pub(super) async fn execute_validate_phase(
         thread_store: &ThreadStore,
         thread_id: &str,
@@ -69,7 +195,7 @@ if let Err(e) =
     } else {
         Phase::ModelAuthor
     };
-    let _ = apply_phase_transition(
+    apply_phase_transition(
         &thread_store,
         thread_id,
         Some(phase),
@@ -102,7 +228,7 @@ if let Err(e) =
     } else {
         Phase::ModelAuthor
     };
-    let _ = apply_phase_transition(
+    apply_phase_transition(
         &thread_store,
         thread_id,
         Some(phase),
@@ -384,8 +510,9 @@ if matches!(
                 p.status = crate::data_engineer::plan::PlanStatus::Approved;
             }
             completion_snapshot = Some(snap);
-            let _ =
-                crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
+            crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
+                .await
+                .map_err(|e| format!("failed to persist cleanse plan validate-pass state: {e}"))?;
         }
     } else {
         if let Some(mut p) =
@@ -403,87 +530,20 @@ if matches!(
                 p.status = crate::data_engineer::plan::PlanStatus::Approved;
             }
             completion_snapshot = Some(snap);
-            let _ =
-                crate::data_engineer::plan::save_model_plan(&actx, &p).await;
+            crate::data_engineer::plan::save_model_plan(&actx, &p)
+                .await
+                .map_err(|e| format!("failed to persist model plan validate-pass state: {e}"))?;
         }
     }
 
-    if completion_snapshot
-        .as_ref()
-        .map(|snap| !snap.all_done)
-        .unwrap_or(false)
-    {
-        let signal = "ValidatePassPlanIncomplete";
-        let reason = format!(
-            "{}: dbt_validate succeeded but plan checklist work is still pending; returning to authoring",
-            signal
-        );
-        apply_guard_block(
-            &thread_store,
-            thread_id,
-            phase,
-            GuardBlockKind::AuthoringCompletion,
-            reason.clone(),
-        )
-        .await?;
-        let to_phase = if phase == Phase::CleanseValidate {
-            Phase::CleanseAuthor
-        } else {
-            Phase::ModelAuthor
-        };
-        apply_phase_transition(
-            &thread_store,
-            thread_id,
-            Some(phase),
-            to_phase,
-            control_flow::TransitionIntent::Loopback,
-            Some(PhaseReasonCode::ValidatePassToAuthoring),
-            Some(crate::data_engineer::phase_reason_detail::to_value(
-                &crate::data_engineer::phase_reason_detail::ValidatePassToAuthoringDetail {
-                    signal: signal.to_string(),
-                    plan_key: active_plan_key,
-                    pending_count: completion_snapshot
-                        .as_ref()
-                        .map(|snap| snap.pending_count)
-                        .unwrap_or(0),
-                    pending_refs: completion_snapshot
-                        .as_ref()
-                        .map(|snap| snap.pending_refs.clone())
-                        .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
-                        .unwrap_or(serde_json::Value::Array(vec![])),
-                    dbt_validate_observation: obs.observation.clone(),
-                    next_action: "resume_authoring_for_remaining_plan_work".to_string(),
-                    audit_acceptance: Self::churn_audit_acceptance_criteria(),
-                },
-            )),
-        )
-        .await?;
-        return Ok(PhaseExecutorOutcome::Continue);
-    }
-
-    let trigger_step_idx = thread_store
-        .get(thread_id)
-        .await
-        .map(|l| l.steps.len().saturating_sub(1))
-        .unwrap_or(0);
-    let to_phase = if phase == Phase::CleanseValidate {
-        Phase::CleanseReview
-    } else {
-        Phase::ModelReview
-    };
-    apply_phase_transition(
+    Self::transition_after_validate_pass(
         &thread_store,
         thread_id,
-        Some(phase),
-        to_phase,
-        control_flow::TransitionIntent::Forward,
-        Some(PhaseReasonCode::ValidatePassToReview),
-        Some(crate::data_engineer::phase_reason_detail::to_value(
-            &crate::data_engineer::phase_reason_detail::ValidatePassToReviewDetail {
-                dbt_validate_observation: obs.observation.clone(),
-                dbt_validate_step_idx: trigger_step_idx,
-            },
-        )),
+        phase,
+        completion_snapshot,
+        active_plan_key,
+        obs.observation.clone(),
+        "ValidatePassPlanIncomplete",
     )
     .await?;
     return Ok(PhaseExecutorOutcome::Continue);

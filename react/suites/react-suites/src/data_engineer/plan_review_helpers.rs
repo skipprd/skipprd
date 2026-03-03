@@ -118,11 +118,18 @@ impl DataEngineerSuite {
         crate::data_engineer::plan::save_cleanse_plan(actx, &p)
             .await
             .map_err(|e| format!("failed to persist approved cleanse plan: {e}"))?;
-        let _ = crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+        crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
             thread_store,
             thread_id,
         )
-        .await;
+        .await
+        .or_else(|e| {
+            if e.contains("not found") {
+                Ok(())
+            } else {
+                Err(format!("failed to clear pending loopback intent: {e}"))
+            }
+        })?;
 
         apply_phase_transition(
             thread_store,
@@ -218,11 +225,18 @@ impl DataEngineerSuite {
         crate::data_engineer::plan::save_model_plan(actx, &p)
             .await
             .map_err(|e| format!("failed to persist approved model plan: {e}"))?;
-        let _ = crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+        crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
             thread_store,
             thread_id,
         )
-        .await;
+        .await
+        .or_else(|e| {
+            if e.contains("not found") {
+                Ok(())
+            } else {
+                Err(format!("failed to clear pending loopback intent: {e}"))
+            }
+        })?;
 
         apply_phase_transition(
             thread_store,

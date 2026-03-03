@@ -17,6 +17,24 @@ use crate::data_engineer::references::DatasetRef;
 use crate::data_engineer::schema_policy;
 use crate::data_engineer::tools::files_tool;
 
+fn classify_schema_batch_failure_kind(msg: &str) -> crate::data_engineer::progress_controller::BatchFailureKind {
+    let s = msg.to_ascii_lowercase();
+    if s.contains("service error")
+        || s.contains("timeout")
+        || s.contains("temporar")
+        || s.contains("throttle")
+        || s.contains("http 502")
+        || s.contains("http 503")
+        || s.contains("http 504")
+    {
+        return crate::data_engineer::progress_controller::BatchFailureKind::InfraTransient;
+    }
+    if s.contains("schema") || s.contains("yaml") || s.contains("contract") || s.contains("parse") {
+        return crate::data_engineer::progress_controller::BatchFailureKind::SchemaOrContract;
+    }
+    crate::data_engineer::progress_controller::BatchFailureKind::Unknown
+}
+
 fn escape_yaml_doc_preamble(s: String) -> String {
     // serde_yaml may emit a leading `---\n`; keep stored files clean and consistent.
     s.trim_start_matches("---\n").to_string()
@@ -480,7 +498,16 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                 plan::ChecklistItemStatus::NeedsUpdate,
             );
         }
-        let budget = controller_kernel::note_batch_result(&mut plan.progress, failed.is_empty());
+        let failure_kind = if failed.is_empty() {
+            None
+        } else {
+            Some(classify_schema_batch_failure_kind(&errors.join("\n")))
+        };
+        let budget = controller_kernel::note_batch_result_with_failure_kind(
+            &mut plan.progress,
+            failed.is_empty(),
+            failure_kind,
+        );
         plan::save_cleanse_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to persist cleanse schema batch result state: {e}"))?;
@@ -707,7 +734,11 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                     for n in names.iter() {
                         plan::model_schema_contract_mark_needs_update(&mut plan, n);
                     }
-                    let budget = controller_kernel::note_batch_result(&mut plan.progress, false);
+                    let budget = controller_kernel::note_batch_result_with_failure_kind(
+                        &mut plan.progress,
+                        false,
+                        Some(classify_schema_batch_failure_kind(&e)),
+                    );
                     plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
                         format!(
                             "failed to persist model schema batch failure state after patch error: {save_err}"
@@ -747,7 +778,11 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 for n in names.iter() {
                     plan::model_schema_contract_mark_needs_update(&mut plan, n);
                 }
-                let budget = controller_kernel::note_batch_result(&mut plan.progress, false);
+                let budget = controller_kernel::note_batch_result_with_failure_kind(
+                    &mut plan.progress,
+                    false,
+                    Some(classify_schema_batch_failure_kind(&e)),
+                );
                 plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
                     format!(
                         "failed to persist model schema batch failure state after post-check error: {save_err}"
@@ -785,7 +820,11 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             for n in names.iter() {
                 plan::model_schema_contract_mark_needs_update(&mut plan, n);
             }
-            let budget = controller_kernel::note_batch_result(&mut plan.progress, false);
+            let budget = controller_kernel::note_batch_result_with_failure_kind(
+                &mut plan.progress,
+                false,
+                Some(classify_schema_batch_failure_kind(&e.to_string())),
+            );
             plan::save_model_plan(ctx, &plan).await.map_err(|save_err| {
                 format!(
                     "failed to persist model schema batch failure state after write error: {save_err}"
@@ -821,7 +860,11 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 plan::ChecklistItemStatus::Done,
             );
         }
-        let budget = controller_kernel::note_batch_result(&mut plan.progress, true);
+        let budget = controller_kernel::note_batch_result_with_failure_kind(
+            &mut plan.progress,
+            true,
+            None,
+        );
         plan::save_model_plan(ctx, &plan)
             .await
             .map_err(|e| format!("failed to persist model schema batch result state: {e}"))?;
