@@ -19,74 +19,6 @@ impl DataEngineerSuite {
         out
     }
 
-    pub(super) async fn set_pending_patch_plan_intent(
-        thread_store: &ThreadStore,
-        thread_id: &str,
-        phase: control_flow::Phase,
-        entry_plan_key: Option<String>,
-        entry_plan_digest: Option<String>,
-    ) -> Result<(), String> {
-        crate::data_engineer::state_manager::mutate_execution_state(thread_store, thread_id, |es| {
-            es.set_pending_patch_plan_intent(phase, entry_plan_key.clone(), entry_plan_digest.clone());
-        })
-        .await
-        .map(|_| ())
-    }
-
-    pub(super) async fn set_pending_patch_impl_intent(
-        thread_store: &ThreadStore,
-        thread_id: &str,
-        phase: control_flow::Phase,
-    ) -> Result<(), String> {
-        crate::data_engineer::state_manager::mutate_execution_state(thread_store, thread_id, |es| {
-            es.set_pending_patch_impl_intent(phase);
-        })
-        .await
-        .map(|_| ())
-    }
-
-    pub(super) async fn clear_pending_loopback_intent(
-        thread_store: &ThreadStore,
-        thread_id: &str,
-    ) -> Result<(), String> {
-        crate::data_engineer::state_manager::mutate_execution_state(thread_store, thread_id, |es| {
-            es.clear_pending_loopback_intent();
-        })
-        .await
-        .map(|_| ())
-    }
-
-    pub(super) fn patch_plan_intent_blocks_fast_forward(
-        execution_state: &crate::data_engineer::progress_controller::ExecutionState,
-        phase: control_flow::Phase,
-        current_plan_key: &str,
-        current_plan_digest: Option<&str>,
-    ) -> bool {
-        crate::data_engineer::phase_gate::patch_plan_intent_blocks_fast_forward(
-            execution_state,
-            phase,
-            current_plan_key,
-            current_plan_digest,
-        )
-    }
-
-    pub(super) fn patch_impl_intent_unsatisfied(
-        execution_state: &crate::data_engineer::progress_controller::ExecutionState,
-        phase: control_flow::Phase,
-    ) -> bool {
-        crate::data_engineer::phase_gate::patch_impl_intent_unsatisfied(execution_state, phase)
-    }
-
-    pub(super) fn derive_single_target_repair_path(
-        execution_state: &crate::data_engineer::progress_controller::ExecutionState,
-        last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
-    ) -> Option<String> {
-        crate::data_engineer::phase_gate::derive_single_target_repair_path(
-            execution_state,
-            last_validate_failed_models,
-        )
-    }
-
     pub(super) async fn approve_cleanse_plan_draft_and_advance(
         thread_store: &ThreadStore,
         thread_id: &str,
@@ -186,7 +118,11 @@ impl DataEngineerSuite {
         crate::data_engineer::plan::save_cleanse_plan(actx, &p)
             .await
             .map_err(|e| format!("failed to persist approved cleanse plan: {e}"))?;
-        let _ = Self::clear_pending_loopback_intent(thread_store, thread_id).await;
+        let _ = crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+            thread_store,
+            thread_id,
+        )
+        .await;
 
         apply_phase_transition(
             thread_store,
@@ -282,7 +218,11 @@ impl DataEngineerSuite {
         crate::data_engineer::plan::save_model_plan(actx, &p)
             .await
             .map_err(|e| format!("failed to persist approved model plan: {e}"))?;
-        let _ = Self::clear_pending_loopback_intent(thread_store, thread_id).await;
+        let _ = crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+            thread_store,
+            thread_id,
+        )
+        .await;
 
         apply_phase_transition(
             thread_store,

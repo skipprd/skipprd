@@ -1008,7 +1008,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
     };
 
 let single_target_repair_path = if hard_mutation_repair_mode {
-    Self::derive_single_target_repair_path(
+    crate::data_engineer::loopback_intents::derive_single_target_repair_path(
         &execution_state,
         &last_validate_failed_models,
     )
@@ -1478,7 +1478,10 @@ match Agent::run_until_block_non_interactive(
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
         }
-        if Self::patch_impl_intent_unsatisfied(&gate_state, phase) {
+        if crate::data_engineer::loopback_intents::patch_impl_intent_unsatisfied(
+            &gate_state,
+            phase,
+        ) {
             let reason = format!(
                 "progress_gate_blocked: review requested implementation patch for phase '{}' and no successful mutation has been recorded since loopback. Apply a mutating file op (patch/rm/mv) before re-validating.",
                 phase.as_str()
@@ -1497,9 +1500,11 @@ match Agent::run_until_block_non_interactive(
             gate_state.pending_loopback_intent.as_ref(),
             Some(crate::data_engineer::progress_controller::PendingLoopbackIntent::PatchImpl { phase: p, .. }) if *p == phase
         ) {
-            let _ =
-                Self::clear_pending_loopback_intent(&thread_store, thread_id)
-                    .await;
+            let _ = crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+                &thread_store,
+                thread_id,
+            )
+            .await;
         }
 
         // Model authoring must actually produce at least one gold model SQL file.

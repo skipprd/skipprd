@@ -68,7 +68,7 @@ if is_cleanse {
             crate::data_engineer::plan::PlanStatus::Approved
                 | crate::data_engineer::plan::PlanStatus::Completed
         ) {
-            if Self::patch_plan_intent_blocks_fast_forward(
+            if crate::data_engineer::loopback_intents::patch_plan_intent_blocks_fast_forward(
                 &execution_state,
                 phase,
                 &p.plan_key,
@@ -104,7 +104,10 @@ if is_cleanse {
                 return Ok(PhaseExecutorOutcome::Continue);
             }
             let _ =
-                Self::clear_pending_loopback_intent(&thread_store, thread_id)
+                crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+                    &thread_store,
+                    thread_id,
+                )
                     .await;
             apply_phase_transition(
                 &thread_store,
@@ -129,7 +132,7 @@ if is_cleanse {
             crate::data_engineer::plan::PlanStatus::Approved
                 | crate::data_engineer::plan::PlanStatus::Completed
         ) {
-            if Self::patch_plan_intent_blocks_fast_forward(
+            if crate::data_engineer::loopback_intents::patch_plan_intent_blocks_fast_forward(
                 &execution_state,
                 phase,
                 &p.plan_key,
@@ -169,7 +172,10 @@ if is_cleanse {
                 return Ok(PhaseExecutorOutcome::Continue);
             }
             let _ =
-                Self::clear_pending_loopback_intent(&thread_store, thread_id)
+                crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+                    &thread_store,
+                    thread_id,
+                )
                     .await;
             apply_phase_transition(
                 &thread_store,

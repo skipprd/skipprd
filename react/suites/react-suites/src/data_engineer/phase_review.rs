@@ -131,7 +131,11 @@ impl DataEngineerSuite {
 
         match meta.decision {
             ReviewDecision::Proceed => {
-                let _ = Self::clear_pending_loopback_intent(thread_store, thread_id).await;
+                let _ = crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+                    thread_store,
+                    thread_id,
+                )
+                .await;
                 let next = match phase {
                     control_flow::Phase::CleanseReview => control_flow::Phase::ModelPlan,
                     control_flow::Phase::ModelReview => control_flow::Phase::PublishAwaitApproval,
@@ -174,7 +178,7 @@ impl DataEngineerSuite {
                     }
                     _ => (None, None),
                 };
-                let _ = Self::set_pending_patch_plan_intent(
+                let _ = crate::data_engineer::loopback_intents::set_pending_patch_plan_intent(
                     thread_store,
                     thread_id,
                     back,
@@ -200,7 +204,12 @@ impl DataEngineerSuite {
                     ReviewTier::Gold => control_flow::Phase::ModelAuthor,
                     ReviewTier::Unknown => control_flow::Phase::ModelAuthor,
                 };
-                let _ = Self::set_pending_patch_impl_intent(thread_store, thread_id, back).await;
+                let _ = crate::data_engineer::loopback_intents::set_pending_patch_impl_intent(
+                    thread_store,
+                    thread_id,
+                    back,
+                )
+                .await;
                 apply_phase_transition(
                     thread_store,
                     thread_id,

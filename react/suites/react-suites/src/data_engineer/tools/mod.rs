@@ -12,6 +12,7 @@ pub mod catalog_note;
 pub mod dbt_examples;
 #[path = "dbt_files.rs"]
 pub mod files_tool;
+mod dbt_sql_parser;
 pub mod dbt_validate;
 pub mod gold_model;
 pub mod json_file;

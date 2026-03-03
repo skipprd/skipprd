@@ -39,6 +39,7 @@ pub mod mutation_gateway;
 pub mod patch_contract;
 #[path = "patch_protocol.rs"]
 pub mod files_patch_repair;
+mod loopback_intents;
 pub mod phase_actions;
 pub mod phase_gate;
 pub mod phase_reason_detail;
@@ -4271,19 +4272,19 @@ mod tests {
             entry_plan_key: Some("k1".to_string()),
             entry_plan_digest: Some("d1".to_string()),
         });
-        assert!(DataEngineerSuite::patch_plan_intent_blocks_fast_forward(
+        assert!(crate::data_engineer::loopback_intents::patch_plan_intent_blocks_fast_forward(
             &st,
             Phase::CleansePlan,
             "k1",
             Some("d1"),
         ));
-        assert!(!DataEngineerSuite::patch_plan_intent_blocks_fast_forward(
+        assert!(!crate::data_engineer::loopback_intents::patch_plan_intent_blocks_fast_forward(
             &st,
             Phase::CleansePlan,
             "k2",
             Some("d1"),
         ));
-        assert!(!DataEngineerSuite::patch_plan_intent_blocks_fast_forward(
+        assert!(!crate::data_engineer::loopback_intents::patch_plan_intent_blocks_fast_forward(
             &st,
             Phase::CleansePlan,
             "k1",
@@ -4304,12 +4305,12 @@ mod tests {
             phase: Phase::ModelAuthor,
             entry_mutation_epoch: 4,
         });
-        assert!(DataEngineerSuite::patch_impl_intent_unsatisfied(
+        assert!(crate::data_engineer::loopback_intents::patch_impl_intent_unsatisfied(
             &st,
             Phase::ModelAuthor
         ));
         st.mutation_epoch = 5;
-        assert!(!DataEngineerSuite::patch_impl_intent_unsatisfied(
+        assert!(!crate::data_engineer::loopback_intents::patch_impl_intent_unsatisfied(
             &st,
             Phase::ModelAuthor
         ));
@@ -4324,7 +4325,10 @@ mod tests {
             name: "stg_other".to_string(),
             file: "models/staging/stg_other.sql".to_string(),
         }];
-        let got = DataEngineerSuite::derive_single_target_repair_path(&st, &failed);
+        let got = crate::data_engineer::loopback_intents::derive_single_target_repair_path(
+            &st,
+            &failed,
+        );
         assert_eq!(got, Some("models/staging/stg_orders.sql".to_string()));
     }
 
@@ -4336,7 +4340,10 @@ mod tests {
             name: "stg_orders".to_string(),
             file: "models/staging/stg_orders.sql".to_string(),
         }];
-        let got = DataEngineerSuite::derive_single_target_repair_path(&st, &failed);
+        let got = crate::data_engineer::loopback_intents::derive_single_target_repair_path(
+            &st,
+            &failed,
+        );
         assert_eq!(got, Some("models/staging/stg_orders.sql".to_string()));
     }
 
@@ -4524,25 +4531,34 @@ mod tests {
 
     #[test]
     fn run_agent_source_enforces_kernel_transition_and_guard_paths() {
-        let src = include_str!("mod.rs");
-        let normalized: String = src.chars().filter(|c| !c.is_whitespace()).collect();
         let legacy_transition = ["control_flow::append_phase_with_", "intent", "("].concat();
         let legacy_guard_block = ["ThreadStep::Guard", "Block"].concat();
-        assert!(
-            !normalized.contains(&legacy_transition),
-            "legacy transition path must not appear in mod.rs"
-        );
-        assert!(
-            !normalized.contains(&legacy_guard_block),
-            "legacy inline GuardBlock construction must not appear in mod.rs"
-        );
-        assert!(
-            normalized.contains("apply_phase_transition("),
-            "kernel transition helper should be used in mod.rs"
-        );
-        assert!(
-            normalized.contains("apply_guard_block("),
-            "kernel guard helper should be used in mod.rs"
-        );
+        let sources = [
+            ("mod.rs", include_str!("mod.rs")),
+            ("phase_plan.rs", include_str!("phase_plan.rs")),
+            ("phase_author.rs", include_str!("phase_author.rs")),
+        ];
+
+        for (name, src) in sources {
+            let normalized: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(
+                !normalized.contains(&legacy_transition),
+                "legacy transition path must not appear in {name}"
+            );
+            assert!(
+                !normalized.contains(&legacy_guard_block),
+                "legacy inline GuardBlock construction must not appear in {name}"
+            );
+            assert!(
+                normalized.contains("apply_phase_transition("),
+                "kernel transition helper should be used in {name}"
+            );
+            if name == "mod.rs" || name == "phase_author.rs" {
+                assert!(
+                    normalized.contains("apply_guard_block("),
+                    "kernel guard helper should be used in {name}"
+                );
+            }
+        }
     }
 }
