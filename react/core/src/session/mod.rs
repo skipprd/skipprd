@@ -1516,7 +1516,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn control_state_payload_load_supports_legacy_raw_payload() {
+    async fn control_state_payload_load_rejects_non_envelope_payload() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
         let scope = RequestScope {
@@ -1525,7 +1525,7 @@ mod tests {
             project_id: "p".into(),
         };
         let store = ThreadStore::new(storage, scope, keyspace);
-        let tid = "tid-control-legacy";
+        let tid = "tid-control-invalid";
         let mut st = ThreadState {
             thread_state_schema_version: THREAD_STATE_SCHEMA_VERSION,
             thread_id: tid.to_string(),
@@ -1535,12 +1535,12 @@ mod tests {
         store
             .put_thread_state_replace(tid, &st)
             .await
-            .expect("seed legacy state");
+            .expect("seed invalid state");
         let loaded = store
             .load_control_state_payload(tid, "data_engineer")
             .await
             .expect("load payload");
-        assert_eq!(loaded, Some(serde_json::json!({"legacy": true})));
+        assert_eq!(loaded, None);
     }
 
     #[tokio::test]

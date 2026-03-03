@@ -13,6 +13,7 @@ use react_core::tools::Tool;
 use crate::config;
 use crate::data_engineer::tools::files_tool::FilesTool;
 use crate::dbt;
+pub use react_core::workflow::TransitionIntent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -159,14 +160,6 @@ pub(crate) fn is_annotation_reason(reason_code: Option<PhaseReasonCode>) -> bool
                 | PhaseReasonCode::PhaseBlocked
         )
     )
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TransitionIntent {
-    Annotation,
-    Forward,
-    Loopback,
 }
 
 pub(crate) fn replan_backtrack_counter_cap() -> usize {

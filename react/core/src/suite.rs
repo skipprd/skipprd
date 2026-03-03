@@ -170,6 +170,33 @@ pub trait Suite: Send + Sync {
     ) -> Result<Vec<FlowFrame>, String>;
 }
 
+/// Compile-time workflow contract for suites using the core workflow kernel.
+///
+/// This keeps core generic while giving suites a typed place to declare:
+/// - phase/reason enums
+/// - state/reducer model
+/// - transition/backtrack semantics
+pub trait WorkflowSuiteContract {
+    type Phase: Copy + Eq + Send + Sync + 'static;
+    type ReasonCode: Copy + Eq + Send + Sync + 'static;
+    type State: Clone + Send + Sync + 'static;
+    type Event: Send + Sync + 'static;
+
+    fn phase_as_str(phase: Self::Phase) -> &'static str;
+    fn reason_as_str(reason: Self::ReasonCode) -> &'static str;
+    fn is_backtrack(from: Self::Phase, to: Self::Phase) -> bool;
+    fn replan_backtrack_cap() -> usize;
+}
+
+/// Runtime policy hooks used by the core workflow kernel.
+pub trait WorkflowPolicy<C: WorkflowSuiteContract> {
+    fn pre_turn(&self, _state: &C::State) -> crate::workflow::PreTurnDirective {
+        crate::workflow::PreTurnDirective::Proceed
+    }
+
+    fn reduce(&self, state: &mut C::State, event: C::Event);
+}
+
 pub type DynSuite = Arc<dyn Suite>;
 
 pub struct SuiteRegistry {

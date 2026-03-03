@@ -1,4 +1,5 @@
 use serde_json::Value;
+use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -196,8 +197,7 @@ impl ThreadStore {
             }
             return None;
         }
-        // Backward compatibility: pre-envelope payloads were stored directly.
-        Some(raw.clone())
+        None
     }
 
     fn encode_control_state_payload(suite_id: &str, payload: Value) -> Result<Value, String> {
@@ -245,6 +245,42 @@ impl ThreadStore {
         let next = mutate(current)?;
         self.save_control_state_payload(thread_id, suite_id, next.clone())
             .await?;
+        Ok(next)
+    }
+
+    pub async fn load_typed_control_state<T: DeserializeOwned>(
+        &self,
+        thread_id: &str,
+        suite_id: &str,
+    ) -> Result<Option<T>, String> {
+        let Some(payload) = self.load_control_state_payload(thread_id, suite_id).await? else {
+            return Ok(None);
+        };
+        let parsed = serde_json::from_value::<T>(payload)
+            .map_err(|e| format!("failed to parse typed control state payload: {e}"))?;
+        Ok(Some(parsed))
+    }
+
+    pub async fn save_typed_control_state<T: Serialize>(
+        &self,
+        thread_id: &str,
+        suite_id: &str,
+        state: &T,
+    ) -> Result<(), String> {
+        let payload = serde_json::to_value(state)
+            .map_err(|e| format!("failed to serialize typed control state payload: {e}"))?;
+        self.save_control_state_payload(thread_id, suite_id, payload).await
+    }
+
+    pub async fn mutate_typed_control_state<T: Serialize + DeserializeOwned>(
+        &self,
+        thread_id: &str,
+        suite_id: &str,
+        mutate: impl FnOnce(Option<T>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let current = self.load_typed_control_state::<T>(thread_id, suite_id).await?;
+        let next = mutate(current)?;
+        self.save_typed_control_state(thread_id, suite_id, &next).await?;
         Ok(next)
     }
 

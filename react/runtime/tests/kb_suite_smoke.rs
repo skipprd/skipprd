@@ -109,7 +109,7 @@ async fn agent_default_policy_accepts_typed_final() {
         vector: None,
         thread_store: None,
         exec_ctx: None,
-        runtime: None,
+        resolved_config: None,
     };
     let reg = ToolRegistry::new();
     let out = Agent::run_until_block(
@@ -171,7 +171,7 @@ async fn agent_does_not_special_case_ask_user_tool_name() {
         vector: None,
         thread_store: None,
         exec_ctx: None,
-        runtime: None,
+        resolved_config: None,
     };
     let mut reg = ToolRegistry::new();
     reg.register(AskUserTool);
@@ -232,7 +232,7 @@ async fn agent_interrupts_only_when_policy_requests_it() {
         vector: None,
         thread_store: None,
         exec_ctx: None,
-        runtime: None,
+        resolved_config: None,
     };
     let mut reg = ToolRegistry::new();
     reg.register(AskUserTool);

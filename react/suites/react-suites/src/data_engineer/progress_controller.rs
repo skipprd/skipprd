@@ -2017,7 +2017,11 @@ mod tests {
             thread_id: tid.to_string(),
             ..react_core::session::ThreadState::default()
         };
-        st.control_state = Some(serde_json::json!({"schema_version":"bad"}));
+        st.control_state = Some(serde_json::json!({
+            "schema_version": react_core::session::CONTROL_STATE_ENVELOPE_SCHEMA_VERSION,
+            "suite_id": "data_engineer",
+            "payload": {"schema_version":"bad"}
+        }));
         store
             .put_thread_state(tid, &st)
             .await

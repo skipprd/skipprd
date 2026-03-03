@@ -164,7 +164,7 @@ jobs:
         run: bash scripts/check-openapi-drift-core.sh && bash scripts/check-openapi-drift-suite-data-engineer.sh
 
       - name: Enforce control-state log-read guardrails
-        run: python3 scripts/check-control-state-log-reads.py
+        run: cargo test -p react-suites data_engineer::tests::control_state_thread_log_read_guardrails_are_enforced_in_rust_tests
 
       - name: Test react crate
         run: cargo test -p react --lib --tests

@@ -147,7 +147,7 @@ pub struct AuthoringCompleteReasonDetail {
 }
 
 pub fn to_value<T: Serialize>(detail: &T) -> Value {
-    serde_json::to_value(detail).unwrap_or(Value::Null)
+    react_core::workflow::reason_detail_value(detail)
 }
 
 pub fn plan_actionable_auto_approved(

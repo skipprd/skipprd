@@ -68,7 +68,7 @@ LIMIT 1
         vector: None,
         thread_store: None,
         exec_ctx: None,
-        runtime: None,
+        resolved_config: None,
     };
     let res = tool.call(args, &actx).await.expect("tool call");
     assert!(

@@ -1,4 +1,6 @@
-use react_core::control_flow::{GuardBlockKind, PhaseReasonCode};
+use react_core::control_flow::PhaseReasonCode;
+#[cfg(test)]
+use react_core::control_flow::GuardBlockKind;
 use react_core::session::{Observation, ThreadStep, ThreadStore};
 use serde_json::Value;
 
@@ -9,26 +11,7 @@ use crate::data_engineer::control_flow::{
 use crate::data_engineer::progress_controller::ExecutionState;
 use crate::data_engineer::state_manager;
 
-#[derive(Clone, Debug)]
-pub enum PhaseDirective {
-    Transition {
-        to: Phase,
-        intent: TransitionIntent,
-        reason_code: Option<PhaseReasonCode>,
-        reason_detail: Option<Value>,
-    },
-    Annotate {
-        phase: Phase,
-        reason_code: PhaseReasonCode,
-        reason_detail: Option<Value>,
-    },
-    Block {
-        phase: Phase,
-        kind: GuardBlockKind,
-        reason: String,
-    },
-    Stay,
-}
+pub type PhaseDirective = react_core::workflow::PhaseDirective<Phase, PhaseReasonCode>;
 
 pub async fn dispatch_phase_transition(
     store: &ThreadStore,
@@ -70,12 +53,12 @@ pub async fn dispatch_phase_transition(
                 phase_state.replan_backtracks = 0;
             }
             TransitionIntent::Loopback => {
-                if is_backtrack {
-                    phase_state.replan_backtracks = phase_state
-                        .replan_backtracks
-                        .saturating_add(1)
-                        .min(replan_backtrack_counter_cap());
-                }
+                phase_state.replan_backtracks = react_core::workflow::next_replan_backtracks(
+                    phase_state.replan_backtracks,
+                    intent,
+                    is_backtrack,
+                    replan_backtrack_counter_cap(),
+                );
             }
         }
     }

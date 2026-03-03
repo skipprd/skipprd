@@ -5,14 +5,7 @@ use crate::data_engineer::progress_controller::{
     ExecutionMode, ExecutionState, FailedModelRef, PendingLoopbackIntent, RepairLadderStep,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PreTurnDirective {
-    Proceed,
-    FailFast {
-        kind: GuardBlockKind,
-        reason: String,
-    },
-}
+pub type PreTurnDirective = react_core::workflow::PreTurnDirective;
 
 pub fn evaluate_pre_turn_directive(
     execution_state: &ExecutionState,
@@ -21,28 +14,33 @@ pub fn evaluate_pre_turn_directive(
 ) -> PreTurnDirective {
     let phase_state = execution_state.phase_state();
     let repair_state = execution_state.repair_state();
-    if repair_state.stall_count >= repair_state.max_stall_count
-        && matches!(phase_state.mode, ExecutionMode::Mutate)
-    {
-        return PreTurnDirective::FailFast {
-            kind: GuardBlockKind::AuthoringToValidate,
-            reason: format!(
-                "failed to make progress for this thread: execution_state stall_count={} reached max_stall_count={} in mode=mutate",
-                repair_state.stall_count, repair_state.max_stall_count
-            ),
-        };
-    }
-
-    if phase_state.replan_backtracks >= max_replan_backtracks {
-        return PreTurnDirective::FailFast {
-            kind: GuardBlockKind::BatchLocked,
-            reason: format!(
-                "failed to make progress for this thread: observed {} validate/review loopback(s) to plan/author in active track '{}' since the last successful dbt_validate (limit {}). Stopping this thread. Please inspect the latest validate/review errors and apply a targeted fix before rerunning.",
-                phase_state.replan_backtracks,
-                phase.as_str(),
-                max_replan_backtracks
-            ),
-        };
+    let core_snapshot = react_core::workflow::PreTurnStateSnapshot {
+        mode_is_mutate: matches!(phase_state.mode, ExecutionMode::Mutate),
+        stall_count: repair_state.stall_count,
+        max_stall_count: repair_state.max_stall_count,
+        replan_backtracks: phase_state.replan_backtracks,
+        hard_mutation_repair_mode: false,
+        ladder_stop: false,
+        target_path: None,
+        attempt_count: 0,
+    };
+    let core_eval = react_core::workflow::evaluate_pre_turn_directive(
+        &core_snapshot,
+        max_replan_backtracks,
+    );
+    if let PreTurnDirective::FailFast { kind, reason } = core_eval {
+        if kind == GuardBlockKind::BatchLocked {
+            return PreTurnDirective::FailFast {
+                kind,
+                reason: format!(
+                    "failed to make progress for this thread: observed {} validate/review loopback(s) to plan/author in active track '{}' since the last successful dbt_validate (limit {}). Stopping this thread. Please inspect the latest validate/review errors and apply a targeted fix before rerunning.",
+                    phase_state.replan_backtracks,
+                    phase.as_str(),
+                    max_replan_backtracks
+                ),
+            };
+        }
+        return PreTurnDirective::FailFast { kind, reason };
     }
 
     let fallback_failed_models = execution_state
@@ -52,26 +50,18 @@ pub fn evaluate_pre_turn_directive(
         .unwrap_or(&[]);
     let single_target_repair_path =
         derive_single_target_repair_path(execution_state, fallback_failed_models);
-    if repair_state.hard_mutation_repair_mode
-        && single_target_repair_path.is_some()
-        && repair_state.ladder_step == RepairLadderStep::Stop
-    {
-        let target = single_target_repair_path
-            .as_deref()
-            .unwrap_or("(unknown target)")
-            .trim()
-            .to_string();
-        return PreTurnDirective::FailFast {
-            kind: GuardBlockKind::AuthoringToValidate,
-            reason: format!(
-                "failed to make progress for this thread: deterministic repair ladder reached stop for '{}' after {} attempt(s). Apply a manual fix to the target file and rerun the thread.",
-                target,
-                repair_state.attempt_count
-            ),
-        };
-    }
-
-    PreTurnDirective::Proceed
+    let core_repair_snapshot = react_core::workflow::PreTurnStateSnapshot {
+        mode_is_mutate: false,
+        stall_count: 0,
+        max_stall_count: 1,
+        replan_backtracks: 0,
+        hard_mutation_repair_mode: repair_state.hard_mutation_repair_mode
+            && single_target_repair_path.is_some(),
+        ladder_stop: repair_state.ladder_step == RepairLadderStep::Stop,
+        target_path: single_target_repair_path.clone(),
+        attempt_count: repair_state.attempt_count,
+    };
+    react_core::workflow::evaluate_pre_turn_directive(&core_repair_snapshot, usize::MAX)
 }
 
 pub fn patch_plan_intent_blocks_fast_forward(

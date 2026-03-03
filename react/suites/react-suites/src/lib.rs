@@ -12,6 +12,7 @@ pub mod kb;
 pub mod preflight;
 pub mod prompts;
 pub mod registry;
+pub mod suite_template;
 pub mod suite;
 pub mod util;
 
