@@ -95,10 +95,12 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                     Phase::CleansePlan,
                     control_flow::TransitionIntent::Loopback,
                     Some(PhaseReasonCode::PlanMissing),
-                    Some(serde_json::json!({
-                        "plan_kind": "cleanse",
-                        "note": "authoring entered without an active cleanse plan; routing back to planning",
-                    })),
+                    Some(crate::data_engineer::phase_reason_detail::to_value(
+                        &crate::data_engineer::phase_reason_detail::PlanMissingDetail {
+                            plan_kind: "cleanse".to_string(),
+                            note: "authoring entered without an active cleanse plan; routing back to planning".to_string(),
+                        },
+                    )),
                 )
                 .await?;
                 return Ok(PhaseExecutorOutcome::Continue);
@@ -131,11 +133,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 Phase::CleansePlan,
                 control_flow::TransitionIntent::Loopback,
                 Some(PhaseReasonCode::PlanSemanticInvalid),
-                Some(serde_json::json!({
-                    "plan_key": plan_key,
-                    "reason": reason,
-                    "audit_acceptance": Self::churn_audit_acceptance_criteria(),
-                })),
+                Some(crate::data_engineer::phase_reason_detail::to_value(
+                    &crate::data_engineer::phase_reason_detail::PlanSemanticInvalidDetail {
+                        plan_key,
+                        reason,
+                        audit_acceptance: Self::churn_audit_acceptance_criteria(),
+                    },
+                )),
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -209,7 +213,11 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
             Phase::CleansePlan,
             control_flow::TransitionIntent::Loopback,
             Some(PhaseReasonCode::PlanNotApproved),
-            Some(serde_json::json!({ "status": format!("{:?}", plan.status) })),
+            Some(crate::data_engineer::phase_reason_detail::to_value(
+                &crate::data_engineer::phase_reason_detail::PlanNotApprovedDetail {
+                    status: format!("{:?}", plan.status),
+                },
+            )),
         )
         .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -380,7 +388,11 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         Phase::CleanseValidate,
                         control_flow::TransitionIntent::Forward,
                         Some(PhaseReasonCode::WorkGroupValidate),
-                        Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                        Some(crate::data_engineer::phase_reason_detail::to_value(
+                            &crate::data_engineer::phase_reason_detail::PlanKeyDetail {
+                                plan_key: plan.plan_key.clone(),
+                            },
+                        )),
                     )
                     .await?;
                     return Ok(PhaseExecutorOutcome::Continue);
@@ -428,7 +440,11 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         Phase::CleanseValidate,
                         control_flow::TransitionIntent::Forward,
                         Some(PhaseReasonCode::PlanTasksDone),
-                        Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                        Some(crate::data_engineer::phase_reason_detail::to_value(
+                            &crate::data_engineer::phase_reason_detail::PlanKeyDetail {
+                                plan_key: plan.plan_key.clone(),
+                            },
+                        )),
                     )
                     .await?;
                     return Ok(PhaseExecutorOutcome::Continue);
@@ -449,7 +465,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         Phase::CleansePlan,
                         control_flow::TransitionIntent::Loopback,
                         Some(PhaseReasonCode::PlanSemanticInvalid),
-                        Some(serde_json::json!({ "plan_key": plan.plan_key, "reason": reason })),
+                        Some(crate::data_engineer::phase_reason_detail::to_value(
+                            &crate::data_engineer::phase_reason_detail::PlanSemanticInvalidDetail {
+                                plan_key: plan.plan_key.clone(),
+                                reason,
+                                audit_acceptance: Self::churn_audit_acceptance_criteria(),
+                            },
+                        )),
                     )
                     .await?;
                     return Ok(PhaseExecutorOutcome::Continue);
@@ -482,10 +504,12 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                     Phase::ModelPlan,
                     control_flow::TransitionIntent::Loopback,
                     Some(PhaseReasonCode::PlanMissing),
-                    Some(serde_json::json!({
-                        "plan_kind": "model",
-                        "note": "authoring entered without an active model plan; routing back to planning",
-                    })),
+                    Some(crate::data_engineer::phase_reason_detail::to_value(
+                        &crate::data_engineer::phase_reason_detail::PlanMissingDetail {
+                            plan_kind: "model".to_string(),
+                            note: "authoring entered without an active model plan; routing back to planning".to_string(),
+                        },
+                    )),
                 )
                 .await?;
                 return Ok(PhaseExecutorOutcome::Continue);
@@ -513,11 +537,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 Phase::ModelPlan,
                 control_flow::TransitionIntent::Loopback,
                 Some(PhaseReasonCode::PlanSemanticInvalid),
-                Some(serde_json::json!({
-                    "plan_key": plan_key,
-                    "reason": reason,
-                    "audit_acceptance": Self::churn_audit_acceptance_criteria(),
-                })),
+                Some(crate::data_engineer::phase_reason_detail::to_value(
+                    &crate::data_engineer::phase_reason_detail::PlanSemanticInvalidDetail {
+                        plan_key,
+                        reason,
+                        audit_acceptance: Self::churn_audit_acceptance_criteria(),
+                    },
+                )),
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -589,7 +615,11 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
             Phase::ModelPlan,
             control_flow::TransitionIntent::Loopback,
             Some(PhaseReasonCode::PlanNotApproved),
-            Some(serde_json::json!({ "status": format!("{:?}", plan.status) })),
+            Some(crate::data_engineer::phase_reason_detail::to_value(
+                &crate::data_engineer::phase_reason_detail::PlanNotApprovedDetail {
+                    status: format!("{:?}", plan.status),
+                },
+            )),
         )
     .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -831,7 +861,11 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         Phase::ModelValidate,
                         control_flow::TransitionIntent::Forward,
                         Some(PhaseReasonCode::WorkGroupValidate),
-                        Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                        Some(crate::data_engineer::phase_reason_detail::to_value(
+                            &crate::data_engineer::phase_reason_detail::PlanKeyDetail {
+                                plan_key: plan.plan_key.clone(),
+                            },
+                        )),
                     )
                     .await?;
                     return Ok(PhaseExecutorOutcome::Continue);
@@ -875,7 +909,11 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         Phase::ModelValidate,
                         control_flow::TransitionIntent::Forward,
                         Some(PhaseReasonCode::PlanTasksDone),
-                        Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                        Some(crate::data_engineer::phase_reason_detail::to_value(
+                            &crate::data_engineer::phase_reason_detail::PlanKeyDetail {
+                                plan_key: plan.plan_key.clone(),
+                            },
+                        )),
                     )
                     .await?;
                     return Ok(PhaseExecutorOutcome::Continue);
@@ -896,7 +934,13 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                     Phase::ModelPlan,
                     control_flow::TransitionIntent::Loopback,
                     Some(PhaseReasonCode::PlanSemanticInvalid),
-                    Some(serde_json::json!({ "plan_key": plan.plan_key, "reason": reason })),
+                    Some(crate::data_engineer::phase_reason_detail::to_value(
+                        &crate::data_engineer::phase_reason_detail::PlanSemanticInvalidDetail {
+                            plan_key: plan.plan_key.clone(),
+                            reason,
+                            audit_acceptance: Self::churn_audit_acceptance_criteria(),
+                        },
+                    )),
                 )
                 .await?;
                     return Ok(PhaseExecutorOutcome::Continue);

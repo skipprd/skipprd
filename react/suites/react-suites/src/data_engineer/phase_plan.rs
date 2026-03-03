@@ -75,12 +75,14 @@ if is_cleanse {
                     phase,
                     control_flow::TransitionIntent::Annotation,
                     Some(PhaseReasonCode::PlanInvalidEmpty),
-                    Some(serde_json::json!({
-                        "plan_key": plan_key,
-                        "status": format!("{:?}", p.status),
-                        "tasks_len": p.tasks.len(),
-                        "batches_len": p.batches.len(),
-                    })),
+                    Some(crate::data_engineer::phase_reason_detail::to_value(
+                        &crate::data_engineer::phase_reason_detail::PlanInvalidEmptyDetail {
+                            plan_key,
+                            status: format!("{:?}", p.status),
+                            tasks_len: p.tasks.len(),
+                            batches_len: p.batches.len(),
+                        },
+                    )),
                 )
                 .await?;
                 return Ok(PhaseExecutorOutcome::Continue);
@@ -138,12 +140,14 @@ if is_cleanse {
                     phase,
                     control_flow::TransitionIntent::Annotation,
                     Some(PhaseReasonCode::PlanInvalidEmpty),
-                    Some(serde_json::json!({
-                        "plan_key": plan_key,
-                        "status": format!("{:?}", p.status),
-                        "tasks_len": p.tasks.len(),
-                        "batches_len": p.batches.len(),
-                    })),
+                    Some(crate::data_engineer::phase_reason_detail::to_value(
+                        &crate::data_engineer::phase_reason_detail::PlanInvalidEmptyDetail {
+                            plan_key,
+                            status: format!("{:?}", p.status),
+                            tasks_len: p.tasks.len(),
+                            batches_len: p.batches.len(),
+                        },
+                    )),
                 )
                 .await?;
                 return Ok(PhaseExecutorOutcome::Continue);
@@ -191,11 +195,13 @@ if is_cleanse {
                     phase,
                     control_flow::TransitionIntent::Annotation,
                     Some(PhaseReasonCode::PlanInvalidEmpty),
-                    Some(serde_json::json!({
-                        "plan_key": plan_key,
-                        "reason": "draft_cleanse_plan_not_raw_grounded",
-                        "removed_non_raw": removed_non_raw,
-                    })),
+                    Some(crate::data_engineer::phase_reason_detail::to_value(
+                        &crate::data_engineer::phase_reason_detail::CleanseDraftUngroundedDetail {
+                            plan_key,
+                            reason: "draft_cleanse_plan_not_raw_grounded".to_string(),
+                            removed_non_raw,
+                        },
+                    )),
                 )
                 .await;
                 return Ok(PhaseExecutorOutcome::Continue);

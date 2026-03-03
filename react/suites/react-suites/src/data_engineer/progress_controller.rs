@@ -619,8 +619,13 @@ impl ExecutionState {
     }
 
     pub fn apply_validate_success(&mut self, tier: ExecutionTier) {
-        self.current_tier = tier;
-        self.mode = ExecutionMode::Done;
+        let mut phase = self.phase_state();
+        let mut repair = self.repair_state();
+        let mut publish = self.publish_state();
+        let mut probe: ProbeState;
+
+        phase.current_tier = tier;
+        phase.mode = ExecutionMode::Done;
         self.last_validate = Some(LastValidateState {
             ts: Some(chrono::Utc::now().to_rfc3339()),
             ok: Some(true),
@@ -628,30 +633,36 @@ impl ExecutionState {
             run_ok: Some(true),
             ..LastValidateState::default()
         });
-        self.last_validate_ok = Some(true);
-        self.last_failure_signature = None;
-        self.repair_backlog.clear();
-        self.hard_mutation_repair_mode = false;
-        self.repair_type = RepairType::Unknown;
-        self.single_target_repair_path = None;
-        self.target_path = None;
-        self.ladder_step = RepairLadderStep::PatchTarget;
-        self.attempt_count = 0;
-        self.repair_started_mutation_epoch = None;
-        self.consecutive_noop_patches = 0;
-        self.stall_count = 0;
-        self.last_progress_delta = Some(ProgressDelta {
+        repair.last_validate_ok = Some(true);
+        repair.last_failure_signature = None;
+        repair.repair_backlog.clear();
+        repair.hard_mutation_repair_mode = false;
+        repair.repair_type = RepairType::Unknown;
+        repair.single_target_repair_path = None;
+        repair.target_path = None;
+        repair.ladder_step = RepairLadderStep::PatchTarget;
+        repair.attempt_count = 0;
+        repair.repair_started_mutation_epoch = None;
+        repair.consecutive_noop_patches = 0;
+        repair.stall_count = 0;
+        repair.last_progress_delta = Some(ProgressDelta {
             progress_made: true,
             ..ProgressDelta::default()
         });
-        self.last_error_class = None;
-        self.last_failed_models.clear();
-        self.last_error_brief = None;
+        repair.last_error_class = None;
+        repair.last_failed_models.clear();
+        repair.last_error_brief = None;
         self.subjective_retry = None;
-        self.pending_loopback_intent = None;
-        self.clear_publish_approval();
-        self.reset_publish_retries();
-        self.reset_probe_state_on_validate(false);
+        repair.pending_loopback_intent = None;
+        publish.publish_approval = None;
+        publish.publish_retries.clear();
+        probe = ProbeState::default();
+        probe.required = false;
+
+        self.set_phase_state(phase);
+        self.set_repair_state(repair);
+        self.set_publish_state(publish);
+        self.set_probe_state_snapshot(probe);
     }
 
     pub fn phase_state(&self) -> PhaseState {
@@ -839,10 +850,15 @@ impl ExecutionState {
         backlog: Vec<RepairTarget>,
         brief: Option<String>,
     ) {
-        let prev_count = self.repair_backlog.len() as i64;
-        let prev_signature = self.last_failure_signature.clone();
-        self.current_tier = tier;
-        self.mode = ExecutionMode::Mutate;
+        let mut phase = self.phase_state();
+        let mut repair = self.repair_state();
+        let mut publish = self.publish_state();
+        let mut probe: ProbeState;
+
+        let prev_count = repair.repair_backlog.len() as i64;
+        let prev_signature = repair.last_failure_signature.clone();
+        phase.current_tier = tier;
+        phase.mode = ExecutionMode::Mutate;
         self.last_validate = Some(LastValidateState {
             ts: Some(chrono::Utc::now().to_rfc3339()),
             ok: Some(false),
@@ -862,29 +878,29 @@ impl ExecutionState {
             failure_class: Some(failure_class),
             ..LastValidateState::default()
         });
-        self.last_validate_ok = Some(false);
-        self.last_failure_signature = Some(failure_signature.clone());
-        self.repair_backlog = backlog;
-        self.hard_mutation_repair_mode = true;
-        self.repair_type = match failure_class {
+        repair.last_validate_ok = Some(false);
+        repair.last_failure_signature = Some(failure_signature.clone());
+        repair.repair_backlog = backlog;
+        repair.hard_mutation_repair_mode = true;
+        repair.repair_type = match failure_class {
             FailureClass::SchemaOrPrecheck => RepairType::Schema,
             FailureClass::SqlOrRuntime | FailureClass::WarehouseConfig | FailureClass::Unknown => {
                 RepairType::SqlTarget
             }
         };
-        self.single_target_repair_path = self
+        repair.single_target_repair_path = repair
             .repair_backlog
             .iter()
             .find_map(|t| t.path.as_ref().map(|s| s.trim().to_string()))
             .filter(|s| !s.is_empty());
-        self.target_path = self.single_target_repair_path.clone();
-        self.ladder_step = RepairLadderStep::PatchTarget;
-        self.attempt_count = 0;
-        self.repair_started_mutation_epoch = Some(self.mutation_epoch);
-        self.consecutive_noop_patches = 0;
-        self.last_error_brief = brief;
-        self.last_error_class = Some(failure_class);
-        self.last_failed_models = self
+        repair.target_path = repair.single_target_repair_path.clone();
+        repair.ladder_step = RepairLadderStep::PatchTarget;
+        repair.attempt_count = 0;
+        repair.repair_started_mutation_epoch = Some(repair.mutation_epoch);
+        repair.consecutive_noop_patches = 0;
+        repair.last_error_brief = brief;
+        repair.last_error_class = Some(failure_class);
+        repair.last_failed_models = repair
             .repair_backlog
             .iter()
             .map(|t| FailedModelRef {
@@ -892,66 +908,77 @@ impl ExecutionState {
                 file: t.path.clone().unwrap_or_default(),
             })
             .collect();
-        self.clear_publish_approval();
-        self.reset_probe_state_on_validate(true);
+        publish.publish_approval = None;
+        probe = ProbeState::default();
+        probe.required = true;
         let compile_ok = self
             .last_validate
             .as_ref()
             .and_then(|v| v.compile_ok)
             .unwrap_or(false);
-        self.probe_state.required =
-            matches!(failure_class, FailureClass::SqlOrRuntime) && compile_ok;
+        probe.required = matches!(failure_class, FailureClass::SqlOrRuntime) && compile_ok;
 
-        let failed_target_count_delta = self.repair_backlog.len() as i64 - prev_count;
+        let failed_target_count_delta = repair.repair_backlog.len() as i64 - prev_count;
         let failure_signature_changed = prev_signature != Some(failure_signature);
         let progress_made = failed_target_count_delta < 0;
         if progress_made {
-            self.stall_count = 0;
+            repair.stall_count = 0;
         } else {
-            self.stall_count = self.stall_count.saturating_add(1);
+            repair.stall_count = repair.stall_count.saturating_add(1);
         }
-        self.last_progress_delta = Some(ProgressDelta {
+        repair.last_progress_delta = Some(ProgressDelta {
             target_hash_changed: false,
             failed_target_count_delta,
             failure_signature_changed,
             checklist_completed_delta: 0,
             progress_made,
         });
+
+        self.set_phase_state(phase);
+        self.set_repair_state(repair);
+        self.set_publish_state(publish);
+        self.set_probe_state_snapshot(probe);
     }
 
     pub fn note_patch_attempt(&mut self, ok: bool, mutated: bool) {
-        self.attempt_count = self.attempt_count.saturating_add(1);
+        let mut repair = self.repair_state();
+        let mut probe = self.probe_state_snapshot();
+        repair.attempt_count = repair.attempt_count.saturating_add(1);
         if ok && mutated {
-            self.consecutive_noop_patches = 0;
-            self.ladder_step = RepairLadderStep::PatchTarget;
-            self.stall_count = 0;
-            self.last_progress_delta = Some(ProgressDelta {
+            repair.consecutive_noop_patches = 0;
+            repair.ladder_step = RepairLadderStep::PatchTarget;
+            repair.stall_count = 0;
+            repair.last_progress_delta = Some(ProgressDelta {
                 target_hash_changed: true,
                 progress_made: true,
                 ..ProgressDelta::default()
             });
             // A successful mutation closes the current probe requirement cycle.
-            self.probe_state.required = false;
-            self.probe_state.repeated_signature_streak = 0;
+            probe.required = false;
+            probe.repeated_signature_streak = 0;
+            self.set_repair_state(repair);
+            self.set_probe_state_snapshot(probe);
             return;
         }
-        self.consecutive_noop_patches = self.consecutive_noop_patches.saturating_add(1);
-        self.ladder_step = if self.attempt_count >= 2 {
+        repair.consecutive_noop_patches = repair.consecutive_noop_patches.saturating_add(1);
+        repair.ladder_step = if repair.attempt_count >= 2 {
             RepairLadderStep::Stop
         } else {
             RepairLadderStep::ReplaceFile
         };
-        self.stall_count = self.stall_count.saturating_add(1);
-        self.last_progress_delta = Some(ProgressDelta {
+        repair.stall_count = repair.stall_count.saturating_add(1);
+        repair.last_progress_delta = Some(ProgressDelta {
             target_hash_changed: false,
             progress_made: false,
             ..ProgressDelta::default()
         });
+        self.set_repair_state(repair);
     }
 
     pub fn reset_probe_state_on_validate(&mut self, is_failure: bool) {
-        self.probe_state = ProbeState::default();
-        self.probe_state.required = is_failure;
+        let mut probe = ProbeState::default();
+        probe.required = is_failure;
+        self.set_probe_state_snapshot(probe);
     }
 
     pub fn note_probe_attempt(
@@ -960,32 +987,28 @@ impl ExecutionState {
         ok: bool,
         signature: ProbeSignature,
     ) -> ProbeOutcomeKind {
-        self.probe_state.attempts_total = self.probe_state.attempts_total.saturating_add(1);
+        let mut probe = self.probe_state_snapshot();
+        probe.attempts_total = probe.attempts_total.saturating_add(1);
         let meaningful_sql = is_meaningful_probe_sql(sql);
         let outcome = if !ok {
-            self.probe_state.failed_attempts = self.probe_state.failed_attempts.saturating_add(1);
-            self.probe_state.repeated_signature_streak =
-                self.probe_state.repeated_signature_streak.saturating_add(1);
+            probe.failed_attempts = probe.failed_attempts.saturating_add(1);
+            probe.repeated_signature_streak = probe.repeated_signature_streak.saturating_add(1);
             ProbeOutcomeKind::Failed
         } else if !meaningful_sql {
-            self.probe_state.non_meaningful_attempts =
-                self.probe_state.non_meaningful_attempts.saturating_add(1);
-            self.probe_state.repeated_signature_streak =
-                self.probe_state.repeated_signature_streak.saturating_add(1);
+            probe.non_meaningful_attempts = probe.non_meaningful_attempts.saturating_add(1);
+            probe.repeated_signature_streak = probe.repeated_signature_streak.saturating_add(1);
             ProbeOutcomeKind::NonMeaningful
-        } else if self.probe_state.last_signature.as_ref() == Some(&signature) {
-            self.probe_state.meaningful_attempts =
-                self.probe_state.meaningful_attempts.saturating_add(1);
-            self.probe_state.repeated_signature_streak =
-                self.probe_state.repeated_signature_streak.saturating_add(1);
+        } else if probe.last_signature.as_ref() == Some(&signature) {
+            probe.meaningful_attempts = probe.meaningful_attempts.saturating_add(1);
+            probe.repeated_signature_streak = probe.repeated_signature_streak.saturating_add(1);
             ProbeOutcomeKind::MeaningfulSameSignal
         } else {
-            self.probe_state.meaningful_attempts =
-                self.probe_state.meaningful_attempts.saturating_add(1);
-            self.probe_state.repeated_signature_streak = 0;
+            probe.meaningful_attempts = probe.meaningful_attempts.saturating_add(1);
+            probe.repeated_signature_streak = 0;
             ProbeOutcomeKind::MeaningfulNewSignal
         };
-        self.probe_state.last_signature = Some(signature);
+        probe.last_signature = Some(signature);
+        self.set_probe_state_snapshot(probe);
         outcome
     }
 
@@ -1036,33 +1059,43 @@ impl ExecutionState {
         entry_plan_key: Option<String>,
         entry_plan_digest: Option<String>,
     ) {
-        self.pending_loopback_intent = Some(PendingLoopbackIntent::PatchPlan {
+        let mut repair = self.repair_state();
+        repair.pending_loopback_intent = Some(PendingLoopbackIntent::PatchPlan {
             phase,
             entry_plan_key,
             entry_plan_digest,
         });
+        self.set_repair_state(repair);
     }
 
     pub fn set_pending_patch_impl_intent(&mut self, phase: Phase) {
-        self.pending_loopback_intent = Some(PendingLoopbackIntent::PatchImpl {
+        let mut repair = self.repair_state();
+        repair.pending_loopback_intent = Some(PendingLoopbackIntent::PatchImpl {
             phase,
-            entry_mutation_epoch: self.mutation_epoch,
+            entry_mutation_epoch: repair.mutation_epoch,
         });
+        self.set_repair_state(repair);
     }
 
     pub fn clear_pending_loopback_intent(&mut self) {
-        self.pending_loopback_intent = None;
+        let mut repair = self.repair_state();
+        repair.pending_loopback_intent = None;
+        self.set_repair_state(repair);
     }
 
     pub fn set_publish_approval(&mut self, decision: PublishApprovalDecision) {
-        self.publish_approval = Some(PublishApprovalState {
+        let mut publish = self.publish_state();
+        publish.publish_approval = Some(PublishApprovalState {
             decision,
             ts: chrono::Utc::now().to_rfc3339(),
         });
+        self.set_publish_state(publish);
     }
 
     pub fn clear_publish_approval(&mut self) {
-        self.publish_approval = None;
+        let mut publish = self.publish_state();
+        publish.publish_approval = None;
+        self.set_publish_state(publish);
     }
 
     pub fn is_publish_approved(&self) -> bool {
@@ -1074,30 +1107,44 @@ impl ExecutionState {
 
     pub fn bump_publish_retry(&mut self, kind: PublishRetryKind, cap: usize) -> usize {
         let capped = cap.max(1);
-        if let Some(existing) = self.publish_retries.iter_mut().find(|r| r.kind == kind) {
+        let mut publish = self.publish_state();
+        if let Some(existing) = publish.publish_retries.iter_mut().find(|r| r.kind == kind) {
             existing.count = existing.count.saturating_add(1).min(capped);
-            return existing.count;
+            let count = existing.count;
+            self.set_publish_state(publish);
+            return count;
         }
-        self.publish_retries.push(PublishRetryState { kind, count: 1 });
+        publish.publish_retries.push(PublishRetryState { kind, count: 1 });
+        self.set_publish_state(publish);
         1
     }
 
     pub fn reset_publish_retry(&mut self, kind: PublishRetryKind) {
-        self.publish_retries.retain(|r| r.kind != kind);
+        let mut publish = self.publish_state();
+        publish.publish_retries.retain(|r| r.kind != kind);
+        self.set_publish_state(publish);
     }
 
     pub fn reset_publish_retries(&mut self) {
-        self.publish_retries.clear();
+        let mut publish = self.publish_state();
+        publish.publish_retries.clear();
+        self.set_publish_state(publish);
     }
 
     pub fn enter_validate_mode(&mut self, tier: ExecutionTier) {
-        self.current_tier = tier;
-        self.mode = ExecutionMode::Validate;
+        let mut phase = self.phase_state();
+        phase.current_tier = tier;
+        phase.mode = ExecutionMode::Validate;
+        self.set_phase_state(phase);
     }
 
     pub fn mark_failed(&mut self, brief: impl Into<String>) {
-        self.mode = ExecutionMode::Failed;
-        self.last_error_brief = Some(brief.into());
+        let mut phase = self.phase_state();
+        let mut repair = self.repair_state();
+        phase.mode = ExecutionMode::Failed;
+        repair.last_error_brief = Some(brief.into());
+        self.set_phase_state(phase);
+        self.set_repair_state(repair);
     }
 
     pub async fn load(thread_store: &ThreadStore, thread_id: &str) -> Option<Self> {
@@ -1118,15 +1165,19 @@ impl ExecutionState {
     }
 
     pub fn set_pending_publish_plan(&mut self, plan_sha256: String) {
-        self.publish_plan.pending_plan_sha256 = Some(plan_sha256);
-        self.publish_plan.pending_set_ts = Some(chrono::Utc::now().to_rfc3339());
+        let mut publish = self.publish_state();
+        publish.publish_plan.pending_plan_sha256 = Some(plan_sha256);
+        publish.publish_plan.pending_set_ts = Some(chrono::Utc::now().to_rfc3339());
+        self.set_publish_state(publish);
     }
 
     pub fn mark_publish_complete(&mut self, plan_sha256: String) {
-        self.publish_plan.last_published_plan_sha256 = Some(plan_sha256);
-        self.publish_plan.published_ts = Some(chrono::Utc::now().to_rfc3339());
-        self.publish_plan.pending_plan_sha256 = None;
-        self.publish_plan.pending_set_ts = None;
+        let mut publish = self.publish_state();
+        publish.publish_plan.last_published_plan_sha256 = Some(plan_sha256);
+        publish.publish_plan.published_ts = Some(chrono::Utc::now().to_rfc3339());
+        publish.publish_plan.pending_plan_sha256 = None;
+        publish.publish_plan.pending_set_ts = None;
+        self.set_publish_state(publish);
     }
 
     pub fn set_artifact_focus(
@@ -1151,13 +1202,15 @@ impl ExecutionState {
         affected_paths: Vec<String>,
         select_terms: Vec<String>,
     ) {
-        self.mutation_epoch = self.mutation_epoch.saturating_add(1);
+        let mut repair = self.repair_state();
+        repair.mutation_epoch = repair.mutation_epoch.saturating_add(1);
         self.last_mutation_summary = Some(LastMutationSummary {
             op: Some(op.into()),
             affected_paths,
             select_terms,
             ts: Some(chrono::Utc::now().to_rfc3339()),
         });
+        self.set_repair_state(repair);
     }
 
     pub fn apply_event(&mut self, event: DataEngineerEvent) {
@@ -1217,15 +1270,17 @@ impl ExecutionState {
                 self.apply_validate_failure(tier, failure_class, sig, backlog, Some(brief));
             }
             DataEngineerEvent::BatchAuthoringRecovered => {
-                self.hard_mutation_repair_mode = false;
-                self.repair_type = RepairType::Unknown;
-                self.single_target_repair_path = None;
-                self.target_path = None;
-                self.repair_started_mutation_epoch = None;
-                self.last_error_brief = None;
-                self.last_error_class = None;
-                self.last_failed_models.clear();
-                self.pending_loopback_intent = None;
+                let mut repair = self.repair_state();
+                repair.hard_mutation_repair_mode = false;
+                repair.repair_type = RepairType::Unknown;
+                repair.single_target_repair_path = None;
+                repair.target_path = None;
+                repair.repair_started_mutation_epoch = None;
+                repair.last_error_brief = None;
+                repair.last_error_class = None;
+                repair.last_failed_models.clear();
+                repair.pending_loopback_intent = None;
+                self.set_repair_state(repair);
             }
         }
     }
