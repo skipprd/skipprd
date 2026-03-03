@@ -669,6 +669,33 @@ struct WorkflowControlState {
     probe: ProbeState,
 }
 
+impl WorkflowControlState {
+    fn mark_validate_success(&mut self, tier: ExecutionTier) {
+        self.phase.current_tier = tier;
+        self.phase.mode = ExecutionMode::Done;
+
+        self.repair.last_validate_ok = Some(true);
+        self.repair.last_failure_signature = None;
+        self.repair.repair_backlog.clear();
+        self.repair.repair_mode = RepairModeState::Inactive;
+        self.repair.stall_count = 0;
+        self.repair.last_progress_delta = Some(ProgressDelta {
+            progress_made: true,
+            ..ProgressDelta::default()
+        });
+        self.repair.last_error_class = None;
+        self.repair.last_failed_models.clear();
+        self.repair.last_error_brief = None;
+        self.repair.pending_loopback_intent = None;
+
+        self.publish.publish_approval = None;
+        self.publish.publish_retries.clear();
+
+        self.probe = ProbeState::default();
+        self.probe.required = false;
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum DataEngineerEvent {
     ValidatePassed {
@@ -766,28 +793,7 @@ impl ExecutionState {
         });
         self.subjective_retry = None;
         self.with_workflow_control_state_mut(|state| {
-            state.phase.current_tier = tier;
-            state.phase.mode = ExecutionMode::Done;
-
-            state.repair.last_validate_ok = Some(true);
-            state.repair.last_failure_signature = None;
-            state.repair.repair_backlog.clear();
-            Self::disable_repair_mode(&mut state.repair);
-            state.repair.stall_count = 0;
-            state.repair.last_progress_delta = Some(ProgressDelta {
-                progress_made: true,
-                ..ProgressDelta::default()
-            });
-            state.repair.last_error_class = None;
-            state.repair.last_failed_models.clear();
-            state.repair.last_error_brief = None;
-            state.repair.pending_loopback_intent = None;
-
-            state.publish.publish_approval = None;
-            state.publish.publish_retries.clear();
-
-            state.probe = ProbeState::default();
-            state.probe.required = false;
+            state.mark_validate_success(tier);
         });
     }
 
