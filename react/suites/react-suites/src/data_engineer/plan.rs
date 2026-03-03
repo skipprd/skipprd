@@ -518,9 +518,68 @@ pub fn prune_model_plan_to_grounded_staging_models(
     plan: &mut ModelPlan,
     allowed_stg_models: &std::collections::BTreeSet<String>,
 ) {
+    fn normalize_staging_input_name(raw: &str) -> Option<String> {
+        let mut t = raw.trim();
+        if t.is_empty() {
+            return None;
+        }
+
+        // Accept Jinja wrapper form: {{ ref('stg_x') }}
+        if t.starts_with("{{") && t.ends_with("}}") && t.len() >= 4 {
+            t = t[2..t.len() - 2].trim();
+        }
+
+        // Accept ref(...) forms and extract the referenced model.
+        let lower = t.to_ascii_lowercase();
+        let mut candidate = if lower.starts_with("ref(") && t.ends_with(')') {
+            let inner = &t[4..t.len() - 1];
+            inner
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"' || c == '`')
+                .to_string()
+        } else {
+            t.to_string()
+        };
+
+        // Accept path-like references by taking SQL stem:
+        // models/staging/stg_x.sql -> stg_x
+        if candidate.contains('/') {
+            let stem = std::path::Path::new(candidate.as_str())
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !stem.trim().is_empty() {
+                candidate = stem.trim().to_string();
+            }
+        }
+
+        // Accept fully-qualified relation ids by taking table segment:
+        // AwsDataCatalog.example1_silver.stg_x -> stg_x
+        if candidate.contains('.') {
+            if let Some(last) = candidate.rsplit('.').next() {
+                candidate = last.trim().to_string();
+            }
+        }
+
+        let normalized = candidate
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"' || c == '`')
+            .to_ascii_lowercase();
+        if normalized.starts_with("stg_") {
+            Some(normalized)
+        } else {
+            None
+        }
+    }
+
+    let normalized_allowed: std::collections::BTreeSet<String> = allowed_stg_models
+        .iter()
+        .filter_map(|s| normalize_staging_input_name(s))
+        .collect();
+
     // Drop tasks that are not grounded in existing staging models and/or violate inputs constraints.
     let mut removed: Vec<String> = Vec::new();
-    plan.tasks.retain(|t| {
+    plan.tasks.retain_mut(|t| {
         let name = t.name.trim();
         if name.is_empty() {
             removed.push(t.name.clone());
@@ -533,25 +592,29 @@ pub fn prune_model_plan_to_grounded_staging_models(
         }
         // Require that the task itself is a valid model name. (We don't require stg_ prefix for gold outputs.)
         // But we do require its inputs to be staging models only.
-        let mut ok_inputs = true;
+        let mut normalized_inputs: Vec<String> = Vec::new();
         for inp in t.inputs.iter() {
             let it = inp.trim();
             if it.is_empty() {
                 continue;
             }
-            if !it.to_ascii_lowercase().starts_with("stg_") {
-                ok_inputs = false;
-                break;
+            let Some(normalized) = normalize_staging_input_name(it) else {
+                removed.push(t.name.clone());
+                return false;
+            };
+            if !normalized_allowed.contains(&normalized) {
+                removed.push(t.name.clone());
+                return false;
             }
-            if !allowed_stg_models.contains(it) {
-                ok_inputs = false;
-                break;
-            }
+            normalized_inputs.push(normalized);
         }
-        if !ok_inputs {
+        if normalized_inputs.is_empty() {
             removed.push(t.name.clone());
             return false;
         }
+        normalized_inputs.sort();
+        normalized_inputs.dedup();
+        t.inputs = normalized_inputs;
         true
     });
 
@@ -4663,6 +4726,49 @@ mod tests {
         prune_model_plan_to_grounded_staging_models(&mut plan, &allowed);
         assert!(plan.tasks.is_empty());
         assert!(plan.batches.is_empty());
+    }
+
+    #[test]
+    fn prune_model_plan_to_grounded_staging_models_normalizes_staging_input_shapes() {
+        let mut plan = ModelPlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![ModelTask {
+                name: "fct_orders".to_string(),
+                folder: "marts".to_string(),
+                goal: "x".to_string(),
+                inputs: vec![
+                    "AwsDataCatalog.example1_silver.stg_test_raw_raw_orders".to_string(),
+                    "{{ ref('stg_test_raw_raw_customers') }}".to_string(),
+                    "models/staging/stg_test_raw_raw_order_items.sql".to_string(),
+                ],
+                expected_model_path: None,
+                invariants: vec![],
+                implementation_spec: dummy_model_spec(),
+                status: TaskStatus::Pending,
+                checklist: vec![],
+            }],
+            batches: vec![vec!["fct_orders".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: PlanProgress::default(),
+        };
+        let allowed = std::collections::BTreeSet::from([
+            "stg_test_raw_raw_orders".to_string(),
+            "stg_test_raw_raw_customers".to_string(),
+            "stg_test_raw_raw_order_items".to_string(),
+        ]);
+        prune_model_plan_to_grounded_staging_models(&mut plan, &allowed);
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(
+            plan.tasks[0].inputs,
+            vec![
+                "stg_test_raw_raw_customers".to_string(),
+                "stg_test_raw_raw_order_items".to_string(),
+                "stg_test_raw_raw_orders".to_string(),
+            ]
+        );
     }
 
     #[test]
