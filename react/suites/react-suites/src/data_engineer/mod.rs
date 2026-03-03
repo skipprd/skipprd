@@ -2010,6 +2010,18 @@ Apply these fixes in the output.",
         }
     }
 
+    fn derive_single_target_repair_path(
+        execution_state: &crate::data_engineer::progress_controller::ExecutionState,
+        last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
+    ) -> Option<String> {
+        execution_state
+            .single_target_repair_path
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| primary_failed_model_file(last_validate_failed_models))
+    }
+
     async fn approve_cleanse_plan_draft_and_advance(
         thread_store: &ThreadStore,
         thread_id: &str,
@@ -3030,9 +3042,12 @@ Apply these fixes in the output.",
             control_flow::Phase::CleanseAuthor | control_flow::Phase::ModelAuthor => {
                 // Authoring phases: allow investigation + mutations; validation/publish are suite-driven.
                 //
-                // If the last validation failed and no mutation has happened since, enforce a hard tool lock:
-                // the next step MUST be a mutation.
-                let hard_mutation_only = guard.last_validate_failed && !guard.mutated_since_fail;
+                // Deterministic repair hard-cutover:
+                // - classic gate: after validate fail with no mutation yet, require mutation next.
+                // - single-target repair mode: ALWAYS require mutation next, even if a prior mutation
+                //   already happened in this repair cycle (prevents read/get loops against removed targets).
+                let hard_mutation_only = (guard.last_validate_failed && !guard.mutated_since_fail)
+                    || single_target_repair_path.is_some();
                 let allow_probe_sql = guard.probe_required && !guard.probe_satisfied;
                 let plan_batched_cleanse_sql = phase == control_flow::Phase::CleanseAuthor
                     && matches!(allowed_batch, Some(AllowedBatch::CleanseSqlDatasetIds(_)));
@@ -3151,6 +3166,12 @@ Apply these fixes in the output.",
                                                     .and_then(|v| v.as_str())
                                                     .map(|p| p.trim() == want)
                                                     .unwrap_or(false);
+                                                if patch_text.contains("@@ ... @@") {
+                                                    return Err(format!(
+                                                        "deterministic repair ladder step for '{}': placeholder hunk header '@@ ... @@' is not allowed. Use real hunks with exact context lines from the current file content.",
+                                                        want
+                                                    ));
+                                                }
                                                 if !has_patch_text || !guard_path_ok {
                                                     return Err(format!(
                                                         "deterministic repair ladder step requires a guarded single-file patch for '{}': args must include path='{}' + patch_text starting with '@@' (Cursor/Aider hunks-only; no ---/+++ headers).",
@@ -6595,20 +6616,45 @@ Apply these fixes in the output.",
                         };
 
                     let single_target_repair_path = if hard_mutation_repair_mode {
-                        match repair_type {
-                            crate::data_engineer::progress_controller::RepairType::Schema => None,
-                            crate::data_engineer::progress_controller::RepairType::SqlTarget
-                            | crate::data_engineer::progress_controller::RepairType::Unknown => {
-                                execution_state
-                                    .single_target_repair_path
-                                    .clone()
-                                    .filter(|s| !s.trim().is_empty())
-                                    .or_else(|| primary_failed_model_file(&last_validate_failed_models))
-                            }
-                        }
+                        Self::derive_single_target_repair_path(
+                            &execution_state,
+                            &last_validate_failed_models,
+                        )
                     } else {
                         None
                     };
+                    if hard_mutation_repair_mode
+                        && single_target_repair_path.is_some()
+                        && execution_state.ladder_step
+                            == crate::data_engineer::progress_controller::RepairLadderStep::Stop
+                    {
+                        let target = single_target_repair_path
+                            .as_deref()
+                            .unwrap_or("(unknown target)")
+                            .trim()
+                            .to_string();
+                        let reason = format!(
+                            "failed to make progress for this thread: deterministic repair ladder reached stop for '{}' after {} attempt(s). Apply a manual fix to the target file and rerun the thread.",
+                            target,
+                            execution_state.attempt_count
+                        );
+                        let ts = chrono::Utc::now().to_rfc3339();
+                        let step = react_core::session::ThreadStep::GuardBlock {
+                            phase: phase.as_str().to_string(),
+                            kind: GuardBlockKind::AuthoringToValidate,
+                            reason: reason.clone(),
+                            observation: react_core::session::Observation::fail(vec![
+                                reason.clone(),
+                            ]),
+                            ts,
+                            agent: "agent".to_string(),
+                        };
+                        thread_store
+                            .append_step(thread_id, step)
+                            .await
+                            .map_err(|e| format!("failed to append guard step: {e}"))?;
+                        return Err(reason);
+                    }
 
                     let (registry, tools_card) = Self::build_tools_for_phase(
                         phase,
@@ -6821,10 +6867,17 @@ Apply these fixes in the output.",
                                 let key = format!("{}/{}", base, file);
                                 if let Ok(bytes) = actx.storage.get_bytes(&key).await {
                                     let content = String::from_utf8_lossy(&bytes).to_string();
+                                    let fence_lang = if file.ends_with(".yml") || file.ends_with(".yaml") {
+                                        "yaml"
+                                    } else {
+                                        "sql"
+                                    };
                                     q.push_str("\n\nPrimary repair target current file content:\n");
                                     q.push_str("File: ");
                                     q.push_str(file);
-                                    q.push_str("\n\n```sql\n");
+                                    q.push_str("\n\n```");
+                                    q.push_str(fence_lang);
+                                    q.push_str("\n");
                                     q.push_str(&content);
                                     if !content.ends_with('\n') {
                                         q.push('\n');
@@ -6954,6 +7007,10 @@ Apply these fixes in the output.",
                         repair.push_str("\nRules:\n");
                         repair.push_str("- You MUST call file with a mutating op next (patch|rm|mv).\n");
                         repair.push_str("- You MUST mutate ONLY the target file above.\n");
+                        repair.push_str("- Do NOT use placeholder patch headers like '@@ ... @@'; use real hunks with exact context from the current file content.\n");
+                        if target.ends_with(".yml") || target.ends_with(".yaml") {
+                            repair.push_str("- YAML repair rule: edit existing keys in place; do NOT append duplicate top-level keys like 'version:' or 'models:'.\n");
+                        }
                         match ladder {
                             crate::data_engineer::progress_controller::RepairLadderStep::ReplaceFile => {
                                 repair.push_str("- IMPORTANT: prefer a guarded single-file patch (args.path + args.patch_text; hunks-only). If patching cannot converge, you may use rm/mv but only against the target path.\n");
@@ -6964,7 +7021,14 @@ Apply these fixes in the output.",
                             crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget => {}
                         }
 
-                        repair.push_str("\nCurrent target file content:\n```sql\n");
+                        let fence_lang = if target.ends_with(".yml") || target.ends_with(".yaml") {
+                            "yaml"
+                        } else {
+                            "sql"
+                        };
+                        repair.push_str("\nCurrent target file content:\n```");
+                        repair.push_str(fence_lang);
+                        repair.push_str("\n");
                         repair.push_str(&content);
                         if !content.ends_with('\n') {
                             repair.push('\n');
@@ -9890,6 +9954,31 @@ mod tests {
             &st,
             Phase::ModelAuthor
         ));
+    }
+
+    #[test]
+    fn derive_single_target_repair_path_prefers_execution_state_target() {
+        use crate::data_engineer::progress_controller::{ExecutionState, FailedModelRef};
+        let mut st = ExecutionState::new();
+        st.single_target_repair_path = Some("models/staging/stg_orders.sql".to_string());
+        let failed = vec![FailedModelRef {
+            name: "stg_other".to_string(),
+            file: "models/staging/stg_other.sql".to_string(),
+        }];
+        let got = DataEngineerSuite::derive_single_target_repair_path(&st, &failed);
+        assert_eq!(got, Some("models/staging/stg_orders.sql".to_string()));
+    }
+
+    #[test]
+    fn derive_single_target_repair_path_falls_back_to_failed_model_file() {
+        use crate::data_engineer::progress_controller::{ExecutionState, FailedModelRef};
+        let st = ExecutionState::new();
+        let failed = vec![FailedModelRef {
+            name: "stg_orders".to_string(),
+            file: "models/staging/stg_orders.sql".to_string(),
+        }];
+        let got = DataEngineerSuite::derive_single_target_repair_path(&st, &failed);
+        assert_eq!(got, Some("models/staging/stg_orders.sql".to_string()));
     }
 
     #[tokio::test]
