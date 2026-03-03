@@ -20,7 +20,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::data_engineer::failure_classifier::ValidateFailureClass;
 use crate::data_engineer::phase_actions::{
-    apply_guard_block, apply_phase_transition, plan_status_reason_detail,
+    apply_guard_block, plan_status_reason_detail,
 };
 
 pub struct DataEngineerSuite;
@@ -68,6 +68,20 @@ impl react_core::suite::WorkflowSuiteContract for DataEngineerSuite {
         event: crate::data_engineer::progress_controller::DataEngineerEvent,
     ) {
         state.apply_event(event);
+    }
+}
+
+impl react_core::suite::WorkflowNodeContract for DataEngineerSuite {
+    type Node = crate::data_engineer::workflow_node::WorkflowNode;
+
+    fn node_from_state(
+        state: &crate::data_engineer::progress_controller::ExecutionState,
+    ) -> Self::Node {
+        crate::data_engineer::workflow_node::WorkflowNode::from_state(state)
+    }
+
+    fn phase_from_node(node: Self::Node) -> Self::Phase {
+        node.as_phase()
     }
 }
 
@@ -124,6 +138,7 @@ pub mod tool_ops;
 mod tool_registry_builder;
 pub mod transition_dispatcher;
 pub mod tools;
+mod workflow_node;
 
 fn lock_prompt_for_plan(
     kind: &str,
@@ -2692,39 +2707,16 @@ Apply these fixes in the output.",
             total_steps += 1;
             remaining_steps = remaining_steps.saturating_sub(1);
 
-            let mut execution_state = crate::data_engineer::progress_controller::ExecutionState::load_strict(
+            let execution_state = crate::data_engineer::progress_controller::ExecutionState::load_strict(
                 &thread_store,
                 thread_id,
             )
             .await?
             .unwrap_or_else(crate::data_engineer::progress_controller::ExecutionState::new);
-            if execution_state.mode
-                == crate::data_engineer::progress_controller::ExecutionMode::Failed
-                && execution_state.current_phase != Some(control_flow::Phase::Done)
-            {
-                execution_state.mode = if matches!(
-                    execution_state.current_phase,
-                    Some(control_flow::Phase::CleanseAuthor | control_flow::Phase::ModelAuthor)
-                ) {
-                    crate::data_engineer::progress_controller::ExecutionMode::Mutate
-                } else {
-                    crate::data_engineer::progress_controller::ExecutionMode::Discover
-                };
-                let _ = execution_state.save(&thread_store, thread_id).await;
-            }
-            let phase = execution_state
-                .current_phase
-                .unwrap_or(control_flow::Phase::Preflight);
-            if matches!(
-                phase,
-                control_flow::Phase::CleanseValidate | control_flow::Phase::ModelValidate
-            ) && execution_state.mode
-                == crate::data_engineer::progress_controller::ExecutionMode::Done
-            {
-                if Self::reconcile_done_validate_phase(&thread_store, thread_id, phase, sctx).await? {
-                    continue;
-                }
-            }
+            let node = <Self as react_core::suite::WorkflowNodeContract>::node_from_state(
+                &execution_state,
+            );
+            let phase = <Self as react_core::suite::WorkflowNodeContract>::phase_from_node(node);
             let thread_state_step_count = thread_store
                 .get_thread_state(thread_id)
                 .await
@@ -2781,13 +2773,14 @@ Apply these fixes in the output.",
                 }
             }
 
-            match phase {
-                Phase::Preflight => match Self::execute_preflight_phase(&thread_store, thread_id, sctx).await? {
+            match node {
+                crate::data_engineer::workflow_node::WorkflowNode::Preflight => match Self::execute_preflight_phase(&thread_store, thread_id, sctx).await? {
                     PhaseExecutorOutcome::Continue => continue,
                     PhaseExecutorOutcome::Return(frames) => return Ok(frames),
                 },
 
-                Phase::CleansePlan | Phase::ModelPlan => {
+                crate::data_engineer::workflow_node::WorkflowNode::CleansePlan
+                | crate::data_engineer::workflow_node::WorkflowNode::ModelPlan => {
                     match Self::execute_plan_phase(
                         &thread_store,
                         thread_id,
@@ -2807,7 +2800,8 @@ Apply these fixes in the output.",
                     }
                 }
 
-                Phase::CleanseAuthor | Phase::ModelAuthor => {
+                crate::data_engineer::workflow_node::WorkflowNode::CleanseAuthor
+                | crate::data_engineer::workflow_node::WorkflowNode::ModelAuthor => {
                     match Self::execute_author_phase(
                         &thread_store,
                         thread_id,
@@ -2827,7 +2821,8 @@ Apply these fixes in the output.",
                     }
                 }
 
-                Phase::CleanseValidate | Phase::ModelValidate => {
+                crate::data_engineer::workflow_node::WorkflowNode::CleanseValidate
+                | crate::data_engineer::workflow_node::WorkflowNode::ModelValidate => {
                     match Self::execute_validate_phase(
                         &thread_store,
                         thread_id,
@@ -2847,7 +2842,9 @@ Apply these fixes in the output.",
                     }
                 }
 
-                Phase::CleanseReview | Phase::ModelReview | Phase::PostPublishReview => {
+                crate::data_engineer::workflow_node::WorkflowNode::CleanseReview
+                | crate::data_engineer::workflow_node::WorkflowNode::ModelReview
+                | crate::data_engineer::workflow_node::WorkflowNode::PostPublishReview => {
                     match Self::execute_review_phase(
                         &thread_store,
                         thread_id,
@@ -2863,7 +2860,7 @@ Apply these fixes in the output.",
                     }
                 }
 
-                Phase::PublishAwaitApproval => match Self::execute_publish_await_approval_phase(
+                crate::data_engineer::workflow_node::WorkflowNode::PublishAwaitApproval => match Self::execute_publish_await_approval_phase(
                     &thread_store,
                     thread_id,
                     sctx,
@@ -2873,12 +2870,12 @@ Apply these fixes in the output.",
                     PhaseExecutorOutcome::Return(frames) => return Ok(frames),
                 },
 
-                Phase::Publish => match Self::execute_publish_phase(&thread_store, thread_id, sctx).await? {
+                crate::data_engineer::workflow_node::WorkflowNode::Publish => match Self::execute_publish_phase(&thread_store, thread_id, sctx).await? {
                     PhaseExecutorOutcome::Continue => continue,
                     PhaseExecutorOutcome::Return(frames) => return Ok(frames),
                 },
 
-                Phase::Done => match Self::execute_done_phase(&mut out_frames)? {
+                crate::data_engineer::workflow_node::WorkflowNode::Done => match Self::execute_done_phase(&mut out_frames)? {
                     PhaseExecutorOutcome::Continue => continue,
                     PhaseExecutorOutcome::Return(frames) => return Ok(frames),
                 },
@@ -2900,7 +2897,7 @@ Apply these fixes in the output.",
                 es.replan_backtracks,
                 es.stall_count,
                 es.max_stall_count,
-                es.hard_mutation_repair_mode,
+                es.hard_mutation_repair_mode(),
             ));
             es.mark_failed(budget_msg.clone());
             let _ = es.save(&thread_store, thread_id).await;
@@ -3620,8 +3617,12 @@ mod tests {
 
         let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
         st.last_validate_ok = Some(false);
-        st.hard_mutation_repair_mode = true;
-        st.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
+        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            crate::data_engineer::progress_controller::ActiveRepairMode {
+                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+            },
+        );
         st.probe_state.required = true;
         st.save(store, "probe-thread").await.expect("save state");
 
@@ -3670,8 +3671,12 @@ mod tests {
 
         let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
         st.last_validate_ok = Some(false);
-        st.hard_mutation_repair_mode = true;
-        st.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
+        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            crate::data_engineer::progress_controller::ActiveRepairMode {
+                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+            },
+        );
         st.probe_state.required = true;
         let sig = crate::data_engineer::progress_controller::ProbeSignature::from_run_sql(
             "select * from t limit 10",
@@ -3827,10 +3832,14 @@ mod tests {
         if let Some(store) = actx.thread_store.as_ref() {
             let mut seeded = crate::data_engineer::progress_controller::ExecutionState::new();
             seeded.last_validate_ok = Some(false);
-            seeded.hard_mutation_repair_mode = true;
-            seeded.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
-            seeded.single_target_repair_path = Some("models/marts/fct_orders.sql".to_string());
-            seeded.target_path = Some("models/marts/fct_orders.sql".to_string());
+            seeded.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+                crate::data_engineer::progress_controller::ActiveRepairMode {
+                    repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                    single_target_repair_path: Some("models/marts/fct_orders.sql".to_string()),
+                    target_path: Some("models/marts/fct_orders.sql".to_string()),
+                    ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+                },
+            );
             seeded
                 .save(store, "t")
                 .await
@@ -3881,12 +3890,15 @@ mod tests {
         if let Some(store) = actx.thread_store.as_ref() {
             let mut seeded = crate::data_engineer::progress_controller::ExecutionState::new();
             seeded.last_validate_ok = Some(false);
-            seeded.hard_mutation_repair_mode = true;
-            seeded.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
-            seeded.single_target_repair_path = Some("models/marts/fct_orders.sql".to_string());
-            seeded.target_path = Some("models/marts/fct_orders.sql".to_string());
-            seeded.ladder_step =
-                crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget;
+            seeded.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+                crate::data_engineer::progress_controller::ActiveRepairMode {
+                    repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                    single_target_repair_path: Some("models/marts/fct_orders.sql".to_string()),
+                    target_path: Some("models/marts/fct_orders.sql".to_string()),
+                    ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget,
+                    ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+                },
+            );
             seeded
                 .save(store, "t")
                 .await
@@ -3933,12 +3945,15 @@ mod tests {
         if let Some(store) = actx.thread_store.as_ref() {
             let mut seeded = crate::data_engineer::progress_controller::ExecutionState::new();
             seeded.last_validate_ok = Some(false);
-            seeded.hard_mutation_repair_mode = true;
-            seeded.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
-            seeded.single_target_repair_path = Some("models/marts/fct_orders.sql".to_string());
-            seeded.target_path = Some("models/marts/fct_orders.sql".to_string());
-            seeded.ladder_step =
-                crate::data_engineer::progress_controller::RepairLadderStep::ReplaceContents;
+            seeded.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+                crate::data_engineer::progress_controller::ActiveRepairMode {
+                    repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                    single_target_repair_path: Some("models/marts/fct_orders.sql".to_string()),
+                    target_path: Some("models/marts/fct_orders.sql".to_string()),
+                    ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::ReplaceContents,
+                    ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+                },
+            );
             seeded
                 .save(store, "t")
                 .await
@@ -3998,12 +4013,16 @@ mod tests {
         if let Some(store) = actx.thread_store.as_ref() {
             let mut seeded = crate::data_engineer::progress_controller::ExecutionState::new();
             seeded.last_validate_ok = Some(false);
-            seeded.hard_mutation_repair_mode = true;
-            seeded.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
-            seeded.single_target_repair_path = Some("models/marts/fct_orders.sql".to_string());
-            seeded.target_path = Some("models/marts/fct_orders.sql".to_string());
-            seeded.ladder_step = crate::data_engineer::progress_controller::RepairLadderStep::FsOp;
-            seeded.attempt_count = 2;
+            seeded.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+                crate::data_engineer::progress_controller::ActiveRepairMode {
+                    repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                    single_target_repair_path: Some("models/marts/fct_orders.sql".to_string()),
+                    target_path: Some("models/marts/fct_orders.sql".to_string()),
+                    ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::FsOp,
+                    attempt_count: 2,
+                    ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+                },
+            );
             seeded
                 .save(store, "t")
                 .await
@@ -4558,7 +4577,14 @@ mod tests {
     fn derive_single_target_repair_path_prefers_execution_state_target() {
         use crate::data_engineer::progress_controller::{ExecutionState, FailedModelRef};
         let mut st = ExecutionState::new();
-        st.single_target_repair_path = Some("models/staging/stg_orders.sql".to_string());
+        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            crate::data_engineer::progress_controller::ActiveRepairMode {
+                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                single_target_repair_path: Some("models/staging/stg_orders.sql".to_string()),
+                target_path: Some("models/staging/stg_orders.sql".to_string()),
+                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+            },
+        );
         let failed = vec![FailedModelRef {
             name: "stg_other".to_string(),
             file: "models/staging/stg_other.sql".to_string(),
@@ -4614,7 +4640,13 @@ mod tests {
         );
 
         // A patch attempt (even no-op) flips patched_since_fail via attempt_count.
-        state.attempt_count = 1;
+        state.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            crate::data_engineer::progress_controller::ActiveRepairMode {
+                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                attempt_count: 1,
+                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+            },
+        );
         state
             .save(&store, tid)
             .await
@@ -4733,14 +4765,9 @@ mod tests {
     fn run_agent_source_enforces_kernel_transition_and_guard_paths() {
         let legacy_transition = ["control_flow::append_phase_with_", "intent", "("].concat();
         let legacy_guard_block = ["ThreadStep::Guard", "Block"].concat();
-        let sources = [
-            ("mod.rs", include_str!("mod.rs")),
-            ("phase_plan.rs", include_str!("phase_plan.rs")),
-            ("phase_author.rs", include_str!("phase_author.rs")),
-        ];
-
-        for (name, src) in sources {
-            let normalized: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+        let mod_src = include_str!("mod.rs");
+        let mod_normalized: String = mod_src.chars().filter(|c| !c.is_whitespace()).collect();
+        for (name, normalized) in [("mod.rs", mod_normalized.as_str())] {
             assert!(
                 !normalized.contains(&legacy_transition),
                 "legacy transition path must not appear in {name}"
@@ -4750,16 +4777,41 @@ mod tests {
                 "legacy inline GuardBlock construction must not appear in {name}"
             );
             assert!(
-                normalized.contains("apply_phase_transition(")
-                    || normalized.contains("commit_phase_decision("),
-                "kernel transition helper should be used in {name}"
+                normalized.contains("apply_guard_block("),
+                "kernel guard helper should be used in {name}"
             );
-            if name == "mod.rs" || name == "phase_author.rs" {
-                assert!(
-                    normalized.contains("apply_guard_block("),
-                    "kernel guard helper should be used in {name}"
-                );
-            }
+        }
+        for marker in [
+            "execute_preflight_phase(",
+            "execute_plan_phase(",
+            "execute_author_phase(",
+            "execute_validate_phase(",
+            "execute_review_phase(",
+            "execute_publish_await_approval_phase(",
+            "execute_publish_phase(",
+        ] {
+            assert!(
+                mod_src.contains(marker),
+                "run loop should route through typed phase executors: missing {marker}"
+            );
+        }
+
+        for (name, src) in [
+            ("phase_preflight.rs", include_str!("phase_preflight.rs")),
+            ("phase_plan.rs", include_str!("phase_plan.rs")),
+            ("phase_author.rs", include_str!("phase_author.rs")),
+            ("phase_validate.rs", include_str!("phase_validate.rs")),
+            ("phase_review.rs", include_str!("phase_review.rs")),
+            ("phase_publish.rs", include_str!("phase_publish.rs")),
+        ] {
+            assert!(
+                src.contains("commit_phase_decision"),
+                "{name} must commit phase changes through commit_phase_decision"
+            );
+            assert!(
+                !src.contains("apply_phase_transition("),
+                "{name} must not bypass the phase contract seam"
+            );
         }
     }
 

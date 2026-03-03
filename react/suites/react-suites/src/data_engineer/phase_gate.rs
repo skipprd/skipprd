@@ -55,11 +55,11 @@ pub fn evaluate_pre_turn_directive(
         stall_count: 0,
         max_stall_count: 1,
         replan_backtracks: 0,
-        hard_mutation_repair_mode: repair_state.hard_mutation_repair_mode
+        hard_mutation_repair_mode: repair_state.hard_mutation_repair_mode()
             && single_target_repair_path.is_some(),
-        ladder_stop: repair_state.ladder_step == RepairLadderStep::Stop,
+        ladder_stop: repair_state.ladder_step() == RepairLadderStep::Stop,
         target_path: single_target_repair_path.clone(),
-        attempt_count: repair_state.attempt_count,
+        attempt_count: repair_state.attempt_count(),
     };
     react_core::workflow::evaluate_pre_turn_directive(&core_repair_snapshot, usize::MAX)
 }
@@ -118,8 +118,7 @@ pub fn derive_single_target_repair_path(
 ) -> Option<String> {
     let repair = execution_state.repair_state();
     repair
-        .single_target_repair_path
-        .as_ref()
+        .single_target_repair_path()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .or_else(|| {
@@ -166,10 +165,16 @@ mod tests {
     #[test]
     fn preturn_gate_hard_repair_ladder_stop_failfast() {
         let mut st = ExecutionState::new();
-        st.hard_mutation_repair_mode = true;
-        st.single_target_repair_path = Some("models/staging/stg_orders.sql".to_string());
-        st.ladder_step = RepairLadderStep::Stop;
-        st.attempt_count = 7;
+        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            crate::data_engineer::progress_controller::ActiveRepairMode {
+                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                single_target_repair_path: Some("models/staging/stg_orders.sql".to_string()),
+                target_path: Some("models/staging/stg_orders.sql".to_string()),
+                ladder_step: RepairLadderStep::Stop,
+                attempt_count: 7,
+                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+            },
+        );
         let d = evaluate_pre_turn_directive(&st, Phase::CleanseAuthor, 3);
         match d {
             PreTurnDirective::FailFast { kind, reason } => {
@@ -184,10 +189,16 @@ mod tests {
     #[test]
     fn preturn_gate_hard_repair_ladder_stop_uses_failed_model_fallback() {
         let mut st = ExecutionState::new();
-        st.hard_mutation_repair_mode = true;
-        st.single_target_repair_path = None;
-        st.ladder_step = RepairLadderStep::Stop;
-        st.attempt_count = 2;
+        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            crate::data_engineer::progress_controller::ActiveRepairMode {
+                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                single_target_repair_path: None,
+                target_path: None,
+                ladder_step: RepairLadderStep::Stop,
+                attempt_count: 3,
+                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+            },
+        );
         st.last_validate = Some(crate::data_engineer::progress_controller::LastValidateState {
             failed_models: vec![crate::data_engineer::progress_controller::FailedModelRef {
                 name: "stg_orders".to_string(),

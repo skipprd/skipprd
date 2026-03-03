@@ -41,7 +41,6 @@ mod state_first_tests {
     fn derive_guard_state_from_execution_state_marks_validate_failure() {
         let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
         st.last_validate_ok = Some(false);
-        st.attempt_count = 0;
         let guard = derive_guard_state_from_execution_state(&st);
         assert!(guard.last_validate_failed);
         assert!(!guard.mutated_since_fail);
@@ -195,7 +194,7 @@ pub fn derive_guard_state_from_execution_state(
         .as_ref()
         .map(|d| d.target_hash_changed || d.progress_made)
         .unwrap_or(false);
-    let patched_since_fail = st.attempt_count > 0;
+    let patched_since_fail = st.attempt_count() > 0;
     let probe_status = st.probe_requirement_status();
     let (probe_required, probe_satisfied) = match probe_status {
         crate::data_engineer::progress_controller::ProbeRequirementStatus::NotRequired => {
@@ -215,7 +214,7 @@ pub fn derive_guard_state_from_execution_state(
         last_validate_failed,
         mutated_since_fail,
         patched_since_fail,
-        mutation_failures_since_validate: st.consecutive_noop_patches,
+        mutation_failures_since_validate: st.consecutive_noop_patches(),
         probe_required,
         probe_satisfied,
     }

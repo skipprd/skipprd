@@ -1,4 +1,4 @@
-use crate::data_engineer::phase_actions::apply_phase_transition;
+use crate::data_engineer::phase_contract::{commit_phase_decision, PhaseDecision};
 use crate::data_engineer::review_batched;
 use crate::data_engineer::{
     control_flow, stable_json_digest, DataEngineerSuite, PhaseExecutorOutcome,
@@ -193,14 +193,15 @@ impl DataEngineerSuite {
                         )
                     })?;
                 }
-                apply_phase_transition(
+                commit_phase_decision(
                     thread_store,
                     thread_id,
                     Some(phase),
-                    next,
-                    control_flow::TransitionIntent::Forward,
-                    Some(PhaseReasonCode::ReviewProceed),
-                    Some(reason_detail),
+                    PhaseDecision::forward(
+                        next,
+                        Some(PhaseReasonCode::ReviewProceed),
+                        Some(reason_detail),
+                    ),
                 )
                 .await?;
                 Ok(PhaseExecutorOutcome::Continue)
@@ -233,14 +234,15 @@ impl DataEngineerSuite {
                     entry_plan_digest,
                 )
                 .await;
-                apply_phase_transition(
+                commit_phase_decision(
                     thread_store,
                     thread_id,
                     Some(phase),
-                    back,
-                    control_flow::TransitionIntent::Loopback,
-                    Some(PhaseReasonCode::ReviewPatchPlan),
-                    Some(reason_detail),
+                    PhaseDecision::loopback(
+                        back,
+                        Some(PhaseReasonCode::ReviewPatchPlan),
+                        Some(reason_detail),
+                    ),
                 )
                 .await?;
                 Ok(PhaseExecutorOutcome::Continue)
@@ -253,14 +255,15 @@ impl DataEngineerSuite {
                     back,
                 )
                 .await;
-                apply_phase_transition(
+                commit_phase_decision(
                     thread_store,
                     thread_id,
                     Some(phase),
-                    back,
-                    control_flow::TransitionIntent::Loopback,
-                    Some(PhaseReasonCode::ReviewPatchImpl),
-                    Some(reason_detail),
+                    PhaseDecision::loopback(
+                        back,
+                        Some(PhaseReasonCode::ReviewPatchImpl),
+                        Some(reason_detail),
+                    ),
                 )
                 .await?;
                 Ok(PhaseExecutorOutcome::Continue)

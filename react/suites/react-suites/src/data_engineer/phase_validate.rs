@@ -166,34 +166,6 @@ impl DataEngineerSuite {
         Ok(())
     }
 
-    pub(super) async fn reconcile_done_validate_phase(
-        thread_store: &ThreadStore,
-        thread_id: &str,
-        phase: crate::data_engineer::control_flow::Phase,
-        sctx: &SuiteCtx,
-    ) -> Result<bool, String> {
-        if !matches!(phase, Phase::CleanseValidate | Phase::ModelValidate) {
-            return Ok(false);
-        }
-        let actx = Self::agent_tool_ctx(thread_id, sctx);
-        let (completion_snapshot, active_plan_key) =
-            Self::reduce_validate_pass_plan_state(&actx, phase).await?;
-
-        Self::commit_validate_pass_transition(
-            thread_store,
-            thread_id,
-            phase,
-            completion_snapshot,
-            active_plan_key,
-            serde_json::json!({
-                "recovered_validate_done_state": true
-            }),
-            "ValidateDoneStateRecoveredPlanIncomplete",
-        )
-        .await?;
-        Ok(true)
-    }
-
     pub(super) async fn execute_validate_phase(
         thread_store: &ThreadStore,
         thread_id: &str,

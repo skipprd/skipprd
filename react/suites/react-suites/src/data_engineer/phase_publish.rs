@@ -1,4 +1,4 @@
-use crate::data_engineer::phase_actions::apply_phase_transition;
+use crate::data_engineer::phase_contract::{commit_phase_decision, PhaseDecision};
 use crate::data_engineer::{control_flow, tools, DataEngineerSuite, PhaseExecutorOutcome};
 use crate::flow_frame::FlowFrame;
 use crate::suite::SuiteCtx;
@@ -46,18 +46,19 @@ impl DataEngineerSuite {
         let approval_detail = crate::data_engineer::phase_reason_detail::publish_approval_state(
             serde_json::to_value(&es.publish_approval).unwrap_or(serde_json::Value::Null),
         );
-        apply_phase_transition(
+        commit_phase_decision(
             thread_store,
             thread_id,
             Some(control_flow::Phase::PublishAwaitApproval),
-            control_flow::Phase::Publish,
-            control_flow::TransitionIntent::Forward,
-            Some(PhaseReasonCode::UserApprovedPublish),
-            Some(crate::data_engineer::phase_reason_detail::publish_auto_approved(
-                serde_json::json!({
-                    "approval_state": approval_detail
-                }),
-            )),
+            PhaseDecision::forward(
+                control_flow::Phase::Publish,
+                Some(PhaseReasonCode::UserApprovedPublish),
+                Some(crate::data_engineer::phase_reason_detail::publish_auto_approved(
+                    serde_json::json!({
+                        "approval_state": approval_detail
+                    }),
+                )),
+            ),
         )
         .await?;
         Ok(PhaseExecutorOutcome::Continue)
@@ -102,16 +103,17 @@ impl DataEngineerSuite {
             es.save(thread_store, thread_id).await.map_err(|e| {
                 format!("failed to persist publish confirmed-success state: {e}")
             })?;
-            apply_phase_transition(
+            commit_phase_decision(
                 thread_store,
                 thread_id,
                 Some(control_flow::Phase::Publish),
-                control_flow::Phase::PostPublishReview,
-                control_flow::TransitionIntent::Forward,
-                Some(PhaseReasonCode::PublishConfirmedSuccess),
-                Some(crate::data_engineer::phase_reason_detail::publish_observation(
-                    obs.clone(),
-                )),
+                PhaseDecision::forward(
+                    control_flow::Phase::PostPublishReview,
+                    Some(PhaseReasonCode::PublishConfirmedSuccess),
+                    Some(crate::data_engineer::phase_reason_detail::publish_observation(
+                        obs.clone(),
+                    )),
+                ),
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -131,17 +133,18 @@ impl DataEngineerSuite {
                     "publish_await_approval_not_converged_after_retries: retries={retry_count}"
                 ));
             }
-            apply_phase_transition(
+            commit_phase_decision(
                 thread_store,
                 thread_id,
                 Some(control_flow::Phase::Publish),
-                control_flow::Phase::PublishAwaitApproval,
-                control_flow::TransitionIntent::Loopback,
-                Some(PhaseReasonCode::PublishFail),
-                Some(crate::data_engineer::phase_reason_detail::publish_failure(
-                    obs,
-                    retry_count,
-                )),
+                PhaseDecision::loopback(
+                    control_flow::Phase::PublishAwaitApproval,
+                    Some(PhaseReasonCode::PublishFail),
+                    Some(crate::data_engineer::phase_reason_detail::publish_failure(
+                        obs,
+                        retry_count,
+                    )),
+                ),
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -160,17 +163,18 @@ impl DataEngineerSuite {
                 "publish_confirmed_failure_not_converged_after_retries: retries={retry_count}"
             ));
         }
-        apply_phase_transition(
+        commit_phase_decision(
             thread_store,
             thread_id,
             Some(control_flow::Phase::Publish),
-            control_flow::Phase::ModelAuthor,
-            control_flow::TransitionIntent::Loopback,
-            Some(PhaseReasonCode::PublishConfirmedFail),
-            Some(crate::data_engineer::phase_reason_detail::publish_failure(
-                obs,
-                retry_count,
-            )),
+            PhaseDecision::loopback(
+                control_flow::Phase::ModelAuthor,
+                Some(PhaseReasonCode::PublishConfirmedFail),
+                Some(crate::data_engineer::phase_reason_detail::publish_failure(
+                    obs,
+                    retry_count,
+                )),
+            ),
         )
         .await?;
         Ok(PhaseExecutorOutcome::Continue)

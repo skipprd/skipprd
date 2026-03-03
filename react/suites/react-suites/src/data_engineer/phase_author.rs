@@ -90,9 +90,13 @@ mod tests {
     #[test]
     fn missing_target_abort_reason_includes_structured_context() {
         let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
-        st.hard_mutation_repair_mode = true;
-        st.attempt_count = 2;
-        st.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
+        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            crate::data_engineer::progress_controller::ActiveRepairMode {
+                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                attempt_count: 2,
+                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+            },
+        );
         let reason = build_missing_target_repair_abort_reason(
             Phase::CleanseAuthor,
             "models/staging/stg_test_raw_raw_order_items.sql",
@@ -369,9 +373,9 @@ fn build_missing_target_repair_abort_reason(
         "target_path": target_path,
         "target_storage_key": target_storage_key,
         "ladder_step": format!("{:?}", ladder),
-        "attempt_count": execution_state.attempt_count,
-        "repair_type": format!("{:?}", execution_state.repair_type),
-        "hard_mutation_repair_mode": execution_state.hard_mutation_repair_mode,
+        "attempt_count": execution_state.attempt_count(),
+        "repair_type": format!("{:?}", execution_state.repair_type()),
+        "hard_mutation_repair_mode": execution_state.hard_mutation_repair_mode(),
         "last_validate_brief": last_validate_brief.clone(),
         "storage_read_error": target_read_error,
         "action": "repair aborted to avoid blind patch generation; provide target content path/state and retry",
@@ -418,8 +422,8 @@ if precheck_handoff == PrecheckAuthoringHandoff::SchemaRepair {
     phase_guard.last_validate_failed = true;
     phase_guard.mutated_since_fail = false;
 }
-let hard_mutation_repair_mode = execution_state.hard_mutation_repair_mode;
-let mut repair_type = execution_state.repair_type;
+let hard_mutation_repair_mode = execution_state.hard_mutation_repair_mode();
+let mut repair_type = execution_state.repair_type();
 if precheck_handoff == PrecheckAuthoringHandoff::SchemaRepair {
     repair_type = crate::data_engineer::progress_controller::RepairType::Schema;
 }
@@ -599,8 +603,8 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 &plan.plan_key,
                 last_validate_brief,
                 last_validate_failed_models,
-                &execution_state.ladder_step,
-                execution_state.attempt_count,
+                &execution_state.ladder_step(),
+                execution_state.attempt_count(),
                 true,
                 false,
             );
@@ -750,8 +754,8 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         &plan.plan_key,
                         last_validate_brief,
                         last_validate_failed_models,
-                        &execution_state.ladder_step,
-                        execution_state.attempt_count,
+                        &execution_state.ladder_step(),
+                        execution_state.attempt_count(),
                         false,
                         true,
                     );
@@ -922,8 +926,8 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                 &plan.plan_key,
                 last_validate_brief,
                 last_validate_failed_models,
-                &execution_state.ladder_step,
-                execution_state.attempt_count,
+                &execution_state.ladder_step(),
+                execution_state.attempt_count(),
                 true,
                 false,
             );
@@ -1143,8 +1147,8 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
                         &plan.plan_key,
                         last_validate_brief,
                         last_validate_failed_models,
-                        &execution_state.ladder_step,
-                        execution_state.attempt_count,
+                        &execution_state.ladder_step(),
+                        execution_state.attempt_count(),
                         false,
                         true,
                     );
@@ -1508,17 +1512,17 @@ if hard_mutation_repair_mode
     .unwrap_or_else(
         crate::data_engineer::progress_controller::ExecutionState::new,
     );
-    if es.target_path.as_deref().unwrap_or("").trim().is_empty()
+    if es.target_path().as_deref().unwrap_or("").trim().is_empty()
         && !target.is_empty()
     {
-        es.target_path = Some(target.clone());
+        es.ensure_repair_target_path(target.clone());
         es.save(&thread_store, thread_id).await.map_err(|e| {
             format!(
                 "failed to persist execution-state target path in deterministic repair mode: {e}"
             )
         })?;
     }
-    let ladder = es.ladder_step.clone();
+    let ladder = es.ladder_step();
 
     let mut content = String::new();
     let mut target_exists = false;

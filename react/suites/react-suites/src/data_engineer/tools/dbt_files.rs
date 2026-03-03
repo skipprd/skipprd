@@ -47,7 +47,7 @@ async fn was_recently_removed_in_repair(ctx: &AgentCtx, rel_path: &str) -> bool 
     crate::data_engineer::state_manager::load_execution_state(store, thread_id)
         .await
         .and_then(|st| {
-            if !st.hard_mutation_repair_mode {
+            if !st.hard_mutation_repair_mode() {
                 return None;
             }
             st.last_mutation_summary.and_then(|m| {
@@ -945,8 +945,12 @@ mod tests {
         );
         let tid = "tid-hard-mutation-files-get-blocked".to_string();
         let mut es = ExecutionState::new();
-        es.hard_mutation_repair_mode = true;
-        es.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
+        es.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            crate::data_engineer::progress_controller::ActiveRepairMode {
+                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+            },
+        );
         es.set_last_mutation_summary(
             "rm",
             vec!["models/staging/m.sql".to_string()],
@@ -983,8 +987,12 @@ mod tests {
         );
         let tid = "tid-hard-mutation-files-list-allowed".to_string();
         let mut es = ExecutionState::new();
-        es.hard_mutation_repair_mode = true;
-        es.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
+        es.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            crate::data_engineer::progress_controller::ActiveRepairMode {
+                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+            },
+        );
         es.set_last_mutation_summary(
             "rm",
             vec!["models/staging/m.sql".to_string()],

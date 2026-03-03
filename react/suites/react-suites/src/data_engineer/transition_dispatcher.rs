@@ -462,8 +462,14 @@ mod tests {
         let tid = "tid-preturn-ladder-stop-fallback";
 
         let mut st = ExecutionState::new();
-        st.hard_mutation_repair_mode = true;
-        st.ladder_step = crate::data_engineer::progress_controller::RepairLadderStep::Stop;
+        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            crate::data_engineer::progress_controller::ActiveRepairMode {
+                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::Stop,
+                attempt_count: 3,
+                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+            },
+        );
         st.last_validate = Some(crate::data_engineer::progress_controller::LastValidateState {
             failed_models: vec![crate::data_engineer::progress_controller::FailedModelRef {
                 name: "stg_orders".to_string(),
@@ -676,15 +682,15 @@ mod tests {
         );
         assert!(
             validate_src.contains("reduce_validate_pass_plan_state"),
-            "phase_validate should route normal and reconcile validate-pass through one reducer"
+            "phase_validate should route validate-pass through one reducer"
         );
         assert!(
-            validate_src.matches("reduce_validate_pass_plan_state(&actx, phase)").count() >= 2,
-            "phase_validate should call the validate-pass reducer from both reconcile and normal pass paths"
+            validate_src.contains("reduce_validate_pass_plan_state(&actx, phase)"),
+            "phase_validate should call the validate-pass reducer before committing transition"
         );
         assert!(
-            validate_src.matches("commit_validate_pass_transition").count() >= 2,
-            "phase_validate should commit reconcile and normal validate-pass transitions through one helper"
+            validate_src.contains("commit_validate_pass_transition"),
+            "phase_validate should commit validate-pass transitions through one helper"
         );
 
         let author_src = include_str!("phase_author.rs");
@@ -699,6 +705,59 @@ mod tests {
         assert!(
             author_src.contains("decide_author_validate_trigger"),
             "phase_author should use a single author->validate decision helper"
+        );
+    }
+
+    #[test]
+    fn all_phase_executors_use_phase_contract_transition_seam() {
+        let plan_src = include_str!("phase_plan.rs");
+        let review_src = include_str!("phase_review.rs");
+        let publish_src = include_str!("phase_publish.rs");
+        let helpers_src = include_str!("plan_review_helpers.rs");
+
+        for (name, src) in [
+            ("phase_plan", plan_src),
+            ("phase_review", review_src),
+            ("phase_publish", publish_src),
+            ("plan_review_helpers", helpers_src),
+        ] {
+            assert!(
+                src.contains("commit_phase_decision"),
+                "{name} should commit transitions through commit_phase_decision"
+            );
+            assert!(
+                !src.contains("apply_phase_transition("),
+                "{name} should not bypass commit_phase_decision"
+            );
+        }
+    }
+
+    #[test]
+    fn repair_state_hard_cutover_uses_typed_mode_only() {
+        let src = include_str!("progress_controller.rs");
+        assert!(
+            src.contains("enum RepairModeState"),
+            "progress_controller should model repair mode as a typed enum"
+        );
+        assert!(
+            src.contains("pub repair_mode: RepairModeState"),
+            "execution/repair state should store typed repair_mode"
+        );
+        assert!(
+            !src.contains("pub hard_mutation_repair_mode: bool"),
+            "legacy hard_mutation_repair_mode bool field must not exist"
+        );
+        assert!(
+            !src.contains("fn set_active_repair_mode("),
+            "temporary set_active_repair_mode helper must not exist after hard cutover"
+        );
+        assert!(
+            !src.contains("fn set_active_repair_mode_snapshot("),
+            "temporary set_active_repair_mode_snapshot helper must not exist after hard cutover"
+        );
+        assert!(
+            !src.contains("fn reset_repair_attempts("),
+            "temporary reset_repair_attempts helper must not exist after hard cutover"
         );
     }
 }

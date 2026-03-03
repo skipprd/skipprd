@@ -1,4 +1,5 @@
 use super::*;
+use crate::data_engineer::phase_contract::{commit_phase_decision, PhaseDecision};
 
 impl DataEngineerSuite {
     pub(super) fn collect_targeted_semantic_tasks(
@@ -67,18 +68,19 @@ impl DataEngineerSuite {
                 .await
                 .map_err(|e| format!("failed to persist pruned-empty cleanse plan: {e}"))?;
             // Stay in plan phase; the next iteration will generate a new plan.
-            apply_phase_transition(
+            commit_phase_decision(
                 thread_store,
                 thread_id,
                 Some(phase),
-                phase,
-                control_flow::TransitionIntent::Annotation,
-                Some(PhaseReasonCode::PlanPrunedEmpty),
-                Some(crate::data_engineer::phase_reason_detail::to_value(
-                    &crate::data_engineer::phase_reason_detail::PlanPrunedEmptyDetail {
-                        plan_key: p.plan_key.clone(),
-                    },
-                )),
+                PhaseDecision::annotation(
+                    phase,
+                    Some(PhaseReasonCode::PlanPrunedEmpty),
+                    Some(crate::data_engineer::phase_reason_detail::to_value(
+                        &crate::data_engineer::phase_reason_detail::PlanPrunedEmptyDetail {
+                            plan_key: p.plan_key.clone(),
+                        },
+                    )),
+                ),
             )
             .await?;
             return Ok(true);
@@ -94,19 +96,20 @@ impl DataEngineerSuite {
             crate::data_engineer::plan::save_cleanse_plan(actx, &p)
                 .await
                 .map_err(|e| format!("failed to persist semantically-invalid cleanse plan: {e}"))?;
-            apply_phase_transition(
+            commit_phase_decision(
                 thread_store,
                 thread_id,
                 Some(phase),
-                phase,
-                control_flow::TransitionIntent::Annotation,
-                Some(PhaseReasonCode::PlanSemanticInvalid),
-                Some(crate::data_engineer::phase_reason_detail::to_value(
-                    &crate::data_engineer::phase_reason_detail::PlanSemanticInvalidErrorsDetail {
-                        plan_key: p.plan_key.clone(),
-                        errors: v.errors.clone(),
-                    },
-                )),
+                PhaseDecision::annotation(
+                    phase,
+                    Some(PhaseReasonCode::PlanSemanticInvalid),
+                    Some(crate::data_engineer::phase_reason_detail::to_value(
+                        &crate::data_engineer::phase_reason_detail::PlanSemanticInvalidErrorsDetail {
+                            plan_key: p.plan_key.clone(),
+                            errors: v.errors.clone(),
+                        },
+                    )),
+                ),
             )
             .await?;
             return Ok(true);
@@ -131,14 +134,15 @@ impl DataEngineerSuite {
             }
         })?;
 
-        apply_phase_transition(
+        commit_phase_decision(
             thread_store,
             thread_id,
             Some(phase),
-            control_flow::Phase::CleanseAuthor,
-            control_flow::TransitionIntent::Forward,
-            Some(transition_reason_code),
-            Some(transition_reason_detail),
+            PhaseDecision::forward(
+                control_flow::Phase::CleanseAuthor,
+                Some(transition_reason_code),
+                Some(transition_reason_detail),
+            ),
         )
         .await?;
         Ok(true)
@@ -173,18 +177,19 @@ impl DataEngineerSuite {
                 .await
                 .map_err(|e| format!("failed to persist pruned-empty model plan: {e}"))?;
             // Stay in plan phase; the next iteration will generate a new plan.
-            apply_phase_transition(
+            commit_phase_decision(
                 thread_store,
                 thread_id,
                 Some(phase),
-                phase,
-                control_flow::TransitionIntent::Annotation,
-                Some(PhaseReasonCode::PlanPrunedEmpty),
-                Some(crate::data_engineer::phase_reason_detail::to_value(
-                    &crate::data_engineer::phase_reason_detail::PlanPrunedEmptyDetail {
-                        plan_key: p.plan_key.clone(),
-                    },
-                )),
+                PhaseDecision::annotation(
+                    phase,
+                    Some(PhaseReasonCode::PlanPrunedEmpty),
+                    Some(crate::data_engineer::phase_reason_detail::to_value(
+                        &crate::data_engineer::phase_reason_detail::PlanPrunedEmptyDetail {
+                            plan_key: p.plan_key.clone(),
+                        },
+                    )),
+                ),
             )
             .await?;
             return Ok(true);
@@ -202,19 +207,20 @@ impl DataEngineerSuite {
             crate::data_engineer::plan::save_model_plan(actx, &p)
                 .await
                 .map_err(|e| format!("failed to persist semantically-invalid model plan: {e}"))?;
-            apply_phase_transition(
+            commit_phase_decision(
                 thread_store,
                 thread_id,
                 Some(phase),
-                phase,
-                control_flow::TransitionIntent::Annotation,
-                Some(PhaseReasonCode::PlanSemanticInvalid),
-                Some(crate::data_engineer::phase_reason_detail::to_value(
-                    &crate::data_engineer::phase_reason_detail::PlanSemanticInvalidErrorsDetail {
-                        plan_key: p.plan_key.clone(),
-                        errors: v.errors.clone(),
-                    },
-                )),
+                PhaseDecision::annotation(
+                    phase,
+                    Some(PhaseReasonCode::PlanSemanticInvalid),
+                    Some(crate::data_engineer::phase_reason_detail::to_value(
+                        &crate::data_engineer::phase_reason_detail::PlanSemanticInvalidErrorsDetail {
+                            plan_key: p.plan_key.clone(),
+                            errors: v.errors.clone(),
+                        },
+                    )),
+                ),
             )
             .await?;
             return Ok(true);
@@ -238,14 +244,15 @@ impl DataEngineerSuite {
             }
         })?;
 
-        apply_phase_transition(
+        commit_phase_decision(
             thread_store,
             thread_id,
             Some(phase),
-            control_flow::Phase::ModelAuthor,
-            control_flow::TransitionIntent::Forward,
-            Some(transition_reason_code),
-            Some(transition_reason_detail),
+            PhaseDecision::forward(
+                control_flow::Phase::ModelAuthor,
+                Some(transition_reason_code),
+                Some(transition_reason_detail),
+            ),
         )
         .await?;
         Ok(true)

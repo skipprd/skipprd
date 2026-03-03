@@ -463,7 +463,7 @@ impl DataEngineerSuite {
                                         crate::data_engineer::progress_controller::ExecutionState::new,
                                     );
 
-                                    match es.ladder_step {
+                                    match es.ladder_step() {
                                         crate::data_engineer::progress_controller::RepairLadderStep::Stop => {
                                             return Err(format!(
                                                 "deterministic repair ladder stop: '{}' did not converge after prior repair attempts. Stop and apply a manual fix for '{}' before re-running.",
@@ -540,9 +540,7 @@ impl DataEngineerSuite {
                                         .unwrap_or_else(
                                             crate::data_engineer::progress_controller::ExecutionState::new,
                                         );
-                                    if es.target_path.as_deref().unwrap_or("").trim().is_empty() {
-                                        es.target_path = Some(want.clone());
-                                    }
+                                    es.ensure_repair_target_path(want.clone());
 
                                     match &res {
                                         Ok(v) => {
@@ -612,7 +610,7 @@ impl DataEngineerSuite {
                                     return Err("run_sql probe loop exhausted for this validate-failure cycle; apply a mutating file fix before probing again.".to_string());
                                 }
                                 let res = self.inner.call(args, ctx).await;
-                                if es.last_validate_ok == Some(false) && es.hard_mutation_repair_mode {
+                                if es.last_validate_ok == Some(false) && es.hard_mutation_repair_mode() {
                                     match &res {
                                         Ok(v) => {
                                             let ok =

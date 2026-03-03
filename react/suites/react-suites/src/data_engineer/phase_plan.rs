@@ -1,4 +1,5 @@
 use super::*;
+use crate::data_engineer::phase_contract::{commit_phase_decision, PhaseDecision};
 
 fn actionable_review_plan_detail(
     plan_key: &str,
@@ -84,21 +85,22 @@ if is_cleanse {
                 let _ =
                     crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
                         .await;
-                apply_phase_transition(
+                commit_phase_decision(
                     &thread_store,
                     thread_id,
                     Some(phase),
-                    phase,
-                    control_flow::TransitionIntent::Annotation,
-                    Some(PhaseReasonCode::PlanInvalidEmpty),
-                    Some(crate::data_engineer::phase_reason_detail::to_value(
-                        &crate::data_engineer::phase_reason_detail::PlanInvalidEmptyDetail {
-                            plan_key,
-                            status: format!("{:?}", p.status),
-                            tasks_len: p.tasks.len(),
-                            batches_len: p.batches.len(),
-                        },
-                    )),
+                    PhaseDecision::annotation(
+                        phase,
+                        Some(PhaseReasonCode::PlanInvalidEmpty),
+                        Some(crate::data_engineer::phase_reason_detail::to_value(
+                            &crate::data_engineer::phase_reason_detail::PlanInvalidEmptyDetail {
+                                plan_key,
+                                status: format!("{:?}", p.status),
+                                tasks_len: p.tasks.len(),
+                                batches_len: p.batches.len(),
+                            },
+                        )),
+                    ),
                 )
                 .await?;
                 return Ok(PhaseExecutorOutcome::Continue);
@@ -115,14 +117,15 @@ if is_cleanse {
                     Err(format!("failed to clear pending loopback intent: {e}"))
                 }
             })?;
-            apply_phase_transition(
+            commit_phase_decision(
                 &thread_store,
                 thread_id,
                 Some(phase),
-                track.author_phase(),
-                control_flow::TransitionIntent::Forward,
-                Some(PhaseReasonCode::PlanAlreadyApproved),
-                Some(plan_status_reason_detail(&p.status)),
+                PhaseDecision::forward(
+                    track.author_phase(),
+                    Some(PhaseReasonCode::PlanAlreadyApproved),
+                    Some(plan_status_reason_detail(&p.status)),
+                ),
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -158,21 +161,22 @@ if is_cleanse {
                             "failed to persist cancelled invalid-empty model plan: {e}"
                         )
                     })?;
-                apply_phase_transition(
+                commit_phase_decision(
                     &thread_store,
                     thread_id,
                     Some(phase),
-                    phase,
-                    control_flow::TransitionIntent::Annotation,
-                    Some(PhaseReasonCode::PlanInvalidEmpty),
-                    Some(crate::data_engineer::phase_reason_detail::to_value(
-                        &crate::data_engineer::phase_reason_detail::PlanInvalidEmptyDetail {
-                            plan_key,
-                            status: format!("{:?}", p.status),
-                            tasks_len: p.tasks.len(),
-                            batches_len: p.batches.len(),
-                        },
-                    )),
+                    PhaseDecision::annotation(
+                        phase,
+                        Some(PhaseReasonCode::PlanInvalidEmpty),
+                        Some(crate::data_engineer::phase_reason_detail::to_value(
+                            &crate::data_engineer::phase_reason_detail::PlanInvalidEmptyDetail {
+                                plan_key,
+                                status: format!("{:?}", p.status),
+                                tasks_len: p.tasks.len(),
+                                batches_len: p.batches.len(),
+                            },
+                        )),
+                    ),
                 )
                 .await?;
                 return Ok(PhaseExecutorOutcome::Continue);
@@ -189,14 +193,15 @@ if is_cleanse {
                     Err(format!("failed to clear pending loopback intent: {e}"))
                 }
             })?;
-            apply_phase_transition(
+            commit_phase_decision(
                 &thread_store,
                 thread_id,
                 Some(phase),
-                track.author_phase(),
-                control_flow::TransitionIntent::Forward,
-                Some(PhaseReasonCode::PlanAlreadyApproved),
-                Some(plan_status_reason_detail(&p.status)),
+                PhaseDecision::forward(
+                    track.author_phase(),
+                    Some(PhaseReasonCode::PlanAlreadyApproved),
+                    Some(plan_status_reason_detail(&p.status)),
+                ),
             )
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
@@ -226,20 +231,21 @@ if is_cleanse {
                 crate::data_engineer::plan::save_cleanse_plan(&actx, &p)
                     .await
                     .map_err(|e| format!("failed to persist cancelled cleanse draft plan: {e}"))?;
-                apply_phase_transition(
+                commit_phase_decision(
                     &thread_store,
                     thread_id,
                     Some(phase),
-                    phase,
-                    control_flow::TransitionIntent::Annotation,
-                    Some(PhaseReasonCode::PlanInvalidEmpty),
-                    Some(crate::data_engineer::phase_reason_detail::to_value(
-                        &crate::data_engineer::phase_reason_detail::CleanseDraftUngroundedDetail {
-                            plan_key,
-                            reason: "draft_cleanse_plan_not_raw_grounded".to_string(),
-                            removed_non_raw,
-                        },
-                    )),
+                    PhaseDecision::annotation(
+                        phase,
+                        Some(PhaseReasonCode::PlanInvalidEmpty),
+                        Some(crate::data_engineer::phase_reason_detail::to_value(
+                            &crate::data_engineer::phase_reason_detail::CleanseDraftUngroundedDetail {
+                                plan_key,
+                                reason: "draft_cleanse_plan_not_raw_grounded".to_string(),
+                                removed_non_raw,
+                            },
+                        )),
+                    ),
                 )
                 .await?;
                 return Ok(PhaseExecutorOutcome::Continue);

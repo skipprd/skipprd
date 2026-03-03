@@ -122,10 +122,14 @@ mod tests {
         let store = test_store();
         let tid = "tid-state-manager-invariant-save";
         let mut st = ExecutionState::new();
-        st.hard_mutation_repair_mode = true;
-        st.repair_type = crate::data_engineer::progress_controller::RepairType::SqlTarget;
-        st.ladder_step = crate::data_engineer::progress_controller::RepairLadderStep::Stop;
-        st.attempt_count = 1;
+        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            crate::data_engineer::progress_controller::ActiveRepairMode {
+                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
+                ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::Stop,
+                attempt_count: 1,
+                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+            },
+        );
         let err = save_execution_state(&store, tid, &st)
             .await
             .expect_err("invalid state must fail save");

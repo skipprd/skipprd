@@ -139,6 +139,51 @@ impl Default for RepairType {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveRepairMode {
+    pub repair_type: RepairType,
+    #[serde(default)]
+    pub single_target_repair_path: Option<String>,
+    #[serde(default)]
+    pub target_path: Option<String>,
+    #[serde(default)]
+    pub ladder_step: RepairLadderStep,
+    #[serde(default)]
+    pub attempt_count: usize,
+    #[serde(default)]
+    pub repair_started_mutation_epoch: Option<u64>,
+    #[serde(default)]
+    pub consecutive_noop_patches: usize,
+}
+
+impl Default for ActiveRepairMode {
+    fn default() -> Self {
+        Self {
+            repair_type: RepairType::Unknown,
+            single_target_repair_path: None,
+            target_path: None,
+            ladder_step: RepairLadderStep::PatchTarget,
+            attempt_count: 0,
+            repair_started_mutation_epoch: None,
+            consecutive_noop_patches: 0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RepairModeState {
+    Inactive,
+    Active(ActiveRepairMode),
+}
+
+impl Default for RepairModeState {
+    fn default() -> Self {
+        Self::Inactive
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeOutcomeKind {
@@ -453,23 +498,9 @@ pub struct ExecutionState {
     #[serde(default)]
     pub repair_backlog: Vec<RepairTarget>,
     #[serde(default)]
-    pub hard_mutation_repair_mode: bool,
-    #[serde(default)]
-    pub repair_type: RepairType,
-    #[serde(default)]
-    pub single_target_repair_path: Option<String>,
-    #[serde(default)]
-    pub target_path: Option<String>,
-    #[serde(default)]
-    pub ladder_step: RepairLadderStep,
-    #[serde(default)]
-    pub attempt_count: usize,
+    pub repair_mode: RepairModeState,
     #[serde(default)]
     pub mutation_epoch: u64,
-    #[serde(default)]
-    pub repair_started_mutation_epoch: Option<u64>,
-    #[serde(default)]
-    pub consecutive_noop_patches: usize,
     #[serde(default)]
     pub stall_count: usize,
     #[serde(default)]
@@ -533,23 +564,9 @@ pub struct RepairState {
     #[serde(default)]
     pub repair_backlog: Vec<RepairTarget>,
     #[serde(default)]
-    pub hard_mutation_repair_mode: bool,
-    #[serde(default)]
-    pub repair_type: RepairType,
-    #[serde(default)]
-    pub single_target_repair_path: Option<String>,
-    #[serde(default)]
-    pub target_path: Option<String>,
-    #[serde(default)]
-    pub ladder_step: RepairLadderStep,
-    #[serde(default)]
-    pub attempt_count: usize,
+    pub repair_mode: RepairModeState,
     #[serde(default)]
     pub mutation_epoch: u64,
-    #[serde(default)]
-    pub repair_started_mutation_epoch: Option<u64>,
-    #[serde(default)]
-    pub consecutive_noop_patches: usize,
     #[serde(default)]
     pub stall_count: usize,
     #[serde(default)]
@@ -564,6 +581,62 @@ pub struct RepairState {
     pub last_failed_models: Vec<FailedModelRef>,
     #[serde(default)]
     pub pending_loopback_intent: Option<PendingLoopbackIntent>,
+}
+
+impl RepairState {
+    pub fn hard_mutation_repair_mode(&self) -> bool {
+        matches!(self.repair_mode, RepairModeState::Active(_))
+    }
+
+    pub fn repair_type(&self) -> RepairType {
+        match &self.repair_mode {
+            RepairModeState::Inactive => RepairType::Unknown,
+            RepairModeState::Active(mode) => mode.repair_type,
+        }
+    }
+
+    pub fn single_target_repair_path(&self) -> Option<&str> {
+        match &self.repair_mode {
+            RepairModeState::Inactive => None,
+            RepairModeState::Active(mode) => mode.single_target_repair_path.as_deref(),
+        }
+    }
+
+    pub fn target_path(&self) -> Option<&str> {
+        match &self.repair_mode {
+            RepairModeState::Inactive => None,
+            RepairModeState::Active(mode) => mode.target_path.as_deref(),
+        }
+    }
+
+    pub fn ladder_step(&self) -> RepairLadderStep {
+        match &self.repair_mode {
+            RepairModeState::Inactive => RepairLadderStep::PatchTarget,
+            RepairModeState::Active(mode) => mode.ladder_step.clone(),
+        }
+    }
+
+    pub fn attempt_count(&self) -> usize {
+        match &self.repair_mode {
+            RepairModeState::Inactive => 0,
+            RepairModeState::Active(mode) => mode.attempt_count,
+        }
+    }
+
+    pub fn consecutive_noop_patches(&self) -> usize {
+        match &self.repair_mode {
+            RepairModeState::Inactive => 0,
+            RepairModeState::Active(mode) => mode.consecutive_noop_patches,
+        }
+    }
+
+    pub fn ensure_target_path(&mut self, path: String) {
+        if let RepairModeState::Active(mode) = &mut self.repair_mode {
+            if mode.target_path.as_deref().unwrap_or("").trim().is_empty() {
+                mode.target_path = Some(path);
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -612,6 +685,61 @@ pub enum DataEngineerEvent {
 }
 
 impl ExecutionState {
+    pub fn hard_mutation_repair_mode(&self) -> bool {
+        self.repair_state().hard_mutation_repair_mode()
+    }
+
+    pub fn repair_type(&self) -> RepairType {
+        self.repair_state().repair_type()
+    }
+
+    pub fn ladder_step(&self) -> RepairLadderStep {
+        self.repair_state().ladder_step()
+    }
+
+    pub fn attempt_count(&self) -> usize {
+        self.repair_state().attempt_count()
+    }
+
+    pub fn consecutive_noop_patches(&self) -> usize {
+        self.repair_state().consecutive_noop_patches()
+    }
+
+    pub fn single_target_repair_path(&self) -> Option<String> {
+        self.repair_state().single_target_repair_path().map(ToString::to_string)
+    }
+
+    pub fn target_path(&self) -> Option<String> {
+        self.repair_state().target_path().map(ToString::to_string)
+    }
+
+    pub fn ensure_repair_target_path(&mut self, path: String) {
+        self.with_repair_state_mut(|repair| {
+            repair.ensure_target_path(path);
+        });
+    }
+
+    fn disable_repair_mode(repair: &mut RepairState) {
+        repair.repair_mode = RepairModeState::Inactive;
+    }
+
+    fn enable_repair_mode(repair: &mut RepairState, repair_type: RepairType) {
+        let single_target_repair_path = repair
+            .repair_backlog
+            .iter()
+            .find_map(|t| t.path.as_ref().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty());
+        repair.repair_mode = RepairModeState::Active(ActiveRepairMode {
+            repair_type,
+            target_path: single_target_repair_path.clone(),
+            single_target_repair_path,
+            ladder_step: RepairLadderStep::PatchTarget,
+            attempt_count: 0,
+            repair_started_mutation_epoch: Some(repair.mutation_epoch),
+            consecutive_noop_patches: 0,
+        });
+    }
+
     pub fn new() -> Self {
         Self {
             schema_version: EXECUTION_STATE_SCHEMA_VERSION,
@@ -638,14 +766,7 @@ impl ExecutionState {
         repair.last_validate_ok = Some(true);
         repair.last_failure_signature = None;
         repair.repair_backlog.clear();
-        repair.hard_mutation_repair_mode = false;
-        repair.repair_type = RepairType::Unknown;
-        repair.single_target_repair_path = None;
-        repair.target_path = None;
-        repair.ladder_step = RepairLadderStep::PatchTarget;
-        repair.attempt_count = 0;
-        repair.repair_started_mutation_epoch = None;
-        repair.consecutive_noop_patches = 0;
+        Self::disable_repair_mode(&mut repair);
         repair.stall_count = 0;
         repair.last_progress_delta = Some(ProgressDelta {
             progress_made: true,
@@ -699,15 +820,8 @@ impl ExecutionState {
             last_validate_ok: self.last_validate_ok,
             last_failure_signature: self.last_failure_signature.clone(),
             repair_backlog: self.repair_backlog.clone(),
-            hard_mutation_repair_mode: self.hard_mutation_repair_mode,
-            repair_type: self.repair_type,
-            single_target_repair_path: self.single_target_repair_path.clone(),
-            target_path: self.target_path.clone(),
-            ladder_step: self.ladder_step.clone(),
-            attempt_count: self.attempt_count,
+            repair_mode: self.repair_mode.clone(),
             mutation_epoch: self.mutation_epoch,
-            repair_started_mutation_epoch: self.repair_started_mutation_epoch,
-            consecutive_noop_patches: self.consecutive_noop_patches,
             stall_count: self.stall_count,
             max_stall_count: self.max_stall_count,
             last_progress_delta: self.last_progress_delta.clone(),
@@ -722,15 +836,8 @@ impl ExecutionState {
         self.last_validate_ok = repair.last_validate_ok;
         self.last_failure_signature = repair.last_failure_signature;
         self.repair_backlog = repair.repair_backlog;
-        self.hard_mutation_repair_mode = repair.hard_mutation_repair_mode;
-        self.repair_type = repair.repair_type;
-        self.single_target_repair_path = repair.single_target_repair_path;
-        self.target_path = repair.target_path;
-        self.ladder_step = repair.ladder_step;
-        self.attempt_count = repair.attempt_count;
+        self.repair_mode = repair.repair_mode;
         self.mutation_epoch = repair.mutation_epoch;
-        self.repair_started_mutation_epoch = repair.repair_started_mutation_epoch;
-        self.consecutive_noop_patches = repair.consecutive_noop_patches;
         self.stall_count = repair.stall_count;
         self.max_stall_count = repair.max_stall_count;
         self.last_progress_delta = repair.last_progress_delta;
@@ -928,23 +1035,13 @@ impl ExecutionState {
         repair.last_validate_ok = Some(false);
         repair.last_failure_signature = Some(failure_signature.clone());
         repair.repair_backlog = backlog;
-        repair.hard_mutation_repair_mode = true;
-        repair.repair_type = match failure_class {
+        let repair_type = match failure_class {
             FailureClass::SchemaOrPrecheck => RepairType::Schema,
             FailureClass::SqlOrRuntime | FailureClass::WarehouseConfig | FailureClass::Unknown => {
                 RepairType::SqlTarget
             }
         };
-        repair.single_target_repair_path = repair
-            .repair_backlog
-            .iter()
-            .find_map(|t| t.path.as_ref().map(|s| s.trim().to_string()))
-            .filter(|s| !s.is_empty());
-        repair.target_path = repair.single_target_repair_path.clone();
-        repair.ladder_step = RepairLadderStep::PatchTarget;
-        repair.attempt_count = 0;
-        repair.repair_started_mutation_epoch = Some(repair.mutation_epoch);
-        repair.consecutive_noop_patches = 0;
+        Self::enable_repair_mode(&mut repair, repair_type);
         repair.last_error_brief = brief;
         repair.last_error_class = Some(failure_class);
         repair.last_failed_models = repair
@@ -990,10 +1087,14 @@ impl ExecutionState {
     pub fn note_patch_attempt(&mut self, ok: bool, mutated: bool) {
         let mut repair = self.repair_state();
         let mut probe = self.probe_state_snapshot();
-        repair.attempt_count = repair.attempt_count.saturating_add(1);
+        if let RepairModeState::Active(mode) = &mut repair.repair_mode {
+            mode.attempt_count = mode.attempt_count.saturating_add(1);
+        }
         if ok && mutated {
-            repair.consecutive_noop_patches = 0;
-            repair.ladder_step = RepairLadderStep::PatchTarget;
+            if let RepairModeState::Active(mode) = &mut repair.repair_mode {
+                mode.consecutive_noop_patches = 0;
+                mode.ladder_step = RepairLadderStep::PatchTarget;
+            }
             repair.stall_count = 0;
             repair.last_progress_delta = Some(ProgressDelta {
                 target_hash_changed: true,
@@ -1007,13 +1108,15 @@ impl ExecutionState {
             self.set_probe_state_snapshot(probe);
             return;
         }
-        repair.consecutive_noop_patches = repair.consecutive_noop_patches.saturating_add(1);
-        repair.ladder_step = match repair.ladder_step {
-            RepairLadderStep::PatchTarget => RepairLadderStep::ReplaceContents,
-            RepairLadderStep::ReplaceContents => RepairLadderStep::FsOp,
-            RepairLadderStep::FsOp => RepairLadderStep::Stop,
-            RepairLadderStep::Stop => RepairLadderStep::Stop,
-        };
+        if let RepairModeState::Active(mode) = &mut repair.repair_mode {
+            mode.consecutive_noop_patches = mode.consecutive_noop_patches.saturating_add(1);
+            mode.ladder_step = match mode.ladder_step {
+                RepairLadderStep::PatchTarget => RepairLadderStep::ReplaceContents,
+                RepairLadderStep::ReplaceContents => RepairLadderStep::FsOp,
+                RepairLadderStep::FsOp => RepairLadderStep::Stop,
+                RepairLadderStep::Stop => RepairLadderStep::Stop,
+            };
+        }
         repair.stall_count = repair.stall_count.saturating_add(1);
         repair.last_progress_delta = Some(ProgressDelta {
             target_hash_changed: false,
@@ -1324,11 +1427,7 @@ impl ExecutionState {
             }
             DataEngineerEvent::BatchAuthoringRecovered => {
                 let mut repair = self.repair_state();
-                repair.hard_mutation_repair_mode = false;
-                repair.repair_type = RepairType::Unknown;
-                repair.single_target_repair_path = None;
-                repair.target_path = None;
-                repair.repair_started_mutation_epoch = None;
+                Self::disable_repair_mode(&mut repair);
                 repair.last_error_brief = None;
                 repair.last_error_class = None;
                 repair.last_failed_models.clear();
@@ -1366,29 +1465,26 @@ impl ExecutionState {
 
     fn collect_repair_ladder_coherence_violations(&self, violations: &mut Vec<String>) {
         let repair = self.repair_state();
-        if repair.ladder_step != RepairLadderStep::PatchTarget && !repair.hard_mutation_repair_mode {
-            violations.push(
-                "repair ladder advanced while hard_mutation_repair_mode is disabled".to_string(),
-            );
-        }
-        if repair.ladder_step == RepairLadderStep::Stop && repair.attempt_count < 3 {
-            violations.push("repair ladder reached stop before three attempts".to_string());
-        }
-        if let Some(single_target) = repair
-            .single_target_repair_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            let target = repair.target_path.as_deref().map(str::trim);
-            if target != Some(single_target) {
-                violations.push(
-                    "single_target_repair_path must match target_path when present".to_string(),
-                );
+        if let RepairModeState::Active(mode) = &repair.repair_mode {
+            if mode.ladder_step == RepairLadderStep::Stop && mode.attempt_count < 3 {
+                violations.push("repair ladder reached stop before three attempts".to_string());
             }
-        }
-        if repair.hard_mutation_repair_mode && repair.repair_type == RepairType::Unknown {
-            violations.push("hard_mutation_repair_mode requires non-unknown repair_type".to_string());
+            if let Some(single_target) = mode
+                .single_target_repair_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let target = mode.target_path.as_deref().map(str::trim);
+                if target != Some(single_target) {
+                    violations.push(
+                        "single_target_repair_path must match target_path when present".to_string(),
+                    );
+                }
+            }
+            if mode.repair_type == RepairType::Unknown {
+                violations.push("active repair mode requires non-unknown repair_type".to_string());
+            }
         }
     }
 
@@ -1526,7 +1622,7 @@ pub fn gate_authoring_progress(state: &ExecutionState, phase: Phase) -> Result<(
         .as_ref()
         .map(|d| d.progress_made || d.target_hash_changed)
         .unwrap_or(false);
-    let patched_since_fail = state.attempt_count > 0;
+    let patched_since_fail = state.attempt_count() > 0;
     if last_validate_failed && !(mutation_progress || patched_since_fail) {
         return Err(
             "progress_gate_blocked: validation previously failed and no successful mutation has been recorded since that failure"
@@ -1670,8 +1766,10 @@ mod tests {
     #[test]
     fn validate_success_resets_repair_and_retry_state() {
         let mut st = ExecutionState::new();
-        st.hard_mutation_repair_mode = true;
-        st.repair_type = RepairType::SqlTarget;
+        st.repair_mode = RepairModeState::Active(ActiveRepairMode {
+            repair_type: RepairType::SqlTarget,
+            ..ActiveRepairMode::default()
+        });
         st.subjective_retry = Some(SubjectiveRetryState {
             phase: Phase::ModelPlan,
             kind: SubjectiveRetryKind::PlanSemanticInvalid,
@@ -1680,8 +1778,8 @@ mod tests {
         st.apply_validate_success(ExecutionTier::Model);
         assert_eq!(st.current_tier, ExecutionTier::Model);
         assert_eq!(st.mode, ExecutionMode::Done);
-        assert!(!st.hard_mutation_repair_mode);
-        assert_eq!(st.repair_type, RepairType::Unknown);
+        assert!(!st.hard_mutation_repair_mode());
+        assert_eq!(st.repair_type(), RepairType::Unknown);
         assert!(st.subjective_retry.is_none());
     }
 
@@ -1699,7 +1797,7 @@ mod tests {
             Vec::new(),
             Some("schema fail".to_string()),
         );
-        assert_eq!(st.repair_type, RepairType::Schema);
+        assert_eq!(st.repair_type(), RepairType::Schema);
 
         let sig2 = FailureSignature {
             class: FailureClass::SqlOrRuntime,
@@ -1712,7 +1810,7 @@ mod tests {
             Vec::new(),
             Some("sql fail".to_string()),
         );
-        assert_eq!(st.repair_type, RepairType::SqlTarget);
+        assert_eq!(st.repair_type(), RepairType::SqlTarget);
     }
 
     #[test]
@@ -1756,7 +1854,11 @@ mod tests {
         st.probe_state.required = true;
         assert!(gate_authoring_progress(&st, Phase::ModelAuthor).is_err());
 
-        st.attempt_count = 1;
+        st.repair_mode = RepairModeState::Active(ActiveRepairMode {
+            repair_type: RepairType::SqlTarget,
+            attempt_count: 1,
+            ..ActiveRepairMode::default()
+        });
         st.last_progress_delta = Some(ProgressDelta {
             target_hash_changed: true,
             progress_made: true,
@@ -1957,10 +2059,10 @@ mod tests {
             }],
             brief: "sql validation failed".to_string(),
         });
-        assert!(st.hard_mutation_repair_mode);
-        assert_eq!(st.repair_type, RepairType::SqlTarget);
+        assert!(st.hard_mutation_repair_mode());
+        assert_eq!(st.repair_type(), RepairType::SqlTarget);
         assert_eq!(
-            st.single_target_repair_path.as_deref(),
+            st.single_target_repair_path().as_deref(),
             Some("models/staging/stg_test_raw_raw_customers.sql")
         );
         assert_eq!(st.last_validate_ok, Some(false));
@@ -1969,19 +2071,21 @@ mod tests {
     #[test]
     fn apply_event_batch_authoring_recovered_clears_repair_mode() {
         let mut st = ExecutionState::new();
-        st.hard_mutation_repair_mode = true;
-        st.repair_type = RepairType::SqlTarget;
-        st.single_target_repair_path = Some("models/staging/x.sql".to_string());
-        st.target_path = Some("models/staging/x.sql".to_string());
+        st.repair_mode = RepairModeState::Active(ActiveRepairMode {
+            repair_type: RepairType::SqlTarget,
+            single_target_repair_path: Some("models/staging/x.sql".to_string()),
+            target_path: Some("models/staging/x.sql".to_string()),
+            ..ActiveRepairMode::default()
+        });
         st.last_failed_models = vec![FailedModelRef {
             name: "x".to_string(),
             file: "models/staging/x.sql".to_string(),
         }];
         st.apply_event(DataEngineerEvent::BatchAuthoringRecovered);
-        assert!(!st.hard_mutation_repair_mode);
-        assert_eq!(st.repair_type, RepairType::Unknown);
-        assert!(st.single_target_repair_path.is_none());
-        assert!(st.target_path.is_none());
+        assert!(!st.hard_mutation_repair_mode());
+        assert_eq!(st.repair_type(), RepairType::Unknown);
+        assert!(st.single_target_repair_path().is_none());
+        assert!(st.target_path().is_none());
         assert!(st.last_failed_models.is_empty());
     }
 
@@ -1997,10 +2101,12 @@ mod tests {
     #[test]
     fn invariants_reject_repair_ladder_stop_without_required_attempts() {
         let mut st = ExecutionState::new();
-        st.hard_mutation_repair_mode = true;
-        st.repair_type = RepairType::SqlTarget;
-        st.ladder_step = RepairLadderStep::Stop;
-        st.attempt_count = 2;
+        st.repair_mode = RepairModeState::Active(ActiveRepairMode {
+            repair_type: RepairType::SqlTarget,
+            ladder_step: RepairLadderStep::Stop,
+            attempt_count: 2,
+            ..ActiveRepairMode::default()
+        });
         let err = st.validate_invariants().expect_err("invariants must fail");
         assert!(err.contains("repair ladder reached stop before three attempts"));
     }

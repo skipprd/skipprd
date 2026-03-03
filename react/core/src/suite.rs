@@ -193,6 +193,17 @@ pub trait WorkflowSuiteContract {
     fn reduce(state: &mut Self::State, event: Self::Event);
 }
 
+/// Typed node contract for suites that use an explicit workflow state-machine node.
+///
+/// This lets runtime orchestration derive phase execution from one canonical node source,
+/// rather than recomputing control flow from multiple independent state fields.
+pub trait WorkflowNodeContract: WorkflowSuiteContract {
+    type Node: Copy + Eq + Send + Sync + 'static;
+
+    fn node_from_state(state: &Self::State) -> Self::Node;
+    fn phase_from_node(node: Self::Node) -> Self::Phase;
+}
+
 pub type DynSuite = Arc<dyn Suite>;
 
 pub struct SuiteRegistry {
