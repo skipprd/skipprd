@@ -159,7 +159,7 @@ components:
           description: Optional initial message. If absent, creates an empty thread.
         suiteId:
           type: string
-          description: Suite id to use (e.g. data_engineer | kb)
+          description: Suite id to use (e.g. kb | analytics_suite)
         agentType:
           type: string
           description: Agent/mode to use (ask | kb | agent | review). Required.
@@ -185,7 +185,7 @@ components:
           description: Optional nudge to resume the thread (default is "Continue.")
         suiteId:
           type: string
-          description: Suite id to use (e.g. data_engineer | kb)
+          description: Suite id to use (e.g. kb | analytics_suite)
         agentType:
           type: string
           description: Agent to use for this message; if differs from current, a switch_agent step is recorded.
@@ -492,7 +492,7 @@ components:
     PlansResponse:
       type: object
       additionalProperties: false
-      required: [v, type, server_time, seq, thread_id]
+      required: [v, type, server_time, seq, thread_id, plans]
       properties:
         v: { type: integer }
         type: { type: string, enum: [plans] }
@@ -501,12 +501,10 @@ components:
         thread_id: { type: string }
         thread_seq: { type: integer, nullable: true }
         for_cid: { type: string, nullable: true }
-        cleanse:
-          $ref: '#/components/schemas/PlanSnapshot'
-          nullable: true
-        model:
-          $ref: '#/components/schemas/PlanSnapshot'
-          nullable: true
+        plans:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlanSnapshot'
 
     PlansChangedResponse:
       type: object
@@ -525,8 +523,11 @@ components:
           items:
             $ref: '#/components/schemas/PlanKind'
           description: Which plan kinds changed. UI should fetch `plans` to get latest snapshots.
-        cleanse_plan_key: { type: string, nullable: true }
-        model_plan_key: { type: string, nullable: true }
+        changed_plan_keys:
+          type: array
+          nullable: true
+          items: { type: string }
+          description: Plan keys that changed (same order as `changed` where available).
 
     ThreadStateResponse:
       type: object
@@ -611,40 +612,9 @@ components:
           nullable: true
           description: Duration for this run (ms), present when ended_at is present.
 
-    # Strongly-typed control-flow enums/meta (kept in sync with `react_core::control_flow`).
     PhaseReasonCode:
       type: string
-      enum:
-        - phase_set
-        - preflight_start
-        - preflight_ok
-        - plan_approved
-        - plan_auto_approved
-        - plan_already_approved
-        - plan_missing
-        - plan_not_approved
-        - plan_invalid_empty
-        - plan_pruned_empty
-        - plan_semantic_invalid
-        - work_group_validate
-        - plan_tasks_done
-        - no_work_all_done
-        - authoring_complete
-        - precheck_failed
-        - validate_pass
-        - validate_fail
-        - review_proceed
-        - review_patch_plan
-        - review_patch_impl
-        - review_project_summary
-        - review_batch
-        - review_final_unify
-        - user_approved_publish
-        - publish_success
-        - publish_fail
-        - publish_confirmed_success
-        - publish_confirmed_fail
-        - phase_blocked
+      description: Suite-defined phase transition reason token.
 
     ReviewDecision:
       type: string
@@ -704,7 +674,7 @@ components:
  
     PlanKind:
       type: string
-      enum: [cleanse, model]
+      description: Suite-defined plan kind token.
 
     ToolEventStatus:
       type: string
@@ -717,7 +687,7 @@ components:
         plan_kind:
           $ref: '#/components/schemas/PlanKind'
           nullable: true
-          description: Plan kind (cleanse|model).
+          description: Suite-defined plan kind token.
         plan_key:
           type: string
           nullable: true
@@ -1069,55 +1039,23 @@ components:
           items: { type: string }
 
     PlanTask:
-      oneOf:
-        - $ref: '#/components/schemas/CleanseTaskSnapshot'
-        - $ref: '#/components/schemas/ModelTaskSnapshot'
-      discriminator:
-        propertyName: taskKind
-        mapping:
-          cleanse: '#/components/schemas/CleanseTaskSnapshot'
-          model: '#/components/schemas/ModelTaskSnapshot'
-
-    CleanseTaskSnapshot:
       type: object
-      additionalProperties: false
-      required: [taskId, dataset_id, status, checklist]
+      additionalProperties: true
+      required: [taskId, status, checklist]
       properties:
+        taskKind: { type: string, nullable: true }
         taskId: { type: string }
-        dataset_id: { type: string }
-        expected_model_path: { type: string, nullable: true }
-        invariants:
-          type: array
-          items: { type: string }
+        label: { type: string, nullable: true }
         status:
           $ref: '#/components/schemas/PlanTaskStatus'
         checklist:
           type: array
           items:
             $ref: '#/components/schemas/PlanChecklistItem'
-
-    ModelTaskSnapshot:
-      type: object
-      additionalProperties: false
-      required: [taskId, name, status, checklist]
-      properties:
-        taskId: { type: string }
-        name: { type: string }
-        folder: { type: string, nullable: true }
-        goal: { type: string, nullable: true }
-        inputs:
-          type: array
-          items: { type: string }
-        expected_model_path: { type: string, nullable: true }
-        invariants:
-          type: array
-          items: { type: string }
-        status:
-          $ref: '#/components/schemas/PlanTaskStatus'
-        checklist:
-          type: array
-          items:
-            $ref: '#/components/schemas/PlanChecklistItem'
+        details:
+          type: object
+          nullable: true
+          additionalProperties: true
 
     # Legacy plan diff/change schemas removed (hard cutover to thread_state + plans).
 
@@ -1264,13 +1202,13 @@ components:
             last_activity: "2025-11-16T11:59:30Z"
             unread_count: 0
             last_message_preview: "Hi there!"
-            suiteId: "data_engineer"
+            suiteId: "kb"
             agentType: "ask"
           - thread_id: th_1731761111222
             last_activity: "2025-11-16T11:58:10Z"
             unread_count: 2
             last_message_preview: "Can you tell me more?"
-            suiteId: "data_engineer"
+            suiteId: "analytics_suite"
             agentType: "agent"
     suitesResponse:
       summary: Suites listed
@@ -1296,7 +1234,7 @@ components:
         v: 1
         type: new
         cid: "a1111111-2222-3333-4444-555555555555"
-        suiteId: "data_engineer"
+        suiteId: "default_suite"
         agentType: "ask"
         question: What were total rides last week?
     threadAssigned:
