@@ -2741,12 +2741,12 @@ Apply these fixes in the output.",
         {
             budget_msg.push_str(&format!(
                 "\n\nExecution state at exhaustion:\n- current_phase={}\n- mode={}\n- phase_reason_code={}\n- replan_backtracks={}\n- stall_count={}/{}\n- hard_mutation_repair_mode={}",
-                es.current_phase.map(|p| p.as_str().to_string()).unwrap_or_else(|| "null".to_string()),
-                format!("{:?}", es.mode),
-                es.phase_reason_code.map(|c| c.as_str().to_string()).unwrap_or_else(|| "null".to_string()),
-                es.replan_backtracks,
-                es.stall_count,
-                es.max_stall_count,
+                es.phase.current_phase.map(|p| p.as_str().to_string()).unwrap_or_else(|| "null".to_string()),
+                format!("{:?}", es.phase.mode),
+                es.phase.phase_reason_code.map(|c| c.as_str().to_string()).unwrap_or_else(|| "null".to_string()),
+                es.phase.replan_backtracks,
+                es.repair.stall_count,
+                crate::data_engineer::progress_controller::DEFAULT_MAX_STALL_COUNT,
                 es.hard_mutation_repair_mode(),
             ));
             es.mark_failed(budget_msg.clone());
@@ -2761,7 +2761,7 @@ Apply these fixes in the output.",
         Option<String>,
         Vec<crate::data_engineer::progress_controller::FailedModelRef>,
     ) {
-        if let Some(last) = execution_state.last_validate.as_ref() {
+        if let Some(last) = execution_state.telemetry.last_validate.as_ref() {
             let brief = last.brief.as_ref().and_then(|s| {
                 let trimmed = s.trim();
                 if trimmed.is_empty() {
@@ -3583,14 +3583,19 @@ mod tests {
         let store = actx.thread_store.as_ref().expect("thread_store");
 
         let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
-        st.last_validate_ok = Some(false);
-        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+        st.telemetry.last_validate = Some(
+            crate::data_engineer::progress_controller::LastValidateState {
+                ok: Some(false),
+                ..crate::data_engineer::progress_controller::LastValidateState::default()
+            },
+        );
+        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
             crate::data_engineer::progress_controller::ActiveRepairMode {
                 repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                 ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
             },
         );
-        st.probe_state.required = true;
+        st.telemetry.probe.required = true;
         st.save(store, "probe-thread").await.expect("save state");
 
         let guard = crate::data_engineer::control_flow::DerivedGuardState {
@@ -3625,8 +3630,8 @@ mod tests {
         let updated = crate::data_engineer::progress_controller::ExecutionState::load(store, "probe-thread")
             .await
             .expect("state should load");
-        assert_eq!(updated.probe_state.attempts_total, 0);
-        assert_eq!(updated.probe_state.meaningful_attempts, 0);
+        assert_eq!(updated.telemetry.probe.attempts_total, 0);
+        assert_eq!(updated.telemetry.probe.meaningful_attempts, 0);
     }
 
     #[tokio::test]
@@ -3637,14 +3642,19 @@ mod tests {
         let store = actx.thread_store.as_ref().expect("thread_store");
 
         let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
-        st.last_validate_ok = Some(false);
-        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+        st.telemetry.last_validate = Some(
+            crate::data_engineer::progress_controller::LastValidateState {
+                ok: Some(false),
+                ..crate::data_engineer::progress_controller::LastValidateState::default()
+            },
+        );
+        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
             crate::data_engineer::progress_controller::ActiveRepairMode {
                 repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                 ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
             },
         );
-        st.probe_state.required = true;
+        st.telemetry.probe.required = true;
         let sig = crate::data_engineer::progress_controller::ProbeSignature::from_run_sql(
             "select * from t limit 10",
             &serde_json::json!({"ok":true}),
@@ -3798,8 +3808,13 @@ mod tests {
         // Seed valid hard-repair execution state for deterministic single-target tool calls.
         if let Some(store) = actx.thread_store.as_ref() {
             let mut seeded = crate::data_engineer::progress_controller::ExecutionState::new();
-            seeded.last_validate_ok = Some(false);
-            seeded.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            seeded.telemetry.last_validate = Some(
+                crate::data_engineer::progress_controller::LastValidateState {
+                    ok: Some(false),
+                    ..crate::data_engineer::progress_controller::LastValidateState::default()
+                },
+            );
+            seeded.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
                 crate::data_engineer::progress_controller::ActiveRepairMode {
                     repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                     single_target_repair_path: Some("models/marts/fct_orders.sql".to_string()),
@@ -3856,8 +3871,13 @@ mod tests {
 
         if let Some(store) = actx.thread_store.as_ref() {
             let mut seeded = crate::data_engineer::progress_controller::ExecutionState::new();
-            seeded.last_validate_ok = Some(false);
-            seeded.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            seeded.telemetry.last_validate = Some(
+                crate::data_engineer::progress_controller::LastValidateState {
+                    ok: Some(false),
+                    ..crate::data_engineer::progress_controller::LastValidateState::default()
+                },
+            );
+            seeded.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
                 crate::data_engineer::progress_controller::ActiveRepairMode {
                     repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                     single_target_repair_path: Some("models/marts/fct_orders.sql".to_string()),
@@ -3911,8 +3931,13 @@ mod tests {
 
         if let Some(store) = actx.thread_store.as_ref() {
             let mut seeded = crate::data_engineer::progress_controller::ExecutionState::new();
-            seeded.last_validate_ok = Some(false);
-            seeded.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            seeded.telemetry.last_validate = Some(
+                crate::data_engineer::progress_controller::LastValidateState {
+                    ok: Some(false),
+                    ..crate::data_engineer::progress_controller::LastValidateState::default()
+                },
+            );
+            seeded.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
                 crate::data_engineer::progress_controller::ActiveRepairMode {
                     repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                     single_target_repair_path: Some("models/marts/fct_orders.sql".to_string()),
@@ -3979,8 +4004,13 @@ mod tests {
 
         if let Some(store) = actx.thread_store.as_ref() {
             let mut seeded = crate::data_engineer::progress_controller::ExecutionState::new();
-            seeded.last_validate_ok = Some(false);
-            seeded.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+            seeded.telemetry.last_validate = Some(
+                crate::data_engineer::progress_controller::LastValidateState {
+                    ok: Some(false),
+                    ..crate::data_engineer::progress_controller::LastValidateState::default()
+                },
+            );
+            seeded.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
                 crate::data_engineer::progress_controller::ActiveRepairMode {
                     repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                     single_target_repair_path: Some("models/marts/fct_orders.sql".to_string()),
@@ -4421,13 +4451,13 @@ mod tests {
 
         let prior_review_answer = "Please add tests.";
         let mut st = ExecutionState::new();
-        st.phase_reason_code = Some(react_core::control_flow::PhaseReasonCode::ReviewPatchPlan);
-        st.phase_reason_detail = Some(serde_json::json!({
+        st.phase.phase_reason_code = Some(react_core::control_flow::PhaseReasonCode::ReviewPatchPlan);
+        st.phase.phase_reason_detail = Some(serde_json::json!({
             "review_phase":"cleanse_review",
             "meta": {"decision":"patch_plan", "dataset_ids": ["x"], "tier":"silver"},
             "answer": prior_review_answer
         }));
-        st.last_mutation_summary = Some(LastMutationSummary {
+        st.telemetry.last_mutation_summary = Some(LastMutationSummary {
             op: Some("patch".to_string()),
             affected_paths: vec!["models/staging/stg_test_raw_raw_orders.sql".to_string()],
             select_terms: vec!["placed_at_ts".to_string()],
@@ -4471,8 +4501,8 @@ mod tests {
         use crate::data_engineer::progress_controller::ExecutionState;
 
         let mut st = ExecutionState::new();
-        st.phase_reason_code = Some(react_core::control_flow::PhaseReasonCode::ValidatePassToReview);
-        st.phase_reason_detail = Some(serde_json::json!({"dbt_validate_step_idx": 1}));
+        st.phase.phase_reason_code = Some(react_core::control_flow::PhaseReasonCode::ValidatePassToReview);
+        st.phase.phase_reason_detail = Some(serde_json::json!({"dbt_validate_step_idx": 1}));
 
         let q = DataEngineerSuite::build_review_question_with_context(
             "orig goal",
@@ -4491,7 +4521,7 @@ mod tests {
         };
 
         let mut st = ExecutionState::new();
-        st.pending_loopback_intent = Some(PendingLoopbackIntent::PatchPlan {
+        st.repair.pending_loopback_intent = Some(PendingLoopbackIntent::PatchPlan {
             phase: Phase::CleansePlan,
             entry_plan_key: Some("k1".to_string()),
             entry_plan_digest: Some("d1".to_string()),
@@ -4524,8 +4554,8 @@ mod tests {
         };
 
         let mut st = ExecutionState::new();
-        st.mutation_epoch = 4;
-        st.pending_loopback_intent = Some(PendingLoopbackIntent::PatchImpl {
+        st.repair.mutation_epoch = 4;
+        st.repair.pending_loopback_intent = Some(PendingLoopbackIntent::PatchImpl {
             phase: Phase::ModelAuthor,
             entry_mutation_epoch: 4,
         });
@@ -4533,7 +4563,7 @@ mod tests {
             &st,
             Phase::ModelAuthor
         ));
-        st.mutation_epoch = 5;
+        st.repair.mutation_epoch = 5;
         assert!(!crate::data_engineer::phase_gate::patch_impl_intent_unsatisfied(
             &st,
             Phase::ModelAuthor
@@ -4544,7 +4574,7 @@ mod tests {
     fn derive_single_target_repair_path_prefers_execution_state_target() {
         use crate::data_engineer::progress_controller::{ExecutionState, FailedModelRef};
         let mut st = ExecutionState::new();
-        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
             crate::data_engineer::progress_controller::ActiveRepairMode {
                 repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                 single_target_repair_path: Some("models/staging/stg_orders.sql".to_string()),
@@ -4590,7 +4620,12 @@ mod tests {
 
         // Seed failing validate state directly in canonical control state.
         let mut state = crate::data_engineer::progress_controller::ExecutionState::new();
-        state.last_validate_ok = Some(false);
+        state.telemetry.last_validate = Some(
+            crate::data_engineer::progress_controller::LastValidateState {
+                ok: Some(false),
+                ..crate::data_engineer::progress_controller::LastValidateState::default()
+            },
+        );
         state
             .save(&store, tid)
             .await
@@ -4607,7 +4642,7 @@ mod tests {
         );
 
         // A patch attempt (even no-op) flips patched_since_fail via attempt_count.
-        state.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+        state.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
             crate::data_engineer::progress_controller::ActiveRepairMode {
                 repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                 attempt_count: 1,
@@ -4716,10 +4751,10 @@ mod tests {
         st.note_manifest_lookup_attempt(path_kind, false, Some(failure_kind));
         st.note_manifest_lookup_attempt(path_kind, false, Some(failure_kind));
 
-        assert!(st.manifest_lookup.retry_suppressed);
-        assert_eq!(st.manifest_lookup.canonical_success_count, 0);
+        assert!(st.manifest.manifest_lookup.retry_suppressed);
+        assert_eq!(st.manifest.manifest_lookup.canonical_success_count, 0);
         assert!(
-            st.manifest_lookup
+            st.manifest.manifest_lookup
                 .failure_signature
                 .as_deref()
                 .unwrap_or("")

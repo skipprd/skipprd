@@ -3,6 +3,7 @@ use react_core::control_flow::GuardBlockKind;
 use crate::data_engineer::control_flow::Phase;
 use crate::data_engineer::progress_controller::{
     ExecutionMode, ExecutionState, FailedModelRef, PendingLoopbackIntent, RepairLadderStep,
+    DEFAULT_MAX_STALL_COUNT,
 };
 
 pub type PreTurnDirective = react_core::workflow::PreTurnDirective;
@@ -17,7 +18,7 @@ pub fn evaluate_pre_turn_directive(
     let core_snapshot = react_core::workflow::PreTurnStateSnapshot {
         mode_is_mutate: matches!(phase_state.mode, ExecutionMode::Mutate),
         stall_count: repair_state.stall_count,
-        max_stall_count: repair_state.max_stall_count,
+        max_stall_count: DEFAULT_MAX_STALL_COUNT,
         replan_backtracks: phase_state.replan_backtracks,
         hard_mutation_repair_mode: false,
         ladder_stop: false,
@@ -44,6 +45,7 @@ pub fn evaluate_pre_turn_directive(
     }
 
     let fallback_failed_models = execution_state
+        .telemetry
         .last_validate
         .as_ref()
         .map(|v| v.failed_models.as_slice())
@@ -136,9 +138,8 @@ mod tests {
     #[test]
     fn preturn_gate_prioritizes_mutate_stall_failfast() {
         let mut st = ExecutionState::new();
-        st.mode = ExecutionMode::Mutate;
-        st.stall_count = 3;
-        st.max_stall_count = 3;
+        st.phase.mode = ExecutionMode::Mutate;
+        st.repair.stall_count = 3;
         let d = evaluate_pre_turn_directive(&st, Phase::CleanseAuthor, 3);
         match d {
             PreTurnDirective::FailFast { kind, .. } => {
@@ -151,7 +152,7 @@ mod tests {
     #[test]
     fn preturn_gate_replan_backtrack_failfast() {
         let mut st = ExecutionState::new();
-        st.replan_backtracks = 4;
+        st.phase.replan_backtracks = 4;
         let d = evaluate_pre_turn_directive(&st, Phase::ModelPlan, 3);
         match d {
             PreTurnDirective::FailFast { kind, reason } => {
@@ -165,7 +166,7 @@ mod tests {
     #[test]
     fn preturn_gate_hard_repair_ladder_stop_failfast() {
         let mut st = ExecutionState::new();
-        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
             crate::data_engineer::progress_controller::ActiveRepairMode {
                 repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                 single_target_repair_path: Some("models/staging/stg_orders.sql".to_string()),
@@ -189,7 +190,7 @@ mod tests {
     #[test]
     fn preturn_gate_hard_repair_ladder_stop_uses_failed_model_fallback() {
         let mut st = ExecutionState::new();
-        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
             crate::data_engineer::progress_controller::ActiveRepairMode {
                 repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                 single_target_repair_path: None,
@@ -199,7 +200,7 @@ mod tests {
                 ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
             },
         );
-        st.last_validate = Some(crate::data_engineer::progress_controller::LastValidateState {
+        st.telemetry.last_validate = Some(crate::data_engineer::progress_controller::LastValidateState {
             failed_models: vec![crate::data_engineer::progress_controller::FailedModelRef {
                 name: "stg_orders".to_string(),
                 file: "models/staging/stg_orders.sql".to_string(),
@@ -234,10 +235,9 @@ mod tests {
             Case {
                 name: "stall_has_priority_over_replan",
                 setup: |st| {
-                    st.mode = ExecutionMode::Mutate;
-                    st.stall_count = 3;
-                    st.max_stall_count = 3;
-                    st.replan_backtracks = 10;
+                    st.phase.mode = ExecutionMode::Mutate;
+                    st.repair.stall_count = 3;
+                    st.phase.replan_backtracks = 10;
                 },
                 expect_fail: true,
                 expect_kind: Some(GuardBlockKind::AuthoringToValidate),
@@ -245,7 +245,7 @@ mod tests {
             Case {
                 name: "replan_failfast_when_no_stall",
                 setup: |st| {
-                    st.replan_backtracks = 5;
+                    st.phase.replan_backtracks = 5;
                 },
                 expect_fail: true,
                 expect_kind: Some(GuardBlockKind::BatchLocked),

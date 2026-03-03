@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn missing_target_abort_reason_includes_structured_context() {
         let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
-        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
             crate::data_engineer::progress_controller::ActiveRepairMode {
                 repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                 attempt_count: 2,
@@ -417,7 +417,7 @@ let track = if is_cleanse {
 };
 // Treat precheck-failed handoff as an explicit typed schema-repair entry mode.
 let mut phase_guard = guard.clone();
-let precheck_handoff = precheck_authoring_handoff(execution_state.phase_reason_code);
+let precheck_handoff = precheck_authoring_handoff(execution_state.phase.phase_reason_code);
 if precheck_handoff == PrecheckAuthoringHandoff::SchemaRepair {
     phase_guard.last_validate_failed = true;
     phase_guard.mutated_since_fail = false;
@@ -1396,6 +1396,7 @@ if hard_mutation_repair_mode && !last_validate_failed_models.is_empty() {
 }
 // Surface the latest typed suite-level error note (if any) to help auto-fix.
 if let Some(reason) = execution_state
+    .repair
     .last_error_brief
     .as_ref()
     .map(|s| s.trim())
@@ -1406,8 +1407,9 @@ if let Some(reason) = execution_state
 }
 // If we re-entered authoring due to review feedback, inject the full review text (by ref)
 // so the agent can address it in implementation without reopening the plan.
-if execution_state.phase_reason_code == Some(PhaseReasonCode::ReviewPatchImpl) {
+if execution_state.phase.phase_reason_code == Some(PhaseReasonCode::ReviewPatchImpl) {
     if let Some(key) = execution_state
+        .phase
         .phase_reason_detail
         .as_ref()
         .and_then(|v| v.get("meta"))
@@ -1616,7 +1618,7 @@ let llm_options = if is_cleanse {
         reasoning_effort: None,
     }
 };
-let pre_mutation_epoch = execution_state.mutation_epoch;
+let pre_mutation_epoch = execution_state.repair.mutation_epoch;
 match Agent::run_until_block_non_interactive(
     &registry,
     &actx,
@@ -1683,7 +1685,7 @@ match Agent::run_until_block_non_interactive(
             return Ok(PhaseExecutorOutcome::Continue);
         }
         if matches!(
-            gate_state.pending_loopback_intent.as_ref(),
+            gate_state.repair.pending_loopback_intent.as_ref(),
             Some(crate::data_engineer::progress_controller::PendingLoopbackIntent::PatchImpl { phase: p, .. }) if *p == phase
         ) {
             crate::data_engineer::state_manager::mutate_execution_state(
@@ -1758,9 +1760,8 @@ match Agent::run_until_block_non_interactive(
                 hard_mutation_repair_mode,
                 phase_guard.last_validate_failed,
                 pre_mutation_epoch,
-                post_state.mutation_epoch,
-                post_state.stall_count,
-                post_state.max_stall_count,
+                post_state.repair.mutation_epoch,
+                post_state.repair.stall_count,
             );
             match crate::data_engineer::authoring_driver::AuthoringDriver::run_turn(
                 &authoring_ctx,

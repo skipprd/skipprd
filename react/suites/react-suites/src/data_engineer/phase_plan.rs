@@ -39,7 +39,7 @@ let track = TrackKind::try_from_plan_phase(phase)?;
 let is_cleanse = track.is_cleanse();
 let actx = Self::plan_agent_ctx(thread_id, sctx);
 let entered_from_actionable_review =
-    execution_state.phase_reason_code == Some(PhaseReasonCode::ReviewPatchPlan);
+    execution_state.phase.phase_reason_code == Some(PhaseReasonCode::ReviewPatchPlan);
 let actionable_review_entry_step_idx =
     entered_from_actionable_review.then_some(thread_state_step_count);
 let prior_plan_for_update = if entered_from_actionable_review {
@@ -448,7 +448,7 @@ let sys = crate::util::time_context::with_time_context(if is_cleanse {
 let manifest_retry_signal = if is_cleanse {
     crate::data_engineer::progress_controller::ManifestLookupState::default()
 } else {
-    execution_state.manifest_lookup.clone()
+    execution_state.manifest.manifest_lookup.clone()
 };
 let (registry, tools_card) = Self::build_tools_for_phase(
     phase,
@@ -516,8 +516,9 @@ if !is_cleanse {
 }
 // If this plan phase was entered because review explicitly required a plan change,
 // include that feedback verbatim to ground the new plan.
-if execution_state.phase_reason_code == Some(PhaseReasonCode::ReviewPatchPlan) {
+if execution_state.phase.phase_reason_code == Some(PhaseReasonCode::ReviewPatchPlan) {
     if let Some(key) = execution_state
+        .phase
         .phase_reason_detail
         .as_ref()
         .and_then(|v| v.get("meta"))

@@ -44,7 +44,7 @@ impl DataEngineerSuite {
             format!("failed to persist publish approval consumption state: {e}")
         })?;
         let approval_detail = crate::data_engineer::phase_reason_detail::publish_approval_state(
-            serde_json::to_value(&es.publish_approval).unwrap_or(serde_json::Value::Null),
+            serde_json::to_value(&es.publish.publish_approval).unwrap_or(serde_json::Value::Null),
         );
         commit_phase_decision(
             thread_store,

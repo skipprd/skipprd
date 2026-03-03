@@ -55,6 +55,7 @@ async fn derive_select_terms(ctx: &AgentCtx, args: &Value) -> Vec<String> {
         }
     };
     let mut out = st
+        .telemetry
         .last_mutation_summary
         .as_ref()
         .map(|m| m.select_terms.clone())

@@ -603,7 +603,14 @@ impl DataEngineerSuite {
                                     return Err("run_sql probe loop exhausted for this validate-failure cycle; apply a mutating file fix before probing again.".to_string());
                                 }
                                 let res = self.inner.call(args, ctx).await;
-                                if es.last_validate_ok == Some(false) && es.hard_mutation_repair_mode() {
+                                if es
+                                    .telemetry
+                                    .last_validate
+                                    .as_ref()
+                                    .and_then(|lv| lv.ok)
+                                    == Some(false)
+                                    && es.hard_mutation_repair_mode()
+                                {
                                     match &res {
                                         Ok(v) => {
                                             let ok =

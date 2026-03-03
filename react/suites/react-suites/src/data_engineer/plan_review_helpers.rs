@@ -623,8 +623,9 @@ impl DataEngineerSuite {
             ),
         };
 
-        let entry_reason_code: Option<PhaseReasonCode> = execution_state.phase_reason_code;
+        let entry_reason_code: Option<PhaseReasonCode> = execution_state.phase.phase_reason_code;
         let entry_reason_detail: serde_json::Value = execution_state
+            .phase
             .phase_reason_detail
             .clone()
             .unwrap_or(serde_json::Value::Null);
@@ -667,7 +668,7 @@ impl DataEngineerSuite {
         if let Some(prior) = prior_review_block {
             ctx_lines.push(prior);
         }
-        if let Some(last_mutation) = execution_state.last_mutation_summary.as_ref() {
+        if let Some(last_mutation) = execution_state.telemetry.last_mutation_summary.as_ref() {
             ctx_lines.push(format!(
                 "Most recent mutation summary (state-derived):\n{}",
                 serde_json::to_string_pretty(&serde_json::json!({

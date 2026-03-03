@@ -43,18 +43,18 @@ pub async fn dispatch_phase_transition(
         .await?
         .unwrap_or_else(ExecutionState::new);
     let prev_state = st.clone();
-    let mut phase_state = st.phase_state();
     if let Some(from) = from_phase {
         let is_backtrack =
             is_cleanse_replan_backtrack(from, phase) || is_model_replan_backtrack(from, phase);
         match intent {
             TransitionIntent::Annotation => {}
             TransitionIntent::Forward => {
-                phase_state.replan_backtracks = 0;
+                st.phase_state_mut().replan_backtracks = 0;
             }
             TransitionIntent::Loopback => {
-                phase_state.replan_backtracks = react_core::workflow::next_replan_backtracks(
-                    phase_state.replan_backtracks,
+                let current = st.phase_state().replan_backtracks;
+                st.phase_state_mut().replan_backtracks = react_core::workflow::next_replan_backtracks(
+                    current,
                     intent,
                     is_backtrack,
                     replan_backtrack_counter_cap(),
@@ -69,10 +69,9 @@ pub async fn dispatch_phase_transition(
     if matches!(phase, Phase::CleansePlan | Phase::ModelPlan) && from_phase != Some(phase) {
         st.reset_plan_bootstrap(phase);
     }
-    phase_state.current_phase = Some(phase);
-    phase_state.phase_reason_code = reason_code;
-    phase_state.phase_reason_detail = reason_detail.clone();
-    st.set_phase_state(phase_state);
+    st.phase_state_mut().current_phase = Some(phase);
+    st.phase_state_mut().phase_reason_code = reason_code;
+    st.phase_state_mut().phase_reason_detail = reason_detail.clone();
     state_manager::replace_execution_state(store, thread_id, st).await?;
 
     let agent = agent.unwrap_or_else(|| "unknown".to_string());
@@ -185,7 +184,7 @@ mod tests {
         let tid = "tid-validate-pass-reset";
 
         let mut st = ExecutionState::new();
-        st.replan_backtracks = 2;
+        st.phase.replan_backtracks = 2;
         state_manager::replace_execution_state(&store, tid, st)
             .await
             .expect("seed execution state");
@@ -205,7 +204,7 @@ mod tests {
 
         let got = state_manager::load_execution_state(&store, tid).await.expect("state should load");
         assert_eq!(
-            got.replan_backtracks, 0,
+            got.phase.replan_backtracks, 0,
             "forward transitions must reset loopback counter"
         );
     }
@@ -223,7 +222,7 @@ mod tests {
         let tid = "tid-validate-pass-loopback";
 
         let mut st = ExecutionState::new();
-        st.replan_backtracks = 0;
+        st.phase.replan_backtracks = 0;
         state_manager::replace_execution_state(&store, tid, st)
             .await
             .expect("seed execution state");
@@ -242,7 +241,7 @@ mod tests {
         .expect("transition should succeed");
 
         let got = state_manager::load_execution_state(&store, tid).await.expect("state should load");
-        assert_eq!(got.replan_backtracks, 1);
+        assert_eq!(got.phase.replan_backtracks, 1);
     }
 
     #[tokio::test]
@@ -258,10 +257,10 @@ mod tests {
         let tid = "tid-model-plan-reset-state";
 
         let mut st = ExecutionState::new();
-        st.model_plan_bootstrap_done = true;
-        st.manifest_lookup.retry_suppressed = true;
-        st.manifest_lookup.repeated_failure_count = 3;
-        st.manifest_lookup.failure_signature = Some("NoSuchKey:Ambiguous".to_string());
+        st.manifest.plan_bootstrap.model_done = true;
+        st.manifest.manifest_lookup.retry_suppressed = true;
+        st.manifest.manifest_lookup.repeated_failure_count = 3;
+        st.manifest.manifest_lookup.failure_signature = Some("NoSuchKey:Ambiguous".to_string());
         state_manager::replace_execution_state(&store, tid, st)
             .await
             .expect("seed execution state");
@@ -281,11 +280,12 @@ mod tests {
 
         let got = state_manager::load_execution_state(&store, tid).await.expect("state should load");
         assert!(
-            !got.model_plan_bootstrap_done,
+            !got.manifest.plan_bootstrap.model_done,
             "model-plan bootstrap should reset on fresh model_plan entry"
         );
         assert!(
-            !got.manifest_lookup.retry_suppressed && got.manifest_lookup.repeated_failure_count == 0,
+            !got.manifest.manifest_lookup.retry_suppressed
+                && got.manifest.manifest_lookup.repeated_failure_count == 0,
             "manifest lookup retry state should reset on fresh model_plan entry"
         );
     }
@@ -336,8 +336,8 @@ mod tests {
         let store = ThreadStore::new(storage, scope, keyspace);
         let tid = "tid-phase-directive-annotate";
         let mut st = ExecutionState::new();
-        st.current_phase = Some(Phase::CleansePlan);
-        st.replan_backtracks = 2;
+        st.phase.current_phase = Some(Phase::CleansePlan);
+        st.phase.replan_backtracks = 2;
         state_manager::replace_execution_state(&store, tid, st)
             .await
             .expect("seed state");
@@ -359,7 +359,7 @@ mod tests {
         let got = state_manager::load_execution_state(&store, tid)
             .await
             .expect("state");
-        assert_eq!(got.replan_backtracks, 2);
+        assert_eq!(got.phase.replan_backtracks, 2);
     }
 
     #[tokio::test]
@@ -374,8 +374,8 @@ mod tests {
         let store = ThreadStore::new(storage, scope, keyspace);
         let tid = "tid-loopback-cap";
         let mut st = ExecutionState::new();
-        st.current_phase = Some(Phase::CleanseValidate);
-        st.replan_backtracks = replan_backtrack_counter_cap();
+        st.phase.current_phase = Some(Phase::CleanseValidate);
+        st.phase.replan_backtracks = replan_backtrack_counter_cap();
         state_manager::replace_execution_state(&store, tid, st)
             .await
             .expect("seed state");
@@ -396,7 +396,7 @@ mod tests {
         let got = state_manager::load_execution_state(&store, tid)
             .await
             .expect("state");
-        assert_eq!(got.replan_backtracks, replan_backtrack_counter_cap());
+        assert_eq!(got.phase.replan_backtracks, replan_backtrack_counter_cap());
     }
 
     #[tokio::test]
@@ -462,7 +462,7 @@ mod tests {
         let tid = "tid-preturn-ladder-stop-fallback";
 
         let mut st = ExecutionState::new();
-        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
             crate::data_engineer::progress_controller::ActiveRepairMode {
                 repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                 ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::Stop,
@@ -470,7 +470,8 @@ mod tests {
                 ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
             },
         );
-        st.last_validate = Some(crate::data_engineer::progress_controller::LastValidateState {
+        st.telemetry.last_validate =
+            Some(crate::data_engineer::progress_controller::LastValidateState {
             failed_models: vec![crate::data_engineer::progress_controller::FailedModelRef {
                 name: "stg_orders".to_string(),
                 file: "models/staging/stg_orders.sql".to_string(),

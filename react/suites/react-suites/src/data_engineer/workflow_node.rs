@@ -56,7 +56,7 @@ impl WorkflowNode {
     }
 
     pub fn from_state(state: &ExecutionState) -> Self {
-        let phase = state.current_phase.unwrap_or(Phase::Preflight);
+        let phase = state.phase.current_phase.unwrap_or(Phase::Preflight);
         Self::from_phase(phase)
     }
 }

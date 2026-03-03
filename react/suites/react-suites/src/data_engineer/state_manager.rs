@@ -7,7 +7,7 @@ use crate::data_engineer::progress_controller::{
 const DATA_ENGINEER_SUITE_ID: &str = "data_engineer";
 
 pub async fn load_execution_state(thread_store: &ThreadStore, thread_id: &str) -> Option<ExecutionState> {
-    let parsed = thread_store
+    let parsed: ExecutionState = thread_store
         .load_typed_control_state::<ExecutionState>(thread_id, DATA_ENGINEER_SUITE_ID)
         .await
         .ok()??;
@@ -141,7 +141,7 @@ mod tests {
         let store = test_store();
         let tid = "tid-state-manager-invariant-save";
         let mut st = ExecutionState::new();
-        st.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
             crate::data_engineer::progress_controller::ActiveRepairMode {
                 repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                 ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::Stop,
@@ -160,8 +160,13 @@ mod tests {
         let store = test_store();
         let tid = "tid-state-manager-invariant-mutate";
         let err = mutate_execution_state(&store, tid, |st| {
-            st.last_validate_ok = Some(true);
-            st.probe_state.required = true;
+            st.telemetry.last_validate = Some(
+                crate::data_engineer::progress_controller::LastValidateState {
+                    ok: Some(true),
+                    ..crate::data_engineer::progress_controller::LastValidateState::default()
+                },
+            );
+            st.telemetry.probe.required = true;
         })
         .await
         .expect_err("invalid post-mutation state must fail");

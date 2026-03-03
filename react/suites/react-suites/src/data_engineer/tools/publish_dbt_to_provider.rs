@@ -139,8 +139,8 @@ impl Tool for PublishDbtToProviderTool {
                         format!("failed to load strict execution state for publish: {e}")
                     })?
                     .unwrap_or_else(ExecutionState::new);
-                last_published_digest = es.publish_plan.last_published_plan_sha256.clone();
-                pending_plan_digest = es.publish_plan.pending_plan_sha256.clone();
+                last_published_digest = es.publish.publish_plan.last_published_plan_sha256.clone();
+                pending_plan_digest = es.publish.publish_plan.pending_plan_sha256.clone();
             }
         }
 

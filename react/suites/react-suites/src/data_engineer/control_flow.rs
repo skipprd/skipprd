@@ -40,7 +40,10 @@ mod state_first_tests {
     #[test]
     fn derive_guard_state_from_execution_state_marks_validate_failure() {
         let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
-        st.last_validate_ok = Some(false);
+        st.telemetry.last_validate = Some(crate::data_engineer::progress_controller::LastValidateState {
+            ok: Some(false),
+            ..crate::data_engineer::progress_controller::LastValidateState::default()
+        });
         let guard = derive_guard_state_from_execution_state(&st);
         assert!(guard.last_validate_failed);
         assert!(!guard.mutated_since_fail);
@@ -49,8 +52,11 @@ mod state_first_tests {
     #[test]
     fn derive_guard_state_from_execution_state_tracks_mutation_progress() {
         let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
-        st.last_validate_ok = Some(false);
-        st.last_progress_delta = Some(crate::data_engineer::progress_controller::ProgressDelta {
+        st.telemetry.last_validate = Some(crate::data_engineer::progress_controller::LastValidateState {
+            ok: Some(false),
+            ..crate::data_engineer::progress_controller::LastValidateState::default()
+        });
+        st.repair.last_progress_delta = Some(crate::data_engineer::progress_controller::ProgressDelta {
             target_hash_changed: true,
             failed_target_count_delta: 0,
             failure_signature_changed: false,
@@ -188,8 +194,14 @@ pub struct DerivedGuardState {
 pub fn derive_guard_state_from_execution_state(
     st: &crate::data_engineer::progress_controller::ExecutionState,
 ) -> DerivedGuardState {
-    let last_validate_failed = st.last_validate_ok == Some(false);
+    let last_validate_failed = st
+        .telemetry
+        .last_validate
+        .as_ref()
+        .and_then(|lv| lv.ok)
+        == Some(false);
     let mutated_since_fail = st
+        .repair
         .last_progress_delta
         .as_ref()
         .map(|d| d.target_hash_changed || d.progress_made)
@@ -622,7 +634,7 @@ pub async fn call_and_record_tool(
                 .await
             {
                 Ok(Some(mut st)) => {
-                    if st.current_phase == Some(Phase::ModelPlan) {
+                    if st.phase.current_phase == Some(Phase::ModelPlan) {
                         let failure_kind = if obs.ok {
                             None
                         } else {
@@ -1491,8 +1503,11 @@ mod tests {
     #[test]
     fn execution_state_guard_uses_probe_state_required_and_exhausted() {
         let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
-        st.last_validate_ok = Some(false);
-        st.probe_state.required = true;
+        st.telemetry.last_validate = Some(crate::data_engineer::progress_controller::LastValidateState {
+            ok: Some(false),
+            ..crate::data_engineer::progress_controller::LastValidateState::default()
+        });
+        st.telemetry.probe.required = true;
         let g = derive_guard_state_from_execution_state(&st);
         assert!(g.probe_required);
         assert!(!g.probe_satisfied);

@@ -73,9 +73,10 @@ impl DataEngineerSuite {
         let trigger_step = serde_json::json!({
             "phase": phase.as_str(),
             "phase_reason_code": execution_state
+                .phase
                 .phase_reason_code
                 .map(|c| c.as_str().to_string()),
-            "phase_reason_detail": execution_state.phase_reason_detail.clone(),
+            "phase_reason_detail": execution_state.phase.phase_reason_detail.clone(),
         });
 
         let mut meta: ReviewDecisionMeta = decision_meta_v

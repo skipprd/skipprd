@@ -50,7 +50,8 @@ async fn was_recently_removed_in_repair(ctx: &AgentCtx, rel_path: &str) -> bool 
             if !st.hard_mutation_repair_mode() {
                 return false;
             }
-            st.last_mutation_summary
+            st.telemetry
+                .last_mutation_summary
                 .and_then(|m| {
                     let op = m.op.unwrap_or_default();
                     if op != "rm" {
@@ -955,7 +956,7 @@ mod tests {
         );
         let tid = "tid-hard-mutation-files-get-blocked".to_string();
         let mut es = ExecutionState::new();
-        es.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+        es.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
             crate::data_engineer::progress_controller::ActiveRepairMode {
                 repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                 ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
@@ -997,7 +998,7 @@ mod tests {
         );
         let tid = "tid-hard-mutation-files-list-allowed".to_string();
         let mut es = ExecutionState::new();
-        es.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
+        es.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
             crate::data_engineer::progress_controller::ActiveRepairMode {
                 repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
                 ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
