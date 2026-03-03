@@ -37,23 +37,44 @@ pub(crate) async fn fail_model_schema_batch(
         )
     })?;
     if budget.exhausted() {
-        return Ok(serde_json::json!({
-            "ok": false,
-            "kind": "batch_locked",
-            "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
-            "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
-            "checklist_item_id": checklist_item_id,
-            "attempted_item_names": attempted_names,
-            "succeeded_item_names": [],
-            "failed_item_names": attempted_names,
-            "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
-        }));
+        return crate::data_engineer::tools::batch_contracts::to_json_value(
+            crate::data_engineer::tools::batch_contracts::ModelSchemaBatchContract {
+                ok: false,
+                kind: Some("batch_locked".to_string()),
+                reason_code: Some(serde_json::to_value(
+                    controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                )
+                .map_err(|e| format!("failed to encode batch lock reason: {e}"))?),
+                message: Some(controller_kernel::batch_lock_error_message(
+                    controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                )
+                .to_string()),
+                checklist_item_id: checklist_item_id.to_string(),
+                attempted_item_names: attempted_names.to_vec(),
+                succeeded_item_names: Vec::new(),
+                failed_item_names: attempted_names.to_vec(),
+                errors: vec![controller_kernel::batch_lock_error_message(
+                    controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                )
+                .to_string()],
+                progress_made: None,
+                warnings: Vec::new(),
+            },
+        );
     }
-    Ok(serde_json::json!({
-        "ok": false,
-        "attempted_item_names": attempted_names,
-        "succeeded_item_names": [],
-        "failed_item_names": attempted_names,
-        "errors": [error_message],
-    }))
+    crate::data_engineer::tools::batch_contracts::to_json_value(
+        crate::data_engineer::tools::batch_contracts::ModelSchemaBatchContract {
+            ok: false,
+            kind: None,
+            reason_code: None,
+            message: None,
+            checklist_item_id: checklist_item_id.to_string(),
+            attempted_item_names: attempted_names.to_vec(),
+            succeeded_item_names: Vec::new(),
+            failed_item_names: attempted_names.to_vec(),
+            errors: vec![error_message],
+            progress_made: None,
+            warnings: Vec::new(),
+        },
+    )
 }

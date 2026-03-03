@@ -62,17 +62,6 @@ pub(crate) fn derive_failed_ids(attempted: &[String], succeeded: &[String]) -> V
         .collect()
 }
 
-pub(crate) fn extract_errors(res: &Value) -> Vec<String> {
-    res.get("errors")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
 pub(crate) fn extract_first_error(res: &Value, default: &str) -> String {
     res.get("errors")
         .and_then(|v| v.as_array())

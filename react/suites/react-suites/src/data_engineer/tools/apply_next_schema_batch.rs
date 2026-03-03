@@ -222,29 +222,48 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
         // Plan auto-heal (semantic): validate + single repair attempt before executing.
         let v = plan::ensure_cleanse_plan_semantically_valid_or_repaired(ctx, &mut plan).await?;
         if !v.ok {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "kind": "plan_invalid",
-                "plan_key": plan.plan_key,
-                "errors": v.errors,
-                "attempted_dataset_ids": [],
-                "succeeded_dataset_ids": [],
-                "failed_dataset_ids": [],
-            }));
+            return crate::data_engineer::tools::batch_contracts::to_json_value(
+                crate::data_engineer::tools::batch_contracts::CleanseSchemaBatchContract {
+                    ok: false,
+                    kind: Some("plan_invalid".to_string()),
+                    reason_code: None,
+                    message: Some(format!("plan_key={}", plan.plan_key)),
+                    checklist_item_id: checklist_item_id.clone(),
+                    attempted_dataset_ids: Vec::new(),
+                    succeeded_dataset_ids: Vec::new(),
+                    failed_dataset_ids: Vec::new(),
+                    errors: v.errors,
+                    progress_made: None,
+                    auto_healed_wildcard_sql_dataset_ids: Vec::new(),
+                },
+            );
         }
 
         if controller_kernel::batch_budget(&plan.progress).exhausted() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "kind": "batch_locked",
-                "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
-                "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
-                "checklist_item_id": checklist_item_id,
-                "attempted_dataset_ids": [],
-                "succeeded_dataset_ids": [],
-                "failed_dataset_ids": [],
-                "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
-            }));
+            return crate::data_engineer::tools::batch_contracts::to_json_value(
+                crate::data_engineer::tools::batch_contracts::CleanseSchemaBatchContract {
+                    ok: false,
+                    kind: Some("batch_locked".to_string()),
+                    reason_code: Some(serde_json::to_value(
+                        controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                    )
+                    .map_err(|e| format!("failed to encode batch lock reason: {e}"))?),
+                    message: Some(controller_kernel::batch_lock_error_message(
+                        controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                    )
+                    .to_string()),
+                    checklist_item_id: checklist_item_id.clone(),
+                    attempted_dataset_ids: Vec::new(),
+                    succeeded_dataset_ids: Vec::new(),
+                    failed_dataset_ids: Vec::new(),
+                    errors: vec![controller_kernel::batch_lock_error_message(
+                        controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                    )
+                    .to_string()],
+                    progress_made: None,
+                    auto_healed_wildcard_sql_dataset_ids: Vec::new(),
+                },
+            );
         }
 
         let batch = plan::cleanse_pending_for_checklist(
@@ -253,29 +272,40 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             &checklist_item_id,
         );
         if batch.is_empty() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "kind": "no_progress",
-                "progress_made": false,
-                "message": "no pending schema checklist work (all done)",
-                "checklist_item_id": checklist_item_id,
-                "attempted_dataset_ids": [],
-                "succeeded_dataset_ids": [],
-                "failed_dataset_ids": [],
-            }));
+            return crate::data_engineer::tools::batch_contracts::to_json_value(
+                crate::data_engineer::tools::batch_contracts::CleanseSchemaBatchContract {
+                    ok: false,
+                    kind: Some("no_progress".to_string()),
+                    reason_code: None,
+                    message: Some("no pending schema checklist work (all done)".to_string()),
+                    checklist_item_id: checklist_item_id.clone(),
+                    attempted_dataset_ids: Vec::new(),
+                    succeeded_dataset_ids: Vec::new(),
+                    failed_dataset_ids: Vec::new(),
+                    errors: Vec::new(),
+                    progress_made: Some(false),
+                    auto_healed_wildcard_sql_dataset_ids: Vec::new(),
+                },
+            );
         }
         if let Err(e) =
             chunk_progress_contract::enforce_chunk_contract(&batch, 5, "cleanse_schema")
         {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "kind": "chunk_contract_violation",
-                "checklist_item_id": checklist_item_id,
-                "attempted_dataset_ids": [],
-                "succeeded_dataset_ids": [],
-                "failed_dataset_ids": [],
-                "errors": [e],
-            }));
+            return crate::data_engineer::tools::batch_contracts::to_json_value(
+                crate::data_engineer::tools::batch_contracts::CleanseSchemaBatchContract {
+                    ok: false,
+                    kind: Some("chunk_contract_violation".to_string()),
+                    reason_code: None,
+                    message: None,
+                    checklist_item_id: checklist_item_id.clone(),
+                    attempted_dataset_ids: Vec::new(),
+                    succeeded_dataset_ids: Vec::new(),
+                    failed_dataset_ids: Vec::new(),
+                    errors: vec![e],
+                    progress_made: None,
+                    auto_healed_wildcard_sql_dataset_ids: Vec::new(),
+                },
+            );
         }
 
         let instructions = extract_string_arg(&args, "instructions")
@@ -492,30 +522,44 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             .map_err(|e| format!("failed to persist cleanse schema batch result state: {e}"))?;
 
         if budget.exhausted() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "kind": "batch_locked",
-                "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
-                "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
-                "checklist_item_id": checklist_item_id,
-                "attempted_dataset_ids": batch,
-                "succeeded_dataset_ids": succeeded,
-                "failed_dataset_ids": failed,
-                "auto_healed_wildcard_sql_dataset_ids": auto_healed_wildcard_sql_dataset_ids,
-                "errors": errors,
-            }));
+            return crate::data_engineer::tools::batch_contracts::to_json_value(
+                crate::data_engineer::tools::batch_contracts::CleanseSchemaBatchContract {
+                    ok: false,
+                    kind: Some("batch_locked".to_string()),
+                    reason_code: Some(serde_json::to_value(
+                        controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                    )
+                    .map_err(|e| format!("failed to encode batch lock reason: {e}"))?),
+                    message: Some(controller_kernel::batch_lock_error_message(
+                        controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                    )
+                    .to_string()),
+                    checklist_item_id: checklist_item_id.clone(),
+                    attempted_dataset_ids: batch,
+                    succeeded_dataset_ids: succeeded,
+                    failed_dataset_ids: failed,
+                    auto_healed_wildcard_sql_dataset_ids,
+                    errors,
+                    progress_made: None,
+                },
+            );
         }
 
-        Ok(serde_json::json!({
-            "ok": failed.is_empty(),
-            "progress_made": !succeeded.is_empty(),
-            "checklist_item_id": checklist_item_id,
-            "attempted_dataset_ids": batch,
-            "succeeded_dataset_ids": succeeded,
-            "failed_dataset_ids": failed,
-            "auto_healed_wildcard_sql_dataset_ids": auto_healed_wildcard_sql_dataset_ids,
-            "errors": errors,
-        }))
+        crate::data_engineer::tools::batch_contracts::to_json_value(
+            crate::data_engineer::tools::batch_contracts::CleanseSchemaBatchContract {
+                ok: failed.is_empty(),
+                kind: None,
+                reason_code: None,
+                message: None,
+                checklist_item_id,
+                attempted_dataset_ids: batch,
+                succeeded_dataset_ids: succeeded.clone(),
+                failed_dataset_ids: failed,
+                auto_healed_wildcard_sql_dataset_ids,
+                errors,
+                progress_made: Some(!succeeded.is_empty()),
+            },
+        )
     }
 }
 
@@ -554,55 +598,85 @@ impl Tool for ApplyNextModelSchemaBatchTool {
         )
         .await?;
         if !v.ok {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "kind": "plan_invalid",
-                "plan_key": plan.plan_key,
-                "errors": v.errors,
-                "attempted_item_names": [],
-                "succeeded_item_names": [],
-                "failed_item_names": [],
-            }));
+            return crate::data_engineer::tools::batch_contracts::to_json_value(
+                crate::data_engineer::tools::batch_contracts::ModelSchemaBatchContract {
+                    ok: false,
+                    checklist_item_id: checklist_item_id.clone(),
+                    kind: Some("plan_invalid".to_string()),
+                    reason_code: None,
+                    message: Some(format!("plan_key={}", plan.plan_key)),
+                    errors: v.errors,
+                    attempted_item_names: Vec::new(),
+                    succeeded_item_names: Vec::new(),
+                    failed_item_names: Vec::new(),
+                    progress_made: None,
+                    warnings: Vec::new(),
+                },
+            );
         }
 
         if controller_kernel::batch_budget(&plan.progress).exhausted() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "kind": "batch_locked",
-                "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
-                "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
-                "checklist_item_id": checklist_item_id,
-                "attempted_item_names": [],
-                "succeeded_item_names": [],
-                "failed_item_names": [],
-                "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
-            }));
+            return crate::data_engineer::tools::batch_contracts::to_json_value(
+                crate::data_engineer::tools::batch_contracts::ModelSchemaBatchContract {
+                    ok: false,
+                    checklist_item_id: checklist_item_id.clone(),
+                    kind: Some("batch_locked".to_string()),
+                    reason_code: Some(serde_json::to_value(
+                        controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                    )
+                    .map_err(|e| format!("failed to encode batch lock reason: {e}"))?),
+                    message: Some(controller_kernel::batch_lock_error_message(
+                        controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                    )
+                    .to_string()),
+                    errors: vec![controller_kernel::batch_lock_error_message(
+                        controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                    )
+                    .to_string()],
+                    attempted_item_names: Vec::new(),
+                    succeeded_item_names: Vec::new(),
+                    failed_item_names: Vec::new(),
+                    progress_made: None,
+                    warnings: Vec::new(),
+                },
+            );
         }
 
         let names =
             plan::model_pending_for_checklist(&plan, plan::CHECKLIST_SQL_MODEL, &checklist_item_id);
         if names.is_empty() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "kind": "no_progress",
-                "progress_made": false,
-                "message": "no pending schema checklist work (all done)",
-                "checklist_item_id": checklist_item_id,
-                "attempted_item_names": [],
-                "succeeded_item_names": [],
-                "failed_item_names": [],
-            }));
+            return crate::data_engineer::tools::batch_contracts::to_json_value(
+                crate::data_engineer::tools::batch_contracts::ModelSchemaBatchContract {
+                    ok: false,
+                    checklist_item_id: checklist_item_id.clone(),
+                    kind: Some("no_progress".to_string()),
+                    reason_code: None,
+                    message: Some("no pending schema checklist work (all done)".to_string()),
+                    errors: Vec::new(),
+                    attempted_item_names: Vec::new(),
+                    succeeded_item_names: Vec::new(),
+                    failed_item_names: Vec::new(),
+                    progress_made: Some(false),
+                    warnings: Vec::new(),
+                },
+            );
         }
         if let Err(e) = chunk_progress_contract::enforce_chunk_contract(&names, 5, "model_schema") {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "kind": "chunk_contract_violation",
-                "checklist_item_id": checklist_item_id,
-                "attempted_item_names": [],
-                "succeeded_item_names": [],
-                "failed_item_names": [],
-                "errors": [e],
-            }));
+            return crate::data_engineer::tools::batch_contracts::to_json_value(
+                crate::data_engineer::tools::batch_contracts::ModelSchemaBatchContract {
+                    ok: false,
+                    checklist_item_id: checklist_item_id.clone(),
+                    kind: Some("chunk_contract_violation".to_string()),
+                    reason_code: None,
+                    message: None,
+                    errors: vec![e],
+                    attempted_item_names: Vec::new(),
+                    succeeded_item_names: Vec::new(),
+                    failed_item_names: Vec::new(),
+                    progress_made: None,
+                    warnings: Vec::new(),
+                },
+            );
         }
 
         let instructions = extract_string_arg(&args, "instructions")
@@ -769,30 +843,47 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             .map_err(|e| format!("failed to persist model schema batch result state: {e}"))?;
 
         if budget.exhausted() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "kind": "batch_locked",
-                "reason_code": controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
-                "message": controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted),
-                "checklist_item_id": checklist_item_id,
-                "attempted_item_names": attempted_names.clone(),
-                "succeeded_item_names": attempted_names.clone(),
-                "failed_item_names": [],
-                "errors": [controller_kernel::batch_lock_error_message(controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted)],
-                "warnings": warnings,
-            }));
+            return crate::data_engineer::tools::batch_contracts::to_json_value(
+                crate::data_engineer::tools::batch_contracts::ModelSchemaBatchContract {
+                    ok: false,
+                    checklist_item_id: checklist_item_id.clone(),
+                    kind: Some("batch_locked".to_string()),
+                    reason_code: Some(serde_json::to_value(
+                        controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                    )
+                    .map_err(|e| format!("failed to encode batch lock reason: {e}"))?),
+                    message: Some(controller_kernel::batch_lock_error_message(
+                        controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                    )
+                    .to_string()),
+                    attempted_item_names: attempted_names.clone(),
+                    succeeded_item_names: attempted_names.clone(),
+                    failed_item_names: Vec::new(),
+                    errors: vec![controller_kernel::batch_lock_error_message(
+                        controller_kernel::BatchLockReason::ConsecutiveFailureBudgetExhausted,
+                    )
+                    .to_string()],
+                    progress_made: None,
+                    warnings,
+                },
+            );
         }
 
-        Ok(serde_json::json!({
-            "ok": true,
-            "progress_made": true,
-            "checklist_item_id": checklist_item_id,
-            "attempted_item_names": attempted_names.clone(),
-            "succeeded_item_names": attempted_names,
-            "failed_item_names": [],
-            "errors": [],
-            "warnings": warnings,
-        }))
+        crate::data_engineer::tools::batch_contracts::to_json_value(
+            crate::data_engineer::tools::batch_contracts::ModelSchemaBatchContract {
+                ok: true,
+                checklist_item_id,
+                kind: None,
+                reason_code: None,
+                message: None,
+                attempted_item_names: attempted_names.clone(),
+                succeeded_item_names: attempted_names,
+                failed_item_names: Vec::new(),
+                errors: Vec::new(),
+                progress_made: Some(true),
+                warnings,
+            },
+        )
     }
 }
 

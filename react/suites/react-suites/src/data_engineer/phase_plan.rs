@@ -18,6 +18,46 @@ fn auto_approved_plan_detail(source: &str) -> serde_json::Value {
     crate::data_engineer::phase_reason_detail::plan_auto_approved(source)
 }
 
+async fn load_any_plan_for_track_spec(
+    actx: &AgentCtx,
+    track: TrackKind,
+) -> Option<TrackPlanDoc> {
+    match track {
+        TrackKind::Cleanse => {
+            crate::data_engineer::phase_plan_lifecycle::load_any_plan_for_spec::<
+                crate::data_engineer::CleanseSpec,
+            >(actx)
+            .await
+        }
+        TrackKind::Model => {
+            crate::data_engineer::phase_plan_lifecycle::load_any_plan_for_spec::<
+                crate::data_engineer::ModelSpec,
+            >(actx)
+            .await
+        }
+    }
+}
+
+async fn load_active_plan_for_track_spec(
+    actx: &AgentCtx,
+    track: TrackKind,
+) -> Option<TrackPlanDoc> {
+    match track {
+        TrackKind::Cleanse => {
+            crate::data_engineer::phase_plan_lifecycle::load_active_plan_for_spec::<
+                crate::data_engineer::CleanseSpec,
+            >(actx)
+            .await
+        }
+        TrackKind::Model => {
+            crate::data_engineer::phase_plan_lifecycle::load_active_plan_for_spec::<
+                crate::data_engineer::ModelSpec,
+            >(actx)
+            .await
+        }
+    }
+}
+
 impl DataEngineerSuite {
     pub(super) async fn execute_plan_phase(
         thread_store: &ThreadStore,
@@ -27,7 +67,6 @@ impl DataEngineerSuite {
         sctx: &SuiteCtx,
         execution_state: &crate::data_engineer::progress_controller::ExecutionState,
         guard: &crate::data_engineer::control_flow::DerivedGuardState,
-        allow_ask_approval: bool,
         thread_state_step_count: usize,
         last_validate_brief: &Option<String>,
         _last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
@@ -43,14 +82,7 @@ let entered_from_actionable_review =
 let actionable_review_entry_step_idx =
     entered_from_actionable_review.then_some(thread_state_step_count);
 let prior_plan_for_update = if entered_from_actionable_review {
-    match track {
-        TrackKind::Cleanse => {
-            crate::data_engineer::phase_plan_lifecycle::load_any_plan_for_spec::<crate::data_engineer::CleanseSpec>(&actx).await
-        }
-        TrackKind::Model => {
-            crate::data_engineer::phase_plan_lifecycle::load_any_plan_for_spec::<crate::data_engineer::ModelSpec>(&actx).await
-        }
-    }
+    load_any_plan_for_track_spec(&actx, track).await
 } else {
     None
 };
@@ -61,14 +93,7 @@ let prior_plan_for_update = if entered_from_actionable_review {
 
 // If an approved/draft plan already exists (oldest active plan for this thread), move forward.
 if let Some(mut existing_plan) =
-    match track {
-        TrackKind::Cleanse => {
-            crate::data_engineer::phase_plan_lifecycle::load_active_plan_for_spec::<crate::data_engineer::CleanseSpec>(&actx).await
-        }
-        TrackKind::Model => {
-            crate::data_engineer::phase_plan_lifecycle::load_active_plan_for_spec::<crate::data_engineer::ModelSpec>(&actx).await
-        }
-    }
+    load_active_plan_for_track_spec(&actx, track).await
 {
     let current_digest = match &existing_plan {
         TrackPlanDoc::Cleanse(plan) => stable_json_digest(plan),
@@ -453,7 +478,6 @@ let manifest_retry_signal = if is_cleanse {
 let (registry, tools_card) = Self::build_tools_for_phase(
     phase,
     &guard,
-    allow_ask_approval,
     sctx,
     None,
     None,

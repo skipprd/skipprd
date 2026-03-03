@@ -171,7 +171,6 @@ impl DataEngineerSuite {
         sctx: &SuiteCtx,
         _execution_state: &crate::data_engineer::progress_controller::ExecutionState,
         _guard: &crate::data_engineer::control_flow::DerivedGuardState,
-        _allow_ask_approval: bool,
         thread_state_step_count: usize,
         _last_validate_brief: &Option<String>,
         _last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],

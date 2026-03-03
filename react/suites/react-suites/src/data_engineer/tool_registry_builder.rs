@@ -268,7 +268,6 @@ impl DataEngineerSuite {
     pub(super) fn build_tools_for_phase(
         phase: control_flow::Phase,
         guard: &control_flow::DerivedGuardState,
-        _allow_ask_approval: bool,
         sctx: &SuiteCtx,
         allowed_batch: Option<AllowedBatch>,
         single_target_repair_path: Option<String>,

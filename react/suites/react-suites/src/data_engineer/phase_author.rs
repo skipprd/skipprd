@@ -395,7 +395,6 @@ impl DataEngineerSuite {
         sctx: &SuiteCtx,
         execution_state: &crate::data_engineer::progress_controller::ExecutionState,
         guard: &crate::data_engineer::control_flow::DerivedGuardState,
-        allow_ask_approval: bool,
         _thread_state_step_count: usize,
         last_validate_brief: &Option<String>,
         last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
@@ -1166,7 +1165,6 @@ let single_target_repair_path = if hard_mutation_repair_mode {
 let (registry, tools_card) = Self::build_tools_for_phase(
     phase,
     &phase_guard,
-    allow_ask_approval,
     sctx,
     allowed_batch.clone(),
     single_target_repair_path.clone(),

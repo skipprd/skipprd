@@ -37,6 +37,13 @@ impl TrackKind {
         }
     }
 
+    pub fn execution_plan_kind(self) -> react_core::session::ExecutionPlanKind {
+        match self {
+            Self::Cleanse => react_core::session::ExecutionPlanKind::new("cleanse"),
+            Self::Model => react_core::session::ExecutionPlanKind::new("model"),
+        }
+    }
+
     pub fn author_phase(self) -> Phase {
         match self {
             Self::Cleanse => Phase::CleanseAuthor,

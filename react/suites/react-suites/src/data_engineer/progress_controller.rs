@@ -772,8 +772,8 @@ impl ExecutionState {
         &self.phase
     }
 
-    pub fn phase_state_mut(&mut self) -> &mut PhaseState {
-        &mut self.phase
+    pub(crate) fn mutate_phase_state(&mut self, mutate: impl FnOnce(&mut PhaseState)) {
+        self.with_phase_state_mut(mutate);
     }
 
     fn with_phase_state_mut(&mut self, mutate: impl FnOnce(&mut PhaseState)) {
@@ -785,10 +785,6 @@ impl ExecutionState {
         &self.repair
     }
 
-    pub fn repair_state_mut(&mut self) -> &mut RepairState {
-        &mut self.repair
-    }
-
     fn with_repair_state_mut(&mut self, mutate: impl FnOnce(&mut RepairState)) {
         mutate(&mut self.repair);
         self.debug_assert_invariants();
@@ -796,10 +792,6 @@ impl ExecutionState {
 
     pub fn publish_state(&self) -> &PublishState {
         &self.publish
-    }
-
-    pub fn publish_state_mut(&mut self) -> &mut PublishState {
-        &mut self.publish
     }
 
     fn with_publish_state_mut(&mut self, mutate: impl FnOnce(&mut PublishState)) {
@@ -850,10 +842,6 @@ impl ExecutionState {
 
     pub fn manifest_state(&self) -> &ManifestState {
         &self.manifest
-    }
-
-    pub fn manifest_state_mut(&mut self) -> &mut ManifestState {
-        &mut self.manifest
     }
 
     fn with_manifest_state_mut(&mut self, mutate: impl FnOnce(&mut ManifestState)) {

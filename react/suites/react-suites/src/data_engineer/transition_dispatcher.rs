@@ -49,16 +49,20 @@ pub async fn dispatch_phase_transition(
         match intent {
             TransitionIntent::Annotation => {}
             TransitionIntent::Forward => {
-                st.phase_state_mut().replan_backtracks = 0;
+                st.mutate_phase_state(|phase_state| {
+                    phase_state.replan_backtracks = 0;
+                });
             }
             TransitionIntent::Loopback => {
                 let current = st.phase_state().replan_backtracks;
-                st.phase_state_mut().replan_backtracks = react_core::workflow::next_replan_backtracks(
-                    current,
-                    intent,
-                    is_backtrack,
-                    replan_backtrack_counter_cap(),
-                );
+                st.mutate_phase_state(|phase_state| {
+                    phase_state.replan_backtracks = react_core::workflow::next_replan_backtracks(
+                        current,
+                        intent,
+                        is_backtrack,
+                        replan_backtrack_counter_cap(),
+                    );
+                });
             }
         }
     }
@@ -69,9 +73,11 @@ pub async fn dispatch_phase_transition(
     if matches!(phase, Phase::CleansePlan | Phase::ModelPlan) && from_phase != Some(phase) {
         st.reset_plan_bootstrap(phase);
     }
-    st.phase_state_mut().current_phase = Some(phase);
-    st.phase_state_mut().phase_reason_code = reason_code;
-    st.phase_state_mut().phase_reason_detail = reason_detail.clone();
+    st.mutate_phase_state(|phase_state| {
+        phase_state.current_phase = Some(phase);
+        phase_state.phase_reason_code = reason_code.clone();
+        phase_state.phase_reason_detail = reason_detail.clone();
+    });
     state_manager::replace_execution_state(store, thread_id, st).await?;
 
     let agent = agent.unwrap_or_else(|| "unknown".to_string());

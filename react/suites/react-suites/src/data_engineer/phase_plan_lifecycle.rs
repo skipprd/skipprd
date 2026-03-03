@@ -51,31 +51,20 @@ impl TrackPlanDoc {
     }
 }
 
-pub(super) async fn load_active_plan(
+pub(super) async fn load_active_plan_for_spec<S: TrackSpec>(
     actx: &AgentCtx,
-    track: TrackKind,
 ) -> Option<TrackPlanDoc> {
-    match track {
+    match S::KIND {
         TrackKind::Cleanse => plan::load_cleanse_plan(actx).await.map(TrackPlanDoc::Cleanse),
         TrackKind::Model => plan::load_model_plan(actx).await.map(TrackPlanDoc::Model),
     }
 }
 
-pub(super) async fn load_active_plan_for_spec<S: TrackSpec>(
-    actx: &AgentCtx,
-) -> Option<TrackPlanDoc> {
-    load_active_plan(actx, S::KIND).await
-}
-
-pub(super) async fn load_any_plan(actx: &AgentCtx, track: TrackKind) -> Option<TrackPlanDoc> {
-    match track {
+pub(super) async fn load_any_plan_for_spec<S: TrackSpec>(actx: &AgentCtx) -> Option<TrackPlanDoc> {
+    match S::KIND {
         TrackKind::Cleanse => plan::load_cleanse_plan_any(actx).await.map(TrackPlanDoc::Cleanse),
         TrackKind::Model => plan::load_model_plan_any(actx).await.map(TrackPlanDoc::Model),
     }
-}
-
-pub(super) async fn load_any_plan_for_spec<S: TrackSpec>(actx: &AgentCtx) -> Option<TrackPlanDoc> {
-    load_any_plan(actx, S::KIND).await
 }
 
 pub(super) async fn save_plan(actx: &AgentCtx, plan: &TrackPlanDoc) -> Result<(), String> {

@@ -10,7 +10,7 @@ pub(super) fn bind_execution_context(
     next_item: Option<NextWorkItemCtx>,
 ) {
     actx.exec_ctx = Some(react_core::session::ExecutionContext {
-        plan_kind: Some(react_core::session::ExecutionPlanKind::new(track.as_str())),
+        plan_kind: Some(track.execution_plan_kind()),
         plan_key: Some(plan_key),
         workgroup_id: next_item.as_ref().map(|x| x.workgroup_id.clone()),
         task_id: next_item.as_ref().map(|x| x.task_id.clone()),

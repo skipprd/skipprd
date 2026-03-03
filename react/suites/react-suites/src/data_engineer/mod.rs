@@ -1,7 +1,5 @@
 use async_trait::async_trait;
 use serde::Serialize;
-use serde_json::json;
-use crate::data_engineer::authoring_driver::AuthoringKind;
 
 use crate::data_engineer_shared::policy_sql_validated::SqlValidatedPolicy;
 use crate::data_engineer_shared::types::DatasetCandidate;
@@ -14,7 +12,7 @@ use react_core::agent::{
 use react_core::control_flow::{GuardBlockKind, PhaseReasonCode, ReviewDecision};
 use react_core::llm::LlmCallOptions;
 use react_core::session::{CatalogBootstrapState, ThreadBootstrapState, ThreadStore, ToolStepStatus};
-use react_core::tools::{Tool, ToolRegistry};
+use react_core::tools::ToolRegistry;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use crate::data_engineer::phase_contract::{
@@ -998,13 +996,13 @@ impl DataEngineerSuite {
 
     fn sanitize_impl_spec_value(
         mut v: serde_json::Value,
-        is_cleanse: bool,
+        track: TrackKind,
     ) -> (serde_json::Value, Vec<String>) {
         let mut stripped: Vec<String> = Vec::new();
         let Some(obj) = v.as_object_mut() else {
             return (v, stripped);
         };
-        let allowed: HashSet<&'static str> = if is_cleanse {
+        let allowed: HashSet<&'static str> = if track == TrackKind::Cleanse {
             [
                 "spec_version",
                 "row_preserving",
@@ -1038,9 +1036,9 @@ impl DataEngineerSuite {
 
     fn parse_impl_spec_value_with_sanitize<T: serde::de::DeserializeOwned>(
         v: serde_json::Value,
-        is_cleanse: bool,
+        track: TrackKind,
     ) -> Result<(T, Vec<String>), String> {
-        let (sv, stripped) = Self::sanitize_impl_spec_value(v, is_cleanse);
+        let (sv, stripped) = Self::sanitize_impl_spec_value(v, track);
         Self::validate_output_field_kind_contract(&sv)?;
         let spec = serde_json::from_value::<T>(sv).map_err(|e| e.to_string())?;
         Ok((spec, stripped))
@@ -1541,7 +1539,7 @@ Apply these fixes in the output.",
             };
             match Self::parse_impl_spec_value_with_sanitize::<
                 crate::data_engineer::plan::CleanseImplementationSpec,
-            >(spec_value, true)
+            >(spec_value, TrackKind::Cleanse)
             {
                 Ok((spec, stripped)) => {
                     if !stripped.is_empty() {
@@ -1590,7 +1588,7 @@ Apply these fixes in the output.",
             };
             match Self::parse_impl_spec_value_with_sanitize::<
                 crate::data_engineer::plan::ModelImplementationSpec,
-            >(spec_value, false)
+            >(spec_value, TrackKind::Model)
             {
                 Ok((spec, stripped)) => {
                     if !stripped.is_empty() {
@@ -2242,99 +2240,6 @@ Apply these fixes in the output.",
         })
     }
 
-    async fn manifest_targeting_lines(
-        actx: &AgentCtx,
-        runtime_failures: &[serde_json::Value],
-    ) -> Vec<String> {
-        // Best-effort: map failing test(s) -> model file path(s) using target/manifest.json.
-        let base = actx
-            .keyspace
-            .dbt_prefix(&actx.scope)
-            .trim_end_matches('/')
-            .to_string();
-        let manifest_key = format!("{}/target/manifest.json", base);
-        let bytes = match actx.storage.get_bytes(&manifest_key).await {
-            Ok(b) => b,
-            Err(_) => return vec![],
-        };
-        let v: serde_json::Value = match serde_json::from_slice(&bytes) {
-            Ok(v) => v,
-            Err(_) => return vec![],
-        };
-        let Some(nodes) = v.get("nodes").and_then(|n| n.as_object()) else {
-            return vec![];
-        };
-
-        let mut out: Vec<String> = Vec::new();
-        for rf in runtime_failures.iter().take(3) {
-            let Some(name) = rf.get("name").and_then(|x| x.as_str()) else {
-                continue;
-            };
-
-            // Find the manifest node for this test.
-            let mut test_node: Option<(&String, &serde_json::Value)> = None;
-            for (k, node) in nodes.iter() {
-                let rt = node
-                    .get("resource_type")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("");
-                if rt != "test" {
-                    continue;
-                }
-                let n = node.get("name").and_then(|x| x.as_str()).unwrap_or("");
-                if n == name || k.ends_with(name) {
-                    test_node = Some((k, node));
-                    break;
-                }
-            }
-            let Some((_test_id, test_node)) = test_node else {
-                continue;
-            };
-            let test_file = test_node
-                .get("original_file_path")
-                .or_else(|| test_node.get("path"))
-                .and_then(|x| x.as_str())
-                .unwrap_or("");
-
-            let depends = test_node
-                .get("depends_on")
-                .and_then(|d| d.get("nodes"))
-                .and_then(|a| a.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let mut model_id: Option<String> = None;
-            for d in depends {
-                if let Some(s) = d.as_str() {
-                    if s.starts_with("model.") {
-                        model_id = Some(s.to_string());
-                        break;
-                    }
-                }
-            }
-            let Some(mid) = model_id else { continue };
-            let model_node = nodes.get(&mid);
-            let model_file = model_node
-                .and_then(|n| n.get("original_file_path").or_else(|| n.get("path")))
-                .and_then(|x| x.as_str())
-                .unwrap_or("");
-            out.push(format!(
-                "- {} -> model_file: {} ; test_file: {}",
-                name,
-                if model_file.is_empty() {
-                    "(unknown)"
-                } else {
-                    model_file
-                },
-                if test_file.is_empty() {
-                    "(unknown)"
-                } else {
-                    test_file
-                }
-            ));
-        }
-        out
-    }
-
     async fn run_ask(
         thread_id: &str,
         question: &str,
@@ -2677,8 +2582,6 @@ Apply these fixes in the output.",
             }
             let guard: DerivedGuardState =
                 control_flow::derive_guard_state_from_execution_state(&execution_state);
-            // Agent mode is non-interactive: never expose ask-approval/ask-user pathways.
-            let allow_ask_approval = false;
             match crate::data_engineer::phase_gate::evaluate_pre_turn_directive(
                 &execution_state,
                 phase,
@@ -2716,7 +2619,6 @@ Apply these fixes in the output.",
                 sctx,
                 &execution_state,
                 &guard,
-                allow_ask_approval,
                 thread_state_step_count,
                 &last_validate_brief,
                 &last_validate_failed_models,
@@ -2781,7 +2683,6 @@ Apply these fixes in the output.",
         sctx: &SuiteCtx,
         execution_state: &crate::data_engineer::progress_controller::ExecutionState,
         guard: &control_flow::DerivedGuardState,
-        allow_ask_approval: bool,
         thread_state_step_count: usize,
         last_validate_brief: &Option<String>,
         last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
@@ -2801,7 +2702,6 @@ Apply these fixes in the output.",
                     sctx,
                     execution_state,
                     guard,
-                    allow_ask_approval,
                     thread_state_step_count,
                     last_validate_brief,
                     last_validate_failed_models,
@@ -2818,7 +2718,6 @@ Apply these fixes in the output.",
                     sctx,
                     execution_state,
                     guard,
-                    allow_ask_approval,
                     thread_state_step_count,
                     last_validate_brief,
                     last_validate_failed_models,
@@ -2835,7 +2734,6 @@ Apply these fixes in the output.",
                     sctx,
                     execution_state,
                     guard,
-                    allow_ask_approval,
                     thread_state_step_count,
                     last_validate_brief,
                     last_validate_failed_models,
@@ -2869,292 +2767,6 @@ Apply these fixes in the output.",
         }
     }
 
-    async fn run_authoring(
-        kind: AuthoringKind,
-        thread_id: &str,
-        question: &str,
-        sctx: &SuiteCtx,
-    ) -> Result<Vec<FlowFrame>, String> {
-        Self::ensure_catalog_bootstrap_semaphored(thread_id, sctx).await?;
-
-        let (agent_name, sys, tools_card, run_preflight_on_bundle) = match kind {
-            AuthoringKind::Cleanse => (
-                "cleanse",
-                crate::util::time_context::with_time_context(prompts::cleanse_system_prompt()),
-                Self::build_tools_card_for_agent_type(AgentMode::Cleanse),
-                false,
-            ),
-            AuthoringKind::Model => (
-                "model",
-                crate::util::time_context::with_time_context(prompts::model_system_prompt()),
-                Self::build_tools_card_for_agent_type(AgentMode::Model),
-                true,
-            ),
-        };
-
-        let pf = crate::preflight::CatalogPreflightProvider {
-            discovery_limits: crate::preflight::discovery::DiscoveryLimits::default(),
-            run_preflight_on_bundle,
-        };
-        let bundle = pf
-            .run(thread_id, question, agent_name, sctx)
-            .await
-            .discovery;
-
-        let agent_mode = AgentMode::parse(agent_name)?;
-        let registry = Self::build_tools(agent_mode, sctx)?;
-        let thread_store = ThreadStore::new(
-            sctx.storage.clone(),
-            sctx.scope.clone(),
-            sctx.keyspace.clone(),
-        );
-
-        let actx = AgentCtx {
-            top_k: 30,
-            per_step_timeout_secs: 10,
-            max_steps: 50,
-            thread_id: Some(thread_id.to_string()),
-            progress_tx: None,
-            pre_step_tx: None,
-            trace_tx: sctx.trace_tx.clone(),
-            agent_name: Some(agent_name.to_string()),
-            policy: std::sync::Arc::new(SqlValidatedPolicy {
-                dataset_candidates: bundle
-                    .datasets
-                    .iter()
-                    .take(8)
-                    .map(|(ds, sc)| DatasetCandidate {
-                        dataset_id: ds.clone(),
-                        score: *sc,
-                    })
-                    .collect(),
-                ..SqlValidatedPolicy::default()
-            }),
-            llm: sctx.llm.clone(),
-            storage: sctx.storage.clone(),
-            scope: sctx.scope.clone(),
-            keyspace: sctx.keyspace.clone(),
-            query: sctx.query.clone(),
-            warehouse: sctx.warehouse.clone(),
-            dbt: sctx.dbt.clone(),
-            vector: sctx.vector.clone(),
-            thread_store: Some(thread_store.clone()),
-            exec_ctx: None,
-            resolved_config: sctx.resolved_config.clone(),
-        };
-
-        let mut last_final: Option<react_core::session::ThreadResult> = None;
-        let mut prompt = match kind {
-            AuthoringKind::Cleanse => Self::inject_cleanse_question(question),
-            AuthoringKind::Model => Self::inject_model_question(question),
-        };
-
-        let llm_options = match kind {
-            AuthoringKind::Cleanse => LlmCallOptions {
-                prompt_id: "data_engineer.cleanse_author",
-                thread_id: None,
-                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                temperature: Some(0.05),
-                top_p: Some(1.0),
-                max_output_tokens: Some(
-                    std::env::var("LLM_AUTHOR_MAX_TOKENS_CLEANSE")
-                        .ok()
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(12_000)
-                        .max(2_000)
-                        .min(64_000),
-                ),
-                reasoning_effort: None,
-            },
-            AuthoringKind::Model => LlmCallOptions {
-                prompt_id: "data_engineer.model_author",
-                thread_id: None,
-                expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                temperature: Some(0.12),
-                top_p: Some(1.0),
-                max_output_tokens: Some(
-                    std::env::var("LLM_AUTHOR_MAX_TOKENS_MODEL")
-                        .ok()
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(16_000)
-                        .max(2_000)
-                        .min(64_000),
-                ),
-                reasoning_effort: None,
-            },
-        };
-
-        for attempt in 0..10 {
-            match Agent::run_until_block(
-                &registry,
-                &actx,
-                &sys,
-                &tools_card,
-                &prompt,
-                llm_options.clone(),
-            )
-            .await
-            {
-                Ok(RunOutcome::Final {
-                    thread_id: _tid,
-                    result,
-                }) => {
-                    last_final = Some(result.clone());
-
-                    // Post-run validate (includes build) so runtime failures feed back into auto-remediation.
-                    let validate_tool = tools::dbt_validate::DbtValidateTool {
-                        datasets: sctx.datasets.clone(),
-                        catalog: sctx.catalog.clone(),
-                    };
-                    let args = json!({
-                        "project_name": format!("{}_project", sctx.scope.project_id.replace('/', "_")),
-                        "build": true
-                    });
-                    let obs = validate_tool
-                        .call(args, &actx)
-                        .await
-                        .unwrap_or_else(|e| json!({"ok": false, "error": e}));
-                    let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let compile_ok = obs
-                        .get("compile_ok")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let run_ok = obs.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                    if ok && compile_ok && run_ok {
-                        return Ok(vec![FlowFrame::Final {
-                            kind: result.kind.into(),
-                            payload: result.payload,
-                            display: result.display,
-                        }]);
-                    }
-
-                    let runtime_failures: Vec<serde_json::Value> = obs
-                        .get("runtime_failures")
-                        .and_then(|v| v.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    let errs: Vec<String> = obs
-                        .get("errors")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    let class = obs
-                        .get("failure_class")
-                        .cloned()
-                        .and_then(|v| {
-                            serde_json::from_value::<react_core::providers::DbtFailureClass>(v)
-                                .ok()
-                        })
-                        .unwrap_or(react_core::providers::DbtFailureClass::Unknown);
-                    let brief = dbt_error::compact_brief(&errs, 2, 900);
-
-                    if matches!(class, react_core::providers::DbtFailureClass::WarehouseConfig) {
-                        return Err(format!(
-                            "dbt_validate failed due to a warehouse/aws configuration issue: {}",
-                            brief
-                        ));
-                    }
-
-                    if compile_ok && !run_ok && !runtime_failures.is_empty() {
-                        let mut lines: Vec<String> = Vec::new();
-                        for rf in runtime_failures.iter().take(3) {
-                            let name = rf
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown_test");
-                            let n = rf
-                                .get("failures")
-                                .and_then(|v| v.as_u64())
-                                .map(|x| x.to_string())
-                                .unwrap_or("?".to_string());
-                            let mh = rf.get("model_hint").and_then(|v| v.as_str()).unwrap_or("");
-                            let ch = rf.get("column_hint").and_then(|v| v.as_str()).unwrap_or("");
-                            let hint = if !mh.is_empty() && !ch.is_empty() {
-                                format!(" (model_hint={}, column_hint={})", mh, ch)
-                            } else if !mh.is_empty() {
-                                format!(" (model_hint={})", mh)
-                            } else {
-                                "".to_string()
-                            };
-                            lines.push(format!("- {} failures: {}{}", name, n, hint));
-                        }
-                        let manifest_lines =
-                            Self::manifest_targeting_lines(&actx, &runtime_failures).await;
-                        let manifest_block = if manifest_lines.is_empty() {
-                            "".to_string()
-                        } else {
-                            format!("\nManifest targeting:\n{}\n", manifest_lines.join("\n"))
-                        };
-                        prompt = format!(
-                            "Auto-remediation attempt {}: dbt build failed at runtime (tests) AFTER a successful compile.\n\
-                             Failing tests:\n{}\n{}\
-                             IMPORTANT: Your very next step MUST be a FIX to dbt artifacts (prefer fixing silver models under models/staging/; do NOT relax/remove tests unless nullable-by-design is justified).\n\
-                             Recommended flow:\n\
-                             - Use `json_file op=query` on `target/manifest.json` (pointer=/nodes) to locate failing test/model nodes (by name/resource_type).\n\
-                               - Find the failing test node(s), then follow depends_on to the referenced model node.\n\
-                               - From the model node, compute the physical relation: <database>.<schema>.<alias>.\n\
-                             - Use `sql_schema` on that relation to determine the tested column type.\n\
-                             - Use `run_sql` to probe the actual data before editing:\n\
-                               - Null check: SELECT count(*) AS total, count_if({{col}} IS NULL) AS nulls FROM {{relation}}\n\
-                               - If string-ish: SELECT count_if(trim(cast({{col}} AS varchar)) = '') AS empty FROM {{relation}}\n\
-                               - If time-like by type: SELECT count_if(try_cast(nullif(trim(cast({{col}} AS varchar)), '') AS timestamp) IS NULL) AS unparseable FROM {{relation}}\n\
-                               - Sample failing: SELECT {{col}} FROM {{relation}} WHERE {{col}} IS NULL LIMIT 50\n\
-                             - Apply a fix using `staging_model` or `file op=patch|rm|mv`.\n\
-                             - You MUST NOT claim fixed unless a probe query shows the failure condition is now 0 rows.\n\
-                             Only AFTER applying a fix should you re-run `dbt_validate` with build=true.",
-                            attempt + 1,
-                            lines.join("\n"),
-                            manifest_block
-                        );
-                    } else {
-                        prompt = format!(
-                            "Auto-remediation attempt {}: dbt_validate/build failed.\n\nError summary:\n{}\n\nAutomatically fix the DBT project:\n- Prefer calling `staging_model` to update silver models under models/staging/ (nested fields, cleansing, naming).\n- Use file or artifacts to inspect/edit existing files.\n- Re-run dbt_validate with build=true.\nRepeat until compile_ok=true AND run_ok=true.",
-                            attempt + 1,
-                            brief
-                        );
-                    }
-                    continue;
-                }
-                Ok(RunOutcome::AwaitUser {
-                    thread_id: _tid,
-                    prompt: p,
-                }) => {
-                    return Err(format!("await_user_forbidden: {}", p));
-                }
-                Ok(RunOutcome::AwaitApproval {
-                    thread_id: _tid,
-                    prompt: p,
-                }) => {
-                    return Ok(vec![FlowFrame::AwaitApproval { prompt: p }]);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        if let Some(r) = last_final {
-            return Ok(vec![FlowFrame::Final {
-                kind: r.kind.into(),
-                payload: r.payload,
-                display: r.display,
-            }]);
-        }
-        Err(format!("{}: no outcome", agent_name))
-    }
-
-    async fn run_cleanse(
-        thread_id: &str,
-        question: &str,
-        sctx: &SuiteCtx,
-    ) -> Result<Vec<FlowFrame>, String> {
-        Self::run_authoring(AuthoringKind::Cleanse, thread_id, question, sctx).await
-    }
-
-    async fn run_model(
-        thread_id: &str,
-        question: &str,
-        sctx: &SuiteCtx,
-    ) -> Result<Vec<FlowFrame>, String> {
-        Self::run_authoring(AuthoringKind::Model, thread_id, question, sctx).await
-    }
 }
 
 #[async_trait]
@@ -3223,8 +2835,9 @@ impl Suite for DataEngineerSuite {
         let agent_mode = Self::validate_agent_type(agent_type)?;
         let frames = match agent_mode {
             AgentMode::Agent => Self::run_agent(thread_id, question, ctx).await,
-            AgentMode::Model => Self::run_model(thread_id, question, ctx).await,
-            AgentMode::Cleanse => Self::run_cleanse(thread_id, question, ctx).await,
+            AgentMode::Model | AgentMode::Cleanse => {
+                Self::run_agent(thread_id, question, ctx).await
+            }
             AgentMode::Review => Self::run_review(thread_id, question, ctx).await,
             AgentMode::Ask => Self::run_ask(thread_id, question, ctx).await,
         }?;
@@ -3241,8 +2854,9 @@ impl Suite for DataEngineerSuite {
         let agent_mode = Self::validate_agent_type(agent_type)?;
         let frames = match agent_mode {
             AgentMode::Agent => Self::run_agent(thread_id, question, ctx).await,
-            AgentMode::Model => Self::run_model(thread_id, question, ctx).await,
-            AgentMode::Cleanse => Self::run_cleanse(thread_id, question, ctx).await,
+            AgentMode::Model | AgentMode::Cleanse => {
+                Self::run_agent(thread_id, question, ctx).await
+            }
             AgentMode::Review => Self::run_review(thread_id, question, ctx).await,
             AgentMode::Ask => Self::run_ask(thread_id, question, ctx).await,
         }?;
@@ -3259,8 +2873,9 @@ impl Suite for DataEngineerSuite {
         let agent_mode = Self::validate_agent_type(agent_type)?;
         let frames = match agent_mode {
             AgentMode::Agent => Self::run_agent(thread_id, text, ctx).await,
-            AgentMode::Model => Self::run_model(thread_id, text, ctx).await,
-            AgentMode::Cleanse => Self::run_cleanse(thread_id, text, ctx).await,
+            AgentMode::Model | AgentMode::Cleanse => {
+                Self::run_agent(thread_id, text, ctx).await
+            }
             AgentMode::Review => Self::run_review(thread_id, text, ctx).await,
             AgentMode::Ask => Self::run_ask(thread_id, text, ctx).await,
         }?;
@@ -3432,7 +3047,7 @@ mod tests {
         });
         let (spec, stripped) = DataEngineerSuite::parse_impl_spec_value_with_sanitize::<
             crate::data_engineer::plan::CleanseImplementationSpec,
-        >(raw, true)
+        >(raw, TrackKind::Cleanse)
         .expect("cleanse spec should parse after sanitize");
         assert_eq!(spec.spec_version, 1);
         assert!(stripped.iter().any(|k| k == "batch_id"));
@@ -3454,7 +3069,7 @@ mod tests {
         });
         let (spec, stripped) = DataEngineerSuite::parse_impl_spec_value_with_sanitize::<
             crate::data_engineer::plan::ModelImplementationSpec,
-        >(raw, false)
+        >(raw, TrackKind::Model)
         .expect("model spec should parse after sanitize");
         assert_eq!(spec.spec_version, 1);
         assert!(stripped.iter().any(|k| k == "dependencies"));

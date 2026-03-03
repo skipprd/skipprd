@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::data_engineer::plan_grounding::{
     ensure_expected_model_paths_cleanse, ensure_expected_model_paths_model,
     prune_cleanse_plan_to_grounded_raw_datasets, prune_model_plan_to_grounded_staging_models,
@@ -133,6 +133,16 @@ pub(crate) fn checklist_status(items: &[PlanChecklistItem], id: &str) -> Checkli
         .find(|it| it.checklist_item_id == id)
         .map(|it| it.status)
         .unwrap_or(ChecklistItemStatus::Pending)
+}
+
+fn parse_batch_contract<T: DeserializeOwned>(
+    extra: &std::collections::BTreeMap<String, Value>,
+    contract_name: &str,
+) -> T {
+    serde_json::from_value(
+        serde_json::to_value(extra).expect("serialize tool observation contract"),
+    )
+    .unwrap_or_else(|e| panic!("{contract_name}: {e}"))
 }
 
 pub fn is_runnable_checklist_status(s: ChecklistItemStatus) -> bool {
@@ -1354,27 +1364,12 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| CHECKLIST_SQL_MODEL.to_string());
-            let ok = observation.ok;
-            let attempted: Vec<String> = observation
-                .extra
-                .get("attempted_dataset_ids")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let succeeded: Vec<String> = observation
-                .extra
-                .get("succeeded_dataset_ids")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let batch = parse_batch_contract::<
+                crate::data_engineer::tools::batch_contracts::CleanseSqlBatchContract,
+            >(&observation.extra, "apply_next_cleanse_batch contract");
+            let ok = batch.ok;
+            let attempted = batch.attempted_dataset_ids;
+            let succeeded = batch.succeeded_dataset_ids;
             let succ_set: std::collections::HashSet<String> = succeeded.iter().cloned().collect();
             let failed: Vec<String> = attempted
                 .iter()
@@ -1458,39 +1453,13 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
         }
 
         if name == "apply_next_cleanse_schema_batch" {
-            let checklist_item_id = step_ctx
-                .as_ref()
-                .and_then(|c| c.checklist_item_id.as_deref())
-                .or_else(|| {
-                    observation
-                        .extra
-                        .get("checklist_item_id")
-                        .and_then(|v| v.as_str())
-                })
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| CHECKLIST_SCHEMA_CONTRACT.to_string());
-            let ok = observation.ok;
-            let attempted: Vec<String> = observation
-                .extra
-                .get("attempted_dataset_ids")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let succeeded: Vec<String> = observation
-                .extra
-                .get("succeeded_dataset_ids")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let batch = parse_batch_contract::<
+                crate::data_engineer::tools::batch_contracts::CleanseSchemaBatchContract,
+            >(&observation.extra, "apply_next_cleanse_schema_batch contract");
+            let checklist_item_id = batch.checklist_item_id;
+            let ok = batch.ok;
+            let attempted = batch.attempted_dataset_ids;
+            let succeeded = batch.succeeded_dataset_ids;
             let succ_set: std::collections::HashSet<String> = succeeded.iter().cloned().collect();
             let failed: Vec<String> = attempted
                 .iter()
@@ -1903,27 +1872,12 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| CHECKLIST_SQL_MODEL.to_string());
-            let ok = observation.ok;
-            let attempted: Vec<String> = observation
-                .extra
-                .get("attempted_item_names")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let succeeded: Vec<String> = observation
-                .extra
-                .get("succeeded_item_names")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let batch = parse_batch_contract::<
+                crate::data_engineer::tools::batch_contracts::ModelSqlBatchContract,
+            >(&observation.extra, "apply_next_model_batch contract");
+            let ok = batch.ok;
+            let attempted = batch.attempted_item_names;
+            let succeeded = batch.succeeded_item_names;
             let succ_set: std::collections::HashSet<String> = succeeded.iter().cloned().collect();
             let failed: Vec<String> = attempted
                 .iter()
@@ -2007,39 +1961,13 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
         }
 
         if name == "apply_next_model_schema_batch" {
-            let checklist_item_id = step_ctx
-                .as_ref()
-                .and_then(|c| c.checklist_item_id.as_deref())
-                .or_else(|| {
-                    observation
-                        .extra
-                        .get("checklist_item_id")
-                        .and_then(|v| v.as_str())
-                })
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| CHECKLIST_SCHEMA_CONTRACT.to_string());
-            let ok = observation.ok;
-            let attempted: Vec<String> = observation
-                .extra
-                .get("attempted_item_names")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let succeeded: Vec<String> = observation
-                .extra
-                .get("succeeded_item_names")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let batch = parse_batch_contract::<
+                crate::data_engineer::tools::batch_contracts::ModelSchemaBatchContract,
+            >(&observation.extra, "apply_next_model_schema_batch contract");
+            let checklist_item_id = batch.checklist_item_id;
+            let ok = batch.ok;
+            let attempted = batch.attempted_item_names;
+            let succeeded = batch.succeeded_item_names;
             let succ_set: std::collections::HashSet<String> = succeeded.iter().cloned().collect();
             let failed: Vec<String> = attempted
                 .iter()
@@ -3201,6 +3129,7 @@ mod tests {
                 serde_json::json!({}),
                 serde_json::json!({
                     "ok": true,
+                    "checklist_item_id":"collision_id_contract",
                     "attempted_dataset_ids":["a.b.c"],
                     "succeeded_dataset_ids":["a.b.c"]
                 }),
