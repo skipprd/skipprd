@@ -10,6 +10,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use react::helpers::configuration::Config as RuntimeConfig;
 use react::llm;
 use react::providers::catalog::DefaultCatalogProvider;
 use react::providers::{DefaultKeyspace, EnvSecretsProvider, LanceVectorStore, LocalKeyspace};
@@ -17,13 +18,21 @@ use react_core::resolved_config as rc;
 use react_core::suite::SuiteCtx;
 use react_module_provider_athena::{AthenaQueryProvider, AthenaSettings};
 use react_module_provider_bigquery::{BigQueryProvider, BigQuerySettings};
-use react_module_provider_dbt::{DbtProjectProvider, DbtRunnerConfig};
+use react_module_provider_dbt::{DbtProjectProvider, DbtRunnerConfig, DbtRunnerMode};
 use react_module_provider_postgres::{PostgresProvider, PostgresSettings};
 use react_module_storage::{LocalFileStorageAdapter, S3StorageAdapter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinSet;
 use tracing_subscriber::prelude::*;
+
+fn bind_runtime_scope_preference(scope: &react_core::scope::RequestScope) {
+    RuntimeConfig::set_scope_preference(
+        scope.tenant.clone(),
+        scope.workspace.clone(),
+        scope.project_id.clone(),
+    );
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "react")]
@@ -634,6 +643,7 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+            bind_runtime_scope_preference(&cfg.scope);
 
             let log_dir = resolve_log_dir(&cfg);
             let enable_console = cli.log.is_some() && !cli.terminal;
@@ -792,8 +802,15 @@ async fn main() {
 
             // DBT provider (host/docker runner), required for dbt_validate/build/publish workflows.
             if cfg.providers.dbt.enabled {
+                let runner_mode = match DbtRunnerMode::parse(&cfg.providers.dbt.runner) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("ERROR: {}", e);
+                        std::process::exit(1);
+                    }
+                };
                 let runner = DbtRunnerConfig {
-                    mode: cfg.providers.dbt.runner.clone(),
+                    mode: runner_mode,
                     docker_image: cfg.providers.dbt.docker_image.clone(),
                     docker_platform: cfg.providers.dbt.docker_platform.clone(),
                     docker_network: cfg.providers.dbt.docker_network.clone(),
@@ -895,6 +912,7 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+            bind_runtime_scope_preference(&cfg.scope);
 
             let log_dir = resolve_log_dir(&cfg);
             // In terminal mode we keep console clean; logs always go to file.
@@ -1095,8 +1113,15 @@ async fn main() {
             }
 
             if cfg.providers.dbt.enabled {
+                let runner_mode = match DbtRunnerMode::parse(&cfg.providers.dbt.runner) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("ERROR: {}", e);
+                        std::process::exit(1);
+                    }
+                };
                 let runner = DbtRunnerConfig {
-                    mode: cfg.providers.dbt.runner.clone(),
+                    mode: runner_mode,
                     docker_image: cfg.providers.dbt.docker_image.clone(),
                     docker_platform: cfg.providers.dbt.docker_platform.clone(),
                     docker_network: cfg.providers.dbt.docker_network.clone(),

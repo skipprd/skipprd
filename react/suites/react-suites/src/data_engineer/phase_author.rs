@@ -1202,7 +1202,7 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
     };
 
 let single_target_repair_path = if hard_mutation_repair_mode {
-    crate::data_engineer::loopback_intents::derive_single_target_repair_path(
+    crate::data_engineer::phase_gate::derive_single_target_repair_path(
         &execution_state,
         &last_validate_failed_models,
     )
@@ -1710,7 +1710,7 @@ match Agent::run_until_block_non_interactive(
             .await?;
             return Ok(PhaseExecutorOutcome::Continue);
         }
-        if crate::data_engineer::loopback_intents::patch_impl_intent_unsatisfied(
+        if crate::data_engineer::phase_gate::patch_impl_intent_unsatisfied(
             &gate_state,
             phase,
         ) {
@@ -1732,19 +1732,14 @@ match Agent::run_until_block_non_interactive(
             gate_state.pending_loopback_intent.as_ref(),
             Some(crate::data_engineer::progress_controller::PendingLoopbackIntent::PatchImpl { phase: p, .. }) if *p == phase
         ) {
-            crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+            crate::data_engineer::state_manager::mutate_execution_state(
                 &thread_store,
                 thread_id,
+                |es| es.clear_pending_loopback_intent(),
             )
             .await
-            .or_else(|e| {
-                if e.contains("not found") {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "failed to clear pending patch-impl loopback intent: {e}"
-                    ))
-                }
+            .map_err(|e| {
+                format!("failed to clear pending patch-impl loopback intent: {e}")
             })?;
         }
 

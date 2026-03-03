@@ -51,7 +51,7 @@ pub async fn load_execution_state_strict(
     Ok(Some(parsed))
 }
 
-pub async fn save_execution_state(
+async fn persist_execution_state(
     thread_store: &ThreadStore,
     thread_id: &str,
     state: &ExecutionState,
@@ -93,8 +93,19 @@ pub async fn mutate_execution_state(
     mutate(&mut st);
     st.validate_invariants()
         .map_err(|e| format!("execution_state invariant check failed after mutation: {e}"))?;
-    save_execution_state(thread_store, thread_id, &st).await?;
+    persist_execution_state(thread_store, thread_id, &st).await?;
     Ok(st)
+}
+
+pub async fn replace_execution_state(
+    thread_store: &ThreadStore,
+    thread_id: &str,
+    next_state: ExecutionState,
+) -> Result<ExecutionState, String> {
+    mutate_execution_state(thread_store, thread_id, |st| {
+        *st = next_state.clone();
+    })
+    .await
 }
 
 pub async fn apply_execution_event(
@@ -126,7 +137,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_execution_state_rejects_invariant_violations() {
+    async fn replace_execution_state_rejects_invariant_violations() {
         let store = test_store();
         let tid = "tid-state-manager-invariant-save";
         let mut st = ExecutionState::new();
@@ -138,10 +149,10 @@ mod tests {
                 ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
             },
         );
-        let err = save_execution_state(&store, tid, &st)
+        let err = replace_execution_state(&store, tid, st)
             .await
             .expect_err("invalid state must fail save");
-        assert!(err.contains("invariant check failed on save"));
+        assert!(err.contains("invariant check failed"));
     }
 
     #[tokio::test]

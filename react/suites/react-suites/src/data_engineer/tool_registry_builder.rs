@@ -1,5 +1,38 @@
 use super::*;
 
+enum FileAccessPolicy {
+    ReadOnly {
+        error_message: &'static str,
+    },
+}
+
+struct PolicyFilesTool {
+    inner: tools::files_tool::FilesTool,
+    policy: FileAccessPolicy,
+}
+
+#[async_trait::async_trait]
+impl react_core::tools::Tool for PolicyFilesTool {
+    fn name(&self) -> &'static str {
+        "file"
+    }
+
+    async fn call(
+        &self,
+        args: serde_json::Value,
+        ctx: &react_core::agent::AgentCtx,
+    ) -> Result<serde_json::Value, String> {
+        match self.policy {
+            FileAccessPolicy::ReadOnly { error_message } => {
+                if !crate::data_engineer::tool_ops::is_file_read_op(&args) {
+                    return Err(error_message.to_string());
+                }
+            }
+        }
+        self.inner.call(args, ctx).await
+    }
+}
+
 impl DataEngineerSuite {
     pub(super) fn build_tools(agent_mode: AgentMode, sctx: &SuiteCtx) -> Result<ToolRegistry, String> {
         use crate::data_engineer::tools::{
@@ -80,34 +113,13 @@ impl DataEngineerSuite {
         let allow_user_interrupt_tools = !Self::headless_mode_enabled();
         let caps = Self::agent_capability_profile(agent_mode, allow_user_interrupt_tools);
 
-        // Allow review to read the current dbt project state (manifest/schema/models)
-        // without permitting writes.
-        struct ReadOnlyFilesTool {
-            inner: FilesTool,
-        }
-        #[async_trait::async_trait]
-        impl react_core::tools::Tool for ReadOnlyFilesTool {
-            fn name(&self) -> &'static str {
-                "file"
-            }
-            async fn call(
-                &self,
-                args: serde_json::Value,
-                ctx: &react_core::agent::AgentCtx,
-            ) -> Result<serde_json::Value, String> {
-                if !crate::data_engineer::tool_ops::is_file_read_op(&args) {
-                    return Err(
-                        "file is read-only for review; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string(),
-                    );
-                }
-                self.inner.call(args, ctx).await
-            }
-        }
-
         if caps.contains(&AgentToolCapability::ReadOnlyFile) {
-            registry.register(ReadOnlyFilesTool {
+            registry.register(PolicyFilesTool {
                 inner: FilesTool {
                     datasets: sctx.datasets.clone(),
+                },
+                policy: FileAccessPolicy::ReadOnly {
+                    error_message: "file is read-only for review; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)",
                 },
             });
         } else if caps.contains(&AgentToolCapability::MutableFile) {
@@ -304,31 +316,12 @@ impl DataEngineerSuite {
                 });
                 reg.register(tools::dbt_examples::SearchDbtExamplesTool);
 
-                // Read-only file tool (no patch).
-                struct ReadOnlyFilesTool {
-                    inner: FilesTool,
-                }
-                #[async_trait::async_trait]
-                impl react_core::tools::Tool for ReadOnlyFilesTool {
-                    fn name(&self) -> &'static str {
-                        "file"
-                    }
-                    async fn call(
-                        &self,
-                        args: serde_json::Value,
-                        ctx: &react_core::agent::AgentCtx,
-                    ) -> Result<serde_json::Value, String> {
-                        if !crate::data_engineer::tool_ops::is_file_read_op(&args) {
-                            return Err(
-                                "file is read-only in plan phases; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string(),
-                            );
-                        }
-                        self.inner.call(args, ctx).await
-                    }
-                }
-                reg.register(ReadOnlyFilesTool {
+                reg.register(PolicyFilesTool {
                     inner: FilesTool {
                         datasets: sctx.datasets.clone(),
+                    },
+                    policy: FileAccessPolicy::ReadOnly {
+                        error_message: "file is read-only in plan phases; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)",
                     },
                 });
                 if !suppress_manifest_json {
@@ -882,28 +875,12 @@ impl DataEngineerSuite {
             | control_flow::Phase::ModelReview
             | control_flow::Phase::PostPublishReview => {
                 // Review phases: keep read-only; do not allow arbitrary SQL execution.
-                struct ReadOnlyFilesTool {
-                    inner: FilesTool,
-                }
-                #[async_trait::async_trait]
-                impl react_core::tools::Tool for ReadOnlyFilesTool {
-                    fn name(&self) -> &'static str {
-                        "file"
-                    }
-                    async fn call(
-                        &self,
-                        args: serde_json::Value,
-                        ctx: &react_core::agent::AgentCtx,
-                    ) -> Result<serde_json::Value, String> {
-                        if !crate::data_engineer::tool_ops::is_file_read_op(&args) {
-                            return Err("file is read-only in review phases; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)".to_string());
-                        }
-                        self.inner.call(args, ctx).await
-                    }
-                }
-                reg.register(ReadOnlyFilesTool {
+                reg.register(PolicyFilesTool {
                     inner: FilesTool {
                         datasets: sctx.datasets.clone(),
+                    },
+                    policy: FileAccessPolicy::ReadOnly {
+                        error_message: "file is read-only in review phases; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)",
                     },
                 });
                 reg.register(JsonFileTool);

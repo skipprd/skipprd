@@ -69,7 +69,7 @@ if is_cleanse {
             crate::data_engineer::plan::PlanStatus::Approved
                 | crate::data_engineer::plan::PlanStatus::Completed
         ) {
-            if crate::data_engineer::loopback_intents::patch_plan_intent_blocks_fast_forward(
+            if crate::data_engineer::phase_gate::patch_plan_intent_blocks_fast_forward(
                 &execution_state,
                 phase,
                 &p.plan_key,
@@ -105,18 +105,13 @@ if is_cleanse {
                 .await?;
                 return Ok(PhaseExecutorOutcome::Continue);
             }
-            crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+            crate::data_engineer::state_manager::mutate_execution_state(
                 &thread_store,
                 thread_id,
+                |es| es.clear_pending_loopback_intent(),
             )
             .await
-            .or_else(|e| {
-                if e.contains("not found") {
-                    Ok(())
-                } else {
-                    Err(format!("failed to clear pending loopback intent: {e}"))
-                }
-            })?;
+            .map(|_| ())?;
             commit_phase_decision(
                 &thread_store,
                 thread_id,
@@ -141,7 +136,7 @@ if is_cleanse {
             crate::data_engineer::plan::PlanStatus::Approved
                 | crate::data_engineer::plan::PlanStatus::Completed
         ) {
-            if crate::data_engineer::loopback_intents::patch_plan_intent_blocks_fast_forward(
+            if crate::data_engineer::phase_gate::patch_plan_intent_blocks_fast_forward(
                 &execution_state,
                 phase,
                 &p.plan_key,
@@ -181,18 +176,13 @@ if is_cleanse {
                 .await?;
                 return Ok(PhaseExecutorOutcome::Continue);
             }
-            crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+            crate::data_engineer::state_manager::mutate_execution_state(
                 &thread_store,
                 thread_id,
+                |es| es.clear_pending_loopback_intent(),
             )
             .await
-            .or_else(|e| {
-                if e.contains("not found") {
-                    Ok(())
-                } else {
-                    Err(format!("failed to clear pending loopback intent: {e}"))
-                }
-            })?;
+            .map(|_| ())?;
             commit_phase_decision(
                 &thread_store,
                 thread_id,

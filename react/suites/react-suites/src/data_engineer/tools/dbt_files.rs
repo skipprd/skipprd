@@ -966,7 +966,7 @@ mod tests {
             vec!["models/staging/m.sql".to_string()],
             vec!["path:models/staging/m.sql".to_string()],
         );
-        state_manager::save_execution_state(&store, &tid, &es)
+        state_manager::replace_execution_state(&store, &tid, es)
             .await
             .expect("seed execution state");
         ctx.thread_store = Some(store);
@@ -1008,7 +1008,7 @@ mod tests {
             vec!["models/staging/m.sql".to_string()],
             vec!["path:models/staging/m.sql".to_string()],
         );
-        state_manager::save_execution_state(&store, &tid, &es)
+        state_manager::replace_execution_state(&store, &tid, es)
             .await
             .expect("seed execution state");
         ctx.thread_store = Some(store);

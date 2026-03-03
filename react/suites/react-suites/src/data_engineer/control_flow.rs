@@ -632,7 +632,7 @@ pub async fn call_and_record_tool(
                         };
                         st.note_manifest_lookup_attempt(path_kind, obs.ok, failure_kind);
                         if let Err(e) =
-                            crate::data_engineer::state_manager::save_execution_state(store, thread_id, &st).await
+                            crate::data_engineer::state_manager::replace_execution_state(store, thread_id, st).await
                         {
                             warn!("failed to persist manifest lookup telemetry: {}", e);
                         }
@@ -714,7 +714,7 @@ pub async fn call_and_record_tool(
             Ok(Some(mut st)) => {
                 st.set_last_mutation_summary(&op, affected_paths, Vec::new());
                 if let Err(e) =
-                    crate::data_engineer::state_manager::save_execution_state(store, thread_id, &st)
+                    crate::data_engineer::state_manager::replace_execution_state(store, thread_id, st)
                         .await
                 {
                     warn!("failed to persist non-file mutation summary: {}", e);

@@ -121,18 +121,13 @@ impl DataEngineerSuite {
         crate::data_engineer::plan::save_cleanse_plan(actx, &p)
             .await
             .map_err(|e| format!("failed to persist approved cleanse plan: {e}"))?;
-        crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+        crate::data_engineer::state_manager::mutate_execution_state(
             thread_store,
             thread_id,
+            |es| es.clear_pending_loopback_intent(),
         )
         .await
-        .or_else(|e| {
-            if e.contains("not found") {
-                Ok(())
-            } else {
-                Err(format!("failed to clear pending loopback intent: {e}"))
-            }
-        })?;
+        .map_err(|e| format!("failed to clear pending loopback intent: {e}"))?;
 
         commit_phase_decision(
             thread_store,
@@ -231,18 +226,13 @@ impl DataEngineerSuite {
         crate::data_engineer::plan::save_model_plan(actx, &p)
             .await
             .map_err(|e| format!("failed to persist approved model plan: {e}"))?;
-        crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+        crate::data_engineer::state_manager::mutate_execution_state(
             thread_store,
             thread_id,
+            |es| es.clear_pending_loopback_intent(),
         )
         .await
-        .or_else(|e| {
-            if e.contains("not found") {
-                Ok(())
-            } else {
-                Err(format!("failed to clear pending loopback intent: {e}"))
-            }
-        })?;
+        .map_err(|e| format!("failed to clear pending loopback intent: {e}"))?;
 
         commit_phase_decision(
             thread_store,

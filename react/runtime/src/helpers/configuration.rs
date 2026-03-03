@@ -3,6 +3,17 @@
 /// This replaces the ingest-oriented `skippr::helpers::configuration::Config` after the crate split.
 /// We intentionally keep this small and environment-driven.
 
+use std::sync::OnceLock;
+
+#[derive(Clone, Debug)]
+struct ScopePreference {
+    tenant: String,
+    workspace: String,
+    project_id: String,
+}
+
+static SCOPE_PREFERENCE: OnceLock<ScopePreference> = OnceLock::new();
+
 pub struct Config;
 
 impl Config {
@@ -62,5 +73,52 @@ impl Config {
             .to_lowercase()
             .as_str()
             == "true"
+    }
+
+    pub fn set_scope_preference(tenant: String, workspace: String, project_id: String) {
+        let _ = SCOPE_PREFERENCE.set(ScopePreference {
+            tenant,
+            workspace,
+            project_id,
+        });
+    }
+
+    pub fn get_tenant() -> String {
+        if let Some(scope) = SCOPE_PREFERENCE.get() {
+            let value = scope.tenant.trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+        Self::getenv("TENANT", "default")
+    }
+
+    pub fn get_workspace_name() -> String {
+        if let Some(scope) = SCOPE_PREFERENCE.get() {
+            let value = scope.workspace.trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+        Self::getenv("WORKSPACE", "default")
+    }
+
+    pub fn get_project_id() -> String {
+        if let Some(scope) = SCOPE_PREFERENCE.get() {
+            let value = scope.project_id.trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+        Self::getenv("PROJECT_ID", "default")
+    }
+
+    pub fn get_pipeline_name() -> String {
+        // Legacy naming: "pipeline" is the project scope in ReAct.
+        let project_id = Self::get_project_id();
+        if project_id != "default" {
+            return project_id;
+        }
+        Self::getenv("PIPELINE", "default")
     }
 }

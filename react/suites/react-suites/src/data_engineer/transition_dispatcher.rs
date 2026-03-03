@@ -73,7 +73,7 @@ pub async fn dispatch_phase_transition(
     phase_state.phase_reason_code = reason_code;
     phase_state.phase_reason_detail = reason_detail.clone();
     st.set_phase_state(phase_state);
-    state_manager::save_execution_state(store, thread_id, &st).await?;
+    state_manager::replace_execution_state(store, thread_id, st).await?;
 
     let agent = agent.unwrap_or_else(|| "unknown".to_string());
     if let Err(e) = store
@@ -92,7 +92,7 @@ pub async fn dispatch_phase_transition(
         .await
     {
         // Best-effort rollback to avoid control-state/log divergence.
-        let _ = state_manager::save_execution_state(store, thread_id, &prev_state).await;
+        let _ = state_manager::replace_execution_state(store, thread_id, prev_state).await;
         return Err(e);
     }
 
@@ -186,7 +186,7 @@ mod tests {
 
         let mut st = ExecutionState::new();
         st.replan_backtracks = 2;
-        state_manager::save_execution_state(&store, tid, &st)
+        state_manager::replace_execution_state(&store, tid, st)
             .await
             .expect("seed execution state");
 
@@ -224,7 +224,7 @@ mod tests {
 
         let mut st = ExecutionState::new();
         st.replan_backtracks = 0;
-        state_manager::save_execution_state(&store, tid, &st)
+        state_manager::replace_execution_state(&store, tid, st)
             .await
             .expect("seed execution state");
 
@@ -262,7 +262,7 @@ mod tests {
         st.manifest_lookup.retry_suppressed = true;
         st.manifest_lookup.repeated_failure_count = 3;
         st.manifest_lookup.failure_signature = Some("NoSuchKey:Ambiguous".to_string());
-        state_manager::save_execution_state(&store, tid, &st)
+        state_manager::replace_execution_state(&store, tid, st)
             .await
             .expect("seed execution state");
 
@@ -338,7 +338,7 @@ mod tests {
         let mut st = ExecutionState::new();
         st.current_phase = Some(Phase::CleansePlan);
         st.replan_backtracks = 2;
-        state_manager::save_execution_state(&store, tid, &st)
+        state_manager::replace_execution_state(&store, tid, st)
             .await
             .expect("seed state");
 
@@ -376,7 +376,7 @@ mod tests {
         let mut st = ExecutionState::new();
         st.current_phase = Some(Phase::CleanseValidate);
         st.replan_backtracks = replan_backtrack_counter_cap();
-        state_manager::save_execution_state(&store, tid, &st)
+        state_manager::replace_execution_state(&store, tid, st)
             .await
             .expect("seed state");
 

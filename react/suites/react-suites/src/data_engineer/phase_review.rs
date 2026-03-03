@@ -138,18 +138,13 @@ impl DataEngineerSuite {
 
         match meta.decision {
             ReviewDecision::Proceed => {
-                crate::data_engineer::loopback_intents::clear_pending_loopback_intent(
+                crate::data_engineer::state_manager::mutate_execution_state(
                     thread_store,
                     thread_id,
+                    |es| es.clear_pending_loopback_intent(),
                 )
                 .await
-                .or_else(|e| {
-                    if e.contains("not found") {
-                        Ok(())
-                    } else {
-                        Err(format!("failed to clear pending loopback intent: {e}"))
-                    }
-                })?;
+                .map(|_| ())?;
                 let next = match phase {
                     control_flow::Phase::CleanseReview => control_flow::Phase::ModelPlan,
                     control_flow::Phase::ModelReview => control_flow::Phase::PublishAwaitApproval,
@@ -208,12 +203,14 @@ impl DataEngineerSuite {
                     }
                     _ => (None, None),
                 };
-                let _ = crate::data_engineer::loopback_intents::set_pending_patch_plan_intent(
+                let _ = crate::data_engineer::state_manager::mutate_execution_state(
                     thread_store,
                     thread_id,
-                    back,
-                    entry_plan_key,
-                    entry_plan_digest,
+                    |es| es.set_pending_patch_plan_intent(
+                        back,
+                        entry_plan_key.clone(),
+                        entry_plan_digest.clone(),
+                    ),
                 )
                 .await;
                 commit_phase_decision(
@@ -231,10 +228,10 @@ impl DataEngineerSuite {
             }
             ReviewDecision::PatchImpl => {
                 let back = patch_impl_target_phase(phase, meta.tier);
-                let _ = crate::data_engineer::loopback_intents::set_pending_patch_impl_intent(
+                let _ = crate::data_engineer::state_manager::mutate_execution_state(
                     thread_store,
                     thread_id,
-                    back,
+                    |es| es.set_pending_patch_impl_intent(back),
                 )
                 .await;
                 commit_phase_decision(

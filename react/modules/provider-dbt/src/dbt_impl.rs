@@ -33,8 +33,8 @@ impl DbtProjectProvider {
 
 #[derive(Clone, Debug, Default)]
 pub struct DbtRunnerConfig {
-    /// Runner mode: "host" (default) or "docker".
-    pub mode: String,
+    /// Runner mode: host (default) or docker.
+    pub mode: DbtRunnerMode,
     /// Docker image to use when mode=="docker" (pinned strongly recommended).
     pub docker_image: Option<String>,
     /// Optional docker platform (e.g. "linux/amd64").
@@ -43,6 +43,32 @@ pub struct DbtRunnerConfig {
     pub docker_network: Option<String>,
     /// If true, mount ~/.aws into the container at /root/.aws (useful for AWS_PROFILE flows).
     pub docker_mount_aws_dir: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DbtRunnerMode {
+    #[default]
+    Host,
+    Docker,
+}
+
+impl DbtRunnerMode {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "host" => Ok(Self::Host),
+            "docker" => Ok(Self::Docker),
+            other => Err(format!(
+                "invalid dbt runner mode '{other}'. expected 'host' or 'docker'"
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Docker => "docker",
+        }
+    }
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -654,15 +680,6 @@ fn run_cmd_labeled(
     envs: &[(&str, String)],
     label: &str,
 ) -> CmdOut {
-    let started = std::time::Instant::now();
-    tracing::info!(
-        target: "dbt",
-        phase = %label,
-        runner = "host",
-        cmd = %cmd,
-        args = %args.join(" "),
-        "starting"
-    );
     let mut c = std::process::Command::new(cmd);
     c.args(args)
         .current_dir(cwd)
@@ -671,8 +688,27 @@ fn run_cmd_labeled(
     for (k, v) in envs.iter() {
         c.env(k, v);
     }
+    run_spawned_cmd_labeled(c, "host", cmd, args.join(" "), label)
+}
 
-    let mut child = match c.spawn() {
+fn run_spawned_cmd_labeled(
+    mut cmd: std::process::Command,
+    runner_label: &'static str,
+    cmd_for_log: &str,
+    args_for_log: String,
+    label: &str,
+) -> CmdOut {
+    let started = std::time::Instant::now();
+    tracing::info!(
+        target: "dbt",
+        phase = %label,
+        runner = %runner_label,
+        cmd = %cmd_for_log,
+        args = %args_for_log,
+        "starting"
+    );
+
+    let mut child = match cmd.spawn() {
         Ok(ch) => ch,
         Err(e) => {
             return CmdOut {
@@ -733,7 +769,14 @@ fn run_cmd_labeled(
                 }
             }
             if should_log_dbt_info_line(&line) {
-                tracing::info!(target: "dbt", phase = %label, runner = "host", stream = "stdout", "{}", line);
+                tracing::info!(
+                    target: "dbt",
+                    phase = %label,
+                    runner = %runner_label,
+                    stream = "stdout",
+                    "{}",
+                    line
+                );
             }
             out_buf.push_str(&line);
             out_buf.push('\n');
@@ -756,7 +799,7 @@ fn run_cmd_labeled(
     tracing::info!(
         target: "dbt",
         phase = %label,
-        runner = "host",
+        runner = %runner_label,
         exit_code = code,
         ok = ok,
         duration_ms = started.elapsed().as_millis() as u64,
@@ -871,16 +914,6 @@ fn build_docker_run_args(
     Ok(args)
 }
 
-fn run_cmd_docker(
-    runner: &DbtRunnerConfig,
-    project_dir: &Path,
-    profiles_dir: Option<&Path>,
-    dbt_args: &[&str],
-    envs: &[(&str, String)],
-) -> CmdOut {
-    run_cmd_docker_labeled(runner, project_dir, profiles_dir, dbt_args, envs, "dbt")
-}
-
 fn run_cmd_docker_labeled(
     runner: &DbtRunnerConfig,
     project_dir: &Path,
@@ -889,7 +922,6 @@ fn run_cmd_docker_labeled(
     envs: &[(&str, String)],
     label: &str,
 ) -> CmdOut {
-    let started = std::time::Instant::now();
     let args = match build_docker_run_args(runner, project_dir, profiles_dir, dbt_args, envs) {
         Ok(v) => v,
         Err(e) => {
@@ -901,100 +933,33 @@ fn run_cmd_docker_labeled(
             };
         }
     };
-
-    tracing::info!(
-        target: "dbt",
-        phase = %label,
-        runner = "docker",
-        cmd = "docker",
-        args = %redact_docker_args_for_log(&args),
-        "starting"
-    );
-
     let mut c = std::process::Command::new("docker");
     c.args(&args)
         .current_dir(project_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    run_spawned_cmd_labeled(
+        c,
+        "docker",
+        "docker",
+        redact_docker_args_for_log(&args),
+        label,
+    )
+}
 
-    let mut child = match c.spawn() {
-        Ok(ch) => ch,
-        Err(e) => {
-            return CmdOut {
-                status_ok: false,
-                code: -1,
-                stdout: String::new(),
-                stderr: format!("spawn error: {}", e),
-            };
+fn run_cmd_for_runner_labeled(
+    runner: &DbtRunnerConfig,
+    project_dir: &Path,
+    profiles_dir: Option<&Path>,
+    dbt_args: &[&str],
+    envs: &[(&str, String)],
+    label: &str,
+) -> CmdOut {
+    match runner.mode {
+        DbtRunnerMode::Host => run_cmd_labeled("dbt", dbt_args, project_dir, envs, label),
+        DbtRunnerMode::Docker => {
+            run_cmd_docker_labeled(runner, project_dir, profiles_dir, dbt_args, envs, label)
         }
-    };
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let (tx, rx) = std::sync::mpsc::channel::<(bool, String)>(); // (is_stderr, line)
-    if let Some(out) = stdout {
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            let br = std::io::BufReader::new(out);
-            for line in br.lines().flatten() {
-                let _ = tx.send((false, line));
-            }
-        });
-    }
-    if let Some(err) = stderr {
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            let br = std::io::BufReader::new(err);
-            for line in br.lines().flatten() {
-                let _ = tx.send((true, line));
-            }
-        });
-    }
-    drop(tx);
-
-    let mut out_buf = String::new();
-    let mut err_buf = String::new();
-    for (is_err, line) in rx {
-        if is_err {
-            err_buf.push_str(&line);
-            err_buf.push('\n');
-        } else {
-            if should_log_dbt_info_line(&line) {
-                tracing::info!(target: "dbt", phase = %label, runner = "docker", stream = "stdout", "{}", line);
-            }
-            out_buf.push_str(&line);
-            out_buf.push('\n');
-        }
-    }
-
-    let status = match child.wait() {
-        Ok(s) => s,
-        Err(e) => {
-            return CmdOut {
-                status_ok: false,
-                code: -1,
-                stdout: out_buf,
-                stderr: format!("wait error: {}", e),
-            };
-        }
-    };
-    let code = status.code().unwrap_or(-1);
-    let ok = status.success();
-    tracing::info!(
-        target: "dbt",
-        phase = %label,
-        runner = "docker",
-        exit_code = code,
-        ok = ok,
-        duration_ms = started.elapsed().as_millis() as u64,
-        "finished"
-    );
-    CmdOut {
-        status_ok: ok,
-        code,
-        stdout: out_buf,
-        stderr: err_buf,
     }
 }
 
@@ -1248,23 +1213,18 @@ impl DbtProvider for DbtProjectProvider {
             envs.push(("DBT_PROFILES_DIR", pd.clone()));
         }
 
-        let use_docker = self.runner.mode.to_lowercase() == "docker";
         let profiles_path = profiles_dir.as_ref().map(|s| Path::new(s));
 
         // Hard fail if dbt CLI itself is broken on this runner (do NOT attempt to repair).
         // This catches host-level Python/env issues early (e.g. import errors) before we try deps/parse/compile.
-        let version_res = if use_docker {
-            run_cmd_docker_labeled(
-                &self.runner,
-                &root,
-                profiles_path,
-                &["--version"],
-                &envs,
-                "version",
-            )
-        } else {
-            run_cmd_labeled("dbt", &["--version"], &root, &envs, "version")
-        };
+        let version_res = run_cmd_for_runner_labeled(
+            &self.runner,
+            &root,
+            profiles_path,
+            &["--version"],
+            &envs,
+            "version",
+        );
         if !version_res.status_ok {
             return Err(format!(
                 "dbt environment check failed (dbt --version). This is a host/runner issue; do not attempt auto-repair.\n\nstdout:\n{}\n\nstderr:\n{}",
@@ -1273,23 +1233,22 @@ impl DbtProvider for DbtProjectProvider {
             ));
         }
 
-        let deps_res = if use_docker {
-            run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["deps"], &envs, "deps")
-        } else {
-            run_cmd_labeled("dbt", &["deps"], &root, &envs, "deps")
-        };
-        let parse_res = if use_docker {
-            run_cmd_docker_labeled(
-                &self.runner,
-                &root,
-                profiles_path,
-                &["parse"],
-                &envs,
-                "parse",
-            )
-        } else {
-            run_cmd_labeled("dbt", &["parse"], &root, &envs, "parse")
-        };
+        let deps_res = run_cmd_for_runner_labeled(
+            &self.runner,
+            &root,
+            profiles_path,
+            &["deps"],
+            &envs,
+            "deps",
+        );
+        let parse_res = run_cmd_for_runner_labeled(
+            &self.runner,
+            &root,
+            profiles_path,
+            &["parse"],
+            &envs,
+            "parse",
+        );
         let compile_res = {
             let mut argv: Vec<String> = vec![
                 "compile".to_string(),
@@ -1309,18 +1268,14 @@ impl DbtProvider for DbtProjectProvider {
                 }
             }
             let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-            if use_docker {
-                run_cmd_docker_labeled(
-                    &self.runner,
-                    &root,
-                    profiles_path,
-                    &argv_refs,
-                    &envs,
-                    "compile",
-                )
-            } else {
-                run_cmd_labeled("dbt", &argv_refs, &root, &envs, "compile")
-            }
+            run_cmd_for_runner_labeled(
+                &self.runner,
+                &root,
+                profiles_path,
+                &argv_refs,
+                &envs,
+                "compile",
+            )
         };
         let run_or_build_res = if build {
             Some({
@@ -1339,18 +1294,14 @@ impl DbtProvider for DbtProjectProvider {
                     }
                 }
                 let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-                if use_docker {
-                    run_cmd_docker_labeled(
-                        &self.runner,
-                        &root,
-                        profiles_path,
-                        &argv_refs,
-                        &envs,
-                        "build",
-                    )
-                } else {
-                    run_cmd_labeled("dbt", &argv_refs, &root, &envs, "build")
-                }
+                run_cmd_for_runner_labeled(
+                    &self.runner,
+                    &root,
+                    profiles_path,
+                    &argv_refs,
+                    &envs,
+                    "build",
+                )
             })
         } else if run {
             Some({
@@ -1369,18 +1320,14 @@ impl DbtProvider for DbtProjectProvider {
                     }
                 }
                 let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-                if use_docker {
-                    run_cmd_docker_labeled(
-                        &self.runner,
-                        &root,
-                        profiles_path,
-                        &argv_refs,
-                        &envs,
-                        "run",
-                    )
-                } else {
-                    run_cmd_labeled("dbt", &argv_refs, &root, &envs, "run")
-                }
+                run_cmd_for_runner_labeled(
+                    &self.runner,
+                    &root,
+                    profiles_path,
+                    &argv_refs,
+                    &envs,
+                    "run",
+                )
             })
         } else {
             None
@@ -1452,7 +1399,7 @@ mod tests {
     #[test]
     fn docker_args_require_image() {
         let runner = DbtRunnerConfig {
-            mode: "docker".to_string(),
+            mode: DbtRunnerMode::Docker,
             docker_image: None,
             ..Default::default()
         };
@@ -1464,7 +1411,7 @@ mod tests {
     #[test]
     fn docker_args_include_project_mount_and_workdir() {
         let runner = DbtRunnerConfig {
-            mode: "docker".to_string(),
+            mode: DbtRunnerMode::Docker,
             docker_image: Some("ghcr.io/dbt-labs/dbt-athena:1.8.3".to_string()),
             docker_platform: Some("linux/amd64".to_string()),
             docker_network: Some("host".to_string()),

@@ -2,8 +2,6 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::discover::Metadata;
-use crate::helpers::progress::ProgressUi;
 use crate::keyspace::{DefaultKeyspace, Keyspace};
 use crate::llm::{DynLlm, NullModel};
 use crate::providers::{
@@ -56,9 +54,6 @@ pub struct SuiteCtx {
     pub vector: Option<Arc<dyn VectorStore>>,
     pub dbt: Option<Arc<dyn DbtProvider>>,
     pub state: Option<Arc<dyn StateStore>>,
-
-    pub _metadata_stub: Option<Arc<Metadata>>,
-    pub _progress_ui_stub: Option<Arc<ProgressUi>>,
 }
 
 impl SuiteCtx {
@@ -84,8 +79,6 @@ impl SuiteCtx {
             vector: None,
             dbt: None,
             state: None,
-            _metadata_stub: None,
-            _progress_ui_stub: None,
         }
     }
 }
@@ -111,8 +104,6 @@ impl Default for SuiteCtx {
             vector: None,
             dbt: None,
             state: None,
-            _metadata_stub: None,
-            _progress_ui_stub: None,
         }
     }
 }

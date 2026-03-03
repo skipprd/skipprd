@@ -1,8 +1,7 @@
-use react_core::control_flow::PhaseReasonCode;
+use react_core::control_flow::{GuardBlockKind, PhaseReasonCode};
 use react_core::session::ThreadStore;
 
 use crate::data_engineer::control_flow::{Phase, TransitionIntent};
-use crate::data_engineer::phase_actions::apply_phase_transition;
 
 #[derive(Clone, Debug)]
 pub enum PhaseDecision {
@@ -69,17 +68,43 @@ pub async fn commit_phase_decision(
             intent,
             reason_code,
             reason_detail,
-        } => {
-            apply_phase_transition(
-                thread_store,
-                thread_id,
-                from_phase,
+        } => crate::data_engineer::transition_dispatcher::apply_phase_directive(
+            thread_store,
+            thread_id,
+            Some("agent".to_string()),
+            from_phase,
+            crate::data_engineer::transition_dispatcher::PhaseDirective::Transition {
                 to,
                 intent,
                 reason_code,
                 reason_detail,
-            )
-            .await
-        }
+            },
+        )
+        .await,
     }
+}
+
+pub async fn commit_guard_block(
+    thread_store: &ThreadStore,
+    thread_id: &str,
+    phase: Phase,
+    kind: GuardBlockKind,
+    reason: impl Into<String>,
+) -> Result<(), String> {
+    crate::data_engineer::transition_dispatcher::apply_phase_directive(
+        thread_store,
+        thread_id,
+        Some("agent".to_string()),
+        Some(phase),
+        crate::data_engineer::transition_dispatcher::PhaseDirective::Block {
+            phase,
+            kind,
+            reason: reason.into(),
+        },
+    )
+    .await
+}
+
+pub fn plan_status_reason_detail<S: std::fmt::Debug>(status: S) -> serde_json::Value {
+    serde_json::json!({ "status": format!("{status:?}") })
 }

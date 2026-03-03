@@ -19,8 +19,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 #[cfg(test)]
 use crate::data_engineer::failure_classifier::ValidateFailureClass;
-use crate::data_engineer::phase_actions::{
-    apply_guard_block, plan_status_reason_detail,
+use crate::data_engineer::phase_contract::{
+    commit_guard_block as apply_guard_block, plan_status_reason_detail,
 };
 
 pub struct DataEngineerSuite;
@@ -98,8 +98,6 @@ pub mod mutation_gateway;
 pub mod patch_contract;
 #[path = "patch_protocol.rs"]
 pub mod files_patch_repair;
-mod loopback_intents;
-pub mod phase_actions;
 pub mod phase_contract;
 pub mod phase_gate;
 pub mod phase_reason_detail;
@@ -2759,127 +2757,27 @@ Apply these fixes in the output.",
                 }
             }
 
-            // Hard-cutover: validate failure context is sourced from typed execution state only.
-            let mut last_validate_brief: Option<String> = None;
-            let mut last_validate_failed_models: Vec<
-                crate::data_engineer::progress_controller::FailedModelRef,
-            > = Vec::new();
-            if let Some(last) = execution_state.last_validate.as_ref() {
-                if let Some(brief) = last.brief.as_ref().filter(|s| !s.trim().is_empty()) {
-                    last_validate_brief = Some(brief.clone());
-                }
-                if !last.failed_models.is_empty() {
-                    last_validate_failed_models = last.failed_models.clone();
-                }
-            }
-
-            match node {
-                crate::data_engineer::workflow_node::WorkflowNode::Preflight => match Self::execute_preflight_phase(&thread_store, thread_id, sctx).await? {
-                    PhaseExecutorOutcome::Continue => continue,
-                    PhaseExecutorOutcome::Return(frames) => return Ok(frames),
-                },
-
-                crate::data_engineer::workflow_node::WorkflowNode::CleansePlan
-                | crate::data_engineer::workflow_node::WorkflowNode::ModelPlan => {
-                    match Self::execute_plan_phase(
-                        &thread_store,
-                        thread_id,
-                        phase,
-                        question,
-                        sctx,
-                        &execution_state,
-                        &guard,
-                        allow_ask_approval,
-                        thread_state_step_count,
-                        &last_validate_brief,
-                        &last_validate_failed_models,
-                    )
-                    .await? {
-                        PhaseExecutorOutcome::Continue => continue,
-                        PhaseExecutorOutcome::Return(frames) => return Ok(frames),
-                    }
-                }
-
-                crate::data_engineer::workflow_node::WorkflowNode::CleanseAuthor
-                | crate::data_engineer::workflow_node::WorkflowNode::ModelAuthor => {
-                    match Self::execute_author_phase(
-                        &thread_store,
-                        thread_id,
-                        phase,
-                        question,
-                        sctx,
-                        &execution_state,
-                        &guard,
-                        allow_ask_approval,
-                        thread_state_step_count,
-                        &last_validate_brief,
-                        &last_validate_failed_models,
-                    )
-                    .await? {
-                        PhaseExecutorOutcome::Continue => continue,
-                        PhaseExecutorOutcome::Return(frames) => return Ok(frames),
-                    }
-                }
-
-                crate::data_engineer::workflow_node::WorkflowNode::CleanseValidate
-                | crate::data_engineer::workflow_node::WorkflowNode::ModelValidate => {
-                    match Self::execute_validate_phase(
-                        &thread_store,
-                        thread_id,
-                        phase,
-                        question,
-                        sctx,
-                        &execution_state,
-                        &guard,
-                        allow_ask_approval,
-                        thread_state_step_count,
-                        &last_validate_brief,
-                        &last_validate_failed_models,
-                    )
-                    .await? {
-                        PhaseExecutorOutcome::Continue => continue,
-                        PhaseExecutorOutcome::Return(frames) => return Ok(frames),
-                    }
-                }
-
-                crate::data_engineer::workflow_node::WorkflowNode::CleanseReview
-                | crate::data_engineer::workflow_node::WorkflowNode::ModelReview
-                | crate::data_engineer::workflow_node::WorkflowNode::PostPublishReview => {
-                    match Self::execute_review_phase(
-                        &thread_store,
-                        thread_id,
-                        phase,
-                        question,
-                        sctx,
-                        &execution_state,
-                        thread_state_step_count,
-                        &mut out_frames,
-                    )
-                    .await? {
-                        PhaseExecutorOutcome::Continue => continue,
-                        PhaseExecutorOutcome::Return(frames) => return Ok(frames),
-                    }
-                }
-
-                crate::data_engineer::workflow_node::WorkflowNode::PublishAwaitApproval => match Self::execute_publish_await_approval_phase(
-                    &thread_store,
-                    thread_id,
-                    sctx,
-                )
-                .await? {
-                    PhaseExecutorOutcome::Continue => continue,
-                    PhaseExecutorOutcome::Return(frames) => return Ok(frames),
-                },
-
-                crate::data_engineer::workflow_node::WorkflowNode::Publish => match Self::execute_publish_phase(&thread_store, thread_id, sctx).await? {
-                    PhaseExecutorOutcome::Continue => continue,
-                    PhaseExecutorOutcome::Return(frames) => return Ok(frames),
-                },
-
-                crate::data_engineer::workflow_node::WorkflowNode::Done => match Self::execute_done_phase(&mut out_frames)? {
-                    PhaseExecutorOutcome::Continue => continue,
-                    PhaseExecutorOutcome::Return(frames) => return Ok(frames),
-                },
+            let (last_validate_brief, last_validate_failed_models) =
+                Self::last_validate_context(&execution_state);
+            let outcome = Self::execute_workflow_node(
+                &thread_store,
+                thread_id,
+                node,
+                phase,
+                question,
+                sctx,
+                &execution_state,
+                &guard,
+                allow_ask_approval,
+                thread_state_step_count,
+                &last_validate_brief,
+                &last_validate_failed_models,
+                &mut out_frames,
+            )
+            .await?;
+            match outcome {
+                PhaseExecutorOutcome::Continue => continue,
+                PhaseExecutorOutcome::Return(frames) => return Ok(frames),
             }
         }
 
@@ -2904,6 +2802,123 @@ Apply these fixes in the output.",
             let _ = es.save(&thread_store, thread_id).await;
         }
         Err(budget_msg)
+    }
+
+    fn last_validate_context(
+        execution_state: &crate::data_engineer::progress_controller::ExecutionState,
+    ) -> (
+        Option<String>,
+        Vec<crate::data_engineer::progress_controller::FailedModelRef>,
+    ) {
+        if let Some(last) = execution_state.last_validate.as_ref() {
+            let brief = last.brief.as_ref().and_then(|s| {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+            return (brief, last.failed_models.clone());
+        }
+        (None, Vec::new())
+    }
+
+    async fn execute_workflow_node(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+        node: crate::data_engineer::workflow_node::WorkflowNode,
+        phase: crate::data_engineer::control_flow::Phase,
+        question: &str,
+        sctx: &SuiteCtx,
+        execution_state: &crate::data_engineer::progress_controller::ExecutionState,
+        guard: &control_flow::DerivedGuardState,
+        allow_ask_approval: bool,
+        thread_state_step_count: usize,
+        last_validate_brief: &Option<String>,
+        last_validate_failed_models: &[crate::data_engineer::progress_controller::FailedModelRef],
+        out_frames: &mut Vec<FlowFrame>,
+    ) -> Result<PhaseExecutorOutcome, String> {
+        match node {
+            crate::data_engineer::workflow_node::WorkflowNode::Preflight => {
+                Self::execute_preflight_phase(thread_store, thread_id, sctx).await
+            }
+            crate::data_engineer::workflow_node::WorkflowNode::CleansePlan
+            | crate::data_engineer::workflow_node::WorkflowNode::ModelPlan => {
+                Self::execute_plan_phase(
+                    thread_store,
+                    thread_id,
+                    phase,
+                    question,
+                    sctx,
+                    execution_state,
+                    guard,
+                    allow_ask_approval,
+                    thread_state_step_count,
+                    last_validate_brief,
+                    last_validate_failed_models,
+                )
+                .await
+            }
+            crate::data_engineer::workflow_node::WorkflowNode::CleanseAuthor
+            | crate::data_engineer::workflow_node::WorkflowNode::ModelAuthor => {
+                Self::execute_author_phase(
+                    thread_store,
+                    thread_id,
+                    phase,
+                    question,
+                    sctx,
+                    execution_state,
+                    guard,
+                    allow_ask_approval,
+                    thread_state_step_count,
+                    last_validate_brief,
+                    last_validate_failed_models,
+                )
+                .await
+            }
+            crate::data_engineer::workflow_node::WorkflowNode::CleanseValidate
+            | crate::data_engineer::workflow_node::WorkflowNode::ModelValidate => {
+                Self::execute_validate_phase(
+                    thread_store,
+                    thread_id,
+                    phase,
+                    question,
+                    sctx,
+                    execution_state,
+                    guard,
+                    allow_ask_approval,
+                    thread_state_step_count,
+                    last_validate_brief,
+                    last_validate_failed_models,
+                )
+                .await
+            }
+            crate::data_engineer::workflow_node::WorkflowNode::CleanseReview
+            | crate::data_engineer::workflow_node::WorkflowNode::ModelReview
+            | crate::data_engineer::workflow_node::WorkflowNode::PostPublishReview => {
+                Self::execute_review_phase(
+                    thread_store,
+                    thread_id,
+                    phase,
+                    question,
+                    sctx,
+                    execution_state,
+                    thread_state_step_count,
+                    out_frames,
+                )
+                .await
+            }
+            crate::data_engineer::workflow_node::WorkflowNode::PublishAwaitApproval => {
+                Self::execute_publish_await_approval_phase(thread_store, thread_id, sctx).await
+            }
+            crate::data_engineer::workflow_node::WorkflowNode::Publish => {
+                Self::execute_publish_phase(thread_store, thread_id, sctx).await
+            }
+            crate::data_engineer::workflow_node::WorkflowNode::Done => {
+                Self::execute_done_phase(out_frames)
+            }
+        }
     }
 
     async fn run_authoring(
@@ -4530,19 +4545,19 @@ mod tests {
             entry_plan_key: Some("k1".to_string()),
             entry_plan_digest: Some("d1".to_string()),
         });
-        assert!(crate::data_engineer::loopback_intents::patch_plan_intent_blocks_fast_forward(
+        assert!(crate::data_engineer::phase_gate::patch_plan_intent_blocks_fast_forward(
             &st,
             Phase::CleansePlan,
             "k1",
             Some("d1"),
         ));
-        assert!(!crate::data_engineer::loopback_intents::patch_plan_intent_blocks_fast_forward(
+        assert!(!crate::data_engineer::phase_gate::patch_plan_intent_blocks_fast_forward(
             &st,
             Phase::CleansePlan,
             "k2",
             Some("d1"),
         ));
-        assert!(!crate::data_engineer::loopback_intents::patch_plan_intent_blocks_fast_forward(
+        assert!(!crate::data_engineer::phase_gate::patch_plan_intent_blocks_fast_forward(
             &st,
             Phase::CleansePlan,
             "k1",
@@ -4563,12 +4578,12 @@ mod tests {
             phase: Phase::ModelAuthor,
             entry_mutation_epoch: 4,
         });
-        assert!(crate::data_engineer::loopback_intents::patch_impl_intent_unsatisfied(
+        assert!(crate::data_engineer::phase_gate::patch_impl_intent_unsatisfied(
             &st,
             Phase::ModelAuthor
         ));
         st.mutation_epoch = 5;
-        assert!(!crate::data_engineer::loopback_intents::patch_impl_intent_unsatisfied(
+        assert!(!crate::data_engineer::phase_gate::patch_impl_intent_unsatisfied(
             &st,
             Phase::ModelAuthor
         ));
@@ -4590,7 +4605,7 @@ mod tests {
             name: "stg_other".to_string(),
             file: "models/staging/stg_other.sql".to_string(),
         }];
-        let got = crate::data_engineer::loopback_intents::derive_single_target_repair_path(
+        let got = crate::data_engineer::phase_gate::derive_single_target_repair_path(
             &st,
             &failed,
         );
@@ -4605,7 +4620,7 @@ mod tests {
             name: "stg_orders".to_string(),
             file: "models/staging/stg_orders.sql".to_string(),
         }];
-        let got = crate::data_engineer::loopback_intents::derive_single_target_repair_path(
+        let got = crate::data_engineer::phase_gate::derive_single_target_repair_path(
             &st,
             &failed,
         );
