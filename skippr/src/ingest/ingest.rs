@@ -38,20 +38,6 @@ impl ResolvedFieldValue {
     }
 }
 
-#[derive(Default)]
-pub struct IngestRecord {
-    #[allow(dead_code)]
-    pub(crate) source_namespace: String,
-    #[allow(dead_code)]
-    pub(crate) source_partition: String,
-    #[allow(dead_code)]
-    pub(crate) skpr_event_ts: i64,
-    pub(crate) skpr_namespace: String,
-    #[allow(dead_code)]
-    pub(crate) skpr_partition: String,
-    pub(crate) record: Value,
-}
-
 // pub fn ingest_buf<R: Read>(reader: &mut BufReader<R>) -> ValueIter<R> {
 //     ValueIter::new(reader, None)
 // }

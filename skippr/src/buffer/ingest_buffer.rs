@@ -128,12 +128,15 @@ pub struct OffsetKeySerialize {
     pub(crate) position: u64,
 }
 
+use crate::ingest::record_types::{NormalizedRecord, SourceRecord};
+
 #[derive(Debug, Clone)]
 pub struct IngestRecord {
     pub(crate) _namespace: String,
     pub(crate) _partition: String,
     pub(crate) _time: Option<i64>,
-    pub(crate) record: Value,
+    pub(crate) source: SourceRecord,
+    pub(crate) normalized: NormalizedRecord,
 }
 
 pub struct IngestBufferBatch {

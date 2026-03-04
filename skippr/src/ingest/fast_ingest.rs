@@ -20,22 +20,6 @@ use crate::discover::DateCandidate;
 #[allow(unused_imports)]
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 
-#[derive(Default)]
-pub struct IngestRecord {
-    #[allow(dead_code)]
-    pub(crate) source_namespace: String,
-    #[allow(dead_code)]
-    pub(crate) source_partition: String,
-    #[allow(dead_code)]
-    pub(crate) skpr_event_ts: i64,
-    #[allow(dead_code)]
-    pub(crate) skpr_namespace: String,
-    #[allow(dead_code)]
-    pub(crate) skpr_partition: String,
-    #[allow(dead_code)]
-    pub(crate) record: Value,
-}
-
 pub static DEFAULT_NESTED_MESSAGE: Lazy<Arc<TimedRwLock<HashMap<String, Value>>>> =
     Lazy::new(|| {
         Arc::new(TimedRwLock::new(

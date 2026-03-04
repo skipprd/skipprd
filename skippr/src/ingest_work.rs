@@ -94,6 +94,7 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use std::io::Cursor;
 
+use crate::ingest::record_types::{NormalizedRecord, SourceRecord};
 use crate::serdes::xml::SerdeXml;
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
@@ -115,7 +116,7 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Debug)]
 struct SlowIngestTask {
     namespace: String,
-    record: Value,
+    record: SourceRecord,
     flatten: bool,
     resp_tx: oneshot::Sender<Result<Value, String>>,
 }
@@ -144,7 +145,7 @@ fn ensure_slow_ingest_worker() {
                 if let Some(ns_meta) = md_local.metadata.get_mut(&task.namespace) {
                     let mut updated = "no".to_string();
                     match ingest(
-                        &task.record,
+                        task.record.inner(),
                         &mut ns_meta.fields,
                         &task.namespace,
                         &mut updated,
@@ -204,7 +205,11 @@ fn ensure_slow_ingest_worker() {
     }
 }
 
-fn slow_ingest_blocking(namespace: &str, record: &Value, flatten: bool) -> Result<Value, String> {
+fn slow_ingest_blocking(
+    namespace: &str,
+    record: &SourceRecord,
+    flatten: bool,
+) -> Result<Value, String> {
     ensure_slow_ingest_worker();
     let tx = SLOW_INGEST_TX
         .get()
@@ -1364,7 +1369,8 @@ impl Ingest {
         let mut enqueue_record = |ns: &String,
                                   part: &String,
                                   time_b: &Option<i64>,
-                                  rec_val: Value,
+                                  source: SourceRecord,
+                                  normalized: NormalizedRecord,
                                   ok: &OffsetKey,
                                   pos: u64| {
             let md_snapshot = METADATA.load();
@@ -1385,7 +1391,8 @@ impl Ingest {
                 .entry(key)
                 .or_insert_with(|| Vec::with_capacity(1024))
                 .push(IngestRecord {
-                    record: rec_val,
+                    source,
+                    normalized,
                     _namespace: ns.clone(),
                     _partition: part.clone(),
                     _time: time_b.clone(),
@@ -1587,9 +1594,11 @@ impl Ingest {
                         enqueue_catalog_build(&skpr_namespace);
                     }
 
+                    let source = SourceRecord::new(record);
+
                     let msg = match METADATA.load().metadata.get(&skpr_namespace) {
                         Some(metadata) => fast_path_ingest(
-                            &record,
+                            source.inner(),
                             metadata.fields.as_ref(),
                             &skpr_namespace,
                             flatten,
@@ -1605,7 +1614,7 @@ impl Ingest {
                         Ok(msg) => msg,
                         Err(_err) => {
                             // Simple fallback: single-record slow path
-                            match slow_ingest_blocking(&skpr_namespace, &record, flatten) {
+                            match slow_ingest_blocking(&skpr_namespace, &source, flatten) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     if Config::debug_enabled() {
@@ -1622,7 +1631,7 @@ impl Ingest {
                                             .unwrap()
                                             .as_secs(),
                                         error: e.to_string(),
-                                        records: record.to_string(),
+                                        records: source.inner().to_string(),
                                         failure_code: "EVOLUTION_SLOW_PATH".to_string(),
                                         source_uri: "".to_string(),
                                         offset_namespace: ingest_batch.offset_key.namespace.clone(),
@@ -1647,11 +1656,13 @@ impl Ingest {
                         continue;
                     }
 
+                    let normalized = NormalizedRecord::new(record_value);
                     enqueue_record(
                         &skpr_namespace,
                         &skpr_partition,
                         &skpr_time_bucket,
-                        record_value.clone(),
+                        source,
+                        normalized,
                         &ingest_batch.offset_key,
                         batch_line,
                     );
@@ -1740,7 +1751,7 @@ impl Ingest {
                 };
 
             let values_ref: Vec<&serde_json::Value> =
-                records_vec.iter().map(|r| &r.record).collect();
+                records_vec.iter().map(|r| r.normalized.inner()).collect();
             if values_ref.is_empty() {
                 continue;
             }
@@ -1762,11 +1773,11 @@ impl Ingest {
             let mut persistent_error: Option<String> = None;
             let mut fixed_records: Vec<serde_json::Value> = Vec::with_capacity(values_ref.len());
             for rec in records_vec.iter() {
-                // Try fast-path again now that schema may have evolved
+                // Re-process from SOURCE record (not normalized) to avoid metadata contamination
                 let md_snapshot = METADATA.load();
                 let msg = match md_snapshot.metadata.get(&skpr_namespace) {
                     Some(metadata) => fast_path_ingest(
-                        &rec.record,
+                        rec.source.inner(),
                         metadata.fields.as_ref(),
                         &skpr_namespace,
                         flatten,
@@ -1780,8 +1791,8 @@ impl Ingest {
                 let record_value = match msg {
                     Ok(msg) => msg,
                     Err(_err) => {
-                        // Final attempt via slow-path
-                        match slow_ingest_blocking(&skpr_namespace, &rec.record, flatten) {
+                        // Final attempt via slow-path using source record
+                        match slow_ingest_blocking(&skpr_namespace, &rec.source, flatten) {
                             Ok(v) => v,
                             Err(e) => {
                                 if Config::debug_enabled() {
@@ -1796,12 +1807,15 @@ impl Ingest {
                         }
                     }
                 };
+                if !record_value.is_null() {
+                    fixed_records.push(record_value);
+                }
             }
 
             if let Some(err) = persistent_error {
-                let joined = values_ref
+                let joined = records_vec
                     .iter()
-                    .map(|r| r.to_string())
+                    .map(|r| r.source.inner().to_string())
                     .collect::<Vec<String>>()
                     .join("\n");
                 // Pick one offset as representative for idempotency
@@ -1856,17 +1870,17 @@ impl Ingest {
 
             // Retry batch serialization once with potentially evolved schema
             let values_ref2: Vec<&serde_json::Value> = if fixed_records.is_empty() {
-                records_vec.iter().map(|r| &r.record).collect()
+                records_vec.iter().map(|r| r.normalized.inner()).collect()
             } else {
                 fixed_records.iter().collect()
             };
             if let Some(batches) = try_serialize(entry.schema.clone(), &values_ref2) {
                 entry.record_batches = Some(batches);
             } else {
-                // Deadletter entire batch if still failing
-                let joined = values_ref2
+                // Deadletter entire batch if still failing -- use source for diagnostics
+                let joined = records_vec
                     .iter()
-                    .map(|r| r.to_string())
+                    .map(|r| r.source.inner().to_string())
                     .collect::<Vec<String>>()
                     .join("\n");
                 let (off_ns, off_part, off_pos) = match entry.offsets.iter().next() {

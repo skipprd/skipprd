@@ -25,8 +25,6 @@ mod filter_parse_int;
 
 use crate::helpers::configuration::Config;
 
-use crate::ingest::ingest::IngestRecord;
-
 use crate::serdes::json::SerdeJson;
 
 use crate::discover::evolution::Evolution;
@@ -943,28 +941,17 @@ impl AnalyseSchema {
 
             match v.type_id() {
                 _value => {
-                    let mut ingest_record = IngestRecord {
-                        source_namespace: "".to_string(),
-                        source_partition: "".to_string(),
-                        skpr_event_ts: 0,
-                        skpr_namespace: _skpr_namespace.clone(),
-                        skpr_partition: "".to_string(),
-                        record: v,
-                    };
-
+                    let mut record = v;
                     counts += 1;
 
-                    // println!("Analyzing count: {}, record: {}", counts, ingest_record.record);
-                    // println!("Analyzing count: {}", counts);
-
                     self.analyse_payload(
-                        &mut ingest_record.record,
+                        &mut record,
                         &mut metadata
-                            .get_mut(&ingest_record.skpr_namespace)
+                            .get_mut(&_skpr_namespace)
                             .unwrap()
                             .fields,
                     );
-                } // Remove this unreachable pattern
+                }
             };
         }
 
