@@ -533,7 +533,9 @@ impl DataEngineerSuite {
                                         .unwrap_or_else(
                                             crate::data_engineer::progress_controller::ExecutionState::new,
                                         );
-                                    es.ensure_repair_target_path(want.clone());
+                                    if let Ok(path) = crate::data_engineer::progress_controller::SqlModelPath::parse(want.clone()) {
+                                        es.ensure_repair_target_path(path);
+                                    }
 
                                     match &res {
                                         Ok(v) => {

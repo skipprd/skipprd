@@ -1473,7 +1473,9 @@ if hard_mutation_repair_mode
     if es.target_path().as_deref().unwrap_or("").trim().is_empty()
         && !target.is_empty()
     {
-        es.ensure_repair_target_path(target.clone());
+        if let Ok(path) = crate::data_engineer::progress_controller::SqlModelPath::parse(target.clone()) {
+            es.ensure_repair_target_path(path);
+        }
         es.save(&thread_store, thread_id).await.map_err(|e| {
             format!(
                 "failed to persist execution-state target path in deterministic repair mode: {e}"

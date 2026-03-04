@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub type ValidateTargetPath = crate::data_engineer::progress_controller::RepairTargetPath;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidateFailureClass {
@@ -29,7 +31,8 @@ pub enum ControllerEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidateFailingTarget {
     pub node_id: String,
-    pub canonical_path: String,
+    #[serde(rename = "canonical_path")]
+    pub target_path: ValidateTargetPath,
     pub error_code: String,
 }
 
@@ -37,7 +40,8 @@ pub struct ValidateFailingTarget {
 pub struct FailureSignature {
     pub class: ValidateFailureClass,
     pub node_id: String,
-    pub canonical_path: String,
+    #[serde(rename = "canonical_path")]
+    pub target_path: ValidateTargetPath,
     pub error_code: String,
 }
 
@@ -137,6 +141,9 @@ fn fallback_targets_from_text_blobs(
             let Some(canonical_path) = extract_models_path_hint(line) else {
                 continue;
             };
+            let Some(target_path) = ValidateTargetPath::parse(canonical_path.clone()).ok() else {
+                continue;
+            };
             let node_id = node_hint_from_line(line).unwrap_or_else(|| {
                 std::path::Path::new(&canonical_path)
                     .file_stem()
@@ -146,7 +153,7 @@ fn fallback_targets_from_text_blobs(
             });
             out.push(ValidateFailingTarget {
                 node_id,
-                canonical_path,
+                target_path,
                 error_code: error_code.to_string(),
             });
         }
@@ -173,9 +180,10 @@ fn build_failing_targets_from_logs(
                 .and_then(|v| v.as_str())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())?;
+            let target_path = ValidateTargetPath::parse(canonical_path).ok()?;
             Some(ValidateFailingTarget {
                 node_id,
-                canonical_path,
+                target_path,
                 error_code: error_code.clone(),
             })
         })
@@ -200,9 +208,12 @@ fn build_failing_targets_from_logs(
                 .and_then(|v| v.as_str())
                 .and_then(extract_models_path_hint);
             if let (Some(node_id), Some(canonical_path)) = (node_id, canonical_path) {
+                let Some(target_path) = ValidateTargetPath::parse(canonical_path).ok() else {
+                    continue;
+                };
                 out.push(ValidateFailingTarget {
                     node_id,
-                    canonical_path,
+                    target_path,
                     error_code: error_code.clone(),
                 });
             }
@@ -226,8 +237,8 @@ fn build_failing_targets_from_logs(
         }
         out.extend(fallback_targets_from_text_blobs(&blobs, &error_code));
     }
-    out.sort_by(|a, b| a.canonical_path.cmp(&b.canonical_path));
-    out.dedup_by(|a, b| a.canonical_path == b.canonical_path);
+    out.sort_by(|a, b| a.target_path.as_str().cmp(b.target_path.as_str()));
+    out.dedup_by(|a, b| a.target_path == b.target_path);
     out
 }
 
@@ -263,7 +274,7 @@ pub fn attach_validate_outcome_v2(obs: &mut Value) -> Result<ValidateOutcomeV2, 
     let failure_signature = failing_targets.first().map(|t| FailureSignature {
         class,
         node_id: t.node_id.clone(),
-        canonical_path: t.canonical_path.clone(),
+        target_path: t.target_path.clone(),
         error_code: t.error_code.clone(),
     });
     let outcome = ValidateOutcomeV2 {
@@ -352,6 +363,9 @@ fn parse_failing_targets(obs: &Value) -> Vec<ValidateFailingTarget> {
         if canonical_path.is_empty() {
             continue;
         }
+        let Ok(target_path) = ValidateTargetPath::parse(canonical_path) else {
+            continue;
+        };
         let node_id = obj
             .get("node_id")
             .and_then(|v| v.as_str())
@@ -369,7 +383,7 @@ fn parse_failing_targets(obs: &Value) -> Vec<ValidateFailingTarget> {
         }
         out.push(ValidateFailingTarget {
             node_id,
-            canonical_path,
+            target_path,
             error_code,
         });
     }
@@ -432,7 +446,13 @@ pub fn validate_event_from_observation(obs: &Value) -> ControllerEvent {
         .unwrap_or("")
         .trim()
         .to_string();
-    if node_id.is_empty() || canonical_path.is_empty() || error_code.is_empty() {
+    let Ok(target_path) = ValidateTargetPath::parse(canonical_path) else {
+        return ControllerEvent::ValidateContractError {
+            reason: "validate_outcome_v2_failure_signature_incomplete".to_string(),
+            brief,
+        };
+    };
+    if node_id.is_empty() || error_code.is_empty() {
         return ControllerEvent::ValidateContractError {
             reason: "validate_outcome_v2_failure_signature_incomplete".to_string(),
             brief,
@@ -441,7 +461,7 @@ pub fn validate_event_from_observation(obs: &Value) -> ControllerEvent {
     let signature = FailureSignature {
         class,
         node_id,
-        canonical_path,
+        target_path,
         error_code,
     };
     ControllerEvent::ValidateFailed {
@@ -608,7 +628,7 @@ mod tests {
         let contract = validate_contract_from_observation(obs).expect("contract");
         assert_eq!(contract.outcome_v2.failing_targets.len(), 1);
         assert_eq!(
-            contract.outcome_v2.failing_targets[0].canonical_path,
+            contract.outcome_v2.failing_targets[0].target_path.as_str(),
             "models/staging/stg_orders.yml"
         );
     }
@@ -628,7 +648,7 @@ mod tests {
         let contract = validate_contract_from_observation(obs).expect("contract");
         assert_eq!(contract.outcome_v2.failing_targets.len(), 1);
         assert_eq!(
-            contract.outcome_v2.failing_targets[0].canonical_path,
+            contract.outcome_v2.failing_targets[0].target_path.as_str(),
             "models/staging/stg_orders.sql"
         );
     }

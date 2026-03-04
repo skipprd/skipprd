@@ -601,7 +601,7 @@ let errs: Vec<String> = obs
         .iter()
         .map(|t| crate::data_engineer::progress_controller::FailedModelRef {
             name: t.node_id.clone(),
-            file: t.canonical_path.clone(),
+            file: t.target_path.as_str().to_string(),
         })
         .collect();
     let failure_class_state = match failure_class {
@@ -619,6 +619,10 @@ let errs: Vec<String> = obs
         failure_class_state,
         &failing_models,
     );
+    let repair_intent = crate::data_engineer::progress_controller::repair_intent_from_backlog(
+        failure_class_state,
+        backlog,
+    );
     crate::data_engineer::state_manager::apply_execution_event(
         &thread_store,
         thread_id,
@@ -628,10 +632,10 @@ let errs: Vec<String> = obs
             failure_signature: crate::data_engineer::progress_controller::FailureSignature {
                 class: failure_class_state,
                 node_id: Some(failure_signature.node_id.clone()),
-                canonical_path: Some(failure_signature.canonical_path.clone()),
+                canonical_path: Some(failure_signature.target_path.clone()),
                 error_code: Some(failure_signature.error_code.clone()),
             },
-            backlog,
+            repair_intent,
             brief: Some(brief.clone()),
             compile_ok: Some(compile_ok),
             run_ok: Some(run_ok),
