@@ -117,21 +117,20 @@ fn ensure_slow_ingest_worker() {
                         Ok(v) => {
                             if updated == "yes" {
                                 METADATA.store(Arc::new(md_local.clone()));
-                                // Refresh Arrow schema (monotonic guard applies inside)
                                 let _ = Ingest::prepare_arrow_schema_with_metadata(
                                     &task.namespace,
                                     &md_local.metadata,
                                     task.flatten,
                                 );
-                                // Persist updated metadata immediately so output plugin sees new namespaces
                                 // Best-effort: block here to avoid partition-creation races
+                                // Persist immediately so output plugin sees new namespaces/fields
                                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                                     let md_clone = md_local.clone();
                                     handle.spawn(async move {
                                         Config::set_metadata(&md_clone, false).await;
                                     });
                                 } else {
-                                    error!("No tokio runtime available to persist metadata for namespace {}", task.namespace);
+                                    error!("No tokio runtime to persist metadata for namespace {}", task.namespace);
                                 }
                             }
                             Ok(v)
@@ -1952,7 +1951,12 @@ impl Ingest {
                     .write()
                     .insert(skpr_namespace.to_string(), template);
             }
-            // Kick schema sync (e.g., create/update Glue tables) on first publish and subsequent true updates
+        }
+
+        // Sync Glue tables on genuine schema changes only (not first-time cache init
+        // from already-persisted metadata). Metadata persistence is the caller's
+        // responsibility (e.g. slow-ingest worker, new-namespace discovery).
+        if did_update_schema && prev_hash_opt.is_some() {
             if crate::helpers::configuration::Config::get_pipeline_output_plugin_name() == "Athena"
             {
                 let md_clone: std::collections::HashMap<String, Metadata> = metadata.clone();
@@ -1963,15 +1967,6 @@ impl Ingest {
                 } else {
                     error!("No tokio runtime available for schema sync");
                 }
-            }
-
-            let pipeline_md = METADATA.load().as_ref().clone();
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    Config::set_metadata(&pipeline_md, false).await;
-                });
-            } else {
-                error!("No tokio runtime available to persist metadata after schema update");
             }
         }
 
