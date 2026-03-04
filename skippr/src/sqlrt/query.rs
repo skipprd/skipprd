@@ -601,9 +601,12 @@ pub async fn query(sql_str: &str) {
             pipeline,
             namespace,
         }) => {
-            let ctx = SessionContext::new();
             let pipeline = pipeline.replace('"', "");
-            let _ = show_stats(&ctx, &pipeline, namespace.as_deref()).await;
+            PIPELINE_NAME.write().clear();
+            PIPELINE_NAME.write().push_str(&pipeline);
+            Config::init().await;
+            let ns = namespace.as_deref().unwrap_or(&pipeline);
+            show_stats(&pipeline, ns).await;
             return;
         }
         Ok(Statement::PipelineDrop(stmt)) => {
@@ -992,17 +995,6 @@ pub async fn query(sql_str: &str) {
             // Build a context and register available pipeline table from current data dir
             let session_config = SessionConfig::new();
 
-            // Special-case: SHOW STATS FOR <pipeline>
-            {
-                let trimmed = sql_str.trim();
-                let upper = trimmed.to_uppercase();
-                if upper.starts_with("SHOW STATS FOR ") {
-                    let name = trimmed["SHOW STATS FOR ".len()..].trim();
-                    let ns = name.trim_matches('`').trim_matches('"');
-                    // Legacy stats removed; use SHOW CATALOG/SHOW SEMANTIC instead
-                    return;
-                }
-            }
 
             let ctx = SessionContext::new_with_config(session_config);
 
@@ -1018,12 +1010,12 @@ pub async fn query(sql_str: &str) {
                             pipeline,
                             namespace,
                         } => {
-                            // Establish pipeline context; default namespace to pipeline if not provided
+                            let pipeline = pipeline.replace('"', "");
                             PIPELINE_NAME.write().clear();
                             PIPELINE_NAME.write().push_str(&pipeline);
                             Config::init().await;
-                            let ns = namespace.clone().unwrap_or_else(|| pipeline.clone());
-                            println!("Stats are embedded in catalog; use SHOW CATALOG or query catalog table.");
+                            let ns = namespace.unwrap_or_else(|| pipeline.clone());
+                            show_stats(&pipeline, &ns).await;
                             return;
                         }
                         Statement::ShowSemantic {
@@ -1607,23 +1599,19 @@ fn recurse_paths(
     }
 }
 
-async fn show_stats(
-    ctx: &SessionContext,
-    pipeline: &str,
-    namespace: Option<&str>,
-) -> Result<(), DataFusionError> {
-    let ns = pipeline.replace('"', "");
-    let sql = match namespace {
-        Some(n) if !n.is_empty() => format!("SHOW STATS FOR {}.{}", ns, n),
-        _ => format!("SHOW STATS FOR \"{}\"", ns),
-    };
-    let df = ctx.sql(&sql).await?;
-    let batches = df.collect().await?;
-    println!("Stats for pipeline '{}':", pipeline);
-    for b in &batches {
-        print_batches_plain(b);
+async fn show_stats(pipeline: &str, namespace: &str) {
+    match crate::helpers::configuration::Config::read_namespace_stats_async(namespace).await {
+        Some(val) => {
+            println!("{}", serde_json::to_string(&val).unwrap_or_default());
+        }
+        None => {
+            eprintln!(
+                "No stats found for namespace '{}' in pipeline '{}'",
+                namespace, pipeline
+            );
+            std::process::exit(1);
+        }
     }
-    Ok(())
 }
 
 async fn show_semantic(

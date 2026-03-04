@@ -42,9 +42,9 @@ pub struct DisocverOptions {
     /// The pipeline to use
     #[arg(short, long)]
     pub pipeline: Option<String>,
-    /// Stream verbose logs instead of progress bars
+    /// Stream verbose logs to stdout instead of showing a progress bar
     #[arg(long, default_value_t = false)]
-    pub log: bool,
+    pub verbose: bool,
 }
 
 #[derive(Parser, Clone, PartialEq)]

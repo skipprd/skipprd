@@ -226,7 +226,7 @@ async fn main() {
                     .push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
-                discover(options.log).await;
+                discover(options.verbose).await;
             } else {
                 error!("No pipeline name provided, you must provide a pipeline name to discover schemas");
             }
