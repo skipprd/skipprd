@@ -41,7 +41,7 @@ pub async fn drop_table(
                     crate::helpers::s3::delete_prefix(&format!("{}/catalog/{}", prefix_root, ns))
                         .await;
                 // Delete parquet data under manifest-defined prefixes for this namespace
-                if let Some(man) = crate::helpers::configuration::Config::read_manifest(ns).await {
+                if let Some(man) = crate::helpers::manifest::Manifest::read(ns).await {
                     if let Some(tables) = man.get("tables").and_then(|t| t.as_object()) {
                         if let Some(ns_obj) = tables.get(ns).and_then(|v| v.as_object()) {
                             if let Some(prefixes) =

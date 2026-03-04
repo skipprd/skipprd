@@ -256,12 +256,12 @@ pub async fn register_namespace_view(
             .await
         {
             Ok(Ok(v)) => {
-                info!(
+                debug!(
                     "Reading manifest from s3://{}/{}",
                     Config::get_skippr_s3_bucket(),
                     key
                 );
-                info!("Manifest content: {}", v);
+                debug!("Manifest content: {}", v);
                 Some(v)
             }
             Ok(Err(e)) => {

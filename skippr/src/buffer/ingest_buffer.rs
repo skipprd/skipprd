@@ -1802,7 +1802,7 @@ pub fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
         // We need a runtime to call async manifest read; fallback to env if RT fails
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let fut = async {
-                if let Some(man) = Config::read_manifest(&Config::get_pipeline_name()).await {
+                if let Some(man) = crate::helpers::manifest::Manifest::read(&Config::get_pipeline_name()).await {
                     if let Some(v) = man.get("wal_segments_prefix").and_then(|s| s.as_str()) {
                         if v.starts_with("s3://") {
                             return Some(v.to_string());

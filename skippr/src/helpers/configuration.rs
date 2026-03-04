@@ -1413,171 +1413,30 @@ impl Config {
         }
     }
 
-    // Legacy output-derived locations removed: manifest is the single source of truth for querying
-
-    // Manifest paths and cache helpers (manifest is a sibling of config/metadata/metrics)
+    // Delegates to helpers::manifest::Manifest — kept for backward compat
     pub fn get_manifest_s3_key(namespace: &str) -> Option<(String, String)> {
-        let tenant = Self::get_tenant();
-        let workspace = Self::get_workspace_name();
-        let pipeline = Self::get_pipeline_name();
-        let bucket = Self::get_skippr_s3_bucket();
-        // Store manifest as <tenant>/<workspace>/<namespace>/manifest/<namespace>.json
-        let filename = format!("{}.json", namespace);
-        let key = format!(
-            "{}/{}/{}/manifest/{}",
-            tenant, workspace, pipeline, filename
-        );
-        Some((bucket, key))
+        Some(crate::helpers::manifest::Manifest::s3_key(namespace))
     }
 
-    // Read manifest JSON for a namespace/pipeline from S3
     pub async fn read_manifest(namespace: &str) -> Option<serde_json::Value> {
-        if let Some((_bucket, key)) = Self::get_manifest_s3_key(namespace) {
-            info!("Reading manifest from s3://{}/{}", _bucket, key);
-            if let Ok(v) = crate::helpers::s3::get_json(&key).await {
-                info!("Manifest content: {}", v);
-                return Some(v);
-            }
-            info!("Manifest not found at s3://{}/{}", _bucket, key);
-        }
-        None
+        crate::helpers::manifest::Manifest::read(namespace).await
     }
 
     pub async fn get_manifest_epoch(namespace: &str) -> Option<u64> {
-        Self::read_manifest(namespace)
-            .await
-            .and_then(|v| v.get("epoch").and_then(|e| e.as_u64()))
+        crate::helpers::manifest::Manifest::epoch(namespace).await
     }
 
-    // Deprecated local registry helpers removed (S3 is canonical)
-
-    // Replaced by registry: callers should use sql::registry::ensure_ns_entry
     pub async fn update_manifest_with_prefix(namespace: &str, dir_prefix: &str) {
-        // Compose absolute s3 URL
-        let abs_prefix = if dir_prefix.starts_with("s3://") {
-            dir_prefix.trim().to_string()
-        } else {
-            let bucket = Self::get_skippr_s3_bucket();
-            let key = Self::get_manifest_s3_key(namespace);
-            format!("s3://{}/{}{}", bucket, key.unwrap().1, dir_prefix)
-        };
-        // Load current manifest or create new
-        let mut manifest = Self::read_manifest(namespace)
-            .await
-            .unwrap_or(serde_json::json!({
-                "epoch": 0u64,
-                "tables": {}
-            }));
-        // tables.namespace.prefixes = unique list
-        {
-            use serde_json::{json, Value};
-            let tables = manifest
-                .as_object_mut()
-                .unwrap()
-                .entry("tables".to_string())
-                .or_insert(json!({}));
-            if !tables.is_object() {
-                *tables = json!({});
-            }
-            let ns_entry = tables
-                .as_object_mut()
-                .unwrap()
-                .entry(namespace.to_string())
-                .or_insert(json!({"prefixes": []}));
-            if !ns_entry.is_object() {
-                *ns_entry = json!({"prefixes": []});
-            }
-            let arr = ns_entry
-                .as_object_mut()
-                .unwrap()
-                .entry("prefixes".to_string())
-                .or_insert(json!([]));
-            if !arr.is_array() {
-                *arr = json!([]);
-            }
-            let a = arr.as_array_mut().unwrap();
-            if !a.iter().any(|v| v.as_str() == Some(&abs_prefix)) {
-                a.push(Value::String(abs_prefix.clone()));
-            }
-        }
-        // Bump epoch
-        let now_epoch = chrono::Utc::now().timestamp() as u64;
-        if let Some(obj) = manifest.as_object_mut() {
-            obj.insert("epoch".to_string(), serde_json::json!(now_epoch));
-        }
-        // Write back to S3
-        if let Some((_bucket, key)) = Self::get_manifest_s3_key(namespace) {
-            let _ = crate::helpers::s3::put_json(&key, &manifest).await;
-        }
+        crate::helpers::manifest::Manifest::ensure_prefix(namespace, dir_prefix).await;
     }
 
-    // Extended helper: update prefix and record database (usually pipeline name)
     pub async fn update_manifest_with_prefix_and_db(
         namespace: &str,
         dir_prefix: &str,
         database: &str,
     ) {
-        // Compose absolute s3 URL
-        let abs_prefix = if dir_prefix.starts_with("s3://") {
-            dir_prefix.trim().to_string()
-        } else {
-            let bucket = Self::get_skippr_s3_bucket();
-            let key = Self::get_manifest_s3_key(namespace);
-            format!("s3://{}/{}{}", bucket, key.unwrap().1, dir_prefix)
-        };
-        // Load current manifest or create new
-        let mut manifest = Self::read_manifest(namespace)
-            .await
-            .unwrap_or(serde_json::json!({
-                "epoch": 0u64,
-                "tables": {}
-            }));
-        {
-            use serde_json::{json, Value};
-            let tables = manifest
-                .as_object_mut()
-                .unwrap()
-                .entry("tables".to_string())
-                .or_insert(json!({}));
-            if !tables.is_object() {
-                *tables = json!({});
-            }
-            let ns_entry = tables
-                .as_object_mut()
-                .unwrap()
-                .entry(namespace.to_string())
-                .or_insert(json!({"prefixes": [], "database": ""}));
-            if !ns_entry.is_object() {
-                *ns_entry = json!({"prefixes": [], "database": ""});
-            }
-            // prefixes
-            let arr = ns_entry
-                .as_object_mut()
-                .unwrap()
-                .entry("prefixes".to_string())
-                .or_insert(json!([]));
-            if !arr.is_array() {
-                *arr = json!([]);
-            }
-            let a = arr.as_array_mut().unwrap();
-            if !a.iter().any(|v| v.as_str() == Some(&abs_prefix)) {
-                a.push(Value::String(abs_prefix.clone()));
-            }
-            // database
-            ns_entry
-                .as_object_mut()
-                .unwrap()
-                .insert("database".to_string(), json!(database));
-        }
-        // Bump epoch
-        let now_epoch = chrono::Utc::now().timestamp() as u64;
-        if let Some(obj) = manifest.as_object_mut() {
-            obj.insert("epoch".to_string(), serde_json::json!(now_epoch));
-        }
-        // Write back to S3
-        if let Some((_bucket, key)) = Self::get_manifest_s3_key(namespace) {
-            let _ = crate::helpers::s3::put_json(&key, &manifest).await;
-        }
+        crate::helpers::manifest::Manifest::ensure_prefix_and_db(namespace, dir_prefix, database)
+            .await;
     }
 
     pub fn get_full_namespace_name() -> String {

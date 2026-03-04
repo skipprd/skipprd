@@ -124,7 +124,7 @@ impl DataOutputS3Plugin {
                 if let Some(pos) = ns_root.rfind('/') { ns_root.truncate(pos); }
                 let abs_prefix = format!("s3://{}/{}", self.s3_bucket, ns_root.trim_start_matches('/'));
                 let db = Config::get_pipeline_name();
-                Config::update_manifest_with_prefix_and_db(&ns, &abs_prefix, &db).await;
+                crate::helpers::manifest::Manifest::ensure_prefix_and_db(&ns, &abs_prefix, &db).await;
             }
         }
     }

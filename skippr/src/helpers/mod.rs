@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 pub mod configuration;
 pub mod logger;
 pub mod logging;
+pub mod manifest;
 pub mod offsets;
 pub mod progress;
 pub mod s3;

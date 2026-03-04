@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
-use tracing::info;
+use tracing::{debug, info};
 
 static S3_CLIENT: OnceCell<Arc<S3Client>> = OnceCell::const_new();
 
@@ -105,15 +105,13 @@ pub async fn get_json(key: &str) -> Result<Value, SdkError<GetObjectError>> {
     let client = get_s3_client().await;
     let bucket = get_skippr_bucket();
 
-    info!("Fetching JSON from S3: bucket='{}' key='{}'", &bucket, key);
+    debug!("Fetching JSON from S3: bucket='{}' key='{}'", &bucket, key);
 
-    // Retry non-404 errors with backoff; return 404 immediately
     let mut attempt: u32 = 0;
     let max_attempts: u32 = 6;
     loop {
-        info!("get_json attempting {} for key '{}'", attempt + 1, key);
+        debug!("get_json attempt {} for key '{}'", attempt + 1, key);
         let res = client.get_object().bucket(&bucket).key(key).send().await;
-        info!("get_json attempted {} for key '{}'", attempt + 1, key);
         match res {
             Ok(resp) => {
                 let bytes = resp.body.collect().await.unwrap().into_bytes();

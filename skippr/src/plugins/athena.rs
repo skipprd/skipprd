@@ -690,20 +690,12 @@ impl DataOutputAwsAthenaPlugin {
         if !abs_prefix.ends_with('/') {
             abs_prefix.push('/');
         }
-        // best-effort manifest update (async fire-and-forget)
         {
             let ns = namespace.to_string();
             let prefix_for_manifest = abs_prefix.clone();
             tokio::spawn(async move {
-                // Write manifest JSON
-                crate::helpers::configuration::Config::update_manifest_with_prefix(
-                    &ns,
-                    &prefix_for_manifest,
-                )
-                .await;
-                // Update manifest for DataFusion queries (record prefix and database=pipeline)
                 let db = crate::helpers::configuration::Config::get_pipeline_name();
-                crate::helpers::configuration::Config::update_manifest_with_prefix_and_db(
+                crate::helpers::manifest::Manifest::ensure_prefix_and_db(
                     &ns,
                     &prefix_for_manifest,
                     &db,

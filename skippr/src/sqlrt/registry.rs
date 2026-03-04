@@ -149,11 +149,5 @@ pub async fn set_embeddings_uri(pipeline: &str, uri: &str) -> Result<(), String>
 
 /// Build the S3 key for a namespace manifest for a given pipeline, independent of any global pipeline state.
 pub fn manifest_key_for(pipeline: &str, namespace: &str) -> String {
-    let tenant = Config::get_tenant();
-    let workspace = Config::get_workspace_name();
-    let filename = format!("{}.json", namespace);
-    format!(
-        "{}/{}/{}/manifest/{}",
-        tenant, workspace, pipeline, filename
-    )
+    crate::helpers::manifest::Manifest::s3_key_for(pipeline, namespace)
 }
