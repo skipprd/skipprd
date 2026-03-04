@@ -2,7 +2,7 @@ use react_core::control_flow::GuardBlockKind;
 
 use crate::data_engineer::control_flow::Phase;
 use crate::data_engineer::progress_controller::{
-    ExecutionMode, ExecutionState, FailedModelRef, PendingLoopbackIntent, RepairLadderStep,
+    ExecutionMode, ExecutionState, PendingLoopbackIntent, RepairLadderStep,
     DEFAULT_MAX_STALL_COUNT,
 };
 
@@ -44,14 +44,7 @@ pub fn evaluate_pre_turn_directive(
         return PreTurnDirective::FailFast { kind, reason };
     }
 
-    let fallback_failed_models = execution_state
-        .telemetry
-        .last_validate
-        .as_ref()
-        .map(|v| v.failed_models.as_slice())
-        .unwrap_or(&[]);
-    let single_target_repair_path =
-        derive_single_target_repair_path(execution_state, fallback_failed_models);
+    let single_target_repair_path = derive_single_target_repair_path(execution_state);
     let core_repair_snapshot = react_core::workflow::PreTurnStateSnapshot {
         mode_is_mutate: false,
         stall_count: 0,
@@ -114,21 +107,12 @@ pub fn patch_impl_intent_unsatisfied(execution_state: &ExecutionState, phase: Ph
     }
 }
 
-pub fn derive_single_target_repair_path(
-    execution_state: &ExecutionState,
-    last_validate_failed_models: &[FailedModelRef],
-) -> Option<String> {
+pub fn derive_single_target_repair_path(execution_state: &ExecutionState) -> Option<String> {
     let repair = execution_state.repair_state();
     repair
         .single_target_repair_path()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            last_validate_failed_models
-                .iter()
-                .map(|fm| fm.file.trim().to_string())
-                .find(|s| !s.is_empty() && s != "(unknown file)")
-        })
 }
 
 #[cfg(test)]
@@ -166,14 +150,16 @@ mod tests {
     #[test]
     fn preturn_gate_hard_repair_ladder_stop_failfast() {
         let mut st = ExecutionState::new();
-        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-            crate::data_engineer::progress_controller::ActiveRepairMode {
-                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                single_target_repair_path: Some("models/staging/stg_orders.sql".to_string()),
-                target_path: Some("models/staging/stg_orders.sql".to_string()),
+        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+            crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                target_path: crate::data_engineer::progress_controller::SqlModelPath::parse(
+                    "models/staging/stg_orders.sql".to_string(),
+                )
+                .expect("valid sql model path"),
                 ladder_step: RepairLadderStep::Stop,
                 attempt_count: 7,
-                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+                repair_started_mutation_epoch: None,
+                consecutive_noop_patches: 0,
             },
         );
         let d = evaluate_pre_turn_directive(&st, Phase::CleanseAuthor, 3);
@@ -190,14 +176,16 @@ mod tests {
     #[test]
     fn preturn_gate_hard_repair_ladder_stop_uses_failed_model_fallback() {
         let mut st = ExecutionState::new();
-        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-            crate::data_engineer::progress_controller::ActiveRepairMode {
-                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                single_target_repair_path: None,
-                target_path: None,
+        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+            crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                target_path: crate::data_engineer::progress_controller::SqlModelPath::parse(
+                    "models/staging/stg_orders.sql".to_string(),
+                )
+                .expect("valid sql model path"),
                 ladder_step: RepairLadderStep::Stop,
                 attempt_count: 3,
-                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+                repair_started_mutation_epoch: None,
+                consecutive_noop_patches: 0,
             },
         );
         st.telemetry.last_validate = Some(crate::data_engineer::progress_controller::LastValidateState {

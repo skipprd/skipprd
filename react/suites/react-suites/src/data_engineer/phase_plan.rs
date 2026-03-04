@@ -478,6 +478,7 @@ let manifest_retry_signal = if is_cleanse {
 let (registry, tools_card) = Self::build_tools_for_phase(
     phase,
     &guard,
+    false,
     sctx,
     None,
     None,
@@ -945,6 +946,15 @@ match Agent::run_until_block_non_interactive(
             }
             return Ok(PhaseExecutorOutcome::Continue);
         } else {
+            let staged =
+                crate::data_engineer::dataset_truth::discover_staging_models_from_storage(&actx)
+                    .await;
+            if staged.allowed_models.is_empty() {
+                return Err(
+                    "model plan contained no grounded tasks after repeated retries (gold must reference existing silver models under models/staging/)"
+                        .to_string(),
+                );
+            }
             let candidates = Self::generate_model_candidates(
                 &actx,
                 &q,
@@ -1009,10 +1019,9 @@ match Agent::run_until_block_non_interactive(
                 }
             }
             // Ground gold planning: gold must be based ONLY on existing staging (silver) models.
-            let stg = crate::data_engineer::dataset_truth::discover_staging_models_from_storage(&actx).await;
             crate::data_engineer::plan::prune_model_plan_to_grounded_staging_models(
                 &mut plan,
-                &stg.allowed_models,
+                &staged.allowed_models,
             );
             if plan.tasks.is_empty() || plan.batches.is_empty() {
                 // Hard cutover: same-phase blocks are represented as GuardBlock only.
@@ -1050,7 +1059,7 @@ match Agent::run_until_block_non_interactive(
             crate::data_engineer::plan::save_model_plan_grounded(
                 &actx,
                 &plan,
-                Some(&stg.allowed_models),
+                Some(&staged.allowed_models),
             )
             .await
             .map_err(|e| {
@@ -1064,7 +1073,7 @@ match Agent::run_until_block_non_interactive(
             let sem = crate::data_engineer::plan::ensure_model_plan_semantically_valid_or_repaired(
                 &actx,
                 &mut plan,
-                &stg.allowed_models,
+                &staged.allowed_models,
             )
             .await?;
             let sem = if sem.ok {
@@ -1089,7 +1098,7 @@ match Agent::run_until_block_non_interactive(
                     crate::data_engineer::plan::ensure_model_plan_semantically_valid_or_repaired(
                         &actx,
                         &mut plan,
-                        &stg.allowed_models,
+                        &staged.allowed_models,
                     )
                     .await?
                 } else {
@@ -1101,7 +1110,7 @@ match Agent::run_until_block_non_interactive(
             crate::data_engineer::plan::save_model_plan_grounded(
                 &actx,
                 &plan,
-                Some(&stg.allowed_models),
+                Some(&staged.allowed_models),
             )
             .await
             .map_err(|e| {
@@ -1163,7 +1172,7 @@ match Agent::run_until_block_non_interactive(
             crate::data_engineer::plan::save_model_plan_grounded(
                 &actx,
                 &plan,
-                Some(&stg.allowed_models),
+                Some(&staged.allowed_models),
             )
             .await?;
             if Self::should_reset_subjective_retry_after_plan_save(

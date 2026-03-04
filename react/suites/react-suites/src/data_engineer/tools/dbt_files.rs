@@ -53,8 +53,7 @@ async fn was_recently_removed_in_repair(ctx: &AgentCtx, rel_path: &str) -> bool 
             st.telemetry
                 .last_mutation_summary
                 .and_then(|m| {
-                    let op = m.op.unwrap_or_default();
-                    if op != "rm" {
+                    if m.op != crate::data_engineer::progress_controller::MutationOp::Remove {
                         return None;
                     }
                     let matched = m.affected_paths.into_iter().any(|p| {
@@ -573,7 +572,13 @@ impl Tool for FilesTool {
                     let _ = crate::data_engineer::state_manager::mutate_execution_state(
                         store,
                         thread_id,
-                        |es| es.set_last_mutation_summary("rm", paths.clone(), select_terms.clone()),
+                        |es| {
+                            es.set_last_mutation_summary(
+                                crate::data_engineer::progress_controller::MutationOp::Remove,
+                                paths.clone(),
+                                select_terms.clone(),
+                            )
+                        },
                     )
                     .await;
                 }
@@ -601,7 +606,13 @@ impl Tool for FilesTool {
                     let _ = crate::data_engineer::state_manager::mutate_execution_state(
                         store,
                         thread_id,
-                        |es| es.set_last_mutation_summary("mv", paths.clone(), select_terms.clone()),
+                        |es| {
+                            es.set_last_mutation_summary(
+                                crate::data_engineer::progress_controller::MutationOp::Move,
+                                paths.clone(),
+                                select_terms.clone(),
+                            )
+                        },
                     )
                     .await;
                 }
@@ -734,7 +745,7 @@ impl Tool for FilesTool {
                         thread_id,
                         |es| {
                             es.set_last_mutation_summary(
-                                "patch",
+                                crate::data_engineer::progress_controller::MutationOp::Patch,
                                 paths.clone(),
                                 select_terms.clone(),
                             )
@@ -956,14 +967,17 @@ mod tests {
         );
         let tid = "tid-hard-mutation-files-get-blocked".to_string();
         let mut es = ExecutionState::new();
-        es.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-            crate::data_engineer::progress_controller::ActiveRepairMode {
-                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+        es.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+            crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                target_path: crate::data_engineer::progress_controller::SqlModelPath::parse("models/staging/m.sql".to_string()).expect("valid sql model path"),
+                ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget,
+                    attempt_count: 0,
+                    repair_started_mutation_epoch: None,
+                    consecutive_noop_patches: 0
             },
         );
         es.set_last_mutation_summary(
-            "rm",
+            crate::data_engineer::progress_controller::MutationOp::Remove,
             vec!["models/staging/m.sql".to_string()],
             vec!["path:models/staging/m.sql".to_string()],
         );
@@ -998,14 +1012,17 @@ mod tests {
         );
         let tid = "tid-hard-mutation-files-list-allowed".to_string();
         let mut es = ExecutionState::new();
-        es.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-            crate::data_engineer::progress_controller::ActiveRepairMode {
-                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+        es.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+            crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                target_path: crate::data_engineer::progress_controller::SqlModelPath::parse("models/staging/m.sql".to_string()).expect("valid sql model path"),
+                ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget,
+                    attempt_count: 0,
+                    repair_started_mutation_epoch: None,
+                    consecutive_noop_patches: 0
             },
         );
         es.set_last_mutation_summary(
-            "rm",
+            crate::data_engineer::progress_controller::MutationOp::Remove,
             vec!["models/staging/m.sql".to_string()],
             vec!["path:models/staging/m.sql".to_string()],
         );

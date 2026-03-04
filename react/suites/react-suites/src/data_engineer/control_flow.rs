@@ -206,7 +206,12 @@ pub fn derive_guard_state_from_execution_state(
         .as_ref()
         .map(|d| d.target_hash_changed || d.progress_made)
         .unwrap_or(false);
-    let patched_since_fail = st.attempt_count() > 0;
+    let patched_since_fail = st
+        .telemetry
+        .last_mutation_summary
+        .as_ref()
+        .map(|m| matches!(m.op, crate::data_engineer::progress_controller::MutationOp::Patch))
+        .unwrap_or(false);
     let probe_status = st.probe_requirement_status();
     let (probe_required, probe_satisfied) = match probe_status {
         crate::data_engineer::progress_controller::ProbeRequirementStatus::NotRequired => {
@@ -678,7 +683,7 @@ pub async fn call_and_record_tool(
                 if succeeded.is_empty() {
                     None
                 } else {
-                    Some((name.to_string(), succeeded))
+                    Some((crate::data_engineer::progress_controller::MutationOp::Patch, succeeded))
                 }
             }
             "apply_next_model_batch" | "apply_next_model_schema_batch" => {
@@ -696,7 +701,7 @@ pub async fn call_and_record_tool(
                 if succeeded.is_empty() {
                     None
                 } else {
-                    Some((name.to_string(), succeeded))
+                    Some((crate::data_engineer::progress_controller::MutationOp::Patch, succeeded))
                 }
             }
             "staging_model" | "gold_model" => {
@@ -714,7 +719,7 @@ pub async fn call_and_record_tool(
                 if written.is_empty() {
                     None
                 } else {
-                    Some((name.to_string(), written))
+                    Some((crate::data_engineer::progress_controller::MutationOp::Patch, written))
                 }
             }
             _ => None,
@@ -724,7 +729,7 @@ pub async fn call_and_record_tool(
             .await
         {
             Ok(Some(mut st)) => {
-                st.set_last_mutation_summary(&op, affected_paths, Vec::new());
+                st.set_last_mutation_summary(op, affected_paths, Vec::new());
                 if let Err(e) =
                     crate::data_engineer::state_manager::replace_execution_state(store, thread_id, st)
                         .await

@@ -90,13 +90,19 @@ mod tests {
     #[test]
     fn missing_target_abort_reason_includes_structured_context() {
         let mut st = crate::data_engineer::progress_controller::ExecutionState::new();
-        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-            crate::data_engineer::progress_controller::ActiveRepairMode {
-                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                attempt_count: 2,
-                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
-            },
-        );
+        st.repair.repair_mode =
+            crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+                crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                    target_path: crate::data_engineer::progress_controller::SqlModelPath::parse(
+                        "models/staging/stg_test_raw_raw_order_items.sql".to_string(),
+                    )
+                    .expect("valid sql model path"),
+                    attempt_count: 2,
+                    ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget,
+                    repair_started_mutation_epoch: None,
+                    consecutive_noop_patches: 0,
+                },
+            );
         let reason = build_missing_target_repair_abort_reason(
             Phase::CleanseAuthor,
             "models/staging/stg_test_raw_raw_order_items.sql",
@@ -1155,16 +1161,14 @@ let (plan_context, allowed_batch): (String, Option<AllowedBatch>) =
     };
 
 let single_target_repair_path = if hard_mutation_repair_mode {
-    crate::data_engineer::phase_gate::derive_single_target_repair_path(
-        &execution_state,
-        &last_validate_failed_models,
-    )
+    crate::data_engineer::phase_gate::derive_single_target_repair_path(&execution_state)
 } else {
     None
 };
 let (registry, tools_card) = Self::build_tools_for_phase(
     phase,
     &phase_guard,
+    false,
     sctx,
     allowed_batch.clone(),
     single_target_repair_path.clone(),

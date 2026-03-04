@@ -604,7 +604,6 @@ let errs: Vec<String> = obs
             file: t.canonical_path.clone(),
         })
         .collect();
-    let backlog = crate::data_engineer::progress_controller::repair_backlog_from_failed_models(&failing_models);
     let failure_class_state = match failure_class {
         crate::data_engineer::controller_event::ValidateFailureClass::WarehouseConfig => {
             crate::data_engineer::progress_controller::FailureClass::WarehouseConfig
@@ -616,6 +615,10 @@ let errs: Vec<String> = obs
             crate::data_engineer::progress_controller::FailureClass::Unknown
         }
     };
+    let backlog = crate::data_engineer::progress_controller::repair_backlog_from_failed_models(
+        failure_class_state,
+        &failing_models,
+    );
     crate::data_engineer::state_manager::apply_execution_event(
         &thread_store,
         thread_id,

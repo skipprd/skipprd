@@ -1001,13 +1001,48 @@ async fn persist_review_final_to_plan(
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReviewUnifyOutput {
-    decision: ReviewDecision,
-    #[serde(default)]
-    tier: ReviewTier,
-    #[serde(default)]
-    dataset_ids: Vec<String>,
+struct ReviewUnifyTextOutput {
     final_review_text: String,
+}
+
+fn deterministic_unify_meta(
+    phase: Phase,
+    all_batch_notes: &[Value],
+) -> (ReviewDecision, ReviewTier, Vec<String>) {
+    let tier = match phase {
+        Phase::CleanseReview => ReviewTier::Silver,
+        Phase::ModelReview | Phase::PostPublishReview => ReviewTier::Gold,
+        _ => ReviewTier::Unknown,
+    };
+
+    let mut dataset_ids: Vec<String> = all_batch_notes
+        .iter()
+        .flat_map(|v| {
+            v.get("batch_items")
+                .and_then(|vv| vv.as_array())
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+        })
+        .collect();
+    dataset_ids.sort();
+    dataset_ids.dedup();
+
+    let has_actionable_hints = all_batch_notes.iter().any(|v| {
+        v.get("actionable_hints")
+            .and_then(|vv| vv.as_array())
+            .map(|arr| arr.iter().any(|x| x.as_str().map(|s| !s.trim().is_empty()).unwrap_or(false)))
+            .unwrap_or(false)
+    });
+    let decision = if has_actionable_hints {
+        ReviewDecision::PatchImpl
+    } else {
+        ReviewDecision::Proceed
+    };
+
+    (decision, tier, dataset_ids)
 }
 
 fn resolve_cleanse_batch_paths(
@@ -1765,17 +1800,21 @@ pub async fn run_batched_review(
         batches = serde_json::to_string_pretty(&unify_batches).unwrap_or_else(|_| "[]".to_string()),
     );
     let unify_v = llm_json(sctx, &actx, thread_id, phase, "unify", unify_user).await?;
-    let unify: ReviewUnifyOutput = serde_json::from_value(unify_v)
-        .map_err(|e| format!("batched review unify output did not match schema: {e}"))?;
-    let final_review_text = unify.final_review_text;
+    let unify_text: ReviewUnifyTextOutput = serde_json::from_value(serde_json::json!({
+        "final_review_text": unify_v
+            .get("final_review_text")
+            .and_then(|v| v.as_str())
+            .or_else(|| unify_v.get("text").and_then(|v| v.as_str()))
+            .unwrap_or("")
+    }))
+    .map_err(|e| format!("batched review unify text output did not match schema: {e}"))?;
+    let final_review_text = unify_text.final_review_text;
     if final_review_text.trim().is_empty() {
         return Err("batched review unify produced empty final_review_text".to_string());
     }
 
     // Persist full review text to storage; keep thread steps small (store only a reference).
-    let decision = unify.decision;
-    let tier = unify.tier;
-    let dataset_ids = unify.dataset_ids;
+    let (decision, tier, dataset_ids) = deterministic_unify_meta(phase, &all_batch_notes);
     let review_sha256 = react_core::llm_observability::sha256_hex_str(&final_review_text);
     let review_bytes = final_review_text.as_bytes().len() as u64;
     let review_key = {
@@ -2302,5 +2341,34 @@ mod tests {
         assert!(prompts
             .iter()
             .any(|p| p.contains("should_not_leak_to_cleanse")));
+    }
+
+    #[test]
+    fn deterministic_unify_meta_derives_tier_and_dataset_ids() {
+        let notes = vec![
+            serde_json::json!({"batch_items":["a.b.c","x.y.z"],"notes":[],"actionable_hints":[]}),
+            serde_json::json!({"batch_items":["x.y.z"],"notes":[],"actionable_hints":[]}),
+        ];
+        let (decision, tier, dataset_ids) =
+            deterministic_unify_meta(Phase::CleanseReview, &notes);
+        assert_eq!(decision, ReviewDecision::Proceed);
+        assert_eq!(tier, ReviewTier::Silver);
+        assert_eq!(
+            dataset_ids,
+            vec!["a.b.c".to_string(), "x.y.z".to_string()]
+        );
+    }
+
+    #[test]
+    fn deterministic_unify_meta_promotes_patch_impl_on_actionable_hints() {
+        let notes = vec![serde_json::json!({
+            "batch_items":["a.b.c"],
+            "notes":["n"],
+            "actionable_hints":["fix col mapping"]
+        })];
+        let (decision, tier, dataset_ids) = deterministic_unify_meta(Phase::ModelReview, &notes);
+        assert_eq!(decision, ReviewDecision::PatchImpl);
+        assert_eq!(tier, ReviewTier::Gold);
+        assert_eq!(dataset_ids, vec!["a.b.c".to_string()]);
     }
 }

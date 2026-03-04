@@ -17,6 +17,10 @@ pub const CHECKLIST_SQL_MODEL: &str = "sql_model";
 pub const CHECKLIST_SCHEMA_CONTRACT: &str = "schema_contract";
 pub const CHECKLIST_VALIDATE: &str = "validate";
 
+pub fn schema_contract_checklist_item_id() -> &'static str {
+    CHECKLIST_SCHEMA_CONTRACT
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "plan_kind", rename_all = "snake_case")]
 pub enum PlanPendingRef {

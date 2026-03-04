@@ -5,15 +5,6 @@ use crate::data_engineer::controller_kernel;
 use crate::data_engineer::plan::{self, ModelPlan};
 use crate::data_engineer::tools::batch_sql_runner;
 
-pub(crate) fn resolve_checklist_item_id(ctx: &AgentCtx) -> String {
-    ctx.exec_ctx
-        .as_ref()
-        .and_then(|c| c.checklist_item_id.as_ref())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| plan::CHECKLIST_SCHEMA_CONTRACT.to_string())
-}
-
 pub(crate) async fn fail_model_schema_batch(
     ctx: &AgentCtx,
     plan: &mut ModelPlan,

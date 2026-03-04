@@ -166,9 +166,22 @@ fn stable_json_digest<T: Serialize>(value: &T) -> Option<String> {
     Some(react_core::llm_observability::sha256_hex_str(&raw))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StayProof {
+    RetryBudgetConsumed,
+    GuardBlockAppended,
+    MutationObserved,
+    AwaitExternalCondition,
+}
+
 enum PhaseExecutorOutcome {
-    Continue,
+    Stay(StayProof),
     Return(Vec<FlowFrame>),
+}
+
+#[allow(non_upper_case_globals)]
+impl PhaseExecutorOutcome {
+    const Continue: Self = Self::Stay(StayProof::AwaitExternalCondition);
 }
 
 /// Interrupt policy used by non-deterministic single-pass modes.
@@ -2626,7 +2639,7 @@ Apply these fixes in the output.",
             )
             .await?;
             match outcome {
-                PhaseExecutorOutcome::Continue => continue,
+                PhaseExecutorOutcome::Stay(_proof) => continue,
                 PhaseExecutorOutcome::Return(frames) => return Ok(frames),
             }
         }
@@ -3208,12 +3221,16 @@ mod tests {
                 ..crate::data_engineer::progress_controller::LastValidateState::default()
             },
         );
-        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-            crate::data_engineer::progress_controller::ActiveRepairMode {
-                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
-            },
-        );
+        st.repair.repair_mode =
+            crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+                crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                    target_path: crate::data_engineer::progress_controller::SqlModelPath::parse("models/staging/stg_probe.sql".to_string()).expect("valid sql model path"),
+                    ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget,
+                    attempt_count: 0,
+                    repair_started_mutation_epoch: None,
+                    consecutive_noop_patches: 0
+                },
+            );
         st.telemetry.probe.required = true;
         st.save(store, "probe-thread").await.expect("save state");
 
@@ -3267,12 +3284,16 @@ mod tests {
                 ..crate::data_engineer::progress_controller::LastValidateState::default()
             },
         );
-        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-            crate::data_engineer::progress_controller::ActiveRepairMode {
-                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
-            },
-        );
+        st.repair.repair_mode =
+            crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+                crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                    target_path: crate::data_engineer::progress_controller::SqlModelPath::parse("models/staging/stg_probe.sql".to_string()).expect("valid sql model path"),
+                    ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget,
+                    attempt_count: 0,
+                    repair_started_mutation_epoch: None,
+                    consecutive_noop_patches: 0
+                },
+            );
         st.telemetry.probe.required = true;
         let sig = crate::data_engineer::progress_controller::ProbeSignature::from_run_sql(
             "select * from t limit 10",
@@ -3433,12 +3454,13 @@ mod tests {
                     ..crate::data_engineer::progress_controller::LastValidateState::default()
                 },
             );
-            seeded.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-                crate::data_engineer::progress_controller::ActiveRepairMode {
-                    repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                    single_target_repair_path: Some("models/marts/fct_orders.sql".to_string()),
-                    target_path: Some("models/marts/fct_orders.sql".to_string()),
-                    ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+            seeded.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+                crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                    target_path: crate::data_engineer::progress_controller::SqlModelPath::parse("models/marts/fct_orders.sql".to_string()).expect("valid sql model path"),
+                    ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget,
+                    attempt_count: 0,
+                    repair_started_mutation_epoch: None,
+                    consecutive_noop_patches: 0
                 },
             );
             seeded
@@ -3496,13 +3518,13 @@ mod tests {
                     ..crate::data_engineer::progress_controller::LastValidateState::default()
                 },
             );
-            seeded.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-                crate::data_engineer::progress_controller::ActiveRepairMode {
-                    repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                    single_target_repair_path: Some("models/marts/fct_orders.sql".to_string()),
-                    target_path: Some("models/marts/fct_orders.sql".to_string()),
+            seeded.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+                crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                    target_path: crate::data_engineer::progress_controller::SqlModelPath::parse("models/marts/fct_orders.sql".to_string()).expect("valid sql model path"),
                     ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget,
-                    ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+                    attempt_count: 0,
+                    repair_started_mutation_epoch: None,
+                    consecutive_noop_patches: 0
                 },
             );
             seeded
@@ -3556,13 +3578,13 @@ mod tests {
                     ..crate::data_engineer::progress_controller::LastValidateState::default()
                 },
             );
-            seeded.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-                crate::data_engineer::progress_controller::ActiveRepairMode {
-                    repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                    single_target_repair_path: Some("models/marts/fct_orders.sql".to_string()),
-                    target_path: Some("models/marts/fct_orders.sql".to_string()),
+            seeded.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+                crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                    target_path: crate::data_engineer::progress_controller::SqlModelPath::parse("models/marts/fct_orders.sql".to_string()).expect("valid sql model path"),
                     ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::ReplaceContents,
-                    ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+                    attempt_count: 0,
+                    repair_started_mutation_epoch: None,
+                    consecutive_noop_patches: 0
                 },
             );
             seeded
@@ -3629,14 +3651,13 @@ mod tests {
                     ..crate::data_engineer::progress_controller::LastValidateState::default()
                 },
             );
-            seeded.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-                crate::data_engineer::progress_controller::ActiveRepairMode {
-                    repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                    single_target_repair_path: Some("models/marts/fct_orders.sql".to_string()),
-                    target_path: Some("models/marts/fct_orders.sql".to_string()),
+            seeded.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+                crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                    target_path: crate::data_engineer::progress_controller::SqlModelPath::parse("models/marts/fct_orders.sql".to_string()).expect("valid sql model path"),
                     ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::FsOp,
                     attempt_count: 2,
-                    ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
+                    repair_started_mutation_epoch: None,
+                    consecutive_noop_patches: 0
                 },
             );
             seeded
@@ -4077,7 +4098,7 @@ mod tests {
             "answer": prior_review_answer
         }));
         st.telemetry.last_mutation_summary = Some(LastMutationSummary {
-            op: Some("patch".to_string()),
+            op: crate::data_engineer::progress_controller::MutationOp::Patch,
             affected_paths: vec!["models/staging/stg_test_raw_raw_orders.sql".to_string()],
             select_terms: vec!["placed_at_ts".to_string()],
             ts: Some("t".to_string()),
@@ -4193,38 +4214,35 @@ mod tests {
     fn derive_single_target_repair_path_prefers_execution_state_target() {
         use crate::data_engineer::progress_controller::{ExecutionState, FailedModelRef};
         let mut st = ExecutionState::new();
-        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-            crate::data_engineer::progress_controller::ActiveRepairMode {
-                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                single_target_repair_path: Some("models/staging/stg_orders.sql".to_string()),
-                target_path: Some("models/staging/stg_orders.sql".to_string()),
-                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
-            },
-        );
-        let failed = vec![FailedModelRef {
+        st.repair.repair_mode =
+            crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+                crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                    target_path: crate::data_engineer::progress_controller::SqlModelPath::parse("models/staging/stg_orders.sql".to_string()).expect("valid sql model path"),
+                    ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget,
+                    attempt_count: 0,
+                    repair_started_mutation_epoch: None,
+                    consecutive_noop_patches: 0
+                },
+            );
+        let _failed = vec![FailedModelRef {
             name: "stg_other".to_string(),
             file: "models/staging/stg_other.sql".to_string(),
         }];
-        let got = crate::data_engineer::phase_gate::derive_single_target_repair_path(
-            &st,
-            &failed,
-        );
+        let got = crate::data_engineer::phase_gate::derive_single_target_repair_path(&st);
         assert_eq!(got, Some("models/staging/stg_orders.sql".to_string()));
     }
 
     #[test]
-    fn derive_single_target_repair_path_falls_back_to_failed_model_file() {
+    fn derive_single_target_repair_path_does_not_fallback_to_failed_model_file() {
         use crate::data_engineer::progress_controller::{ExecutionState, FailedModelRef};
         let st = ExecutionState::new();
         let failed = vec![FailedModelRef {
             name: "stg_orders".to_string(),
             file: "models/staging/stg_orders.sql".to_string(),
         }];
-        let got = crate::data_engineer::phase_gate::derive_single_target_repair_path(
-            &st,
-            &failed,
-        );
-        assert_eq!(got, Some("models/staging/stg_orders.sql".to_string()));
+        let _ = failed;
+        let got = crate::data_engineer::phase_gate::derive_single_target_repair_path(&st);
+        assert_eq!(got, None);
     }
 
     #[tokio::test]
@@ -4260,13 +4278,21 @@ mod tests {
             Some(false)
         );
 
-        // A patch attempt (even no-op) flips patched_since_fail via attempt_count.
-        state.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-            crate::data_engineer::progress_controller::ActiveRepairMode {
-                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                attempt_count: 1,
-                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
-            },
+        // A recorded patch mutation flips patched_since_fail via typed mutation receipt.
+        state.repair.repair_mode =
+            crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+                crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                    target_path: crate::data_engineer::progress_controller::SqlModelPath::parse("models/staging/stg_orders.sql".to_string()).expect("valid sql model path"),
+                    ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::PatchTarget,
+                    attempt_count: 0,
+                    repair_started_mutation_epoch: None,
+                    consecutive_noop_patches: 0
+                },
+            );
+        state.set_last_mutation_summary(
+            crate::data_engineer::progress_controller::MutationOp::Patch,
+            vec!["models/staging/stg_orders.sql".to_string()],
+            vec![],
         );
         state
             .save(&store, tid)

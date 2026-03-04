@@ -206,8 +206,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
-        let checklist_item_id =
-            crate::data_engineer::tools::batch_schema_runner::resolve_checklist_item_id(ctx);
+        let checklist_item_id = plan::schema_contract_checklist_item_id().to_string();
 
         let mut plan = plan::load_cleanse_plan_any(ctx)
             .await
@@ -266,11 +265,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             );
         }
 
-        let batch = plan::cleanse_pending_for_checklist(
-            &plan,
-            plan::CHECKLIST_SQL_MODEL,
-            &checklist_item_id,
-        );
+        let batch = plan::cleanse_pending_schema_contracts(&plan);
         if batch.is_empty() {
             return crate::data_engineer::tools::batch_contracts::to_json_value(
                 crate::data_engineer::tools::batch_contracts::CleanseSchemaBatchContract {
@@ -313,12 +308,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             .unwrap_or_default();
 
         for ds in batch.iter() {
-            plan::cleanse_checklist_mark_status(
-                &mut plan,
-                ds,
-                &checklist_item_id,
-                plan::ChecklistItemStatus::InProgress,
-            );
+            plan::cleanse_schema_contract_mark_in_progress(&mut plan, ds);
         }
         plan::save_cleanse_plan(ctx, &plan)
             .await
@@ -490,20 +480,10 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
         }
 
         for ds in succeeded.iter() {
-            plan::cleanse_checklist_mark_status(
-                &mut plan,
-                ds,
-                &checklist_item_id,
-                plan::ChecklistItemStatus::Done,
-            );
+            plan::cleanse_schema_contract_mark_done(&mut plan, ds);
         }
         for ds in failed.iter() {
-            plan::cleanse_checklist_mark_status(
-                &mut plan,
-                ds,
-                &checklist_item_id,
-                plan::ChecklistItemStatus::NeedsUpdate,
-            );
+            plan::cleanse_schema_contract_mark_needs_update(&mut plan, ds);
         }
         let failure_kind = if failed.is_empty() {
             None
@@ -575,8 +555,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
-        let checklist_item_id =
-            crate::data_engineer::tools::batch_schema_runner::resolve_checklist_item_id(ctx);
+        let checklist_item_id = plan::schema_contract_checklist_item_id().to_string();
 
         let mut plan = plan::load_model_plan_any(ctx)
             .await
@@ -642,8 +621,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             );
         }
 
-        let names =
-            plan::model_pending_for_checklist(&plan, plan::CHECKLIST_SQL_MODEL, &checklist_item_id);
+        let names = plan::model_pending_schema_contracts(&plan);
         if names.is_empty() {
             return crate::data_engineer::tools::batch_contracts::to_json_value(
                 crate::data_engineer::tools::batch_contracts::ModelSchemaBatchContract {
@@ -684,12 +662,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             .unwrap_or_default();
 
         for n in names.iter() {
-            plan::model_checklist_mark_status(
-                &mut plan,
-                n,
-                &checklist_item_id,
-                plan::ChecklistItemStatus::InProgress,
-            );
+            plan::model_schema_contract_mark_in_progress(&mut plan, n);
         }
         plan::save_model_plan(ctx, &plan)
             .await
@@ -826,12 +799,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
         }
 
         for n in names.iter() {
-            plan::model_checklist_mark_status(
-                &mut plan,
-                n,
-                &checklist_item_id,
-                plan::ChecklistItemStatus::Done,
-            );
+            plan::model_schema_contract_mark_done(&mut plan, n);
         }
         let budget = controller_kernel::note_batch_result_with_failure_kind(
             &mut plan.progress,
@@ -1245,7 +1213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_next_cleanse_schema_batch_respects_exec_ctx_checklist_item_id() {
+    async fn apply_next_cleanse_schema_batch_ignores_exec_ctx_checklist_override() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
             replies: Mutex::new(vec![serde_json::json!({
@@ -1289,7 +1257,7 @@ mod tests {
             plan_key: Some(plan_key.clone()),
             workgroup_id: Some("wg".to_string()),
             task_id: Some("AwsDataCatalog.test_raw.raw_customers".to_string()),
-            checklist_item_id: Some(plan::CHECKLIST_SCHEMA_CONTRACT.to_string()),
+            checklist_item_id: Some(plan::CHECKLIST_SQL_MODEL.to_string()),
             data: std::collections::BTreeMap::new(),
         });
 
@@ -1565,7 +1533,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_next_model_schema_batch_respects_exec_ctx_checklist_item_id() {
+    async fn apply_next_model_schema_batch_ignores_exec_ctx_checklist_override() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
             replies: Mutex::new(vec![serde_json::json!({
@@ -1609,7 +1577,7 @@ mod tests {
             plan_key: Some(plan_key.clone()),
             workgroup_id: Some("wg".to_string()),
             task_id: Some("dim_customers".to_string()),
-            checklist_item_id: Some(plan::CHECKLIST_SCHEMA_CONTRACT.to_string()),
+            checklist_item_id: Some(plan::CHECKLIST_SQL_MODEL.to_string()),
             data: std::collections::BTreeMap::new(),
         });
 

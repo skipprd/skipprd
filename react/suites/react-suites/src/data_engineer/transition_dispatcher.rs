@@ -468,14 +468,16 @@ mod tests {
         let tid = "tid-preturn-ladder-stop-fallback";
 
         let mut st = ExecutionState::new();
-        st.repair.repair_mode = crate::data_engineer::progress_controller::RepairModeState::Active(
-            crate::data_engineer::progress_controller::ActiveRepairMode {
-                repair_type: crate::data_engineer::progress_controller::RepairType::SqlTarget,
-                ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::Stop,
-                attempt_count: 3,
-                ..crate::data_engineer::progress_controller::ActiveRepairMode::default()
-            },
-        );
+        st.repair.repair_mode =
+            crate::data_engineer::progress_controller::RepairModeState::SqlTarget(
+                crate::data_engineer::progress_controller::SqlTargetRepairMode {
+                    target_path: crate::data_engineer::progress_controller::SqlModelPath::parse("models/staging/stg_orders.sql".to_string()).expect("valid sql model path"),
+                    ladder_step: crate::data_engineer::progress_controller::RepairLadderStep::Stop,
+                    attempt_count: 3,
+                    repair_started_mutation_epoch: None,
+                    consecutive_noop_patches: 0
+                },
+            );
         st.telemetry.last_validate =
             Some(crate::data_engineer::progress_controller::LastValidateState {
             failed_models: vec![crate::data_engineer::progress_controller::FailedModelRef {
