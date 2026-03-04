@@ -2148,7 +2148,7 @@ mod tests_fast_path_ingest {
         // We need a mock for Helpers::flatten in this test
         // This is a complex test due to the external dependency on Helpers::flatten
         // For now, we'll expect it to return an error or be handled
-        let result = fast_path_ingest(&input, &metadata, namespace, true);
+        let _result = fast_path_ingest(&input, &metadata, namespace, true);
         // We'll skip assertion here since we can't easily mock Helpers::flatten
     }
 

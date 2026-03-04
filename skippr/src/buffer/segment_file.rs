@@ -1,6 +1,8 @@
 use crate::helpers::offsets::OffsetKey;
 use arrow::array::RecordBatch;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+#[cfg(test)]
+use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
