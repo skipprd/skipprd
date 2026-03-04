@@ -220,12 +220,17 @@ pub async fn query(sql_str: &str) {
     // Enforce fully-qualified table names: require <pipeline>.<namespace>, forbid default.*
     {
         let upper = sql_trim.to_uppercase();
-        // Skip validation for STREAM (handled below) and simple help/meta commands
+        let is_ddl = upper.starts_with("ENABLE ")
+            || upper.starts_with("DISABLE ")
+            || upper.starts_with("SCHEMA ")
+            || upper.starts_with("PIPELINE ")
+            || upper.starts_with("DROP ")
+            || upper.starts_with("ALTER ")
+            || upper.starts_with("RESET ");
         let is_stream = upper.starts_with("STREAM ");
-        let is_explain = upper.starts_with("EXPLAIN ");
         let is_show = upper.starts_with("SHOW ");
         let is_describe = upper.starts_with("DESCRIBE ") || upper.starts_with("DESC ");
-        if !is_stream && !is_show && !is_describe {
+        if !is_ddl && !is_stream && !is_show && !is_describe {
             let lower = sql_trim.to_lowercase();
             if lower.contains(" default.") {
                 println!("Error: default.* schema is not allowed. Use <pipeline>.<namespace> (e.g., picnic.screen).");
