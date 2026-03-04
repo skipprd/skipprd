@@ -1130,18 +1130,19 @@ pub fn discover_ingest(
         const DETAIL_LIMIT: usize = 50;
         if entry.0 <= DETAIL_LIMIT {
             info!(
-                "Discovered new field: {} of type: {}{}{}",
+                "Discovered new field: {} of type: {} on namespace '{}'{}{}",
                 field,
                 metadata.get(field).unwrap().determined_type,
+                ns,
                 if parent_field.is_some() {
-                    " of parent field: "
+                    " (parent: "
                 } else {
                     ""
                 },
                 if parent_field.is_some() {
-                    parent_field.unwrap()
+                    format!("{})", parent_field.unwrap())
                 } else {
-                    ""
+                    String::new()
                 }
             );
         }

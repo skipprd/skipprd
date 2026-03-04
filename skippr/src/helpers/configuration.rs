@@ -11,7 +11,6 @@ use std::sync::Arc;
 use yaml_rust::YamlLoader;
 
 use dashmap::DashMap;
-use ini::configparser::ini::Ini;
 use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
@@ -50,7 +49,6 @@ pub static DATA_DIR_INIT_ONCE: OnceCell<()> = OnceCell::new();
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Skippr {
-    pub api_token: Option<String>,
     pub workspace: Option<String>,
     pub tenant: Option<String>,
     pub skippr_s3_bucket: Option<String>,
@@ -299,7 +297,6 @@ impl Config {
     pub fn new() -> Config {
         Config {
             skippr: Some(Skippr {
-                api_token: None,
                 workspace: None,
                 tenant: None,
                 skippr_s3_bucket: None,
@@ -342,82 +339,6 @@ impl Config {
         file_path
     }
 
-    fn parse_skippr_profile() {
-        // get SKIPPR_PROFILE env var
-        let profile_name = Config::getenv("SKIPPR_PROFILE", "default");
-
-        // Parse credentials file
-        let credentials_file_path = format!(
-            "{}/.skippr/credentials",
-            std::env::var("HOME").unwrap_or("~".to_string())
-        );
-        let credentials_file_contents =
-            fs::read_to_string(&credentials_file_path).unwrap_or(String::new());
-
-        if credentials_file_contents.is_empty() {
-            warn!("No credentials file found at {}", credentials_file_path);
-            return;
-        }
-
-        let mut ini = Ini::new();
-        ini.read(credentials_file_contents).unwrap_or_else(|_| {
-            panic!("Error parsing credentials file");
-        });
-
-        if ini.sections().contains(&profile_name) == false {
-            if profile_name != "default" {
-                panic!(
-                    "Profile '{}' not found in credentials file {}",
-                    profile_name, credentials_file_path
-                );
-            } else {
-                // support local work without a profile if user has not set SKIPPR_PROFILE
-                warn!(
-                    "Profile '{}' not found in credentials file {}",
-                    profile_name, credentials_file_path
-                );
-            }
-            return;
-        }
-
-        // check if profile exists
-        if ini.sections().contains(&profile_name) == true || profile_name == "default" {
-            let workspace = ini.get(&profile_name, "workspace").expect(&format!(
-                "'workspace' not found for profile '{}' in credentials file {}",
-                profile_name, credentials_file_path
-            ));
-            let api_token = ini.get(&profile_name, "api_token").expect(&format!(
-                "'api_token' not found for profile '{}' in credentials file {}",
-                profile_name, credentials_file_path
-            ));
-
-            // Update app config
-            let mut app_config = APP_CONFIG.write();
-            let app_config = app_config.as_mut().unwrap();
-
-            // app_config.skippr.workspace = Some(workspace);
-            // app_config.skippr.api_token = Some(api_token);
-            match app_config.skippr.as_mut() {
-                Some(skippr) => {
-                    skippr.workspace = Some(workspace);
-                    skippr.api_token = Some(api_token);
-                }
-                None => {
-                    app_config.skippr = Some(Skippr {
-                        workspace: Some(workspace),
-                        api_token: Some(api_token),
-                        skippr_s3_bucket: None,
-                        tenant: None,
-                    });
-                }
-            }
-        } else {
-            panic!(
-                "Profile '{}' not found in credentials file {}",
-                profile_name, credentials_file_path
-            );
-        }
-    }
 
     pub fn build_config() {
         let file_path = Config::find_config_file();
@@ -429,7 +350,6 @@ impl Config {
                     let mut app_config = APP_CONFIG.write();
                     app_config.replace(Config::new());
                 }
-                Config::parse_skippr_profile();
                 return;
             }
         };
@@ -480,8 +400,6 @@ impl Config {
             let mut app_config = APP_CONFIG.write();
             app_config.replace(config);
         }
-
-        Config::parse_skippr_profile();
 
         // Ensure SKIPPR_S3_BUCKET env var is set from config (fallbacks handled inside getter)
         let bucket = Config::get_skippr_s3_bucket();
@@ -704,37 +622,6 @@ impl Config {
                 Config::set_evncache("DATA_DEADLETTER_PLUGIN_NAME", &res.clone());
                 res
             }
-        }
-    }
-
-    pub fn get_skippr_api_token() -> String {
-        if Config::get_envcache("SKIPPR_API_TOKEN") != "" {
-            if Config::get_envcache("SKIPPR_API_TOKEN") == DEFAULT_CONFIG {
-                return "".to_string();
-            }
-            return Config::get_envcache("SKIPPR_API_TOKEN");
-        } else {
-            let config = Config::get();
-
-            let token = Config::getenv("SKIPPR_API_TOKEN", DEFAULT_CONFIG);
-
-            let token = config
-                .skippr
-                .or(Some(Skippr {
-                    api_token: Some(token.clone()),
-                    workspace: None,
-                    tenant: None,
-                    skippr_s3_bucket: None,
-                }))
-                .unwrap()
-                .api_token
-                .as_ref()
-                .or(Some(&token))
-                .unwrap()
-                .to_string();
-
-            Config::set_evncache("SKIPPR_API_TOKEN", &token.clone());
-            token
         }
     }
 

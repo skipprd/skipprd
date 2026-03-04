@@ -45,43 +45,6 @@ use crate::discover::evolution::{infer_specs_for_record, EvolutionProposal};
 use crate::ingest::fast_ingest::{
     create_default_nested_message, fast_path_ingest, DEFAULT_NESTED_MESSAGE,
 };
-static CATALOG_QUEUE: once_cell::sync::Lazy<dashmap::DashMap<String, std::time::Instant>> =
-    once_cell::sync::Lazy::new(|| dashmap::DashMap::new());
-fn enqueue_catalog_build(ns: &str) {
-    let now = std::time::Instant::now();
-    CATALOG_QUEUE.insert(ns.to_string(), now);
-}
-fn ensure_catalog_worker() {
-    use std::sync::Once;
-    static START: Once = Once::new();
-    START.call_once(|| {
-        std::thread::spawn(|| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-                    let now = std::time::Instant::now();
-                    let mut due: Vec<String> = Vec::new();
-                    for it in CATALOG_QUEUE.iter() {
-                        if now.duration_since(*it.value()) >= std::time::Duration::from_millis(1500)
-                        {
-                            due.push(it.key().clone());
-                        }
-                    }
-                    for ns in due {
-                        CATALOG_QUEUE.remove(&ns);
-                        // Mid-sync catalog builds are disabled; catalogs write at end of sync.
-                        // Left intentionally as no-op to avoid empty catalogs during ingest.
-                    }
-                }
-            });
-        });
-    });
-}
-
 use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord};
 use crate::helpers::s3 as s3_helpers;
 use crate::helpers::timed_rwlock::TimedRwLock;
@@ -168,16 +131,7 @@ fn ensure_slow_ingest_worker() {
                                         Config::set_metadata(&md_clone, false).await;
                                     });
                                 } else {
-                                    let md_clone = md_local.clone();
-                                    std::thread::spawn(move || {
-                                        let rt = tokio::runtime::Builder::new_current_thread()
-                                            .enable_all()
-                                            .build()
-                                            .unwrap();
-                                        rt.block_on(async move {
-                                            Config::set_metadata(&md_clone, false).await;
-                                        });
-                                    });
+                                    error!("No tokio runtime available to persist metadata for namespace {}", task.namespace);
                                 }
                             }
                             Ok(v)
@@ -191,18 +145,9 @@ fn ensure_slow_ingest_worker() {
             let _ = task.resp_tx.send(result);
         }
     };
-    if let Ok(handle) = runtime::Handle::try_current() {
-        handle.spawn(worker);
-    } else {
-        std::thread::spawn(|| {
-            let rt = runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(worker);
-        });
-    }
+    let handle = runtime::Handle::try_current()
+        .expect("slow_ingest_worker must be started inside a tokio runtime");
+    handle.spawn(worker);
 }
 
 fn slow_ingest_blocking(
@@ -1105,9 +1050,7 @@ impl Ingest {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(upload);
         } else {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            // Ensure the task runs to completion before the runtime drops
-            rt.block_on(upload);
+            error!("No tokio runtime available for deadletter upload; records will be persisted on next sync");
         }
     }
 
@@ -1295,8 +1238,8 @@ impl Ingest {
         handle: runtime::Handle,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) {
-        // optional: enforce allowed partition values
-        // This is thread local, a micro-optimization would be to move this to a global variable since it's not going to change and therefore no locking is required
+        let _guard = handle.enter();
+
         let allowed_values = Config::get_partition_allowed_values();
 
         PARTITION_ALLOWED_VALUES_CACHE.with(|cache| {
@@ -1572,26 +1515,13 @@ impl Ingest {
                             .insert(skpr_namespace.clone(), Metadata::new().unwrap());
                         METADATA.store(Arc::new(new_pm.clone()));
                         info!("Discovered new namespace: {}", skpr_namespace);
-                        // Persist immediately to ensure output plugins see new namespace
                         if let Ok(h) = runtime::Handle::try_current() {
                             h.spawn(async move {
                                 Config::set_metadata(&new_pm, false).await;
                             });
                         } else {
-                            let md_clone = new_pm.clone();
-                            std::thread::spawn(move || {
-                                let rt = runtime::Builder::new_current_thread()
-                                    .enable_all()
-                                    .build()
-                                    .unwrap();
-                                rt.block_on(async move {
-                                    Config::set_metadata(&md_clone, false).await;
-                                });
-                            });
+                            error!("No tokio runtime available to persist metadata for new namespace {}", skpr_namespace);
                         }
-                        // Trigger catalog/semantic/stats build for new namespace (debounced)
-                        ensure_catalog_worker();
-                        enqueue_catalog_build(&skpr_namespace);
                     }
 
                     let source = SourceRecord::new(record);
@@ -1938,18 +1868,9 @@ impl Ingest {
             }
             buffers_copy.write(all_batches);
             let fut = buffers_copy.flush(offset_db_clone.clone(), shared_output.clone());
-            match tokio::runtime::Handle::try_current() {
-                Ok(h) => {
-                    let _ = h.block_on(fut);
-                }
-                Err(_) => {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .unwrap();
-                    let _ = rt.block_on(fut);
-                }
-            }
+            let h = tokio::runtime::Handle::try_current()
+                .expect("flush must run inside a tokio runtime");
+            let _ = h.block_on(fut);
         }
     }
 
@@ -2040,33 +1961,17 @@ impl Ingest {
                         crate::helpers::configuration::Config::sync_schema(&md_clone).await;
                     });
                 } else {
-                    let rt = tokio::runtime::Builder::new_multi_thread()
-                        .worker_threads(1)
-                        .enable_all()
-                        .build()
-                        .unwrap();
-                    rt.spawn(async move {
-                        crate::helpers::configuration::Config::sync_schema(&md_clone).await;
-                    });
+                    error!("No tokio runtime available for schema sync");
                 }
             }
 
-            // Persist full pipeline metadata to Skippr state bucket whenever schema updates
             let pipeline_md = METADATA.load().as_ref().clone();
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
                     Config::set_metadata(&pipeline_md, false).await;
                 });
             } else {
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .unwrap();
-                    rt.block_on(async move {
-                        Config::set_metadata(&pipeline_md, false).await;
-                    });
-                });
+                error!("No tokio runtime available to persist metadata after schema update");
             }
         }
 
