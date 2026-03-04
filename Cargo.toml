@@ -2,13 +2,4 @@
 resolver = "2"
 members = [
   "skippr",
-  "react/runtime",
-  "react/core",
-  "react/suites/react-suites",
-  "react/modules/storage",
-  "react/modules/provider-vector-lance",
-  "react/modules/provider-postgres",
-  "react/modules/provider-bigquery",
-  "react/modules/provider-athena",
-  "react/modules/provider-dbt",
 ]

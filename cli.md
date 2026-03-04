@@ -1,19 +1,8 @@
 
-This repository is a Cargo workspace with two crates:
+This repository is a Cargo workspace with one crate:
 
 
 - `skippr`: ingest + plugins + `sqlrt`
-- `react`: ReAct runtime + WebSocket server (`serve`)
-
-To run the ReAct server:
-
-```bash
-cargo run -p react -- serve --port 8787 --log
-```
-
-Suites (default registry):
-- `data_engineer`: unified analytics + DBT-oriented suite (`ask` | `model` | `cleanse`)
-- `kb`: minimal local knowledge-base suite (local file ingest + vector Q&A)
 
 
 Usage: skippr convert <INPUT> <OUTPUT> [OPTIONS]

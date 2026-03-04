@@ -1,67 +1,12 @@
 ## DBT validation target and S3 layout
 
 - Target adapter for validation/compile is `datafusion`. Ensure `DBT_PROFILES_DIR` (or `profiles_dir` in calls) provides a profile compatible with the `datafusion` target.
-- DBT project files (ReAct-owned) are stored in S3 under `<tenant>/<workspace>/<project_id>/dbt/`.
+- DBT project files are stored in S3 under `<tenant>/<workspace>/<project_id>/dbt/`.
   - `dbt_project.yml`
   - `models/schema.yml` (sources)
   - `models/<dataset_id>/stg_<dataset_id>.sql` (staging; `dataset_id` is encoded for safe S3 keys)
   - Compiled artifacts uploaded to `<tenant>/<workspace>/<project_id>/dbt/target/` after successful `dbt compile`/`dbt build`.
 # Skippr
-
-## OpenAPI schema-first (ReAct WebSocket)
-
-To generate Rust models from the ReAct WebSocket OpenAPI schema and (optionally) wire updates:
-
-1. Ensure the core canonical spec is present at `react/runtime/openapi/ws-core.yaml` and suite spec at `react/suites/data_engineer/openapi/ws-data-engineer.yaml`.
-2. Use the helper script to run OpenAPI Generator (Docker or local jar):
-
-```bash
-scripts/gen-openapi-core.sh
-scripts/gen-openapi-suite-data-engineer.sh
-```
-
-This will generate core Rust models under `react/runtime/src/ws/api_gen/`. Only `components/schemas` are used for model generation. The WebSocket path exists for documentation. The server additionally enforces strict request validation and UUID v4 thread IDs.
-
-## Start the WebSocket server (ReAct API)
-
-Run the server locally (default port 8787 shown; choose any open port):
-
-```bash
-cargo run -p react -- serve --config react/runtime/config.example.yml --port 8787 --terminal
-```
-
-## Suites
-
-The `react` server supports multiple suites. The default suite registry currently includes:
-- `data_engineer`: unified analytics + DBT-oriented suite (suite-defined flows/modes)
-- `kb`: minimal local knowledge-base suite (ingest local `.txt`/`.md` files into vectors and answer questions)
-
-Connect a WebSocket client to:
-
-- `ws://localhost:8787/`
-
-Send JSON frames matching `react/runtime/openapi/ws-core.yaml` (+ suite schema overlays). Example requests:
-
-```json
-{"v":1,"type":"list","cid":"b2a4c2b5-1d19-4b5c-a0b3-2f8f7a7c9d11"}
-```
-
-```json
-{"v":1,"type":"new","cid":"a1111111-2222-3333-4444-555555555555","suiteId":"data_engineer","agentType":"ask","question":"What were total rides last week?"}
-```
-
-```json
-{"v":1,"type":"open","cid":"a1111111-2222-3333-4444-555555555555","thread_id":"<uuid>","suiteId":"data_engineer","agentType":"ask","question":"Continue."}
-```
-
-```json
-{"v":1,"type":"user","cid":"b1111111-2222-3333-4444-555555555555","thread_id":"<uuid>","text":"We rent e-bikes in NYC and care about weekend demand."}
-```
-
-Notes:
-- No authentication is required (for now).
-- The server strictly rejects unknown properties and uses UUID v4 thread IDs.
-- Full schemas and examples are in `react/runtime/openapi/ws-core.yaml`.
 
 ### What is Skippr?
 
@@ -78,10 +23,9 @@ cargo run -- --log sync
 
 ## CLI Commands
 
-This repository is a Cargo workspace with two crates:
+This repository is a Cargo workspace with one crate:
 
 - `skippr`: ingest + plugins + `sqlrt` (DataFusion runtime)
-- `react`: engine-agnostic ReAct runtime + Athena/Glue provider + WebSocket server
 
 Use either a built binary or run via cargo:
 
@@ -181,12 +125,12 @@ cargo run -- benchmark -f 100 -r 50000 -s 800 --name bigfiles --description "IO 
 ```
 
 ### llm
-LLM/ReAct entrypoints for chat, embeddings, cleansing, and modeling. Configure LLM via env (see Configuration).
+LLM entrypoints for chat, embeddings, cleansing, and modeling. Configure LLM via env (see Configuration).
 
 Flags:
 - `--chat "<prompt>"`: single chat turn with the configured chat model
-- `--cleanse`: interactive ReAct cleansing (cross-namespace), with human approval; writes DBT model SQL
-- `--model`: interactive ReAct modeling (cross-namespace), with human approval; after approval calls approve_and_save_artifact to write:
+- `--cleanse`: interactive cleansing (cross-namespace), with human approval; writes DBT model SQL
+- `--model`: interactive modeling (cross-namespace), with human approval; after approval calls approve_and_save_artifact to write:
   - Models at `dbt/models/<namespace>/<name>.sql` (raw text)
   - MetricFlow at `dbt/metrics/<namespace>/<name>.yaml` (raw text)
   - Also appends versioned copies under `_versions/<name>/<timestamp>.*`
@@ -197,7 +141,6 @@ Flags:
 Notes:
 - `ask` auto-discovers across pipelines; do not pass a pipeline for `ask`.
 - Embeddings are stored in LanceDB on S3 (uses `SKIPPR_S3_BUCKET`).
-- WebSocket API supports multiple agents per thread. Send `agentType` (ask | cleanse | model) on `new`/`open`. Default is `ask`. Switching agents keeps the same `thread_id` and records a `switch_agent` step.
 
 Examples:
 ```bash
@@ -239,7 +182,7 @@ These are planned features; scope and sequence may evolve.
     - [x] Replace all `println!` calls with `tracing` macros for structured logging.
     - [x] Configure logging levels and formats via environment variables or config files.
 
-### LLM ReAcT Integration
+### LLM Integration
 - [ ] LLM-driven data source exploration
   - [ ] Use LLMs to analyze and summarize unknown datasets.
   - [ ] Generate schema suggestions and data quality insights.
