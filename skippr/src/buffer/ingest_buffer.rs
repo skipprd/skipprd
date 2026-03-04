@@ -2010,6 +2010,7 @@ mod tests_wal_commit {
     use arrow::array::Int32Array;
     use arrow::record_batch::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
+    use serial_test::serial;
     use std::collections::HashMap as StdHashMap;
     use std::fs;
     use std::sync::Arc;
@@ -2042,6 +2043,10 @@ mod tests_wal_commit {
                 Config::setenv("DATA_DIR", v);
             } else {
                 std::env::remove_var("DATA_DIR");
+                // Clear the cache entry too; get_envcache("DATA_DIR") == "" causes
+                // get_pipeline_data_dir() to fall back to the default, which is what
+                // subsequent tests expect when DATA_DIR was never set before this test ran.
+                Config::set_evncache("DATA_DIR", "");
             }
         }
     }
@@ -2076,6 +2081,7 @@ mod tests_wal_commit {
     }
 
     #[test]
+    #[serial]
     fn test_write_seg_commit_header_roundtrip() {
         let (base, _guard) = setup_data_dir();
         let segf = SegmentFile::new(&base, "t1").unwrap();
@@ -2102,6 +2108,7 @@ mod tests_wal_commit {
     }
 
     #[test]
+    #[serial]
     fn test_wal_index_gating_with_commit() {
         let (base, _guard) = setup_data_dir();
         // Write segment without commit
@@ -2128,6 +2135,7 @@ mod tests_wal_commit {
     }
 
     #[test]
+    #[serial]
     fn test_offsets_recovery_commit_windows() {
         let (base, _guard) = setup_data_dir();
         let segf1 = SegmentFile::new(&base, "t3").unwrap();
