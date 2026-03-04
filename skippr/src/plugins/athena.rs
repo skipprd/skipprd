@@ -173,7 +173,7 @@ impl DataOutputAwsAthenaPlugin {
         stream: SendableRecordBatchStream,
         filename: String,
     ) -> Result<(), std::io::Error> {
-        let mut partition_cache: Vec<String> = vec![];
+        let _partition_cache: Vec<String> = vec![];
 
         let _bucket = &self.config.s3_bucket;
         let key = &self.config.s3_prefix;
@@ -756,6 +756,7 @@ impl DataOutputAwsAthenaPlugin {
         })
     }
 
+    #[allow(dead_code)]
     async fn upload_object(
         _client: S3Client,
         _bucket: String,

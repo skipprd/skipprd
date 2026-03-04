@@ -141,7 +141,7 @@ impl S3MultipartWriter {
     }
 
     fn current_sha256(&self) -> [u8; 32] {
-        let mut h = self.hasher.clone();
+        let h = self.hasher.clone();
         let digest = h.finalize();
         let mut sha = [0u8; 32];
         sha.copy_from_slice(&digest[..]);

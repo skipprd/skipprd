@@ -752,8 +752,8 @@ impl Helpers {
         }
         if let Some(idx) = last_sign_idx {
             if !s.ends_with('Z') {
-                let (head, tail) = s.split_at(idx + 1);
-                let mut digits: String = tail
+                let (_head, tail) = s.split_at(idx + 1);
+                let digits: String = tail
                     .chars()
                     .take_while(|c| c.is_ascii_digit() || *c == ':')
                     .collect();

@@ -22,12 +22,10 @@ use datafusion::physical_plan::RecordBatchStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use futures::stream::StreamExt as FuturesStreamExt;
-use glob::glob;
 use hex;
 use once_cell::sync::Lazy;
 use once_cell::sync::Lazy as OnceLazy;
 use serde_derive::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -60,6 +58,7 @@ static CONSUMER_STOP: Lazy<std::sync::atomic::AtomicBool> =
     Lazy::new(|| std::sync::atomic::AtomicBool::new(false));
 
 // Per-partition notify for quick wakeups
+#[allow(dead_code)]
 static PARTITION_NOTIFIES: Lazy<DashMap<PartitionKey, Arc<tokio::sync::Notify>>> =
     Lazy::new(|| DashMap::new());
 
@@ -68,12 +67,14 @@ static SEGMENT_LIVE: Lazy<Arc<std::sync::Mutex<GlobalSegment>>> =
     Lazy::new(|| Arc::new(std::sync::Mutex::new(GlobalSegment::new())));
 // Segment snapshot representation
 #[derive(Clone)]
+#[allow(dead_code)]
 struct SegmentPartitionMeta {
     bytes: u64,
     updated_at: SystemTime,
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct SegmentSnapshot {
     id: String,
     durability: Durability,
@@ -81,7 +82,7 @@ struct SegmentSnapshot {
     updated_at: SystemTime,
     total_bytes: u64,
     offsets: HashMap<OffsetKey, u64>,
-    batches: HashMap<PartitionKey, Vec<RecordBatch>>, // present only if in_memory
+    batches: HashMap<PartitionKey, Vec<RecordBatch>>,
     meta: HashMap<PartitionKey, SegmentPartitionMeta>,
 }
 
@@ -519,6 +520,7 @@ impl Buffers {
         CONSUMER_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     async fn compact_one_partition(
         force: bool,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
@@ -1216,10 +1218,10 @@ impl Buffers {
 
     async fn compact_segment_partition(
         seg_path: &PathBuf,
-        meta: &SegmentFileMetadata,
+        _meta: &SegmentFileMetadata,
         idx: &crate::buffer::segment_file::SegmentPartitionIndexEntry,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
-        offsets_db: Arc<Offsets>,
+        _offsets_db: Arc<Offsets>,
     ) -> io::Result<bool> {
         let (namespace, partition, time, shard) = (
             idx.key.0.clone(),
@@ -1341,8 +1343,7 @@ impl Buffers {
                         let _ = tx.send(Err(DataFusionError::IoError(e)));
                         return;
                     }
-                    let mut reader = io::BufReader::new(file);
-                    // Limit reads to the partition len by wrapping the reader in Take
+                    let reader = io::BufReader::new(file);
                     use std::io::Read as IoRead;
                     let mut take = reader.take(part_len);
                     match StreamReader::try_new(&mut take, None) {
@@ -1962,6 +1963,7 @@ pub fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn list_wal_files() -> io::Result<Vec<PathBuf>> {
     Ok(Vec::new())
 }
@@ -1991,6 +1993,7 @@ impl WalIndexMetrics {
 pub struct WalPartitionIndex {/* deprecated */}
 
 impl WalPartitionIndex {
+    #[allow(dead_code)]
     fn new() -> Self {
         WalPartitionIndex {}
     }
@@ -2396,6 +2399,7 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 enum WalEntry {
     Segment {
         path: PathBuf,
@@ -2412,11 +2416,13 @@ impl WalEntry {
             WalEntry::Segment { bytes, .. } => *bytes,
         }
     }
+    #[allow(dead_code)]
     fn updated_at(&self) -> SystemTime {
         match self {
             WalEntry::Segment { updated_at, .. } => *updated_at,
         }
     }
+    #[allow(dead_code)]
     fn offsets(&self) -> &HashMap<OffsetKey, u64> {
         match self {
             WalEntry::Segment { offsets, .. } => offsets,
@@ -2424,6 +2430,7 @@ impl WalEntry {
     }
 }
 
+#[allow(dead_code)]
 fn load_partition_segment_counter(
     namespace: &str,
     partition: &str,
@@ -2445,6 +2452,7 @@ fn load_partition_segment_counter(
     None
 }
 
+#[allow(dead_code)]
 fn persist_partition_segment_counter(
     namespace: &str,
     partition: &str,
@@ -2574,21 +2582,19 @@ impl WalPartition {
         // Deterministic compaction id
         let mut hasher = Sha256::new();
         for e in self.queue.iter() {
-            if let WalEntry::Segment {
+            let WalEntry::Segment {
                 path,
                 bytes,
                 updated_at,
                 ..
-            } = e
-            {
-                hasher.update(path.as_os_str().as_encoded_bytes());
-                hasher.update(&bytes.to_le_bytes());
-                let ts = updated_at
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-                hasher.update(&ts.to_le_bytes());
-            }
+            } = e;
+            hasher.update(path.as_os_str().as_encoded_bytes());
+            hasher.update(&bytes.to_le_bytes());
+            let ts = updated_at
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            hasher.update(&ts.to_le_bytes());
         }
         let compaction_id = {
             let digest = hasher.finalize();
@@ -2618,7 +2624,7 @@ impl WalPartition {
         }
 
         let schema: SchemaRef = {
-            let mut schema_opt: Option<SchemaRef> = None;
+            let schema_opt: Option<SchemaRef> = None;
             // For Segment entries, we will read schema later from SegmentFile; fallback not needed here
             // Keep returning an error if none found
             match schema_opt {
@@ -2923,6 +2929,7 @@ impl WalPartition {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct CompactionTask {
     key: (String, String, Option<i64>, String),
     force: bool,
@@ -2936,6 +2943,7 @@ pub async fn force_drain_all(
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct WalFile {
     pub(crate) path: PathBuf,
     pub(crate) namespace: String,
@@ -3000,6 +3008,7 @@ impl WalFile {
         // file_lock.as_ref().unwrap().try_clone()
     }
 
+    #[allow(dead_code)]
     fn from_path(path: &PathBuf) -> io::Result<Self> {
         let mut file = OpenOptions::new().read(true).open(&path)?;
 

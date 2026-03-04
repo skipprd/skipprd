@@ -96,7 +96,7 @@ impl std::fmt::Display for SchemaLoadDest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PipelineToggle {
+pub enum PipelineToggle {
     Enable,
     Disable,
 }
@@ -140,33 +140,31 @@ impl fmt::Display for PipelineToggle {
 /// SCHEMA DUMP bike_hire TO 'bike_hire.yaml'
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SchemaDumpStatement {
-    /// From where the data comes from
-    pub(crate) pipeline: ObjectName,
-    pub(crate) schema: Option<ObjectName>,
-    /// The URL to where the data is heading
-    pub(crate) target: String,
+pub struct SchemaDumpStatement {
+    pub pipeline: ObjectName,
+    pub schema: Option<ObjectName>,
+    pub target: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SchemaDropStatement {
-    pub(crate) pipeline: ObjectName,
-    pub(crate) schema: Option<ObjectName>,
+pub struct SchemaDropStatement {
+    pub pipeline: ObjectName,
+    pub schema: Option<ObjectName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DatabaseDropStatement {
-    pub(crate) database: ObjectName,
+pub struct DatabaseDropStatement {
+    pub database: ObjectName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PipelineDropStatement {
-    pub(crate) pipeline: ObjectName,
+pub struct PipelineDropStatement {
+    pub pipeline: ObjectName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PipelineResetStatement {
-    pub(crate) pipeline: ObjectName,
+pub struct PipelineResetStatement {
+    pub pipeline: ObjectName,
 }
 
 /// Skppr extension DDL for `SCHEMA LOAD`
@@ -185,19 +183,15 @@ pub(crate) struct PipelineResetStatement {
 /// SCHEMA LOAD 'bike_hire.yaml INTO bike_hire'
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SchemaLoadStatement {
-    /// The object name to where the data is heading
-    pub(crate) pipeline: SchemaLoadDest,
-    /// The url from where the data comes
-    pub(crate) source: String,
+pub struct SchemaLoadStatement {
+    pub pipeline: SchemaLoadDest,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PipelineToggleStatement {
-    /// The object name to where the data is heading
-    pub(crate) pipeline: ObjectName,
-    /// The url from where the data comes
-    pub(crate) toggle: PipelineToggle,
+pub struct PipelineToggleStatement {
+    pub pipeline: ObjectName,
+    pub toggle: PipelineToggle,
 }
 
 #[allow(dead_code)]
@@ -209,27 +203,25 @@ pub(crate) struct AlterTableAddColumn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AlterSchemaDropColumn {
-    pub(crate) pipeline: ObjectName,
-    pub(crate) schema: Option<ObjectName>,
-    // support field names with dots representing nested fields (e.g. foo.bar.baz), hence ObjectName instead of Ident
-    pub(crate) column_name: ObjectName,
+pub struct AlterSchemaDropColumn {
+    pub pipeline: ObjectName,
+    pub schema: Option<ObjectName>,
+    pub column_name: ObjectName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AlterSchemaAlterColumnType {
-    pub(crate) pipeline: ObjectName,
-    pub(crate) schema: Option<ObjectName>,
-    // support field names with dots representing nested fields (e.g. foo.bar.baz), hence ObjectName instead of Ident
-    pub(crate) column_name: ObjectName,
-    pub(crate) new_type: DataType,
-    pub(crate) values_new_type: Option<DataType>,
+pub struct AlterSchemaAlterColumnType {
+    pub pipeline: ObjectName,
+    pub schema: Option<ObjectName>,
+    pub column_name: ObjectName,
+    pub new_type: DataType,
+    pub values_new_type: Option<DataType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TableDropStatement {
-    pub(crate) schema: Option<ObjectName>,
-    pub(crate) table: ObjectName,
+pub struct TableDropStatement {
+    pub schema: Option<ObjectName>,
+    pub table: ObjectName,
 }
 
 /// Skippr SQL Statement.

@@ -224,12 +224,10 @@ pub async fn register_namespace_view(
 ) -> Result<(), DataFusionError> {
     // If this table already exists in this context, skip work
     {
-        use datafusion::catalog::CatalogProvider;
         let state = ctx.state();
         let cat_list = state.catalog_list();
         if let Some(catalog) = cat_list.catalog("datafusion") {
             if let Some(schema) = catalog.schema(pipeline) {
-                // Async check for existing table in this context
                 match schema.table(namespace).await {
                     Ok(Some(_tbl)) => {
                         debug!("register_namespace_view: table already present in context: datafusion.{}.{}", pipeline, namespace);
@@ -455,7 +453,7 @@ pub async fn register_deadletters(
 /// Ensure the logical schema 'dbt' exists under the default 'datafusion' catalog.
 pub fn ensure_dbt_schema(ctx: &SessionContext) -> Result<(), DataFusionError> {
     use datafusion::catalog::memory::{MemoryCatalogProvider, MemorySchemaProvider};
-    use datafusion::catalog::{CatalogProvider, SchemaProvider};
+    use datafusion::catalog::CatalogProvider;
     let state = ctx.state();
     let cat_list = state.catalog_list();
     if let Some(catalog) = cat_list.catalog("datafusion") {

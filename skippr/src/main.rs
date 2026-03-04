@@ -1,13 +1,6 @@
 use rand::Rng;
 use std::time::{Duration, SystemTime};
 
-use arrow::datatypes::Schema;
-
-// mod thread_pool;
-// use thread_pool::ThreadPool;
-// Note: Skippr now builds both a library (`skippr`) and a binary (`src/main.rs`).
-// This binary should prefer importing functionality from the library to avoid duplicating modules.
-
 extern crate nix;
 
 use nix::sys::signal::{kill, Signal};
@@ -15,11 +8,10 @@ use nix::unistd::Pid;
 use std::{io, process};
 
 use std::sync::Arc;
-use std::thread;
 
 use std::fs;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::thread::sleep;
 use std::time::Instant;
 
@@ -31,48 +23,27 @@ extern crate core;
 
 use clap::Parser;
 
-use signal_hook::iterator::Signals;
-
-use std::panic;
 use std::string::ToString;
-// use datafusion::common::ExprSchema;
-
-use once_cell::sync::Lazy;
-use signal_hook::consts::{SIGABRT, SIGINT, SIGQUIT, SIGTERM};
-use tokio::runtime;
-
-// All modules are provided by the library crate `skippr`.
 
 use skippr::helpers::configuration::{Config, PIPELINE_NAME};
 use skippr::helpers::logging::init_logging;
 use skippr::helpers::progress::ProgressUi;
 use tracing::{error, info, warn};
 
-use skippr::helpers::logger::{LogLevel, Logger};
+use skippr::helpers::logger::LogLevel;
 use skippr::helpers::offsets::Offsets;
 
 use skippr::plugins::athena::DataOutputAwsAthenaPlugin;
 
 use skippr::plugins::s3_input::DataSourceS3Plugin;
-// use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 use skippr::metrics::{Metrics, MetricsStatus};
 use skippr::plugins::file_input::DataSourceLocalFilePlugin;
-use skippr::{
-    ARROW_SCHEMA, ARROW_SCHEMA_VERSION, LOGGER, METADATA, METRICS,
-    OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE, OUTPUT_RUNNING, RUNNING,
-};
-// use crate::plugins::file_output::DataOutputFilePlugin;
-// use crate::plugins::s3_output::DataOutputS3Plugin;
-// use crate::plugins::stdin_input::DataSourceStdinPlugin;
-// use crate::plugins::stdout_output::DataOutputStdoutPlugin;
+use skippr::{LOGGER, METADATA, METRICS, OUTPUT_RUNNING, RUNNING};
 
 use datafusion::prelude::*;
 use skippr::buffer::ingest_buffer::{wal_recover, Buffers};
-// use crate::buffer::BufferChunker;
-use arc_swap::ArcSwap;
 use skippr::benchmark::PerformanceBenchmark;
-use skippr::helpers::timed_rwlock::TimedRwLock;
 use skippr::ingest_work::Ingest;
 use skippr::plugins::file_output::DataOutputFilePlugin;
 use skippr::plugins::DataOutputPlugin;
@@ -703,7 +674,7 @@ async fn discover(log: bool) {
                     let mut approx_rows: u64 = 0;
                     let mut min_ts: Option<i64> = None;
                     let mut max_ts: Option<i64> = None;
-                    for (fname, fs) in stats.fields.iter() {
+                    for (_fname, fs) in stats.fields.iter() {
                         approx_rows = approx_rows.max(fs.sample_total.unwrap_or(fs.total));
                         // Name-agnostic: infer time window only when numeric epoch-like stats are present
                         if let Some(min_num) = fs.min_numeric {

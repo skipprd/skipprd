@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
-use tracing::{debug, info};
+use tracing::debug;
 
 static S3_CLIENT: OnceCell<Arc<S3Client>> = OnceCell::const_new();
 

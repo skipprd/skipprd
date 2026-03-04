@@ -28,10 +28,6 @@ use datafusion::prelude::SessionConfig;
 // no Volatility import needed (UDFs disabled)
 // removed unused ScalarValue
 use datafusion::arrow::array::RecordBatch;
-use datafusion::arrow::datatypes::DataType as ArrowDataType;
-// removed unused FunctionRegistry
-// removed unused AmazonS3Builder
-// removed unused Url
 use datafusion::datasource::MemTable;
 // removed unused ViewTable
 use crate::buffer::segment_file::SegmentFile;
@@ -40,7 +36,6 @@ use crate::sqlrt::tui::{QueryEditorConfig, QueryEditorView};
 use crate::ARROW_SCHEMA;
 use arc_swap::ArcSwap;
 use arrow::ipc::reader::StreamReader;
-use datafusion::arrow::util::pretty::pretty_format_batches;
 use sqlparser::ast::{
     Expr as StdExpr, Function, FunctionArg, FunctionArgExpr, GroupByExpr, Ident,
     ObjectName as SqlObjectName, Query as StdQuery, Select as StdSelect,
@@ -1273,12 +1268,11 @@ pub async fn query(sql_str: &str) {
                 whitelist: &std::collections::HashSet<String>,
             ) {
                 if let StdStatement::Query(q) = stmt {
-                    if let StdQuery {
+                    let StdQuery {
                         body,
                         order_by,
-                        limit,
                         ..
-                    } = q.as_mut()
+                    } = q.as_mut();
                     {
                         match &mut **body {
                             SetExpr::Select(sel) => {
@@ -1469,7 +1463,7 @@ pub async fn query(sql_str: &str) {
                                                         .seek(std::io::SeekFrom::Start(idx.start))
                                                         .is_ok()
                                                     {
-                                                        let mut reader =
+                                                        let reader =
                                                             std::io::BufReader::new(file);
                                                         let mut take = reader.take(idx.len);
                                                         if let Ok(sr) =

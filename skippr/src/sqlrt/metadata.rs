@@ -56,7 +56,7 @@ pub async fn register_catalog(ctx: &SessionContext) {
         Option<String>,
     )> = Vec::new();
 
-    for (pipeline, nsmap) in registry.namespaces_by_pipeline.iter() {
+    for (_pipeline, nsmap) in registry.namespaces_by_pipeline.iter() {
         for (ns, entry) in nsmap.iter() {
             debug!(
                 "{} META: ns='{}' catalog_key='{}'",

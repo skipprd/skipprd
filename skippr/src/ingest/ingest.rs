@@ -1059,7 +1059,7 @@ pub fn discover_ingest(
     static TOTAL_NEW_FIELDS: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
 
     let _foo: AnalyseSchema = AnalyseSchema { i: 0 };
-    let was_present = metadata.contains_key(field);
+    let _was_present = metadata.contains_key(field);
 
     let discoverd_data_type = "string".to_string().clone();
 
@@ -1175,10 +1175,10 @@ pub fn set_date(
     field: &str,
     value: &Value,
     parent_field: Option<&str>,
-    parent_data_type: Option<&str>,
+    _parent_data_type: Option<&str>,
     metadata: &mut HashMap<String, Metadata>,
-    updated_schema: &mut String,
-    flatten: bool,
+    _updated_schema: &mut String,
+    _flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
     // Use cached field name lookups to reduce repetitive transformations
     let output_field_name = Metadata::get_field_out_field_name(metadata, field);

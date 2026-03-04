@@ -36,7 +36,7 @@ use crate::plugins::s3_input::DataSourceS3PluginConfig;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use toml;
 // use crate::plugins::s3_inventory::{DataSourceS3InventoryPluginConfig};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 lazy_static! {
     static ref ENV_CACHE: TimedRwLock<DashMap<String, String>> =

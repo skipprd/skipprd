@@ -107,6 +107,7 @@ pub struct InMemoryStorageAdapter {
 #[derive(Clone, Debug)]
 struct StoredObject {
     bytes: Vec<u8>,
+    #[allow(dead_code)]
     content_type: String,
     etag: String,
 }

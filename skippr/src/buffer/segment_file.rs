@@ -1,7 +1,7 @@
 use crate::helpers::offsets::OffsetKey;
 use arrow::array::RecordBatch;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;

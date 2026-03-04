@@ -243,11 +243,12 @@ pub struct IngestBatch {
     pub(crate) offset_key: OffsetKey,
     pub(crate) data: String,
     pub(crate) bytes: usize,
+    #[allow(dead_code)]
     pub(crate) source_uri: String,
 }
 
 #[derive(Clone)]
-pub(crate) struct IngestTask {
+pub struct IngestTask {
     pub(crate) datas: Arc<Vec<IngestBatch>>,
     offset_db: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
@@ -268,7 +269,7 @@ impl IngestTask {
 }
 
 #[derive(Clone)]
-pub(crate) struct IngestTasks {
+pub struct IngestTasks {
     tasks: Vec<IngestTask>,
     bytes: usize,
 }
@@ -360,6 +361,7 @@ impl Ingest {
     fn read_mem_available_mib() -> Option<u64> {
         Self::read_meminfo_kib("MemAvailable:").map(|kib| kib / 1024)
     }
+    #[allow(dead_code)]
     fn infer_required_type(value: &serde_json::Value) -> (String, Option<String>) {
         use serde_json::Value as V;
         match value {
@@ -384,6 +386,7 @@ impl Ingest {
         }
     }
 
+    #[allow(dead_code)]
     fn build_evolution_from_record(
         namespace: &str,
         record: &serde_json::Value,
@@ -531,7 +534,7 @@ impl Ingest {
         let queue_lock_clone = queue_lock.clone();
         let queue_cv_clone = queue_cv.clone();
         let is_shutting_down = Arc::new(AtomicUsize::new(0));
-        let is_shutting_down_clone = is_shutting_down.clone();
+        let _is_shutting_down_clone = is_shutting_down.clone();
 
         let thread_pool = Arc::new(ThreadPool::new(num_cpus));
         let thread_pool_clone = thread_pool.clone();
@@ -662,7 +665,7 @@ impl Ingest {
         let window_size = Duration::from_secs(5); // 5 second window for throughput calculation
 
         let throughput_history = Arc::new(RwLock::new(VecDeque::with_capacity(100)));
-        let last_adjustment = Arc::new(RwLock::new(Instant::now()));
+        let _last_adjustment = Arc::new(RwLock::new(Instant::now()));
         // let adjustment_cooldown = Duration::from_secs(10); // 10 second cooldown between adjustments
 
         Ingest {
@@ -1268,7 +1271,7 @@ impl Ingest {
 
         let _aprox_now = SystemTime::now();
 
-        let updated_schema = "no".to_string();
+        let _updated_schema = "no".to_string();
 
         let buffers = Buffers::new();
 
@@ -1278,7 +1281,7 @@ impl Ingest {
         let mut _j = 0;
         let mut d = 0;
         let x = 0;
-        let mut batch_line: u64 = 0;
+        let mut batch_line: u64;
 
         let format = match Config::get_pipline_plugin_config("input") {
             Ok(plugin) => plugin.format(),
@@ -1623,7 +1626,7 @@ impl Ingest {
             // Seed schema for brand-new namespaces with inferred specs from this entry
             let ns = entry._namespace.clone();
             let md_snapshot = METADATA.load();
-            let is_empty_ns = md_snapshot
+            let _is_empty_ns = md_snapshot
                 .metadata
                 .get(&ns)
                 .map(|m| m.fields.is_empty())

@@ -230,7 +230,7 @@ impl Evolution {
             let last_evolution_guard = last_evolution_refcell.borrow();
             if let Some(evolution_key) = last_evolution_guard.get(field) {
                 // Copy out needed data to avoid holding immutable borrows across mutation
-                let (cached_key, new_field_name, type_string_opt): (
+                let (_cached_key, new_field_name, type_string_opt): (
                     String,
                     Option<String>,
                     Option<String>,

@@ -4,7 +4,7 @@ use aws_sdk_s3::Client;
 
 use flate2::read::GzDecoder;
 
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 
 use std::sync::Arc;
 
@@ -15,7 +15,6 @@ use std::time::Duration;
 // use aws_sdk_s3::types::Object;
 // use futures::future::join_all;
 
-use once_cell::sync::Lazy;
 use serde_derive::Deserialize;
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
@@ -552,7 +551,7 @@ impl DataSourceS3Plugin {
 
         if !current_batch.is_empty() {
             let batch_bytes = current_bytes;
-            pending_bytes_sum = pending_bytes_sum.saturating_add(batch_bytes);
+            let _ = pending_bytes_sum.saturating_add(batch_bytes);
             pending_tasks.push(IngestTask::new(
                 std::mem::take(&mut current_batch),
                 offsets.clone(),
@@ -618,12 +617,13 @@ impl DataSourceS3Plugin {
     /// 3. Submits the processed data to the ingestion pipeline
     ///
     /// Returns: Throughput metrics that can be used to adjust future batch sizes
+    #[allow(dead_code)]
     async fn download_and_ingest(
         &mut self,
-        s3_bucket: &String,
-        keys: &Vec<Vec<String>>,
-        offsets: &Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        _s3_bucket: &String,
+        _keys: &Vec<Vec<String>>,
+        _offsets: &Arc<Offsets>,
+        _shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
         _chunk_size_current: i64,
     ) -> ThroughputMetrics {
         // Deprecated in bounded pipeline path; keep a no-op metrics return for compatibility

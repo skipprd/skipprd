@@ -681,7 +681,7 @@ fn process_record_field(
     metadata: &HashMap<String, Metadata>,
     flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
-    let m = Map::new();
+    let _m = Map::new();
 
     let mut resolved_value: Result<ResolvedFieldValue, Box<dyn Error>> =
         Ok(ResolvedFieldValue::new(field.to_string(), Value::Null));

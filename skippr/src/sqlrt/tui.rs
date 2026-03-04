@@ -610,7 +610,7 @@ impl QueryEditorView {
                     ViewMode::BarV | ViewMode::BarH => {
                         let (labels, values) = build_bar_data(&data);
                         let mut items: Vec<(&str, u64)> = Vec::new();
-                        let mut owned: Vec<String> = labels; // keep strings alive
+                        let owned: Vec<String> = labels;
                         for (i, v) in values.iter().enumerate() {
                             if i < owned.len() {
                                 items.push((owned[i].as_str(), (*v) as u64));
@@ -1179,7 +1179,7 @@ fn build_suggestions(
     }
     // WHERE value suggestions: sample distinct values from current data
     if in_where_value_ctx {
-        if let Some((table_opt2, alias_opt2)) = extract_table_and_alias(input).into() {
+        if let Some((_table_opt2, alias_opt2)) = extract_table_and_alias(input).into() {
             if let Some(lhs_field) =
                 extract_lhs_field_in_where(input, cursor, where_pos.unwrap_or(0))
             {
@@ -1381,6 +1381,7 @@ fn flatten_field_old(field: &arrow_schema::Field, parent: Option<&str>, out: &mu
     }
 }
 
+#[allow(dead_code)]
 fn extract_table_name(sql: &str) -> Option<String> {
     let up = sql.to_uppercase();
     if let Some(i) = up.find(" FROM ") {
