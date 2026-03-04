@@ -507,13 +507,7 @@ async fn discover(log: bool) {
     let stdout_is_tty = std::io::stdout().is_terminal();
     let progress = ProgressUi::new(stdout_is_tty && !log);
     if progress.enabled() {
-        progress.add_tasks(&[
-            "Ingesting",
-            "Finalising",
-            "Building stats",
-            "Building catalog",
-            "Creating embeddings",
-        ]);
+        progress.add_tasks(&["Ingesting", "Finalising"]);
     }
 
     info!(
@@ -863,13 +857,7 @@ async fn sync() {
     let stdout_is_tty = std::io::stdout().is_terminal();
     let progress = ProgressUi::new(stdout_is_tty && !skippr::helpers::logging::cli_logs_enabled());
     if progress.enabled() {
-        progress.add_tasks(&[
-            "Ingesting",
-            "Finalising",
-            "Building stats",
-            "Building catalog",
-            "Creating embeddings",
-        ]);
+        progress.add_tasks(&["Ingesting", "Finalising"]);
     }
 
     {
@@ -1163,9 +1151,6 @@ async fn sync() {
         progress.finish();
     }
 }
-
-// legacy no-op; replaced by catalog::orchestrator
-async fn build_catalog(_pipeline_metadata: &PipelineMetadata) {}
 
 pub async fn sync_output_plugin(
     plugin_name: &str,
