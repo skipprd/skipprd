@@ -99,18 +99,10 @@ tempfile = "3.10"
 itertools = "0.12"
 
 [features]
-llama_cpp = ["llama_cpp_2"]
 stats_integration = []
 
 [dev-dependencies]
 serial_test = "1.0.0"
 assert_cmd = "2"
 predicates = "3"
-httpmock = "0.7"
-
-[dependencies.llama_cpp_2]
-optional = true
-git = "https://github.com/utilityai/llama-cpp-rs.git"
-package = "llama-cpp-2"
-tag = "0.1.122"
 

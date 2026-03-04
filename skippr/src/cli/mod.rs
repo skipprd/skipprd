@@ -28,8 +28,6 @@ pub enum Mode {
     Schema(SchemaOptions),
     SqlHelp(SqlHelpOptions),
     Benchmark(BenchmarkOptions),
-    Llm(LlmOptions),
-    Serve(ServeOptions),
 }
 
 #[derive(Parser, Clone, PartialEq)]
@@ -107,34 +105,3 @@ pub struct BenchmarkOptions {
     pub description: Option<String>,
 }
 
-#[derive(Parser, Clone, PartialEq, Default)]
-pub struct LlmOptions {
-    /// Start an interactive cleansing suggestion flow (cross-namespace context)
-    #[arg(long, default_value_t = false)]
-    pub cleanse: bool,
-    /// Start an interactive MetricFlow modeling flow (cross-namespace context)
-    #[arg(long, default_value_t = false)]
-    pub model: bool,
-    /// Embedding inputs (repeat flag to add multiple)
-    #[arg(long)]
-    pub embed: Vec<String>,
-    /// Ask a question about ingested data (uses semantic & catalog)
-    #[arg(long)]
-    pub ask: Option<String>,
-    /// List ask threads
-    #[arg(long, default_value_t = false)]
-    pub ask_list: bool,
-    /// Open/resume a specific ask thread
-    #[arg(long)]
-    pub ask_open: Option<String>,
-    /// Top-K rows or docs to consider
-    #[arg(long, default_value_t = 5)]
-    pub top_k: usize,
-}
-
-#[derive(Parser, Clone, PartialEq)]
-pub struct ServeOptions {
-    /// Port to listen for WebSocket clients
-    #[arg(long, default_value_t = 8787)]
-    pub port: u16,
-}

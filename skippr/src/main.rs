@@ -74,7 +74,6 @@ use arc_swap::ArcSwap;
 use skippr::benchmark::PerformanceBenchmark;
 use skippr::helpers::timed_rwlock::TimedRwLock;
 use skippr::ingest_work::Ingest;
-use skippr::llm;
 use skippr::plugins::file_output::DataOutputFilePlugin;
 use skippr::plugins::DataOutputPlugin;
 use skippr::sqlrt::doc_parser::SqlDocParser;
@@ -441,54 +440,6 @@ async fn main() {
                 }
             }
         }
-        Mode::Llm(options) => {
-            println!(
-                "{} LLM: initializing model config...",
-                chrono::Utc::now().to_rfc3339()
-            );
-            let cfg = llm::config_from_env();
-            println!(
-                "{} LLM: provider={:?} chat_model={:?} base_url={:?}",
-                chrono::Utc::now().to_rfc3339(),
-                cfg.provider,
-                cfg.chat_model,
-                cfg.base_url
-            );
-            let llm = llm::create_llm(&cfg);
-            // NOTE: Suite-related features were moved to a separate runtime service.
-            if options.ask_list
-                || options.ask_open.is_some()
-                || options.cleanse
-                || options.model
-                || options.ask.is_some()
-            {
-                eprintln!("This command is no longer available in the skippr CLI.");
-                eprintln!("Use the dedicated runtime service for ask/model/threads workflows.");
-                return;
-            }
-            if !options.embed.is_empty() {
-                let out = llm.embed(&options.embed);
-                match out {
-                    Ok(v) => {
-                        for (i, emb) in v.iter().enumerate() {
-                            println!("{}:{}", i, emb.len());
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("ERROR: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-            }
-        }
-        Mode::Serve(opts) => {
-            eprintln!("The WebSocket server is no longer hosted by the skippr binary.");
-            eprintln!(
-                "Use the dedicated runtime service (configured port: {}).",
-                opts.port
-            );
-            return;
-        }
     }
 }
 
@@ -832,35 +783,16 @@ async fn discover(log: bool) {
             } // cap prompt size
         }
 
-        let cfg = llm::config_from_env();
-        let llm = llm::create_llm(&cfg);
-        let prompt = format!(
-            "Summarize a data warehouse snapshot in two insightful sentences. The volume, recency, and high level of what the data represents.\nTables: {}\nApprox total rows: {}\nPeriod: {}\nNamespaces:\n{}\nKeep it factual, avoid bullets, and do not invent values.",
-            tables,
-            approx_total,
-            if period_str.is_empty() { "unknown".to_string() } else { period_str.clone() },
-            digest_lines.join("\n")
-        );
-        match llm.chat(&[llm::ChatMessage {
-            role: "user".into(),
-            content: prompt,
-        }]) {
-            Ok(text) => {
-                println!("{} {}", chrono::Utc::now().to_rfc3339(), text.trim());
-            }
-            Err(_) => {
-                if period_str.is_empty() {
-                    println!(
-                        "Warehouse spans {} table(s) with ≈{} rows in total.",
-                        tables, approx_total
-                    );
-                } else {
-                    println!(
-                        "Warehouse spans {} table(s) with ≈{} rows from {}.",
-                        tables, approx_total, period_str
-                    );
-                }
-            }
+        if period_str.is_empty() {
+            println!(
+                "Warehouse spans {} table(s) with ≈{} rows in total.",
+                tables, approx_total
+            );
+        } else {
+            println!(
+                "Warehouse spans {} table(s) with ≈{} rows from {}.",
+                tables, approx_total, period_str
+            );
         }
     }
 
