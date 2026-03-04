@@ -891,6 +891,7 @@ impl Ingest {
             let mut _active_threads_snapshot = self.active_count.load(Ordering::SeqCst);
 
             for datas in ingest_batches.tasks.iter() {
+                let task_bytes: u64 = datas.datas.iter().map(|d| d.bytes as u64).sum();
                 // Per-task queue gating: block with Condvar until queue depth below max
                 if self.queue_length.load(Ordering::Acquire) >= self.max_queue_length {
                     let (lock, cv) = &*self.queue_cv;
@@ -928,8 +929,7 @@ impl Ingest {
                         let _ = tx.send(0);
                     });
 
-                    // Update throughput metrics
-                    self.update_throughput(batch_bytes as u64);
+                    self.update_throughput(task_bytes);
                 } else {
                     // Queue the task for later processing
                     let _lock = self.queue_lock.write().unwrap();
@@ -942,8 +942,7 @@ impl Ingest {
                     // Increment queue length when adding to queue
                     self.queue_length.fetch_add(1, Ordering::Acquire);
 
-                    // Update throughput metrics
-                    self.update_throughput(batch_bytes as u64);
+                    self.update_throughput(task_bytes);
                 }
             }
 
@@ -968,15 +967,22 @@ impl Ingest {
                     )
                 };
                 if current_chunk_size != optimal_chunk_size {
+                    let trend_label = if throughput_trend > 0.0 {
+                        "rising"
+                    } else if throughput_trend < 0.0 {
+                        "falling"
+                    } else {
+                        "stable"
+                    };
                     info!(
-                        "Optimising chunk size: active_cores: {}, active_tasks: {}, throughput: {}/s, trend: {:.2}, optimal_chunk_size: {} from {}, adjustment_factor: {}",
+                        "Optimising chunk size: active_cores: {}, active_tasks: {}, throughput: {}/s ({}), chunk_size: {} -> {}, adjustment: {:.2}x",
                         active_cores,
                         queue_length,
                         Helpers::human_readable_size(current_throughput),
-                        throughput_trend,
-                        Helpers::human_readable_size(optimal_chunk_size as u64),
+                        trend_label,
                         Helpers::human_readable_size(current_chunk_size as u64),
-                        format!("{:.2}", (optimal_chunk_size as f64) / (current_chunk_size as f64))
+                        Helpers::human_readable_size(optimal_chunk_size as u64),
+                        (optimal_chunk_size as f64) / (current_chunk_size as f64)
                     );
                     self.optimal_chunk_size
                         .store(optimal_chunk_size, Ordering::SeqCst);
