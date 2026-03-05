@@ -1173,33 +1173,27 @@ impl AnalyseSchema {
         let mut data_type = get_type(value);
 
         if data_type == SkipprDataType::String || data_type == SkipprDataType::Integer {
-            // String really an int?
             data_type = self.check_string_or_int(value);
+        }
 
-            if allow_date {
-                let mut valid_timestamp = false;
+        if matches!(data_type, SkipprDataType::Integer | SkipprDataType::Long) && allow_date {
+            let mut valid_timestamp = false;
 
-                if data_type == SkipprDataType::Integer {
-                    valid_timestamp = self.is_valid_timestamp(value);
-                    if valid_timestamp {
-                        data_type = SkipprDataType::Timestamp;
-                    }
-                } else if data_type == SkipprDataType::Long {
-                    valid_timestamp = self.is_valid_timestamp(value);
-                    if valid_timestamp {
-                        data_type = SkipprDataType::TimestampMilli;
-                    }
-                }
-
+            if data_type == SkipprDataType::Integer {
+                valid_timestamp = self.is_valid_timestamp(value);
                 if valid_timestamp {
-                    // self.set_date_field_candidate(field, metadata, &"".to_string());
-                    self.increment_date_field_candidate_count(field, metadata, &"".to_string());
+                    data_type = SkipprDataType::Timestamp;
+                }
+            } else if data_type == SkipprDataType::Long {
+                valid_timestamp = self.is_valid_timestamp_milli(value);
+                if valid_timestamp {
+                    data_type = SkipprDataType::TimestampMilli;
                 }
             }
 
-            // if self.is_float(value) {
-            //     data_type = "double".to_string();
-            // }
+            if valid_timestamp {
+                self.increment_date_field_candidate_count(field, metadata, &"".to_string());
+            }
         }
 
         if data_type == SkipprDataType::String && allow_date {

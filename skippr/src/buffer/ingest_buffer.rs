@@ -108,6 +108,8 @@ static CONSUMER_STARTED: Lazy<std::sync::atomic::AtomicBool> =
     Lazy::new(|| std::sync::atomic::AtomicBool::new(false));
 static CONSUMER_STOP: Lazy<std::sync::atomic::AtomicBool> =
     Lazy::new(|| std::sync::atomic::AtomicBool::new(false));
+static COMPACTOR_HANDLE: Lazy<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+    Lazy::new(|| std::sync::Mutex::new(None));
 
 // Per-partition notify for quick wakeups
 #[allow(dead_code)]
@@ -484,6 +486,9 @@ impl Buffers {
         offsets_db: Arc<Offsets>,
     ) {
         use std::sync::atomic::Ordering as AO;
+        if CONSUMER_STOP.load(AO::Relaxed) {
+            return;
+        }
         if CONSUMER_STARTED
             .compare_exchange(false, true, AO::Relaxed, AO::Relaxed)
             .is_err()
@@ -491,7 +496,7 @@ impl Buffers {
             return;
         }
         let use_s3 = is_s3_wal();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
                     .load(std::sync::atomic::Ordering::Relaxed)
@@ -560,6 +565,9 @@ impl Buffers {
                 }
             }
         });
+        if let Ok(mut guard) = COMPACTOR_HANDLE.lock() {
+            *guard = Some(handle);
+        }
     }
 
     // Removed compaction dispatch; replaced by single-thread consumer
@@ -626,6 +634,37 @@ impl Buffers {
     /// Signal the background compactor pool to stop after current work completes.
     pub fn request_compactor_stop() {
         CONSUMER_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Await the background compactor task to fully complete (with a timeout).
+    /// Returns `true` if the compactor exited gracefully within the deadline.
+    pub async fn await_compactor_shutdown(timeout: std::time::Duration) -> bool {
+        let handle = {
+            let mut guard = match COMPACTOR_HANDLE.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            guard.take()
+        };
+        let Some(handle) = handle else {
+            return true;
+        };
+        match tokio::time::timeout(tokio::time::Duration::from_secs(timeout.as_secs()), handle)
+            .await
+        {
+            Ok(Ok(())) => true,
+            Ok(Err(e)) => {
+                warn!("Compactor task panicked: {e}");
+                false
+            }
+            Err(_) => {
+                warn!(
+                    "Compactor did not finish within {:?} timeout",
+                    timeout
+                );
+                false
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -1834,37 +1873,43 @@ impl Buffers {
             .all(|p| Self::is_source_tombstoned(source, &p.key));
 
         if all_tombstoned {
-            match source {
+            let segment_deleted = match source {
                 SegmentSource::Disk(seg_path) => {
-                    if let Err(e) = fs::remove_file(seg_path) {
-                        warn!(
-                            "Failed to remove fully-compacted segment {}: {}",
-                            seg_display, e
-                        );
-                    } else {
-                        let commit_path = seg_path.with_extension("seg.commit");
-                        if let Err(e) = fs::remove_file(&commit_path) {
-                            if e.kind() != io::ErrorKind::NotFound {
-                                warn!(
-                                    "Failed to remove commit marker {}: {}",
-                                    commit_path.to_string_lossy(),
-                                    e
-                                );
+                    match fs::remove_file(seg_path) {
+                        Ok(_) => {
+                            let commit_path = seg_path.with_extension("seg.commit");
+                            if let Err(e) = fs::remove_file(&commit_path) {
+                                if e.kind() != io::ErrorKind::NotFound {
+                                    warn!(
+                                        "Failed to remove commit marker {}: {}",
+                                        commit_path.to_string_lossy(),
+                                        e
+                                    );
+                                }
                             }
+                            true
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to remove fully-compacted segment {}: {}",
+                                seg_display, e
+                            );
+                            false
                         }
                     }
                 }
                 SegmentSource::S3 { key, bucket, .. } => {
                     let client = crate::helpers::s3::get_s3_client().await;
                     let commit_key = format!("{}.commit", key);
-                    if let Err(e) = client
+                    let seg_ok = client
                         .delete_object()
                         .bucket(bucket)
                         .key(key)
                         .send()
                         .await
-                    {
-                        warn!("Failed to delete S3 segment {}: {:?}", key, e);
+                        .is_ok();
+                    if !seg_ok {
+                        warn!("Failed to delete S3 segment {}", key);
                     }
                     if let Err(e) = client
                         .delete_object()
@@ -1875,13 +1920,16 @@ impl Buffers {
                     {
                         warn!("Failed to delete S3 commit marker {}: {:?}", commit_key, e);
                     }
+                    seg_ok
                 }
-            }
-            for part in meta.index.iter() {
-                let tp = Self::tombstone_path_for_source(source, &part.key);
-                if tp.exists() {
-                    if let Err(e) = fs::remove_file(&tp) {
-                        warn!("Failed to remove tombstone {:?}: {}", tp, e);
+            };
+            if segment_deleted {
+                for part in meta.index.iter() {
+                    let tp = Self::tombstone_path_for_source(source, &part.key);
+                    if tp.exists() {
+                        if let Err(e) = fs::remove_file(&tp) {
+                            warn!("Failed to remove tombstone {:?}: {}", tp, e);
+                        }
                     }
                 }
             }

@@ -996,32 +996,13 @@ async fn sync() {
         }
         let finalising_started = std::time::Instant::now();
         info!("Finalising: stopping background compactor");
-        // Stop background compactor pool and wait for in-flight to drain
         Buffers::request_compactor_stop();
-        info!("Finalising: waiting for in-flight compactions to drain");
-        // Wait for in-flight to reach zero (bounded wait)
-        for i in 0..40 {
-            let inflight = skippr::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if inflight == 0 {
-                info!("Finalising: in-flight compactions drained after {} checks", i + 1);
-                break;
-            }
-            if i % 10 == 9 {
-                info!(
-                    "Finalising: waiting for in-flight compactions (inflight={})",
-                    inflight
-                );
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        let remaining_inflight = skippr::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if remaining_inflight > 0 {
-            warn!(
-                "Finalising: compactor drain timeout reached with {} in-flight tasks",
-                remaining_inflight
-            );
+        info!("Finalising: awaiting background compactor shutdown");
+        let compactor_ok = Buffers::await_compactor_shutdown(std::time::Duration::from_secs(120)).await;
+        if compactor_ok {
+            info!("Finalising: background compactor exited cleanly");
+        } else {
+            warn!("Finalising: background compactor did not exit cleanly");
         }
         info!("Finalising: running forced compaction pass 1");
         Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
