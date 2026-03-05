@@ -104,12 +104,18 @@ pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
 
 // Lock-free WAL index and counters
 pub static WAL_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-static CONSUMER_STARTED: Lazy<std::sync::atomic::AtomicBool> =
-    Lazy::new(|| std::sync::atomic::AtomicBool::new(false));
-static CONSUMER_STOP: Lazy<std::sync::atomic::AtomicBool> =
+static COMPACTOR_STARTED: Lazy<std::sync::atomic::AtomicBool> =
     Lazy::new(|| std::sync::atomic::AtomicBool::new(false));
 static COMPACTOR_HANDLE: Lazy<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
     Lazy::new(|| std::sync::Mutex::new(None));
+static COMPACTOR_COMMAND_TX: Lazy<
+    std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<CompactorCommand>>>,
+> = Lazy::new(|| std::sync::Mutex::new(None));
+
+enum CompactorCommand {
+    Wake,
+    DrainAndStop(tokio::sync::oneshot::Sender<bool>),
+}
 
 // Per-partition notify for quick wakeups
 #[allow(dead_code)]
@@ -379,7 +385,7 @@ impl Buffers {
     pub async fn flush(
         &mut self,
         offsets_db: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        _shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) -> Result<(), ArrowError> {
         let bytes: u64 = 0;
         let mut rows: u64 = 0;
@@ -467,143 +473,167 @@ impl Buffers {
 
         WAL_BYTES_TOTAL.fetch_add(uploaded_bytes, std::sync::atomic::Ordering::Relaxed);
 
-        Buffers::start_single_consumer(shared_output.clone(), offsets_db.clone());
+        Buffers::wake_compactor();
 
         Ok(())
     }
 
-    /// Ensure a single background compactor is running.
-    ///
-    /// The compactor watches `WAL_PARTITION_INDEX` and, when partitions exceed
-    /// the configured byte/time thresholds (`buffer_threshold_bytes` / `buffer_threshold_seconds`),
-    /// it reads the partition's WAL objects from S3, compacts them into the configured output
-    /// (typically Athena S3), and reduces the tracked index bytes accordingly.
-    ///
-    /// Offsets are NOT committed here; they are committed in `Buffers::flush` immediately after
-    /// each WAL object is successfully uploaded to S3, making compaction fully decoupled from ingest.
-    pub fn start_single_consumer(
+    pub fn start_compactor_service(
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
         offsets_db: Arc<Offsets>,
     ) {
         use std::sync::atomic::Ordering as AO;
-        if CONSUMER_STOP.load(AO::Relaxed) {
-            return;
-        }
-        if CONSUMER_STARTED
+        if COMPACTOR_STARTED
             .compare_exchange(false, true, AO::Relaxed, AO::Relaxed)
             .is_err()
         {
             return;
         }
-        let use_s3 = is_s3_wal();
-        let handle = tokio::spawn(async move {
-            loop {
-                let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    .clamp(1, 64) as usize;
-                let stop = CONSUMER_STOP.load(std::sync::atomic::Ordering::Relaxed);
-
-                if use_s3 {
-                    let candidates =
-                        Self::next_compaction_candidates_s3(concurrency, false).await;
-                    if candidates.is_empty() {
-                        if stop {
-                            break;
-                        }
-                        tokio_sleep(TokioDuration::from_millis(500)).await;
-                        continue;
-                    }
-                    use futures::stream::StreamExt;
-                    let mut in_flight: futures::stream::FuturesUnordered<
-                        Pin<Box<dyn Future<Output = ()> + Send>>,
-                    > = futures::stream::FuturesUnordered::new();
-                    for (source, meta, idx) in candidates.into_iter() {
-                        let out = shared_output.clone();
-                        let off = offsets_db.clone();
-                        in_flight.push(Box::pin(async move {
-                            let _ = Self::compact_segment_partition_source(
-                                &source, &meta, &idx, out, off,
-                            )
-                            .await;
-                        }));
-                    }
-                    while let Some(_) = in_flight.next().await {}
-                    if stop
-                        && Self::next_compaction_candidates_s3(1, false)
-                            .await
-                            .is_empty()
-                    {
-                        break;
-                    }
-                } else {
-                    let candidates = Self::next_compaction_candidates(concurrency, false);
-                    if candidates.is_empty() {
-                        if stop {
-                            break;
-                        }
-                        tokio_sleep(TokioDuration::from_millis(500)).await;
-                        continue;
-                    }
-                    use futures::stream::StreamExt;
-                    let mut in_flight: futures::stream::FuturesUnordered<
-                        Pin<Box<dyn Future<Output = ()> + Send>>,
-                    > = futures::stream::FuturesUnordered::new();
-                    for (path, meta, idx) in candidates.into_iter() {
-                        let out = shared_output.clone();
-                        let off = offsets_db.clone();
-                        in_flight.push(Box::pin(async move {
-                            let _ = Self::compact_segment_partition(
-                                &path, &meta, &idx, out, off,
-                            )
-                            .await;
-                        }));
-                    }
-                    while let Some(_) = in_flight.next().await {}
-                    if stop && Self::next_compaction_candidates(1, false).is_empty() {
-                        break;
-                    }
-                }
-            }
-        });
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<CompactorCommand>();
+        if let Ok(mut guard) = COMPACTOR_COMMAND_TX.lock() {
+            *guard = Some(tx);
+        }
+        let handle = tokio::spawn(Self::run_compactor_service(rx, shared_output, offsets_db));
         if let Ok(mut guard) = COMPACTOR_HANDLE.lock() {
             *guard = Some(handle);
         }
     }
 
-    // Removed compaction dispatch; replaced by single-thread consumer
+    pub fn wake_compactor() {
+        let tx = {
+            let guard = match COMPACTOR_COMMAND_TX.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            guard.clone()
+        };
+        if let Some(tx) = tx {
+            let _ = tx.send(CompactorCommand::Wake);
+        }
+    }
 
-    // Removed enqueue_compaction
-
-    pub async fn compact_all_partitions(
-        force: bool,
+    pub async fn drain_and_stop_compactor(
         offsets_db: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
-    ) {
-        let _ = flush_all_segments(offsets_db.clone()).await;
+        timeout: std::time::Duration,
+    ) -> bool {
+        let _ = flush_all_segments(offsets_db).await;
+        let tx = {
+            let mut guard = match COMPACTOR_COMMAND_TX.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            guard.take()
+        };
+        let Some(tx) = tx else {
+            return true;
+        };
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<bool>();
+        if tx.send(CompactorCommand::DrainAndStop(done_tx)).is_err() {
+            return false;
+        }
+        let timeout_dur = tokio::time::Duration::from_secs(timeout.as_secs());
+        match tokio::time::timeout(timeout_dur, done_rx).await {
+            Ok(Ok(true)) => {
+                let handle = {
+                    let mut guard = match COMPACTOR_HANDLE.lock() {
+                        Ok(g) => g,
+                        Err(_) => return false,
+                    };
+                    guard.take()
+                };
+                if let Some(handle) = handle {
+                    match handle.await {
+                        Ok(()) => {
+                            COMPACTOR_STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
+                            true
+                        }
+                        Err(e) => {
+                            warn!("Compactor task join error after drain: {e}");
+                            false
+                        }
+                    }
+                } else {
+                    COMPACTOR_STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
+                    true
+                }
+            }
+            Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
+                let handle = {
+                    let mut guard = match COMPACTOR_HANDLE.lock() {
+                        Ok(g) => g,
+                        Err(_) => return false,
+                    };
+                    guard.take()
+                };
+                if let Some(handle) = handle {
+                    handle.abort();
+                }
+                COMPACTOR_STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
+                false
+            }
+        }
+    }
 
+    async fn run_compactor_service(
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<CompactorCommand>,
+        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        offsets_db: Arc<Offsets>,
+    ) {
+        let mut drain_reply: Option<tokio::sync::oneshot::Sender<bool>> = None;
+        loop {
+            let force = drain_reply.is_some();
+            let did_work =
+                Self::run_compaction_cycle(force, shared_output.clone(), offsets_db.clone()).await;
+            if force && !did_work {
+                if let Some(reply) = drain_reply.take() {
+                    let _ = reply.send(true);
+                }
+                break;
+            }
+            tokio::select! {
+                cmd = rx.recv() => {
+                    match cmd {
+                        Some(CompactorCommand::Wake) => {}
+                        Some(CompactorCommand::DrainAndStop(reply)) => {
+                            drain_reply = Some(reply);
+                        }
+                        None => break,
+                    }
+                }
+                _ = tokio_sleep(TokioDuration::from_millis(500)) => {}
+            }
+        }
+        COMPACTOR_STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    async fn run_compaction_cycle(
+        force: bool,
+        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        offsets_db: Arc<Offsets>,
+    ) -> bool {
         use futures::stream::StreamExt;
+        let mut did_work = false;
         let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
             .load(std::sync::atomic::Ordering::Relaxed)
             .clamp(1, 64) as usize;
 
         if is_s3_wal() {
             loop {
-                let candidates =
-                    Self::next_compaction_candidates_s3(concurrency, force).await;
+                let candidates = Self::next_compaction_candidates_s3(concurrency, force).await;
                 if candidates.is_empty() {
                     break;
                 }
+                did_work = true;
                 let mut in_flight: futures::stream::FuturesUnordered<
                     Pin<Box<dyn Future<Output = ()> + Send>>,
                 > = futures::stream::FuturesUnordered::new();
-                for (source, meta, idx) in candidates.into_iter() {
+                for (source, meta, idx) in candidates {
                     let out = shared_output.clone();
                     let off = offsets_db.clone();
                     in_flight.push(Box::pin(async move {
-                        let _ = Self::compact_segment_partition_source(
-                            &source, &meta, &idx, out, off,
-                        )
-                        .await;
+                        let _ =
+                            Self::compact_segment_partition_source(&source, &meta, &idx, out, off)
+                                .await;
                     }));
                 }
                 while let Some(_) = in_flight.next().await {}
@@ -614,57 +644,24 @@ impl Buffers {
                 if candidates.is_empty() {
                     break;
                 }
+                did_work = true;
                 let mut in_flight: futures::stream::FuturesUnordered<
                     Pin<Box<dyn Future<Output = ()> + Send>>,
                 > = futures::stream::FuturesUnordered::new();
-                for (path, meta, idx) in candidates.into_iter() {
+                for (path, meta, idx) in candidates {
                     let out = shared_output.clone();
                     let off = offsets_db.clone();
                     in_flight.push(Box::pin(async move {
-                        let _ =
-                            Self::compact_segment_partition(&path, &meta, &idx, out, off).await;
+                        let _ = Self::compact_segment_partition(&path, &meta, &idx, out, off).await;
                     }));
                 }
                 while let Some(_) = in_flight.next().await {}
             }
-            Self::sweep_segment_cleanup();
-        }
-    }
-
-    /// Signal the background compactor pool to stop after current work completes.
-    pub fn request_compactor_stop() {
-        CONSUMER_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Await the background compactor task to fully complete (with a timeout).
-    /// Returns `true` if the compactor exited gracefully within the deadline.
-    pub async fn await_compactor_shutdown(timeout: std::time::Duration) -> bool {
-        let handle = {
-            let mut guard = match COMPACTOR_HANDLE.lock() {
-                Ok(g) => g,
-                Err(_) => return false,
-            };
-            guard.take()
-        };
-        let Some(handle) = handle else {
-            return true;
-        };
-        match tokio::time::timeout(tokio::time::Duration::from_secs(timeout.as_secs()), handle)
-            .await
-        {
-            Ok(Ok(())) => true,
-            Ok(Err(e)) => {
-                warn!("Compactor task panicked: {e}");
-                false
-            }
-            Err(_) => {
-                warn!(
-                    "Compactor did not finish within {:?} timeout",
-                    timeout
-                );
-                false
+            if did_work {
+                Self::sweep_segment_cleanup();
             }
         }
+        did_work
     }
 
     #[allow(dead_code)]

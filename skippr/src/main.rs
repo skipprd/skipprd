@@ -923,8 +923,7 @@ async fn sync() {
         .unwrap();
     let shared_output = Arc::new(output);
 
-    // Start background WAL compactor pool after WAL recovery
-    Buffers::start_single_consumer(shared_output.clone(), offsets_db.clone());
+    Buffers::start_compactor_service(shared_output.clone(), offsets_db.clone());
 
     let shared_output_clone = shared_output.clone();
 
@@ -985,38 +984,21 @@ async fn sync() {
         METRICS.write().status = MetricsStatus::Finishing;
     }
 
-    // Queue-based model: rely on the explicit drain above; skip legacy compact_all_partitions
-
     info!("All buffers flushed to output plugin");
 
-    // Deterministic drain: compact all remaining on-disk segments to parquet
     {
         if progress.enabled() {
             progress.start("Finalising");
         }
         let finalising_started = std::time::Instant::now();
-        info!("Finalising: stopping background compactor");
-        Buffers::request_compactor_stop();
-        info!("Finalising: awaiting background compactor shutdown");
-        let compactor_ok = Buffers::await_compactor_shutdown(std::time::Duration::from_secs(120)).await;
+        info!("Finalising: draining and stopping compactor");
+        let compactor_ok =
+            Buffers::drain_and_stop_compactor(offsets_db.clone(), std::time::Duration::from_secs(300))
+                .await;
         if compactor_ok {
-            info!("Finalising: background compactor exited cleanly");
+            info!("Finalising: compactor drained and stopped");
         } else {
-            warn!("Finalising: background compactor did not exit cleanly");
-        }
-        info!("Finalising: running forced compaction pass 1");
-        Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
-        // Safety loop: run another pass if segments remain (handles late live persist)
-        let needs_pass2 = if skippr::helpers::configuration::Config::get_wal_storage()
-            .eq_ignore_ascii_case("s3")
-        {
-            true // always run pass 2 for S3 WAL (segs_remaining is disk-only)
-        } else {
-            Buffers::segs_remaining() > 0
-        };
-        if needs_pass2 {
-            info!("Finalising: running forced compaction pass 2");
-            Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
+            warn!("Finalising: compactor drain/stop did not complete cleanly");
         }
         let (scanned_commits, removed_orphans, orphan_errors) =
             Buffers::cleanup_orphan_seg_commits(200_000);
@@ -1029,8 +1011,6 @@ async fn sync() {
             finalising_started.elapsed()
         );
     }
-    // Single-thread model: no background compaction tasks remain here
-    // Wait for background Glue partition tasks to settle to avoid undercount at end
     info!("Finalising: waiting for Athena partition tasks to drain");
     skippr::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
     info!("Finalising: Athena partition tasks drained");
