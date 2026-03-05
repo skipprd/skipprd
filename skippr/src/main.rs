@@ -992,13 +992,11 @@ async fn sync() {
         }
         let finalising_started = std::time::Instant::now();
         info!("Finalising: draining and stopping compactor");
-        let compactor_ok =
-            Buffers::drain_and_stop_compactor(offsets_db.clone(), std::time::Duration::from_secs(300))
-                .await;
+        let compactor_ok = Buffers::drain_and_stop_compactor(offsets_db.clone()).await;
         if compactor_ok {
             info!("Finalising: compactor drained and stopped");
         } else {
-            warn!("Finalising: compactor drain/stop did not complete cleanly");
+            panic!("Finalising: compactor drain/stop did not complete cleanly");
         }
         let (scanned_commits, removed_orphans, orphan_errors) =
             Buffers::cleanup_orphan_seg_commits(200_000);

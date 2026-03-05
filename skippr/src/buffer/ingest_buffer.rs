@@ -512,10 +512,7 @@ impl Buffers {
         }
     }
 
-    pub async fn drain_and_stop_compactor(
-        offsets_db: Arc<Offsets>,
-        timeout: std::time::Duration,
-    ) -> bool {
+    pub async fn drain_and_stop_compactor(offsets_db: Arc<Offsets>) -> bool {
         let _ = flush_all_segments(offsets_db).await;
         let tx = {
             let mut guard = match COMPACTOR_COMMAND_TX.lock() {
@@ -531,9 +528,8 @@ impl Buffers {
         if tx.send(CompactorCommand::DrainAndStop(done_tx)).is_err() {
             return false;
         }
-        let timeout_dur = tokio::time::Duration::from_secs(timeout.as_secs());
-        match tokio::time::timeout(timeout_dur, done_rx).await {
-            Ok(Ok(true)) => {
+        match done_rx.await {
+            Ok(true) => {
                 let handle = {
                     let mut guard = match COMPACTOR_HANDLE.lock() {
                         Ok(g) => g,
@@ -557,7 +553,7 @@ impl Buffers {
                     true
                 }
             }
-            Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
+            Ok(false) | Err(_) => {
                 let handle = {
                     let mut guard = match COMPACTOR_HANDLE.lock() {
                         Ok(g) => g,
