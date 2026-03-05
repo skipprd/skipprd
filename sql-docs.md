@@ -134,7 +134,7 @@ ENABLE PIPELINE <pipeline_name>
 ```
 
 **Description:**
-Enables a pipeline for processing.
+Enables a pipeline for processing. Pipeline metadata must already exist (run `discover` first). Exits non-zero if the pipeline is not found.
 
 **Example:**
 ```sql
@@ -173,6 +173,21 @@ Drops a database from the AWS Glue Catalog.
 DROP DATABASE data_warehouse
 ```
 
+### DEADLETTERS TABLE
+
+**Syntax:**
+```sql
+SELECT <columns> FROM deadletters [WHERE namespace = '<ns>'] [AND dt BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD']
+```
+
+**Description:**
+Query deadletter events uploaded directly to the Skippr state bucket under `deadletters/`. Supports JSON extraction via `json_extract_scalar(record.raw_json, '$.<path>')`.
+
+**Example:**
+```sql
+SELECT id, namespace, failure_error_messages[1] AS err FROM deadletters WHERE namespace = 'bike_hire' AND dt BETWEEN '2025-11-05' AND '2025-11-07'
+```
+
 ## Query Operations
 
 ### SHOW DOCS
@@ -203,6 +218,21 @@ Executes a standard SQL query against the data. Supports querying from AWS Athen
 **Example:**
 ```sql
 SELECT user_id, COUNT(*) FROM bike_hire WHERE date > '2023-01-01' GROUP BY user_id LIMIT 10
+```
+
+### STREAM
+
+**Syntax:**
+```sql
+STREAM <columns> FROM <table_name> [WHERE <condition>] [ORDER BY <expressions>] [LIMIT <count>]
+```
+
+**Description:**
+Executes a streaming SQL query against data currently ingesting into the WAL, continuously returning new results as data arrives.
+
+**Example:**
+```sql
+STREAM user_id, event_type FROM user_events WHERE event_time > CURRENT_TIMESTAMP - INTERVAL '1' HOUR ORDER BY event_time LIMIT 100
 ```
 
 ### DATEDIFF

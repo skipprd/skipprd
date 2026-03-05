@@ -1,20 +1,17 @@
 site_name: Skippr Docs
 repo_url: https://github.com/skipprd/skipprd
-site_description: Skippr makes it easy to ingest, transform, and load data from any source to any destination.
+site_description: Skippr is a data ingestion CLI that discovers schemas and writes optimised Parquet to S3 with Glue/Athena integration.
 theme:
-#  name: bootstrap4
   name: material
   custom_dir: overrides
   features:
     - navigation.footer
+    - navigation.sections
   palette:
-    # Palette toggle for light mode
     - scheme: default
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
-
-    # Palette toggle for dark mode
     - scheme: slate
       toggle:
         icon: material/brightness-4
@@ -26,45 +23,40 @@ extra_css:
 nav:
   - Home: index.md
   - Getting Started:
-      - Quick Start: getting-started/index.md
+      - Installation: getting-started/install.md
+      - Quick Start: getting-started/quickstart.md
+  - Concepts:
+      - How Skippr Works: concepts/how-it-works.md
+      - Schema Discovery & Evolution: concepts/schema.md
+      - Exactly-Once Delivery: concepts/exactly-once.md
+      - Deadletters: concepts/deadletters.md
+  - CLI Reference:
+      - discover: cli/discover.md
+      - sync: cli/sync.md
+      - query: cli/query.md
+      - schema: cli/schema.md
+      - sql-help: cli/sql-help.md
+      - benchmark: cli/benchmark.md
+  - SQL Reference: sql/reference.md
   - Configuration:
-      - Configuration Overview: configuration/configuration.md
-      - Api Token: configuration/skippr-api-token.md
-      - Data Source Batch Size Bytes: configuration/data-source-batch-size-bytes.md
-      - Data Source Batch Size Seconds: configuration/data-source-batch-size-seconds.md
-      - Data Source Plugin Name: configuration/data-source-plugin-name.md
-      - Buffer Threshold Bytes: configuration/buffer-threshold-bytes.md
-      - Buffer Threshold Seconds: configuration/buffer-threshold-seconds.md
-      - Transform Namespace Fields: configuration/transform-namespace-fields.md
-      - Transform Partition Fields: configuration/transform-partition-fields.md
-      - Transform Flatten Events: configuration/transform-flatten-events.md
-      - Transform Batch Time Fields: configuration/transform-batch-time-fields.md
-      - Transform Batch Time Unit: configuration/transform-batch-time-unit.md
-      - Pipeline Name: configuration/pipeline-name.md
-      - Workspace Name: configuration/workspace-name.md
-      - Data Dir: configuration/data-dir.md
-      - Chaos Mode: configuration/chaos-mode.md
-  - Plugins:
-      - Overview: plugins/overview/index.md
+      - Overview: configuration/overview.md
+      - Pipeline & Workspace: configuration/pipeline.md
+      - Input Source: configuration/input.md
+      - Output Destination: configuration/output.md
+      - Transforms: configuration/transforms.md
+      - Buffering & WAL: configuration/buffering.md
+      - Advanced: configuration/advanced.md
+  - Connectors:
       - Inputs:
-          - File: plugins/inputs/file/index.md
-          - S3 Bucket: plugins/inputs/s3/index.md
-          - Kafka: plugins/inputs/kafka/index.md
+          - S3: connectors/inputs/s3.md
+          - Local File: connectors/inputs/file.md
       - Outputs:
-          - File: plugins/outputs/file/index.md
-          - S3 Bucket: plugins/outputs/s3/index.md
-          - Kafka: plugins/outputs/kafka/index.md
-  - Advanced:
-      - Core Concepts: advanced/core-concepts.md
-      - Logging Event Map: advanced/logging-event-map.md
-#  - Enterprise:
-#      - AWS: enterprise/aws/index.md
-#      - Azure (Coming Soon): 404.md
-#      - Google (Coming 2021): 404.md
-#      - OpenStack (Coming 2021): 404.md
-#      - VMWare (Coming 2021): 404.md
-#      - Demo: enterprise/demo/index.md
-#  - License: license.md
+          - Athena (S3 + Glue): connectors/outputs/athena.md
+          - Local File: connectors/outputs/file.md
+  - Operations:
+      - Logging Event Map: operations/logging.md
+      - Troubleshooting: operations/troubleshooting.md
+  - License: license.md
 
 markdown_extensions:
   - toc:

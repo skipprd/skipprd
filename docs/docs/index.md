@@ -1,65 +1,38 @@
-## Canonical S3 layout
+# Skippr
 
-- Data (Parquet): controlled by the output plugin (Athena). Canonical namespace root prefix:
-  `s3://{bucket}/{s3_prefix}/{namespace}/` (with trailing slash).
-- Manifest (query source of truth): `{tenant}/{workspace}/{pipeline}/manifest/{pipeline}.json`
-- Registry (per-pipeline): `{tenant}/{workspace}/{pipeline}/manifest/registry.json`
-  - `data_prefixes`: explicit canonical namespace roots (not used by query to find Parquet)
-  - `catalog_key`: `{tenant}/{workspace}/{pipeline}/catalog/...`
-  - `stats_key`: `{tenant}/{workspace}/{pipeline}/stats/...`
-  - `semantic_key`: `{tenant}/{workspace}/{pipeline}/semantic/...`
+Skippr is a data ingestion CLI that reads from sources like S3 or local files, automatically discovers schemas, and writes optimised Parquet to S3 with AWS Glue catalog tables queryable via Athena.
 
-Query engine registers Parquet paths from manifest-only (absolute `s3://` URLs). Registry is used by metadata/QA layers to locate catalog, stats and semantic resources.
-# Welcome to Skippr Docs 👋
+## Key capabilities
 
+- **Schema discovery** — automatically infers nested schemas from JSON, CSV, or Parquet sources
+- **Schema evolution** — detects field type changes and handles them without breaking downstream tables
+- **Exactly-once delivery** — WAL-backed ingestion with offset tracking and integrity checks, surviving process crashes (including SIGKILL)
+- **Athena-native output** — writes Parquet to S3, manages Glue databases/tables, and registers Hive partitions
+- **Built-in SQL engine** — query destination tables, stream from the WAL, manage pipelines and schemas via SQL
+- **Deadletter handling** — invalid records are captured as queryable Parquet in S3, not silently dropped
+- **Stateless compute** — no clustering, no scaling groups. Single binary, single process. Even local disk is optional when using S3 WAL
 
-### What is Skippr
+## How it works
 
-Skippr solves the EL in ELT, connecting any data source to any destination.
+```
+Source (S3, file)
+  → discover (schema inference)
+  → sync (ingest → WAL → compactor → Parquet → S3 + Glue)
+  → query (Athena SQL, STREAM from WAL)
+```
 
-Specifically, Skippr discovers your source data schemas and converts your data to an optimised format for your output destinations.
+The three core commands map directly to the pipeline lifecycle:
 
-**Examples:**
+| Command | Purpose |
+|---|---|
+| `skippr discover` | Connect to source, sample data, infer and persist schema |
+| `skippr sync` | Ingest data, buffer through WAL, compact and upload Parquet, register partitions |
+| `skippr query` | Run SQL against destination tables, manage pipelines and schemas |
 
-* json files on your local disk -> Avro messages in Kafka
-* json files on S3 -> Parquet on S3
+## Quick start
 
-# Key Features
+Install the CLI and run your first pipeline in under 5 minutes. See the [Quick Start](getting-started/quickstart.md) guide.
 
-## Any Data Source, Any Destination
+## License
 
-Skippr is an open platform, input and output plugins are open source and joyfully simple to create. All the complexity is transparently solved in skippr core, which the input and output plugins wrap as PHP bindings.
-
-## Universal Data Format and Integration
-
-CSV, Json, XML, Avro, Parquet, Arrow... think of Skippr as your effortless bridge to beyond data integration. Complete freedom to migrate data between any system, format and truly multi-cloud.
-
-Because Skippr guarantees your schemas, you can output optimised data formats for your destination or even standardise on the zero-copy world of Apache Arrow.
-
-## Schema Discovery and Evolution
-
-Schema changes overtime are automatically handled, with Enterprise supporting backwards compatible evolution rules and propagation to destinations (Hive, Avro Registry, DBRM's etc)
-
-
-## Getting Started
-
-Running Skippr is as easy.
-
-### Skippr Docker
-
-Skippr docker solves data integration, just configure an input and output plugin and specify your desired output (e.g. json file to parquet on S3). Skippr auto-fixing serialisers and schema discovery algorithms empower you to focus on creating value from your data, not migrating it.
-
-See [Getting Started Docker](getting-started/docker).
-
-### Skippr Enterprise
-
-Skippr Enterprise deploys as a serverless cloud solution, managing away complex pipeline challenges like auto-scaling, scheduling, dead-lettering and destination schema maintenance.
-
-Deploy to your private cloud account with one command or as part of your CICD. See the [Getting Started Guide](enterprise/aws).
-
-
-
-
-# Help
-
-Join us on [Slack](https://join.slack.com/t/skipprgroup/shared_invite/zt-np4dqtsw-ASqYMtQlFkvDTWXhz4hxYw).
+Skippr is licensed under the [Elastic License 2.0 (ELv2)](license.md).
