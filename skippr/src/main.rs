@@ -909,7 +909,9 @@ async fn sync() {
     // One-time migration: backfill .seg.commit and cleanup legacy segs before WAL recovery
     Buffers::migrate_segs_once();
 
-    wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
+    wal_recover(offsets_db.clone())
+        .await
+        .expect("Failed to recover WAL index");
 
     {
         METRICS.write().status = MetricsStatus::Running;
@@ -1023,8 +1025,15 @@ async fn sync() {
         }
         info!("Finalising: running forced compaction pass 1");
         Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
-        // Safety loop: if any .seg remain, run another pass (handles late live persist)
-        if Buffers::segs_remaining() > 0 {
+        // Safety loop: run another pass if segments remain (handles late live persist)
+        let needs_pass2 = if skippr::helpers::configuration::Config::get_wal_storage()
+            .eq_ignore_ascii_case("s3")
+        {
+            true // always run pass 2 for S3 WAL (segs_remaining is disk-only)
+        } else {
+            Buffers::segs_remaining() > 0
+        };
+        if needs_pass2 {
             info!("Finalising: running forced compaction pass 2");
             Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
         }

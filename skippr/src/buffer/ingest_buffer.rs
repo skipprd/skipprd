@@ -46,6 +46,58 @@ use tracing::{debug, error, info, warn};
 type PartitionKey = (String, String, Option<i64>, String);
 use tokio::sync::mpsc;
 
+/// Identifies a WAL segment and provides access to its data.
+/// `Disk` holds a local path; `S3` holds the object key, bucket, and full
+/// in-memory bytes (downloaded once during candidate scanning).
+#[derive(Clone)]
+pub(crate) enum SegmentSource {
+    Disk(PathBuf),
+    S3 {
+        key: String,
+        bucket: String,
+        data: Arc<Vec<u8>>,
+    },
+}
+
+impl SegmentSource {
+    /// Stable identifier for tombstone filenames and dedup.
+    fn segment_id(&self) -> &str {
+        match self {
+            SegmentSource::Disk(p) => p.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown"),
+            SegmentSource::S3 { key, .. } => {
+                let filename = key.rsplit('/').next().unwrap_or(key);
+                filename.strip_suffix(".seg").unwrap_or(filename)
+            }
+        }
+    }
+
+    fn display_name(&self) -> String {
+        match self {
+            SegmentSource::Disk(p) => p.to_string_lossy().to_string(),
+            SegmentSource::S3 { key, bucket, .. } => format!("s3://{bucket}/{key}"),
+        }
+    }
+
+    fn data_len(&self) -> io::Result<u64> {
+        match self {
+            SegmentSource::Disk(p) => {
+                let file = OpenOptions::new().read(true).open(p)?;
+                Ok(file.metadata()?.len())
+            }
+            SegmentSource::S3 { data, .. } => Ok(data.len() as u64),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn is_s3(&self) -> bool {
+        matches!(self, SegmentSource::S3 { .. })
+    }
+}
+
+fn is_s3_wal() -> bool {
+    Config::get_wal_storage().eq_ignore_ascii_case("s3")
+}
+
 #[allow(dead_code)]
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
     Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
@@ -438,35 +490,71 @@ impl Buffers {
         {
             return;
         }
+        let use_s3 = is_s3_wal();
         tokio::spawn(async move {
             loop {
-                // Fetch up to concurrency candidates and compact them concurrently
                 let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
                     .load(std::sync::atomic::Ordering::Relaxed)
                     .clamp(1, 64) as usize;
-                let candidates = Self::next_compaction_candidates(concurrency, false);
                 let stop = CONSUMER_STOP.load(std::sync::atomic::Ordering::Relaxed);
-                if candidates.is_empty() {
-                    if stop {
+
+                if use_s3 {
+                    let candidates =
+                        Self::next_compaction_candidates_s3(concurrency, false).await;
+                    if candidates.is_empty() {
+                        if stop {
+                            break;
+                        }
+                        tokio_sleep(TokioDuration::from_millis(500)).await;
+                        continue;
+                    }
+                    use futures::stream::StreamExt;
+                    let mut in_flight: futures::stream::FuturesUnordered<
+                        Pin<Box<dyn Future<Output = ()> + Send>>,
+                    > = futures::stream::FuturesUnordered::new();
+                    for (source, meta, idx) in candidates.into_iter() {
+                        let out = shared_output.clone();
+                        let off = offsets_db.clone();
+                        in_flight.push(Box::pin(async move {
+                            let _ = Self::compact_segment_partition_source(
+                                &source, &meta, &idx, out, off,
+                            )
+                            .await;
+                        }));
+                    }
+                    while let Some(_) = in_flight.next().await {}
+                    if stop
+                        && Self::next_compaction_candidates_s3(1, false)
+                            .await
+                            .is_empty()
+                    {
                         break;
                     }
-                    tokio_sleep(TokioDuration::from_millis(500)).await;
-                    continue;
-                }
-                use futures::stream::StreamExt;
-                let mut in_flight: futures::stream::FuturesUnordered<
-                    Pin<Box<dyn Future<Output = ()> + Send>>,
-                > = futures::stream::FuturesUnordered::new();
-                for (path, meta, idx) in candidates.into_iter() {
-                    let out = shared_output.clone();
-                    let off = offsets_db.clone();
-                    in_flight.push(Box::pin(async move {
-                        let _ = Self::compact_segment_partition(&path, &meta, &idx, out, off).await;
-                    }));
-                }
-                while let Some(_) = in_flight.next().await {}
-                if stop {
-                    if Self::next_compaction_candidates(1, false).is_empty() {
+                } else {
+                    let candidates = Self::next_compaction_candidates(concurrency, false);
+                    if candidates.is_empty() {
+                        if stop {
+                            break;
+                        }
+                        tokio_sleep(TokioDuration::from_millis(500)).await;
+                        continue;
+                    }
+                    use futures::stream::StreamExt;
+                    let mut in_flight: futures::stream::FuturesUnordered<
+                        Pin<Box<dyn Future<Output = ()> + Send>>,
+                    > = futures::stream::FuturesUnordered::new();
+                    for (path, meta, idx) in candidates.into_iter() {
+                        let out = shared_output.clone();
+                        let off = offsets_db.clone();
+                        in_flight.push(Box::pin(async move {
+                            let _ = Self::compact_segment_partition(
+                                &path, &meta, &idx, out, off,
+                            )
+                            .await;
+                        }));
+                    }
+                    while let Some(_) = in_flight.next().await {}
+                    if stop && Self::next_compaction_candidates(1, false).is_empty() {
                         break;
                     }
                 }
@@ -483,36 +571,56 @@ impl Buffers {
         offsets_db: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) {
-        // Drain/persist in-memory snapshots first so compactor works only on disk
         let _ = flush_all_segments(offsets_db.clone()).await;
 
-        // Parallel compaction of on-disk segment partitions
         use futures::stream::StreamExt;
         let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
             .load(std::sync::atomic::Ordering::Relaxed)
             .clamp(1, 64) as usize;
 
-        loop {
-            let candidates = Self::next_compaction_candidates(concurrency, force);
-            if candidates.is_empty() {
-                break;
+        if is_s3_wal() {
+            loop {
+                let candidates =
+                    Self::next_compaction_candidates_s3(concurrency, force).await;
+                if candidates.is_empty() {
+                    break;
+                }
+                let mut in_flight: futures::stream::FuturesUnordered<
+                    Pin<Box<dyn Future<Output = ()> + Send>>,
+                > = futures::stream::FuturesUnordered::new();
+                for (source, meta, idx) in candidates.into_iter() {
+                    let out = shared_output.clone();
+                    let off = offsets_db.clone();
+                    in_flight.push(Box::pin(async move {
+                        let _ = Self::compact_segment_partition_source(
+                            &source, &meta, &idx, out, off,
+                        )
+                        .await;
+                    }));
+                }
+                while let Some(_) = in_flight.next().await {}
             }
-
-            let mut in_flight: futures::stream::FuturesUnordered<
-                Pin<Box<dyn Future<Output = ()> + Send>>,
-            > = futures::stream::FuturesUnordered::new();
-            for (path, meta, idx) in candidates.into_iter() {
-                let out = shared_output.clone();
-                let off = offsets_db.clone();
-                in_flight.push(Box::pin(async move {
-                    let _ = Self::compact_segment_partition(&path, &meta, &idx, out, off).await;
-                }));
+        } else {
+            loop {
+                let candidates = Self::next_compaction_candidates(concurrency, force);
+                if candidates.is_empty() {
+                    break;
+                }
+                let mut in_flight: futures::stream::FuturesUnordered<
+                    Pin<Box<dyn Future<Output = ()> + Send>>,
+                > = futures::stream::FuturesUnordered::new();
+                for (path, meta, idx) in candidates.into_iter() {
+                    let out = shared_output.clone();
+                    let off = offsets_db.clone();
+                    in_flight.push(Box::pin(async move {
+                        let _ =
+                            Self::compact_segment_partition(&path, &meta, &idx, out, off).await;
+                    }));
+                }
+                while let Some(_) = in_flight.next().await {}
             }
-            while let Some(_) = in_flight.next().await {}
+            Self::sweep_segment_cleanup();
         }
-
-        // Sweep: remove any fully-tombstoned segments left behind
-        Self::sweep_segment_cleanup();
     }
 
     /// Signal the background compactor pool to stop after current work completes.
@@ -618,17 +726,13 @@ impl Buffers {
         PathBuf::from(format!("{}/segment_buffer/done", Config::get_data_dir()))
     }
 
-    fn partition_tombstone_path(seg_path: &PathBuf, key: &PartitionKey) -> PathBuf {
-        let snapshot_id = seg_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
+    fn tombstone_path_for_id(segment_id: &str, key: &PartitionKey) -> PathBuf {
         let (ns, part, time_opt, shard) = key;
         let time = time_opt.unwrap_or(0);
         let safe = |s: &str| s.replace('/', "_");
         let file = format!(
             "{}.seg.{}.{}.{}.{}.tombstone",
-            snapshot_id,
+            segment_id,
             safe(ns),
             safe(part),
             time,
@@ -637,17 +741,40 @@ impl Buffers {
         Buffers::tombstone_dir().join(file)
     }
 
+    fn partition_tombstone_path(seg_path: &PathBuf, key: &PartitionKey) -> PathBuf {
+        let id = seg_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        Self::tombstone_path_for_id(id, key)
+    }
+
+    fn tombstone_path_for_source(source: &SegmentSource, key: &PartitionKey) -> PathBuf {
+        Self::tombstone_path_for_id(source.segment_id(), key)
+    }
+
     fn is_partition_tombstoned(seg_path: &PathBuf, key: &PartitionKey) -> bool {
         Self::partition_tombstone_path(seg_path, key).exists()
     }
 
-    fn compute_compaction_id(
-        seg_path: &PathBuf,
+    fn is_source_tombstoned(source: &SegmentSource, key: &PartitionKey) -> bool {
+        Self::tombstone_path_for_source(source, key).exists()
+    }
+
+    fn compaction_id_for_source(
+        source: &SegmentSource,
         idx: &crate::buffer::segment_file::SegmentPartitionIndexEntry,
     ) -> String {
         let mut hasher = Sha256::new();
-        if let Some(name) = seg_path.file_name().and_then(|s| s.to_str()) {
-            hasher.update(name.as_bytes());
+        match source {
+            SegmentSource::Disk(p) => {
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    hasher.update(name.as_bytes());
+                }
+            }
+            SegmentSource::S3 { key, .. } => {
+                hasher.update(key.as_bytes());
+            }
         }
         hasher.update(&idx.start.to_le_bytes());
         hasher.update(&idx.len.to_le_bytes());
@@ -655,6 +782,14 @@ impl Buffers {
         hasher.update(&idx.updated_at_secs.to_le_bytes());
         let digest = hasher.finalize();
         hex::encode(&digest[..8])
+    }
+
+    #[allow(dead_code)]
+    fn compute_compaction_id(
+        seg_path: &PathBuf,
+        idx: &crate::buffer::segment_file::SegmentPartitionIndexEntry,
+    ) -> String {
+        Self::compaction_id_for_source(&SegmentSource::Disk(seg_path.clone()), idx)
     }
 
     fn fsync_dir(dir: &PathBuf) -> io::Result<()> {
@@ -1147,6 +1282,126 @@ impl Buffers {
         out
     }
 
+    async fn next_compaction_candidates_s3(
+        limit: usize,
+        force: bool,
+    ) -> Vec<(
+        SegmentSource,
+        SegmentFileMetadata,
+        crate::buffer::segment_file::SegmentPartitionIndexEntry,
+    )> {
+        let mut out: Vec<(
+            SegmentSource,
+            SegmentFileMetadata,
+            crate::buffer::segment_file::SegmentPartitionIndexEntry,
+        )> = Vec::with_capacity(limit);
+        let bucket = Config::get_wal_s3_bucket();
+        let prefix = Config::get_wal_s3_prefix();
+        let client = crate::helpers::s3::get_s3_client().await;
+
+        let mut token: Option<String> = None;
+        let mut segs: HashSet<String> = HashSet::new();
+        let mut commits: HashSet<String> = HashSet::new();
+        loop {
+            let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix);
+            if let Some(t) = &token {
+                req = req.continuation_token(t);
+            }
+            match req.send().await {
+                Ok(resp) => {
+                    if let Some(contents) = resp.contents {
+                        for obj in contents {
+                            if let Some(k) = obj.key() {
+                                if k.ends_with(".seg") {
+                                    segs.insert(k.to_string());
+                                }
+                                if k.ends_with(".seg.commit") {
+                                    commits
+                                        .insert(k.trim_end_matches(".commit").to_string());
+                                }
+                            }
+                        }
+                    }
+                    if resp.is_truncated.unwrap_or(false) {
+                        token = resp.next_continuation_token;
+                    } else {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("S3 WAL compaction list error: {}", e);
+                    break;
+                }
+            }
+        }
+
+        let now_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        for seg_key in segs.iter() {
+            if out.len() >= limit {
+                break;
+            }
+            if !commits.contains(seg_key) {
+                continue;
+            }
+            let data = match client
+                .get_object()
+                .bucket(&bucket)
+                .key(seg_key)
+                .send()
+                .await
+            {
+                Ok(resp) => match resp.body.collect().await {
+                    Ok(agg) => agg.into_bytes().to_vec(),
+                    Err(e) => {
+                        warn!("S3 WAL compaction body error {}: {}", seg_key, e);
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    warn!("S3 WAL compaction get error {}: {}", seg_key, e);
+                    continue;
+                }
+            };
+
+            let source = SegmentSource::S3 {
+                key: seg_key.clone(),
+                bucket: bucket.clone(),
+                data: Arc::new(data),
+            };
+
+            if let SegmentSource::S3 { ref data, .. } = source {
+                if let Ok(meta) = SegmentFile::read_metadata_from_bytes(data) {
+                    for idx in meta.index.iter() {
+                        if Self::is_source_tombstoned(&source, &idx.key) {
+                            continue;
+                        }
+                        let inflight_key =
+                            (source.display_name(), idx.start, idx.len);
+                        if COMPACTION_IN_FLIGHT.contains_key(&inflight_key) {
+                            continue;
+                        }
+                        if Self::should_compact(
+                            idx.bytes,
+                            idx.updated_at_secs,
+                            now_secs,
+                            force,
+                        ) {
+                            out.push((source.clone(), meta.clone(), idx.clone()));
+                            if out.len() >= limit {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     fn sweep_segment_cleanup() {
         let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
         if !seg_dir.exists() {
@@ -1216,9 +1471,9 @@ impl Buffers {
         count
     }
 
-    async fn compact_segment_partition(
-        seg_path: &PathBuf,
-        _meta: &SegmentFileMetadata,
+    async fn compact_segment_partition_source(
+        source: &SegmentSource,
+        meta: &SegmentFileMetadata,
         idx: &crate::buffer::segment_file::SegmentPartitionIndexEntry,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
         _offsets_db: Arc<Offsets>,
@@ -1229,6 +1484,7 @@ impl Buffers {
             idx.key.2,
             idx.key.3.clone(),
         );
+        let seg_display = source.display_name();
         let mut out_key = BufferChunker::encode_chunk_name(
             "output",
             Some(&namespace),
@@ -1236,15 +1492,13 @@ impl Buffers {
             time,
             Some(&shard),
         );
-        let compaction_id = Buffers::compute_compaction_id(seg_path, idx);
+        let compaction_id = Buffers::compaction_id_for_source(source, idx);
         out_key = format!("{}-c={}", out_key, compaction_id);
 
-        // Metrics: started + in-flight
         crate::metrics::counters::add_wal_compaction_started(1);
         crate::metrics::counters::inc_wal_compactions_in_flight();
 
-        // Single-flight guard (keyed by seg_path + start + len)
-        let inflight_key = (seg_path.to_string_lossy().to_string(), idx.start, idx.len);
+        let inflight_key = (seg_display.clone(), idx.start, idx.len);
         if COMPACTION_IN_FLIGHT
             .insert(inflight_key.clone(), ())
             .is_some()
@@ -1252,9 +1506,7 @@ impl Buffers {
             if Config::debug_enabled() || Config::log_wal_enabled() {
                 debug!(
                     "Compactor: skip duplicate in-flight seg={} start={} len={}",
-                    seg_path.to_string_lossy(),
-                    idx.start,
-                    idx.len
+                    seg_display, idx.start, idx.len
                 );
             }
             crate::metrics::counters::dec_wal_compactions_in_flight();
@@ -1269,86 +1521,84 @@ impl Buffers {
         }
         let _guard = InflightGuard(inflight_key.clone());
         if Config::debug_enabled() || Config::log_wal_enabled() {
-            debug!("Compactor: start ns={} part={} time={} shard={} seg={} start={} len={} bytes={} out_key={}",
-                namespace, partition, time.unwrap_or(0), shard, seg_path.to_string_lossy(), idx.start, idx.len, idx.bytes, out_key);
+            debug!(
+                "Compactor: start ns={} part={} time={} shard={} seg={} start={} len={} bytes={} out_key={}",
+                namespace, partition, time.unwrap_or(0), shard, seg_display, idx.start, idx.len, idx.bytes, out_key
+            );
         }
-        // Validate and clamp partition bounds to avoid corrupt reads
-        let file_len = OpenOptions::new()
-            .read(true)
-            .open(&seg_path)?
-            .metadata()?
-            .len();
+
+        let file_len = source.data_len()?;
         if idx.start >= file_len {
             error!(
                 "Compactor: partition start beyond file end for {} start={} len={} file_len={}",
-                seg_path.to_string_lossy(),
-                idx.start,
-                idx.len,
-                file_len
+                seg_display, idx.start, idx.len, file_len
             );
             return Ok(false);
         }
         let safe_len = std::cmp::min(idx.len, file_len.saturating_sub(idx.start));
         if Config::debug_enabled() || Config::log_wal_enabled() {
-            let end_hint = idx.start.saturating_add(safe_len);
             debug!(
                 "Compactor: bounds seg={} file_len={} start={} idx_len={} safe_len={} end_hint={}",
-                seg_path.to_string_lossy(),
-                file_len,
-                idx.start,
-                idx.len,
-                safe_len,
-                end_hint
+                seg_display, file_len, idx.start, idx.len, safe_len,
+                idx.start.saturating_add(safe_len)
             );
         }
 
-        // Determine schema by opening and creating a StreamReader once (bounded to safe_len)
-        let schema: SchemaRef = {
-            let mut file = OpenOptions::new().read(true).open(&seg_path)?;
-            file.seek(io::SeekFrom::Start(idx.start))?;
-            let reader = io::BufReader::new(file);
-            use std::io::Read as IoRead;
-            let mut take = reader.take(safe_len);
-            match StreamReader::try_new(&mut take, None) {
-                Ok(sr) => sr.schema(),
-                Err(e) => {
-                    let es = e.to_string();
-                    if es.contains("failed to fill whole buffer") || es.contains("UnexpectedEof") {
-                        // Retry without length limiting in case the computed len is slightly short
-                        let mut file2 = OpenOptions::new().read(true).open(&seg_path)?;
-                        file2.seek(io::SeekFrom::Start(idx.start))?;
-                        let reader2 = io::BufReader::new(file2);
-                        let sr2 = StreamReader::try_new(reader2, None).map_err(|e2| {
-                            io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e2))
-                        })?;
-                        sr2.schema()
-                    } else {
-                        return Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!("arrow: {}", e),
-                        ));
+        // ── Schema + batch-stream setup (branches on source type) ──────────
+        let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(8);
+        let start_pos = idx.start;
+        let part_len = safe_len;
+
+        let schema: SchemaRef = match source {
+            SegmentSource::S3 { data, .. } => {
+                let start = start_pos as usize;
+                let end = start.saturating_add(part_len as usize).min(data.len());
+                let mut cursor = io::Cursor::new(&data[start..end]);
+                match StreamReader::try_new(&mut cursor, None) {
+                    Ok(sr) => sr.schema(),
+                    Err(_) => {
+                        let mut cursor2 = io::Cursor::new(&data[start..]);
+                        StreamReader::try_new(&mut cursor2, None)
+                            .map(|sr| sr.schema())
+                            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?
+                    }
+                }
+            }
+            SegmentSource::Disk(seg_path) => {
+                let mut file = OpenOptions::new().read(true).open(seg_path)?;
+                file.seek(io::SeekFrom::Start(start_pos))?;
+                let reader = io::BufReader::new(file);
+                use std::io::Read as IoRead;
+                let mut take = reader.take(part_len);
+                match StreamReader::try_new(&mut take, None) {
+                    Ok(sr) => sr.schema(),
+                    Err(e) => {
+                        let es = e.to_string();
+                        if es.contains("failed to fill whole buffer") || es.contains("UnexpectedEof") {
+                            let mut file2 = OpenOptions::new().read(true).open(seg_path)?;
+                            file2.seek(io::SeekFrom::Start(start_pos))?;
+                            let reader2 = io::BufReader::new(file2);
+                            StreamReader::try_new(reader2, None)
+                                .map(|sr| sr.schema())
+                                .map_err(|e2| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e2)))?
+                        } else {
+                            return Err(io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)));
+                        }
                     }
                 }
             }
         };
 
-        let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(8);
-        let seg_path_clone = seg_path.clone();
-        let start_pos = idx.start;
-        let part_len = safe_len;
-        tokio::spawn(async move {
-            match OpenOptions::new().read(true).open(&seg_path_clone) {
-                Ok(mut file) => {
-                    if let Err(e) = file.seek(io::SeekFrom::Start(start_pos)) {
-                        let _ = tx.send(Err(DataFusionError::IoError(e)));
-                        return;
-                    }
-                    let reader = io::BufReader::new(file);
-                    use std::io::Read as IoRead;
-                    let mut take = reader.take(part_len);
-                    match StreamReader::try_new(&mut take, None) {
+        // ── Spawn batch reader ─────────────────────────────────────────────
+        match source {
+            SegmentSource::S3 { data, .. } => {
+                let data = data.clone();
+                tokio::spawn(async move {
+                    let start = start_pos as usize;
+                    let end = start.saturating_add(part_len as usize).min(data.len());
+                    let mut cursor = io::Cursor::new(&data[start..end]);
+                    match StreamReader::try_new(&mut cursor, None) {
                         Ok(sr) => {
-                            let mut had_iter_error = false;
                             for item in sr {
                                 match item {
                                     Ok(batch) => {
@@ -1357,141 +1607,143 @@ impl Buffers {
                                         }
                                     }
                                     Err(e) => {
-                                        let es = e.to_string();
-                                        had_iter_error = true;
-                                        if es.contains("failed to fill whole buffer")
-                                            || es.contains("UnexpectedEof")
-                                        {
-                                            // Retry reading unbounded from start once
-                                            match OpenOptions::new()
-                                                .read(true)
-                                                .open(&seg_path_clone)
-                                            {
-                                                Ok(mut f2) => {
-                                                    if let Err(e) =
-                                                        f2.seek(io::SeekFrom::Start(start_pos))
-                                                    {
-                                                        let _ = tx
-                                                            .send(Err(DataFusionError::IoError(e)));
-                                                        break;
-                                                    }
-                                                    let reader2 = io::BufReader::new(f2);
-                                                    match StreamReader::try_new(reader2, None) {
-                                                        Ok(sr2) => {
-                                                            for item2 in sr2 {
-                                                                match item2 {
-                                                                    Ok(batch) => {
-                                                                        if tx
-                                                                            .send(Ok(batch))
-                                                                            .await
-                                                                            .is_err()
-                                                                        {
-                                                                            break;
-                                                                        }
-                                                                    }
-                                                                    Err(e2) => {
-                                                                        let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e2), None))).await;
-                                                                        break;
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        Err(e2) => {
-                                                            let _ = tx
-                                                                .send(Err(
-                                                                    DataFusionError::ArrowError(
-                                                                        Box::new(e2),
-                                                                        None,
-                                                                    ),
-                                                                ))
-                                                                .await;
-                                                        }
-                                                    }
-                                                }
-                                                Err(eopen) => {
-                                                    let _ = tx
-                                                        .send(Err(DataFusionError::IoError(eopen)));
-                                                }
-                                            }
-                                        } else {
-                                            let _ = tx
-                                                .send(Err(DataFusionError::ArrowError(
-                                                    Box::new(e),
-                                                    None,
-                                                )))
-                                                .await;
-                                        }
+                                        let _ = tx
+                                            .send(Err(DataFusionError::ArrowError(Box::new(e), None)))
+                                            .await;
                                         break;
                                     }
                                 }
                             }
-                            if had_iter_error { /* already handled fallback or sent error */ }
                         }
                         Err(e) => {
-                            // Fallback: if the limited reader fails due to truncated buffer, retry without the limit
-                            let es = e.to_string();
-                            if es.contains("failed to fill whole buffer")
-                                || es.contains("UnexpectedEof")
-                            {
-                                match OpenOptions::new().read(true).open(&seg_path_clone) {
-                                    Ok(mut f2) => {
-                                        if let Err(e) = f2.seek(io::SeekFrom::Start(start_pos)) {
-                                            let _ = tx.send(Err(DataFusionError::IoError(e)));
-                                            return;
-                                        }
-                                        let reader2 = io::BufReader::new(f2);
-                                        match StreamReader::try_new(reader2, None) {
-                                            Ok(sr2) => {
-                                                for item in sr2 {
-                                                    match item {
-                                                        Ok(batch) => {
-                                                            if tx.send(Ok(batch)).await.is_err() {
+                            let _ = tx
+                                .send(Err(DataFusionError::ArrowError(Box::new(e), None)))
+                                .await;
+                        }
+                    }
+                    drop(tx);
+                });
+            }
+            SegmentSource::Disk(seg_path) => {
+                let seg_path_clone = seg_path.clone();
+                tokio::spawn(async move {
+                    match OpenOptions::new().read(true).open(&seg_path_clone) {
+                        Ok(mut file) => {
+                            if let Err(e) = file.seek(io::SeekFrom::Start(start_pos)) {
+                                let _ = tx.send(Err(DataFusionError::IoError(e)));
+                                return;
+                            }
+                            let reader = io::BufReader::new(file);
+                            use std::io::Read as IoRead;
+                            let mut take = reader.take(part_len);
+                            match StreamReader::try_new(&mut take, None) {
+                                Ok(sr) => {
+                                    let mut had_iter_error = false;
+                                    for item in sr {
+                                        match item {
+                                            Ok(batch) => {
+                                                if tx.send(Ok(batch)).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                let es = e.to_string();
+                                                had_iter_error = true;
+                                                if es.contains("failed to fill whole buffer")
+                                                    || es.contains("UnexpectedEof")
+                                                {
+                                                    match OpenOptions::new().read(true).open(&seg_path_clone) {
+                                                        Ok(mut f2) => {
+                                                            if let Err(e) = f2.seek(io::SeekFrom::Start(start_pos)) {
+                                                                let _ = tx.send(Err(DataFusionError::IoError(e)));
                                                                 break;
                                                             }
+                                                            let reader2 = io::BufReader::new(f2);
+                                                            match StreamReader::try_new(reader2, None) {
+                                                                Ok(sr2) => {
+                                                                    for item2 in sr2 {
+                                                                        match item2 {
+                                                                            Ok(batch) => {
+                                                                                if tx.send(Ok(batch)).await.is_err() {
+                                                                                    break;
+                                                                                }
+                                                                            }
+                                                                            Err(e2) => {
+                                                                                let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e2), None))).await;
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                                Err(e2) => {
+                                                                    let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e2), None))).await;
+                                                                }
+                                                            }
                                                         }
-                                                        Err(e) => {
-                                                            let _ = tx
-                                                                .send(Err(
-                                                                    DataFusionError::ArrowError(
-                                                                        Box::new(e),
-                                                                        None,
-                                                                    ),
-                                                                ))
-                                                                .await;
-                                                            break;
+                                                        Err(eopen) => {
+                                                            let _ = tx.send(Err(DataFusionError::IoError(eopen)));
                                                         }
+                                                    }
+                                                } else {
+                                                    let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e), None))).await;
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if had_iter_error { /* already handled */ }
+                                }
+                                Err(e) => {
+                                    let es = e.to_string();
+                                    if es.contains("failed to fill whole buffer") || es.contains("UnexpectedEof") {
+                                        match OpenOptions::new().read(true).open(&seg_path_clone) {
+                                            Ok(mut f2) => {
+                                                if let Err(e) = f2.seek(io::SeekFrom::Start(start_pos)) {
+                                                    let _ = tx.send(Err(DataFusionError::IoError(e)));
+                                                    return;
+                                                }
+                                                let reader2 = io::BufReader::new(f2);
+                                                match StreamReader::try_new(reader2, None) {
+                                                    Ok(sr2) => {
+                                                        for item in sr2 {
+                                                            match item {
+                                                                Ok(batch) => {
+                                                                    if tx.send(Ok(batch)).await.is_err() {
+                                                                        break;
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e), None))).await;
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e2) => {
+                                                        let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e2), None))).await;
                                                     }
                                                 }
                                             }
-                                            Err(e2) => {
-                                                let _ = tx
-                                                    .send(Err(DataFusionError::ArrowError(
-                                                        Box::new(e2),
-                                                        None,
-                                                    )))
-                                                    .await;
+                                            Err(eopen) => {
+                                                let _ = tx.send(Err(DataFusionError::IoError(eopen)));
                                             }
                                         }
-                                    }
-                                    Err(eopen) => {
-                                        let _ = tx.send(Err(DataFusionError::IoError(eopen)));
+                                    } else {
+                                        let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e), None))).await;
                                     }
                                 }
-                            } else {
-                                let _ = tx
-                                    .send(Err(DataFusionError::ArrowError(Box::new(e), None)))
-                                    .await;
                             }
                         }
+                        Err(e) => {
+                            let _ = tx.send(Err(DataFusionError::IoError(e)));
+                        }
                     }
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(DataFusionError::IoError(e)));
-                }
+                    drop(tx);
+                });
             }
-            drop(tx);
-        });
+        }
 
+        // ── Stream wrapper + output sync ───────────────────────────────────
         struct SegRecordBatchStream {
             schema: SchemaRef,
             rx: mpsc::Receiver<Result<RecordBatch, DataFusionError>>,
@@ -1502,7 +1754,6 @@ impl Buffers {
                 self: Pin<&mut Self>,
                 cx: &mut TaskContext<'_>,
             ) -> TaskPoll<Option<Self::Item>> {
-                // Safety: we only move rx
                 let inner = unsafe { self.get_unchecked_mut() };
                 match inner.rx.poll_recv(cx) {
                     TaskPoll::Ready(Some(item)) => TaskPoll::Ready(Some(item)),
@@ -1525,146 +1776,134 @@ impl Buffers {
             let err_str = e.to_string();
             error!(
                 "Compactor: compact failed seg={} key={:?} out_key={} error={}",
-                seg_path.to_string_lossy(),
-                idx.key,
-                out_key,
-                err_str
+                seg_display, idx.key, out_key, err_str
             );
-            // Diagnostics and quarantine for truncated streams to ensure forward progress
             if err_str.contains("failed to fill whole buffer") || err_str.contains("UnexpectedEof")
             {
-                let file_len2 = OpenOptions::new()
-                    .read(true)
-                    .open(&seg_path)?
-                    .metadata()?
-                    .len();
-                let safe_len2 = std::cmp::min(idx.len, file_len2.saturating_sub(idx.start));
                 let diag = format!(
-                    "seg_path={} file_len={} start={} idx_len={} safe_len={} out_key={} error={}",
-                    seg_path.to_string_lossy(),
-                    file_len2,
-                    idx.start,
-                    idx.len,
-                    safe_len2,
-                    out_key,
-                    err_str
+                    "seg={} file_len={} start={} idx_len={} safe_len={} out_key={} error={}",
+                    seg_display, file_len, idx.start, idx.len, safe_len, out_key, err_str
                 );
-                // Quarantine the entire segment for inspection
-                let qdir = PathBuf::from(format!(
-                    "{}/segment_buffer/quarantine",
-                    Config::get_data_dir()
-                ));
-                let _ = fs::create_dir_all(&qdir);
-                let ts = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let base = seg_path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
-                let qseg = qdir.join(format!("{}.{}.seg", base, ts));
-                let qdiag = qdir.join(format!("{}.{}.diag.txt", base, ts));
-                if !qseg.exists() {
-                    if let Err(e) = fs::copy(&seg_path, &qseg) {
-                        error!(
-                            "Compactor: quarantine copy failed seg={} to={} err={}",
-                            seg_path.to_string_lossy(),
-                            qseg.to_string_lossy(),
-                            e
-                        );
+                if let SegmentSource::Disk(seg_path) = source {
+                    let qdir = PathBuf::from(format!(
+                        "{}/segment_buffer/quarantine",
+                        Config::get_data_dir()
+                    ));
+                    let _ = fs::create_dir_all(&qdir);
+                    let ts = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let base = seg_path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown");
+                    let qseg = qdir.join(format!("{}.{}.seg", base, ts));
+                    let qdiag = qdir.join(format!("{}.{}.diag.txt", base, ts));
+                    if !qseg.exists() {
+                        if let Err(e) = fs::copy(seg_path, &qseg) {
+                            error!(
+                                "Compactor: quarantine copy failed seg={} to={} err={}",
+                                seg_display,
+                                qseg.to_string_lossy(),
+                                e
+                            );
+                        }
                     }
+                    let _ = fs::write(&qdiag, diag.as_bytes());
                 }
-                if let Err(e) = fs::write(&qdiag, diag.as_bytes()) {
-                    error!(
-                        "Compactor: quarantine diag write failed path={} err={}",
-                        qdiag.to_string_lossy(),
-                        e
-                    );
-                }
-                warn!(
-                    "Compactor: truncated-stream quarantine seg={} qseg={} qdiag={}",
-                    seg_path.to_string_lossy(),
-                    qseg.to_string_lossy(),
-                    qdiag.to_string_lossy()
-                );
+                warn!("Compactor: truncated-stream quarantine seg={}", seg_display);
                 crate::metrics::counters::add_quarantined_partitions(1);
             }
             return Ok(false);
         }
 
-        // Metrics: completed
+        // ── Post-compaction: tombstone + cleanup ───────────────────────────
         crate::metrics::counters::add_wal_compaction_completed(1);
 
-        // Do not commit offsets here; they are committed upon persisting .seg in flush()
-
-        // Write tombstone to avoid reprocessing this partition from this segment
         let tdir = Self::tombstone_dir();
         let _ = fs::create_dir_all(&tdir);
-        let tpath = Self::partition_tombstone_path(seg_path, &idx.key);
+        let tpath = Self::tombstone_path_for_source(source, &idx.key);
         if let Err(e) = fs::write(&tpath, b"") {
             error!("Failed to write tombstone {:?}: {}", tpath, e);
         }
-        // debug!("Compactor: compact success seg={} key={:?} out_key={} tombstone={}", seg_path.to_string_lossy(), idx.key, out_key, tpath.to_string_lossy());
 
-        // If all partitions in this segment are tombstoned, delete the .seg file
-        let segf = SegmentFile {
-            path: seg_path.clone(),
-        };
-        match segf.read_metadata() {
-            Ok(m) => {
-                let mut remaining = 0usize;
-                for p in m.index.iter() {
-                    if !Self::is_partition_tombstoned(seg_path, &p.key) {
-                        remaining += 1;
-                    }
-                }
-                if remaining == 0 {
-                    // remove segment file
+        let all_tombstoned = meta
+            .index
+            .iter()
+            .all(|p| Self::is_source_tombstoned(source, &p.key));
+
+        if all_tombstoned {
+            match source {
+                SegmentSource::Disk(seg_path) => {
                     if let Err(e) = fs::remove_file(seg_path) {
                         warn!(
                             "Failed to remove fully-compacted segment {}: {}",
-                            seg_path.to_string_lossy(),
-                            e
+                            seg_display, e
                         );
                     } else {
                         let commit_path = seg_path.with_extension("seg.commit");
-                        match fs::remove_file(&commit_path) {
-                            Ok(_) => {}
-                            Err(e) => {
-                                if e.kind() != io::ErrorKind::NotFound {
-                                    warn!(
-                                        "Failed to remove commit marker {}: {}",
-                                        commit_path.to_string_lossy(),
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                        // println!("Removed fully-compacted segment {}", seg_path.to_string_lossy());
-                        // remove all tombstones for this segment
-                        for part in m.index.iter() {
-                            let tp = Self::partition_tombstone_path(seg_path, &part.key);
-                            if tp.exists() {
-                                if let Err(e) = fs::remove_file(&tp) {
-                                    warn!("Failed to remove tombstone {:?}: {}", tp, e);
-                                }
+                        if let Err(e) = fs::remove_file(&commit_path) {
+                            if e.kind() != io::ErrorKind::NotFound {
+                                warn!(
+                                    "Failed to remove commit marker {}: {}",
+                                    commit_path.to_string_lossy(),
+                                    e
+                                );
                             }
                         }
                     }
                 }
+                SegmentSource::S3 { key, bucket, .. } => {
+                    let client = crate::helpers::s3::get_s3_client().await;
+                    let commit_key = format!("{}.commit", key);
+                    if let Err(e) = client
+                        .delete_object()
+                        .bucket(bucket)
+                        .key(key)
+                        .send()
+                        .await
+                    {
+                        warn!("Failed to delete S3 segment {}: {:?}", key, e);
+                    }
+                    if let Err(e) = client
+                        .delete_object()
+                        .bucket(bucket)
+                        .key(&commit_key)
+                        .send()
+                        .await
+                    {
+                        warn!("Failed to delete S3 commit marker {}: {:?}", commit_key, e);
+                    }
+                }
             }
-            Err(e) => {
-                if e.kind() != io::ErrorKind::NotFound {
-                    warn!(
-                        "Failed to re-read segment metadata for cleanup {}: {}",
-                        seg_path.to_string_lossy(),
-                        e
-                    );
+            for part in meta.index.iter() {
+                let tp = Self::tombstone_path_for_source(source, &part.key);
+                if tp.exists() {
+                    if let Err(e) = fs::remove_file(&tp) {
+                        warn!("Failed to remove tombstone {:?}: {}", tp, e);
+                    }
                 }
             }
         }
         Ok(true)
+    }
+
+    async fn compact_segment_partition(
+        seg_path: &PathBuf,
+        meta: &SegmentFileMetadata,
+        idx: &crate::buffer::segment_file::SegmentPartitionIndexEntry,
+        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        offsets_db: Arc<Offsets>,
+    ) -> io::Result<bool> {
+        Self::compact_segment_partition_source(
+            &SegmentSource::Disk(seg_path.clone()),
+            meta,
+            idx,
+            shared_output,
+            offsets_db,
+        )
+        .await
     }
 }
 
@@ -1796,170 +2035,117 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
     Ok(())
 }
 
-/// Blocking S3 WAL index recovery used for end-of-ingest compaction
-pub fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
-    // Resolve wal_segments_prefix from manifest or env for current pipeline
-    fn resolve_prefix_blocking() -> Option<String> {
-        // We need a runtime to call async manifest read; fallback to env if RT fails
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let fut = async {
-                if let Some(man) = crate::helpers::manifest::Manifest::read(&Config::get_pipeline_name()).await {
-                    if let Some(v) = man.get("wal_segments_prefix").and_then(|s| s.as_str()) {
-                        if v.starts_with("s3://") {
-                            return Some(v.to_string());
-                        }
-                    }
-                    if let Some(tables) = man.get("tables").and_then(|t| t.as_object()) {
-                        let p = Config::get_pipeline_name();
-                        if let Some(nsobj) = tables.get(&p).and_then(|v| v.as_object()) {
-                            if let Some(pfx) =
-                                nsobj.get("wal_segments_prefix").and_then(|s| s.as_str())
-                            {
-                                if pfx.starts_with("s3://") {
-                                    return Some(pfx.to_string());
-                                }
+/// Async S3 WAL offset recovery: lists committed segments in S3, reads their
+/// metadata, and commits source offsets to the offsets DB. No data is written to
+/// local disk — compaction reads from S3 directly via `next_compaction_candidates_s3`.
+async fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
+    let bucket = Config::get_wal_s3_bucket();
+    let prefix = Config::get_wal_s3_prefix();
+
+    info!(
+        "S3 WAL recovery: scanning s3://{}/{} for committed segments",
+        bucket, prefix
+    );
+    let client = crate::helpers::s3::get_s3_client().await;
+
+    let mut token: Option<String> = None;
+    let mut segs: HashSet<String> = HashSet::new();
+    let mut commits: HashSet<String> = HashSet::new();
+    loop {
+        let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix);
+        if let Some(t) = &token {
+            req = req.continuation_token(t);
+        }
+        match req.send().await {
+            Ok(resp) => {
+                if let Some(contents) = resp.contents {
+                    for obj in contents {
+                        if let Some(k) = obj.key() {
+                            if k.ends_with(".seg") {
+                                segs.insert(k.to_string());
+                            }
+                            if k.ends_with(".seg.commit") {
+                                commits.insert(k.trim_end_matches(".commit").to_string());
                             }
                         }
                     }
                 }
-                None
-            };
-            let pfx = handle.block_on(fut);
-            if pfx.is_some() {
-                return pfx;
-            }
-        }
-        let env = Config::getenv("WAL_SEGMENTS_PREFIX", "");
-        if !env.is_empty() && env.starts_with("s3://") {
-            return Some(env);
-        }
-        None
-    }
-    let prefix_url = match resolve_prefix_blocking() {
-        Some(p) => p,
-        None => {
-            return Ok(());
-        }
-    };
-    // Build a small runtime for S3 listing and GETs
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
-    rt.block_on(async {
-        let u = match url::Url::parse(&prefix_url) {
-            Ok(u) => u,
-            Err(e) => {
-                error!("wal_recover_s3: bad prefix {}: {}", prefix_url, e);
-                return;
-            }
-        };
-        if u.scheme() != "s3" {
-            return;
-        }
-        let bucket = match u.host_str() {
-            Some(b) => b.to_string(),
-            None => return,
-        };
-        let base = u
-            .path()
-            .trim_start_matches('/')
-            .trim_end_matches('/')
-            .to_string();
-        let client = crate::helpers::s3::get_s3_client().await;
-        // List objects and find committed segments
-        let mut token: Option<String> = None;
-        let mut segs: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut commits: std::collections::HashSet<String> = std::collections::HashSet::new();
-        loop {
-            let mut req = client.list_objects_v2().bucket(&bucket).prefix(&base);
-            if let Some(t) = &token {
-                req = req.continuation_token(t);
-            }
-            match req.send().await {
-                Ok(resp) => {
-                    if let Some(contents) = resp.contents {
-                        for obj in contents {
-                            if let Some(k) = obj.key() {
-                                if k.ends_with(".seg") {
-                                    segs.insert(k.to_string());
-                                }
-                                if k.ends_with(".seg.commit") {
-                                    commits.insert(k.trim_end_matches(".commit").to_string());
-                                }
-                            }
-                        }
-                    }
-                    if resp.is_truncated.unwrap_or(false) {
-                        token = resp.next_continuation_token;
-                    } else {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    error!("wal_recover_s3: list error: {}", e);
+                if resp.is_truncated.unwrap_or(false) {
+                    token = resp.next_continuation_token;
+                } else {
                     break;
                 }
             }
-        }
-        let mut processed: u64 = 0;
-        let mut committed_offsets: u64 = 0;
-        let mut namespaces: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for seg_key in segs.iter() {
-            if !commits.contains(seg_key) {
-                continue;
+            Err(e) => {
+                error!("S3 WAL recovery: list error: {}", e);
+                break;
             }
-            match client
-                .get_object()
-                .bucket(&bucket)
-                .key(seg_key)
-                .send()
-                .await
-            {
-                Ok(resp) => match resp.body.collect().await {
-                    Ok(agg) => {
-                        let bytes = agg.into_bytes();
-                        if let Ok(meta) =
-                            crate::buffer::segment_file::SegmentFile::read_metadata_from_bytes(
-                                &bytes,
-                            )
-                        {
-                            for idx in meta.index.iter() {
-                                namespaces.insert(idx.key.0.clone());
-                            }
-                            for (ok, pos) in meta.offsets.iter() {
-                                let offset_key = OffsetKey {
-                                    namespace: ok.namespace.clone(),
-                                    partition: ok.partition.clone(),
-                                };
-                                offsets_db.insert(&offset_key, OffsetTypes::Position, *pos);
-                                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
-                                committed_offsets = committed_offsets.saturating_add(1);
-                            }
-                            processed = processed.saturating_add(1);
+        }
+    }
+
+    let mut processed: u64 = 0;
+    let mut committed_offsets: u64 = 0;
+    let mut namespaces: HashSet<String> = HashSet::new();
+    let mut bytes_total: u64 = 0;
+
+    for seg_key in segs.iter() {
+        if !commits.contains(seg_key) {
+            continue;
+        }
+        match client
+            .get_object()
+            .bucket(&bucket)
+            .key(seg_key)
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.body.collect().await {
+                Ok(agg) => {
+                    let data = agg.into_bytes();
+                    if let Ok(meta) = SegmentFile::read_metadata_from_bytes(&data) {
+                        for idx in meta.index.iter() {
+                            namespaces.insert(idx.key.0.clone());
                         }
+                        for (ok, pos) in meta.offsets.iter() {
+                            let offset_key = OffsetKey {
+                                namespace: ok.namespace.clone(),
+                                partition: ok.partition.clone(),
+                            };
+                            offsets_db.insert(&offset_key, OffsetTypes::Position, *pos);
+                            offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+                            committed_offsets = committed_offsets.saturating_add(1);
+                        }
+                        bytes_total = bytes_total.saturating_add(meta.total_bytes);
+                        processed = processed.saturating_add(1);
                     }
-                    Err(e) => {
-                        error!("wal_recover_s3: get body error {}: {}", seg_key, e);
-                    }
-                },
-                Err(e) => {
-                    error!("wal_recover_s3: get error {}: {}", seg_key, e);
                 }
+                Err(e) => {
+                    error!("S3 WAL recovery: body error {}: {}", seg_key, e);
+                }
+            },
+            Err(e) => {
+                error!("S3 WAL recovery: get error {}: {}", seg_key, e);
             }
         }
-        if processed > 0 {
-            info!("Indexed {} S3 WAL segments under {}", processed, prefix_url);
-            info!(
-                "Committed {} offsets from S3 WAL (.seg with commit)",
-                committed_offsets
-            );
-            let mut w = METRICS.write();
-            w.wal_index_namespaces_total = namespaces.len() as u64;
-            w.wal_index_files_total = processed as u64;
-            offsets_db.flush();
-        }
-    });
+    }
+
+    info!(
+        "S3 WAL recovery: indexed {} of {} segments for {} namespaces",
+        processed,
+        segs.len(),
+        namespaces.len()
+    );
+    info!(
+        "S3 WAL recovery: committed {} offsets, {} total bytes",
+        committed_offsets, bytes_total
+    );
+    if processed > 0 {
+        let mut w = METRICS.write();
+        w.wal_index_namespaces_total = namespaces.len() as u64;
+        w.wal_index_files_total = processed;
+        w.wal_index_bytes_total = bytes_total;
+    }
+    offsets_db.flush();
     Ok(())
 }
 
@@ -1999,10 +2185,11 @@ impl WalPartitionIndex {
     }
 }
 
-pub fn wal_recover(_offsets_db: Arc<Offsets>) -> io::Result<()> {
-    // Delegate to disk-based recovery exclusively
-    // @todo - implement S3 WAL recovery if we ever re-enable S3 WAL storage
-    wal_recover_disk(_offsets_db)
+pub async fn wal_recover(offsets_db: Arc<Offsets>) -> io::Result<()> {
+    if is_s3_wal() {
+        return wal_recover_s3(offsets_db).await;
+    }
+    wal_recover_disk(offsets_db)
 }
 
 #[cfg(test)]
