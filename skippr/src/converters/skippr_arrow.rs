@@ -356,7 +356,7 @@ fn convert_skippr_to_arrow_field_types(
                 DataType::Timestamp(Millisecond, None),
             )
             .expect("Error setting object scalar field date type"),
-            SkipprDataType::Unknown => {}
+            _ => {}
         }
     }
 

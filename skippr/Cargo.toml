@@ -3,10 +3,6 @@ name = "skippr"
 version = "0.0.0-git"
 edition = "2021"
 
-[profile.profiling]
-inherits = "release"
-debug = true
-
 [dependencies]
 serde_derive = "1.0.105"
 serde = "1.0.105"
@@ -105,4 +101,5 @@ stats_integration = []
 serial_test = "1.0.0"
 assert_cmd = "2"
 predicates = "3"
+proptest = "1.10.0"
 

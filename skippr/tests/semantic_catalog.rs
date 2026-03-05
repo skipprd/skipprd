@@ -1,5 +1,3 @@
-use assert_cmd::prelude::*;
-use std::fs;
 use std::process::Command;
 
 #[test]
@@ -11,7 +9,6 @@ fn semantic_and_catalog_tables_register_and_query() {
     {
         return;
     }
-    use std::process::Command;
     std::env::set_var("SKIPPR_OFFLINE", "true");
     std::env::set_var("PIPELINE_NAME", "bike_hire5");
 

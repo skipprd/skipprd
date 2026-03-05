@@ -1625,10 +1625,12 @@ impl AnalyseSchema {
     }
 
     pub(crate) fn coerce_to_milli_seconds(v: Value) -> Value {
-        if v.as_i64().unwrap() < 10000000000 {
-            let millis = v.as_i64().unwrap() * 1000;
-            // println!("field: {}, value: {}, v: {}", field, value, millis);
-            millis.into()
+        let ts = v.as_i64().unwrap();
+        if ts < 10_000_000_000 {
+            match ts.checked_mul(1000) {
+                Some(millis) => millis.into(),
+                None => v,
+            }
         } else {
             v
         }
@@ -3249,5 +3251,273 @@ mod tests_flatten_metadata {
         assert_eq!(field.out_field_name, expected_field_name);
         assert_eq!(field.determined_type, SkipprDataType::Array);
         assert_eq!(field.determined_type_values, Some(SkipprDataType::Double));
+    }
+}
+
+/// End-to-end roundtrip tests: JSON -> discover -> evolve -> Arrow -> Hive.
+#[cfg(test)]
+mod tests_roundtrip {
+    use super::*;
+    use crate::converters::skippr_arrow::convert_skippr_to_arrow;
+    use crate::converters::skippr_hive::SkipprHive;
+    use crate::discover::evolution::Evolution;
+    use crate::ingest::ingest::discover_ingest;
+    use serde_json::json;
+
+    fn discover_field(
+        field: &str,
+        value: &serde_json::Value,
+        metadata: &mut HashMap<String, Metadata>,
+    ) {
+        let mut updated = "no".to_string();
+        discover_ingest(field, value, None, None, metadata, &mut updated);
+    }
+
+    fn build_output(
+        metadata: &HashMap<String, Metadata>,
+    ) -> Box<HashMap<String, OutputMetadata>> {
+        let mut out = HashMap::new();
+        for (k, v) in metadata.iter() {
+            if v.enabled {
+                out.insert(k.clone(), OutputMetadata::from_metadata(v));
+            }
+        }
+        Box::new(out)
+    }
+
+    fn build_hive_root(metadata: &HashMap<String, Metadata>) -> OutputMetadata {
+        let mut root = OutputMetadata::new();
+        root.determined_type = SkipprDataType::Record;
+        let mut fields = HashMap::new();
+        for (k, v) in metadata.iter() {
+            fields.insert(k.clone(), OutputMetadata::from_metadata(v));
+        }
+        root.fields = Box::new(fields);
+        root
+    }
+
+    #[test]
+    fn flat_string_to_integer_evolution() {
+        let mut metadata: HashMap<String, Metadata> = HashMap::new();
+        discover_field("x", &json!("hello"), &mut metadata);
+        assert_eq!(metadata.get("x").unwrap().determined_type, SkipprDataType::String);
+
+        let mut updated = "no".to_string();
+        let r = Evolution::evolve_field(
+            &"x".to_string(), &json!(42), None, None, &mut metadata, &mut updated, false,
+        );
+        assert!(r.is_ok());
+        assert!(!metadata.get("x").unwrap().evolution.is_empty());
+
+        let arrow = convert_skippr_to_arrow(build_output(&metadata));
+        assert!(arrow.is_ok());
+        assert!(arrow.unwrap().fields().len() >= 1);
+    }
+
+    #[test]
+    fn flat_string_to_record_evolution() {
+        let mut metadata: HashMap<String, Metadata> = HashMap::new();
+        discover_field("data", &json!("simple_string"), &mut metadata);
+
+        let mut updated = "no".to_string();
+        let r = Evolution::evolve_field(
+            &"data".to_string(), &json!({"name": "alice", "age": 30}),
+            None, None, &mut metadata, &mut updated, false,
+        );
+        assert!(r.is_ok());
+        assert!(metadata.contains_key("data_record"));
+        assert_eq!(metadata.get("data_record").unwrap().determined_type, SkipprDataType::Record);
+
+        let arrow = convert_skippr_to_arrow(build_output(&metadata));
+        assert!(arrow.is_ok());
+    }
+
+    #[test]
+    fn nested_child_type_change() {
+        let mut metadata: HashMap<String, Metadata> = HashMap::new();
+        discover_field("outer", &json!({"inner": "hello"}), &mut metadata);
+        assert_eq!(metadata.get("outer").unwrap().determined_type, SkipprDataType::Record);
+        assert_eq!(
+            metadata.get("outer").unwrap().fields.get("inner").unwrap().determined_type,
+            SkipprDataType::String
+        );
+
+        let mut updated = "no".to_string();
+        if let Some(outer_mut) = metadata.get_mut("outer") {
+            let _ = Evolution::evolve_field(
+                &"inner".to_string(), &json!(3.14),
+                Some("outer"), Some("record"),
+                &mut outer_mut.fields, &mut updated, false,
+            );
+        }
+
+        let arrow = convert_skippr_to_arrow(build_output(&metadata));
+        assert!(arrow.is_ok());
+    }
+
+    #[test]
+    fn array_discovery_and_arrow() {
+        let mut metadata: HashMap<String, Metadata> = HashMap::new();
+        discover_field("tags", &json!(["red", "green", "blue"]), &mut metadata);
+        assert_eq!(metadata.get("tags").unwrap().determined_type, SkipprDataType::Array);
+
+        let arrow = convert_skippr_to_arrow(build_output(&metadata));
+        assert!(arrow.is_ok());
+    }
+
+    #[test]
+    fn multiple_evolutions_same_field() {
+        let mut metadata: HashMap<String, Metadata> = HashMap::new();
+        discover_field("val", &json!("text"), &mut metadata);
+
+        let mut updated = "no".to_string();
+        let r1 = Evolution::evolve_field(
+            &"val".to_string(), &json!(42i64), None, None, &mut metadata, &mut updated, false,
+        );
+        assert!(r1.is_ok());
+
+        let r2 = Evolution::evolve_field(
+            &"val".to_string(), &json!(3.14), None, None, &mut metadata, &mut updated, false,
+        );
+        assert!(r2.is_ok());
+
+        assert!(metadata.get("val").unwrap().evolution.len() >= 2);
+
+        let arrow = convert_skippr_to_arrow(build_output(&metadata));
+        assert!(arrow.is_ok());
+    }
+
+    #[test]
+    fn hive_schema_generation() {
+        let mut metadata: HashMap<String, Metadata> = HashMap::new();
+        discover_field("name", &json!("alice"), &mut metadata);
+        discover_field("age", &json!(30), &mut metadata);
+        discover_field("score", &json!(99.5), &mut metadata);
+        discover_field("active", &json!(true), &mut metadata);
+
+        let root = build_hive_root(&metadata);
+        let hive = SkipprHive::convert_skippr_to_hive(&root);
+        assert!(hive.is_ok());
+        assert!(hive.unwrap().len() >= 4);
+    }
+
+    #[test]
+    fn full_pipeline_discover_evolve_arrow_hive() {
+        let mut metadata: HashMap<String, Metadata> = HashMap::new();
+        discover_field("id", &json!(1), &mut metadata);
+        discover_field("name", &json!("alice"), &mut metadata);
+        discover_field("meta", &json!("some_string"), &mut metadata);
+
+        let mut updated = "no".to_string();
+        let _ = Evolution::evolve_field(
+            &"meta".to_string(), &json!({"key": "value", "count": 5}),
+            None, None, &mut metadata, &mut updated, false,
+        );
+
+        let arrow = convert_skippr_to_arrow(build_output(&metadata));
+        assert!(arrow.is_ok());
+        assert!(arrow.unwrap().fields().len() >= 3);
+
+        let root = build_hive_root(&metadata);
+        let hive = SkipprHive::convert_skippr_to_hive(&root);
+        assert!(hive.is_ok());
+    }
+}
+
+/// Property-based fuzz tests for schema discovery.
+#[cfg(test)]
+mod tests_discover_proptest {
+    use super::*;
+    use crate::ingest::ingest::discover_ingest;
+    use proptest::prelude::*;
+    use serde_json::json;
+
+    fn arb_json_leaf() -> impl Strategy<Value = serde_json::Value> {
+        prop_oneof![
+            Just(json!(null)),
+            any::<bool>().prop_map(|b| json!(b)),
+            any::<i32>().prop_map(|i| json!(i)),
+            any::<i64>().prop_map(|i| json!(i)),
+            (-1e15f64..1e15f64).prop_map(|f| json!(f)),
+            "[a-zA-Z0-9_ ]{0,30}".prop_map(|s| json!(s)),
+        ]
+    }
+
+    fn arb_json_value() -> BoxedStrategy<serde_json::Value> {
+        let leaf = arb_json_leaf();
+        leaf.prop_recursive(4, 32, 8, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..5)
+                    .prop_map(|v| serde_json::Value::Array(v)),
+                prop::collection::hash_map("[a-z]{1,6}", inner, 0..5)
+                    .prop_map(|m| {
+                        let obj: serde_json::Map<std::string::String, serde_json::Value> =
+                            m.into_iter().collect();
+                        serde_json::Value::Object(obj)
+                    }),
+            ]
+        })
+        .boxed()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1000))]
+
+        #[test]
+        fn discover_ingest_never_panics(value in arb_json_value()) {
+            let mut metadata: HashMap<std::string::String, Metadata> = HashMap::new();
+            let mut updated = "no".to_string();
+            let _ = discover_ingest("test_field", &value, None, None, &mut metadata, &mut updated);
+        }
+
+        #[test]
+        fn discovered_type_is_valid(value in arb_json_value()) {
+            let mut metadata: HashMap<std::string::String, Metadata> = HashMap::new();
+            let mut updated = "no".to_string();
+            discover_ingest("test_field", &value, None, None, &mut metadata, &mut updated);
+
+            if let Some(md) = metadata.get("test_field") {
+                let valid_types = [
+                    SkipprDataType::String,
+                    SkipprDataType::Integer,
+                    SkipprDataType::Long,
+                    SkipprDataType::Double,
+                    SkipprDataType::Boolean,
+                    SkipprDataType::Date,
+                    SkipprDataType::Timestamp,
+                    SkipprDataType::TimestampMilli,
+                    SkipprDataType::Array,
+                    SkipprDataType::Record,
+                    SkipprDataType::Map,
+                    SkipprDataType::Null,
+                    SkipprDataType::Unknown,
+                ];
+                assert!(
+                    valid_types.contains(&md.determined_type),
+                    "discovered type {:?} should be a valid SkipprDataType",
+                    md.determined_type
+                );
+            }
+        }
+
+        #[test]
+        fn discover_then_evolve_never_panics(
+            initial in arb_json_leaf(),
+            breaking in arb_json_value(),
+        ) {
+            let mut metadata: HashMap<std::string::String, Metadata> = HashMap::new();
+            let mut updated = "no".to_string();
+            discover_ingest("f", &initial, None, None, &mut metadata, &mut updated);
+
+            let _ = crate::discover::evolution::Evolution::evolve_field(
+                &"f".to_string(),
+                &breaking,
+                None,
+                None,
+                &mut metadata,
+                &mut updated,
+                false,
+            );
+        }
     }
 }

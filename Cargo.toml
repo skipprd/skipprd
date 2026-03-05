@@ -3,3 +3,7 @@ resolver = "2"
 members = [
   "skippr",
 ]
+
+[profile.profiling]
+inherits = "release"
+debug = true

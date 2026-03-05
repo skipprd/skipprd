@@ -2149,3 +2149,155 @@ mod tests_fast_path_ingest {
         assert_eq!(err, "No default message template found");
     }
 }
+
+#[cfg(test)]
+mod tests_fast_set_value_proptest {
+    use super::*;
+    use proptest::prelude::*;
+    use serde_json::json;
+
+    fn arb_skippr_type() -> impl Strategy<Value = SkipprDataType> {
+        prop_oneof![
+            Just(SkipprDataType::String),
+            Just(SkipprDataType::Integer),
+            Just(SkipprDataType::Long),
+            Just(SkipprDataType::Double),
+            Just(SkipprDataType::Boolean),
+            Just(SkipprDataType::Timestamp),
+            Just(SkipprDataType::TimestampMilli),
+            Just(SkipprDataType::Date),
+        ]
+    }
+
+    fn arb_json_value() -> impl Strategy<Value = serde_json::Value> {
+        prop_oneof![
+            Just(json!(null)),
+            any::<bool>().prop_map(|b| json!(b)),
+            any::<i32>().prop_map(|i| json!(i)),
+            any::<i64>().prop_map(|i| json!(i)),
+            (-1e15f64..1e15f64).prop_map(|f| json!(f)),
+            "[a-zA-Z0-9_]{0,20}".prop_map(|s| json!(s)),
+            Just(json!({})),
+            Just(json!({"a": 1})),
+            Just(json!([])),
+            Just(json!([1, 2, 3])),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(500))]
+
+        #[test]
+        fn fast_set_value_never_panics(
+            data_type in arb_skippr_type(),
+            value in arb_json_value(),
+        ) {
+            let metadata: HashMap<String, Metadata> = HashMap::new();
+            let _ = fast_set_value(
+                data_type.as_str(),
+                "test_field",
+                &value,
+                &metadata,
+                Some(false),
+                false,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_data_loss_regression {
+    use super::*;
+    use serde_json::json;
+
+    fn create_array_metadata(values_type: SkipprDataType) -> HashMap<String, Metadata> {
+        let mut metadata = HashMap::new();
+        let mut arr = Metadata::new().unwrap();
+        arr.determined_type = SkipprDataType::Array;
+        arr.determined_type_values = Some(values_type.clone());
+        arr.out_field_name = "arr".to_string();
+
+        let mut elem = Metadata::new().unwrap();
+        elem.determined_type = values_type;
+        elem.out_field_name = "0".to_string();
+        arr.fields.insert("0".to_string(), elem);
+
+        metadata.insert("arr".to_string(), arr);
+        metadata
+    }
+
+    #[test]
+    fn array_element_coercion_failure_inserts_null() {
+        let metadata = create_array_metadata(SkipprDataType::Integer);
+
+        let value = json!(["not_an_int", 42, "also_not_int"]);
+        let result = process_array_field(
+            "arr",
+            &value,
+            &metadata,
+            false,
+        );
+        assert!(result.is_ok(), "array processing should not error");
+        let resolved = result.unwrap();
+        if let serde_json::Value::Array(arr) = &resolved.value {
+            assert_eq!(arr.len(), 3);
+            assert!(arr[0].is_null(), "failed element should become null (data loss path)");
+            assert!(arr[2].is_null(), "failed element should become null (data loss path)");
+        } else {
+            panic!("expected array output");
+        }
+    }
+
+    #[test]
+    fn map_key_not_in_metadata_returns_error() {
+        let metadata = HashMap::new();
+        let value = json!({"unknown_key": "value"});
+        let result = process_map_field(
+            "missing_map",
+            &value,
+            &metadata,
+            false,
+        );
+        assert!(result.is_err(), "map with unknown key should error");
+    }
+
+    #[test]
+    fn unknown_data_type_returns_error() {
+        let metadata: HashMap<String, Metadata> = HashMap::new();
+        let result = fast_set_value(
+            "unknown",
+            "test_field",
+            &json!(42),
+            &metadata,
+            Some(false),
+            false,
+        );
+        assert!(result.is_err(), "unknown data type should error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Unknown data type"), "error should mention unknown type");
+    }
+
+    #[test]
+    fn empty_array_processes_cleanly() {
+        let metadata = create_array_metadata(SkipprDataType::Integer);
+        let value = json!([]);
+        let result = process_array_field("arr", &value, &metadata, false);
+        assert!(result.is_ok());
+        if let serde_json::Value::Array(arr) = &result.unwrap().value {
+            assert!(arr.is_empty());
+        }
+    }
+
+    #[test]
+    fn null_in_array_becomes_null() {
+        let metadata = create_array_metadata(SkipprDataType::Integer);
+        let value = json!([null, 42, null]);
+        let result = process_array_field("arr", &value, &metadata, false);
+        assert!(result.is_ok());
+        if let serde_json::Value::Array(arr) = &result.unwrap().value {
+            assert_eq!(arr.len(), 3);
+            assert!(arr[0].is_null());
+            assert!(arr[2].is_null());
+        }
+    }
+}
