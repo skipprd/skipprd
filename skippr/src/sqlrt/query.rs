@@ -714,7 +714,7 @@ pub async fn query(sql_str: &str) {
                 Ok(metadata) => metadata,
                 Err(_e) => {
                     println!("Pipeline '{}' not found", stmt.pipeline);
-                    return;
+                    process::exit(1);
                 }
             };
 
