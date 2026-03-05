@@ -1914,12 +1914,10 @@ impl Ingest {
         // Publish schema via ArcSwap per-namespace
         use dashmap::mapref::entry::Entry;
         let mut did_update_schema = false;
-        let mut prev_hash_opt: Option<String> = None;
         match ARROW_SCHEMA.entry(skpr_namespace.to_string()) {
             Entry::Occupied(o) => {
                 let prev = o.get().load();
                 let prev_hash = crate::converters::skippr_arrow::stable_schema_fingerprint(&prev);
-                prev_hash_opt = Some(prev_hash.clone());
                 if prev_hash != new_hash {
                     // Only accept monotonic (superset) schema changes; ignore regressions
                     if crate::converters::skippr_arrow::is_schema_superset(&_schema_ref, &prev) {
@@ -1963,10 +1961,10 @@ impl Ingest {
             }
         }
 
-        // Sync Glue tables on genuine schema changes only (not first-time cache init
-        // from already-persisted metadata). Metadata persistence is the caller's
-        // responsibility (e.g. slow-ingest worker, new-namespace discovery).
-        if did_update_schema && prev_hash_opt.is_some() {
+        // Sync Glue tables on genuine schema changes, and first-time cache init
+        // from already-persisted/newly initialized metadata. 
+        // Metadata persistence is the caller's responsibility (e.g. slow-ingest worker, new-namespace discovery).
+        if did_update_schema {
             if crate::helpers::configuration::Config::get_pipeline_output_plugin_name() == "Athena"
             {
                 let md_clone: std::collections::HashMap<String, Metadata> = metadata.clone();
