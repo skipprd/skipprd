@@ -1492,6 +1492,11 @@ impl Ingest {
                         &mut namesapce_cache,
                     );
 
+                    // HACK: backfill filter — only ingest order-snapshot
+                    if skpr_namespace != "order-snapshot" {
+                        continue;
+                    }
+
                     if namesapce_cache
                         != PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone())
                     {

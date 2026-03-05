@@ -4,124 +4,91 @@ const FILTER_FLAG_ALLOW_THOUSAND: bool = false;
 #[cfg(test)]
 mod tests {
     use crate::discover::get_type;
+    use crate::discover::SkipprDataType;
     use serde_json::Value;
 
     #[test]
     fn test_get_type_int() {
-        let expected_type = "double".to_string();
-
         let subject = 123;
-        assert_ne!(get_type(&mut subject.to_string()), expected_type);
+        assert_ne!(get_type(&mut subject.to_string()), SkipprDataType::Double);
     }
 
     #[test]
     fn test_get_bool_true() {
-        let expected_type = "double".to_string();
-
         let subject = true;
-        assert_ne!(get_type(&mut subject.to_string()), expected_type);
+        assert_ne!(get_type(&mut subject.to_string()), SkipprDataType::Double);
     }
 
     #[test]
     fn test_get_type_bool_false() {
-        let expected_type = "double".to_string();
-
         let subject = false;
-        assert_ne!(get_type(&mut subject.to_string()), expected_type);
+        assert_ne!(get_type(&mut subject.to_string()), SkipprDataType::Double);
     }
 
     #[test]
     fn test_get_type_bool_true_1() {
-        let expected_type = "double".to_string();
-
         let subject = 1;
-        assert_ne!(get_type(&mut subject.to_string()), expected_type);
+        assert_ne!(get_type(&mut subject.to_string()), SkipprDataType::Double);
     }
 
     #[test]
     fn test_get_type_bool_false_0() {
-        let expected_type = "double".to_string();
-
         let subject = 0;
-        assert_ne!(get_type(&mut subject.to_string()), expected_type);
+        assert_ne!(get_type(&mut subject.to_string()), SkipprDataType::Double);
     }
 
     #[test]
     fn test_get_type_string() {
-        let expected_type = "double".to_string();
-
         let subject = "sd";
-        assert_ne!(get_type(&mut subject.to_string()), expected_type);
+        assert_ne!(get_type(&mut subject.to_string()), SkipprDataType::Double);
     }
 
     #[test]
     fn test_get_type_float_1() {
-        let expected_type = "double".to_string();
-
         let subject = 1.2;
-        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Double);
     }
 
     #[test]
     fn test_get_type_float_2() {
-        let expected_type = "double".to_string();
-
         let subject = 0.2;
-        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Double);
     }
 
     #[allow(dead_code)]
     fn test_get_type_float_3() {
-        let expected_type = "double".to_string();
-
         let subject = 2.0;
         assert_eq!(
             get_type(&mut String::from(subject.to_string())),
-            expected_type
+            SkipprDataType::Double
         );
     }
 
     #[test]
     fn test_get_type_float_4() {
-        let expected_type = "double".to_string();
-
         let subject = "0.0";
-        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Double);
     }
 
     #[test]
     fn test_get_type_float_4_2() {
-        let expected_type = "double".to_string();
-
         let subject = "23.4";
         let json_value: Value = serde_json::from_str(subject).unwrap();
         let value: &mut String = &mut json_value.to_string();
-        assert_eq!(get_type(value), expected_type);
+        assert_eq!(get_type(value), SkipprDataType::Double);
     }
 
     #[test]
     fn test_get_type_float_5() {
-        let expected_type = "double".to_string();
-
         let subject = "-0.1";
-        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Double);
     }
 
     #[test]
     fn test_get_type_float_6() {
-        let expected_type = "double".to_string();
-
         let subject = "+0.1";
-        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Double);
     }
-
-    // #[test]
-    // fn test_get_type_float_7() {
-    //     let expected_type = "double".to_string();
-    //
-    //     let subject = 0.0;
-    //     assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
-    // }
 }
 
 #[allow(dead_code)]

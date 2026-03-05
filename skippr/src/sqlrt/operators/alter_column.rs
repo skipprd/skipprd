@@ -1,4 +1,4 @@
-use crate::discover::{Metadata, SkipprTypes};
+use crate::discover::{Metadata, SkipprDataType};
 use crate::sqlrt::parser::AlterSchemaAlterColumnType;
 
 pub fn alter_column_type(
@@ -12,7 +12,7 @@ pub fn alter_column_type(
     .ok_or_else(|| format!("Column '{}' not found", alteration.column_name))?;
 
     let skippr_new_type =
-        SkipprTypes::from_string(&alteration.new_type.to_string()).ok_or_else(|| {
+        SkipprDataType::from_string(&alteration.new_type.to_string()).ok_or_else(|| {
             format!(
                 "No type equivalent for '{}' in Skippr types",
                 alteration.new_type
@@ -20,13 +20,13 @@ pub fn alter_column_type(
         })?;
 
     match skippr_new_type {
-        SkipprTypes::Array => {
+        SkipprDataType::Array => {
             let values_new_type = alteration
                 .values_new_type
                 .clone()
                 .ok_or_else(|| "No values type provided for array type".to_string())?;
 
-            let skippr_value_type = SkipprTypes::from_string(&values_new_type.to_string())
+            let skippr_value_type = SkipprDataType::from_string(&values_new_type.to_string())
                 .ok_or_else(|| {
                     format!(
                         "No type equivalent for '{}' in Skippr types",
@@ -34,14 +34,14 @@ pub fn alter_column_type(
                     )
                 })?;
 
-            column_metadata.determined_type = skippr_new_type.to_string();
-            column_metadata.determined_type_values = skippr_value_type.to_string();
+            column_metadata.determined_type = skippr_new_type.clone();
+            column_metadata.determined_type_values = Some(skippr_value_type);
         }
-        SkipprTypes::Record => {
+        SkipprDataType::Record => {
             return Err(format!("Type '{}' not supported for ALTER COLUMN. Perhaps try altering a specific field or dropping the struct altogether.", &alteration.new_type.to_string()));
         }
         _ => {
-            column_metadata.determined_type = skippr_new_type.to_string();
+            column_metadata.determined_type = skippr_new_type;
         }
     }
 

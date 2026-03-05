@@ -28,6 +28,8 @@ pub mod timed_rwlock;
 
 use crate::discover::date_formats::DateFormats;
 use crate::discover::Metadata;
+#[cfg(test)]
+use crate::discover::SkipprDataType;
 use crate::helpers::configuration::Config;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
@@ -1772,14 +1774,14 @@ mod flattern_tests {
         let default_metadata = Metadata::new().unwrap();
         assert_eq!(default_metadata.count, 0);
         assert!(default_metadata.types.is_empty());
-        assert_eq!(default_metadata.parent_type, "");
+        assert_eq!(default_metadata.parent_type, None);
         assert!(default_metadata.fields.is_empty());
         assert!(default_metadata.date_candidate.is_none());
         assert!(default_metadata.evolution.is_empty());
         assert!(default_metadata.enabled);
         assert_eq!(default_metadata.out_field_name, "");
-        assert_eq!(default_metadata.determined_type, "");
-        assert_eq!(default_metadata.determined_type_values, "");
+        assert_eq!(default_metadata.determined_type, SkipprDataType::Unknown);
+        assert_eq!(default_metadata.determined_type_values, None);
     }
 
     #[test]
@@ -1811,7 +1813,7 @@ mod flattern_tests {
             Metadata {
                 count: 1,
                 types: HashMap::new(),
-                parent_type: "".into(),
+                parent_type: None,
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
                 date_parser_kind: None,
@@ -1819,8 +1821,8 @@ mod flattern_tests {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "field".into(),
-                determined_type: "string".into(),
-                determined_type_values: "".into(),
+                determined_type: SkipprDataType::String,
+                determined_type_values: None,
                 repetition_count: 1,
             },
         );
@@ -1829,7 +1831,7 @@ mod flattern_tests {
             Metadata {
                 count: 1,
                 types: HashMap::new(),
-                parent_type: "".into(),
+                parent_type: None,
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
                 date_parser_kind: None,
@@ -1837,8 +1839,8 @@ mod flattern_tests {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "contact".into(),
-                determined_type: "record".into(),
-                determined_type_values: "".into(),
+                determined_type: SkipprDataType::Record,
+                determined_type_values: None,
                 repetition_count: 1,
             },
         );
@@ -1847,7 +1849,7 @@ mod flattern_tests {
             Metadata {
                 count: 1,
                 types: HashMap::new(),
-                parent_type: "".into(),
+                parent_type: None,
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
                 date_parser_kind: None,
@@ -1855,8 +1857,8 @@ mod flattern_tests {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "name".into(),
-                determined_type: "string".into(),
-                determined_type_values: "".into(),
+                determined_type: SkipprDataType::String,
+                determined_type_values: None,
                 repetition_count: 1,
             },
         );
@@ -1865,7 +1867,7 @@ mod flattern_tests {
             Metadata {
                 count: 1,
                 types: HashMap::new(),
-                parent_type: "".into(),
+                parent_type: None,
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
                 date_parser_kind: None,
@@ -1873,8 +1875,8 @@ mod flattern_tests {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "tel".into(),
-                determined_type: "int".into(),
-                determined_type_values: "".into(),
+                determined_type: SkipprDataType::Integer,
+                determined_type_values: None,
                 repetition_count: 1,
             },
         );
@@ -1908,7 +1910,7 @@ mod flattern_tests {
             Metadata {
                 count: 1,
                 types: HashMap::new(),
-                parent_type: "".into(),
+                parent_type: None,
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
                 date_parser_kind: None,
@@ -1916,8 +1918,8 @@ mod flattern_tests {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "field".into(),
-                determined_type: "string".into(),
-                determined_type_values: "".into(),
+                determined_type: SkipprDataType::String,
+                determined_type_values: None,
                 repetition_count: 1,
             },
         );
@@ -1926,7 +1928,7 @@ mod flattern_tests {
             Metadata {
                 count: 2,
                 types: HashMap::new(),
-                parent_type: "".into(),
+                parent_type: None,
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
                 date_parser_kind: None,
@@ -1934,8 +1936,8 @@ mod flattern_tests {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "contacts".into(),
-                determined_type: "array".into(),
-                determined_type_values: "".into(),
+                determined_type: SkipprDataType::Array,
+                determined_type_values: None,
                 repetition_count: 1,
             },
         );
@@ -1944,7 +1946,7 @@ mod flattern_tests {
             Metadata {
                 count: 2,
                 types: HashMap::new(),
-                parent_type: "".into(),
+                parent_type: None,
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
                 date_parser_kind: None,
@@ -1952,8 +1954,8 @@ mod flattern_tests {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "0".into(),
-                determined_type: "string".into(),
-                determined_type_values: "".into(),
+                determined_type: SkipprDataType::String,
+                determined_type_values: None,
                 repetition_count: 1,
             },
         );
@@ -1969,7 +1971,7 @@ mod flattern_tests {
                 Metadata {
                     count: 2,
                     types: HashMap::new(),
-                    parent_type: "".into(),
+                    parent_type: None,
                     fields: Box::new(HashMap::new()),
                     date_candidate: None,
                     date_parser_kind: None,
@@ -1977,8 +1979,8 @@ mod flattern_tests {
                     evolution: Box::new(HashMap::new()),
                     enabled: true,
                     out_field_name: "name".into(),
-                    determined_type: "string".into(),
-                    determined_type_values: "".into(),
+                    determined_type: SkipprDataType::String,
+                    determined_type_values: None,
                     repetition_count: 1,
                 },
             );
@@ -1994,7 +1996,7 @@ mod flattern_tests {
                 Metadata {
                     count: 2,
                     types: HashMap::new(),
-                    parent_type: "".into(),
+                    parent_type: None,
                     fields: Box::new(HashMap::new()),
                     date_candidate: None,
                     date_parser_kind: None,
@@ -2002,8 +2004,8 @@ mod flattern_tests {
                     evolution: Box::new(HashMap::new()),
                     enabled: true,
                     out_field_name: "tel".into(),
-                    determined_type: "int".into(),
-                    determined_type_values: "".into(),
+                    determined_type: SkipprDataType::Integer,
+                    determined_type_values: None,
                     repetition_count: 1,
                 },
             );
@@ -2095,13 +2097,13 @@ mod tests_flatten_special_cases {
         // Case for uppercase field (IMEI)
         let mut imei_metadata = Metadata::new().unwrap();
         imei_metadata.out_field_name = "imei".to_string();
-        imei_metadata.determined_type = "long".to_string();
+        imei_metadata.determined_type = SkipprDataType::Long;
         metadata.insert("IMEI".to_string(), imei_metadata);
 
         // Case for special characters (preasure\bar)
         let mut pressure_metadata = Metadata::new().unwrap();
         pressure_metadata.out_field_name = "preasure_bar".to_string();
-        pressure_metadata.determined_type = "double".to_string();
+        pressure_metadata.determined_type = SkipprDataType::Double;
         metadata.insert("preasure\\bar".to_string(), pressure_metadata);
 
         // Create test JSON with both cases - using both original and transformed field names

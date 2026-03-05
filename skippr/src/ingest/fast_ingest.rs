@@ -34,8 +34,8 @@ pub fn create_default_nested_message(metadata: &HashMap<String, Metadata>) -> Va
         if meta_data.enabled {
             if meta_data.fields.is_empty() {
                 message[meta_data.out_field_name.clone()] = Value::Null;
-            } else if meta_data.determined_type == "array" {
-                if meta_data.determined_type_values == "record" {
+            } else             if meta_data.determined_type == SkipprDataType::Array {
+                if meta_data.determined_type_values == Some(SkipprDataType::Record) {
                     // message[meta_data.out_field_name.clone()] = create_default_nested_message(&meta_data.fields);
                     let fields = create_default_nested_message(&meta_data.fields);
                     message[meta_data.out_field_name.clone()] = Value::Array(vec![]);
@@ -47,7 +47,7 @@ pub fn create_default_nested_message(metadata: &HashMap<String, Metadata>) -> Va
                 } else {
                     message[meta_data.out_field_name.clone()] = Value::Array(Vec::new());
                 }
-            } else if meta_data.determined_type == "map" {
+            } else if meta_data.determined_type == SkipprDataType::Map {
                 message[meta_data.out_field_name.clone()] = Value::Object(Map::new());
             } else {
                 let mut sub_fields = Map::new();
@@ -143,7 +143,7 @@ pub fn fast_path_ingest(
 
             // Use data_type() method instead of string determined_type
             // Avoid recomputing out_field_name in insertion path; capture now
-            fields_to_process.push((field, value, meta_data.data_type()));
+            fields_to_process.push((field, value, meta_data.determined_type.clone()));
         } else {
             // Propose evolution for missing field under root
             if crate::helpers::configuration::Config::debug_enabled() {
@@ -705,7 +705,7 @@ fn process_record_field(
             // println!("field: {}: value {}\n", sub_field, val);
 
             if meta_field.enabled {
-                let new_val = fast_set_value(
+                let new_val = fast_set_value_optimized(
                     &meta_field.determined_type,
                     &sub_field,
                     val,
@@ -725,14 +725,12 @@ fn process_record_field(
             // Only check direct array fields with record type, as nested checks will be handled in their respective processing functions
             if let Some(meta_field) = metadata.get(field).and_then(|f| f.fields.get(sub_field)) {
                 // Use enum comparisons instead of string comparisons
-                if meta_field.is_type(SkipprDataType::Array)
-                    && meta_field.is_values_type(SkipprDataType::Record)
+                if meta_field.determined_type == SkipprDataType::Array
+                    && meta_field.determined_type_values == Some(SkipprDataType::Record)
                 {
-                    // If it's an array of records, check the length against repetition_count
                     if let Some(array_values) = sub_value.as_array() {
                         let array_length = array_values.len() as i32;
                         if array_length > meta_field.repetition_count {
-                            // Reject the message if array has more elements than repetition_count
                             return Err(Box::new(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
                                 format!("Array field '{}.{}' has {} elements, but repetition_count is {}. Falling back to slow path.",
@@ -751,7 +749,7 @@ fn process_record_field(
                 .get(sub_field)
                 .ok_or_else(|| format!("Subfield '{}' not found in fields", sub_field))?;
             if meta_field.enabled {
-                let newval = fast_set_value(
+                let newval = fast_set_value_optimized(
                     &meta_field.determined_type,
                     sub_field,
                     sub_value,
@@ -800,9 +798,8 @@ fn process_map_field(
                 continue;
             }
 
-            // Array repetition validation
-            if meta_field.is_type(SkipprDataType::Array)
-                && meta_field.is_values_type(SkipprDataType::Record)
+            if meta_field.determined_type == SkipprDataType::Array
+                && meta_field.determined_type_values == Some(SkipprDataType::Record)
             {
                 // Only validate arrays of records
                 if let Some(array_values) = val.as_array() {
@@ -817,8 +814,7 @@ fn process_map_field(
                 }
             }
 
-            // Process the value
-            let new_val = fast_set_value(
+            let new_val = fast_set_value_optimized(
                 &meta_field.determined_type,
                 key,
                 val,
@@ -859,8 +855,7 @@ fn process_array_field(
 
         // Only check repetition_count for arrays of records, as primitive arrays don't have the constraint
         if let Some(meta) = metadata.get(field) {
-            // Use the enum comparison instead of string comparison
-            if meta.is_values_type(SkipprDataType::Record) {
+            if meta.determined_type_values == Some(SkipprDataType::Record) {
                 let array_length = values.len() as i32;
                 if array_length > meta.repetition_count {
                     // Reject the message if array has more elements than repetition_count
@@ -878,7 +873,7 @@ fn process_array_field(
 
         let parent_meta_opt = metadata.get(field);
         let is_record_values = parent_meta_opt
-            .map(|m| m.is_values_type(SkipprDataType::Record))
+            .map(|m| m.determined_type_values == Some(SkipprDataType::Record))
             .unwrap_or(false);
         for (idx, val) in values.iter().enumerate() {
             // Preserve original error behavior: error on first iteration with current idx if parent metadata missing
@@ -894,10 +889,11 @@ fn process_array_field(
             };
 
             if parent_meta.enabled {
+                let values_type = parent_meta.determined_type_values.as_ref().unwrap_or(&SkipprDataType::Unknown);
                 if is_record_values {
                     let sub_field = "0";
-                    let _new_val = match fast_set_value(
-                        &parent_meta.determined_type_values,
+                    let _new_val = match fast_set_value_optimized(
+                        values_type,
                         sub_field,
                         val,
                         &parent_meta.fields,
@@ -912,8 +908,8 @@ fn process_array_field(
                 } else {
                     let sub_field_owned = idx.to_string();
                     let sub_field = sub_field_owned.as_str();
-                    let _new_val = match fast_set_value(
-                        &parent_meta.determined_type_values,
+                    let _new_val = match fast_set_value_optimized(
+                        values_type,
                         sub_field,
                         val,
                         &parent_meta.fields,
@@ -963,7 +959,7 @@ mod tests {
             Metadata {
                 count: 1,
                 types: HashMap::new(),
-                parent_type: String::from("parent"),
+                parent_type: Some(SkipprDataType::Record),
                 fields: Box::new(HashMap::new()),
                 date_candidate: Some(date_candidate),
                 date_parser_kind: None,
@@ -971,8 +967,8 @@ mod tests {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: String::from(field),
-                determined_type: String::from("date"),
-                determined_type_values: "".to_string(),
+                determined_type: SkipprDataType::Date,
+                determined_type_values: None,
                 repetition_count: 1,
             },
         );
@@ -1516,7 +1512,7 @@ mod tests_process_array_field {
         let flatten = false;
         let mut metadata = HashMap::new();
         let mut meta_data_item = Metadata::new()?;
-        meta_data_item.determined_type_values = "int".to_string();
+        meta_data_item.determined_type_values = Some(SkipprDataType::Integer);
         metadata.insert(field.to_string(), meta_data_item);
 
         let result = process_array_field(field, &value, &metadata, flatten)?;
@@ -1532,7 +1528,7 @@ mod tests_process_array_field {
         let flatten = true;
         let mut metadata = HashMap::new();
         let mut meta_data_item = Metadata::new()?;
-        meta_data_item.determined_type_values = "int".to_string();
+        meta_data_item.determined_type_values = Some(SkipprDataType::Integer);
         meta_data_item.out_field_name = "splat_name".to_string();
         metadata.insert(field.to_string(), meta_data_item);
 
@@ -1550,7 +1546,7 @@ mod tests_process_array_field {
         let flatten = false;
         let mut metadata = HashMap::new();
         let mut meta_data_item = Metadata::new()?;
-        meta_data_item.determined_type_values = "double".to_string();
+        meta_data_item.determined_type_values = Some(SkipprDataType::Double);
         metadata.insert(field.to_string(), meta_data_item);
 
         let result = process_array_field(field, &value, &metadata, flatten)?;
@@ -1566,7 +1562,7 @@ mod tests_process_array_field {
         let flatten = false;
         let mut metadata = HashMap::new();
         let mut meta_data_item = Metadata::new()?;
-        meta_data_item.determined_type_values = "boolean".to_string();
+        meta_data_item.determined_type_values = Some(SkipprDataType::Boolean);
         metadata.insert(field.to_string(), meta_data_item);
 
         let result = process_array_field(field, &value, &metadata, flatten)?;
@@ -1582,7 +1578,7 @@ mod tests_process_array_field {
         let flatten = false;
         let mut metadata = HashMap::new();
         let mut meta_data_item = Metadata::new()?;
-        meta_data_item.determined_type_values = "boolean".to_string();
+        meta_data_item.determined_type_values = Some(SkipprDataType::Boolean);
         metadata.insert(field.to_string(), meta_data_item);
 
         let result = process_array_field(field, &value, &metadata, flatten)?;
@@ -1598,7 +1594,7 @@ mod tests_process_array_field {
         let flatten = false;
         let mut metadata = HashMap::new();
         let mut meta_data_item = Metadata::new()?;
-        meta_data_item.determined_type_values = "null".to_string();
+        meta_data_item.determined_type_values = Some(SkipprDataType::Null);
         metadata.insert(field.to_string(), meta_data_item);
 
         let result = process_array_field(field, &value, &metadata, flatten)?;
@@ -1614,7 +1610,7 @@ mod tests_process_array_field {
         let flatten = false;
         let mut metadata = HashMap::new();
         let mut meta_data_item = Metadata::new()?;
-        meta_data_item.determined_type_values = "string".to_string();
+        meta_data_item.determined_type_values = Some(SkipprDataType::String);
         metadata.insert(field.to_string(), meta_data_item);
 
         let result = process_array_field(field, &value, &metadata, flatten)?;
@@ -1644,7 +1640,6 @@ mod tests_process_array_field_repetition_count {
     #[test]
     fn test_process_array_field_exceeds_repetition_count() {
         let field = "contacts";
-        // Create an array with 3 elements
         let value = json!([
             {"name": "Person 1", "tel": 123},
             {"name": "Person 2", "tel": 456},
@@ -1654,8 +1649,8 @@ mod tests_process_array_field_repetition_count {
 
         let mut metadata = HashMap::new();
         let mut meta_data_item = Metadata::new().unwrap();
-        meta_data_item.determined_type = "array".to_string();
-        meta_data_item.determined_type_values = "record".to_string();
+        meta_data_item.determined_type = SkipprDataType::Array;
+        meta_data_item.determined_type_values = Some(SkipprDataType::Record);
         // Set repetition_count to 2, which is less than the 3 elements in the array
         meta_data_item.repetition_count = 2;
         metadata.insert(field.to_string(), meta_data_item);
@@ -1675,7 +1670,6 @@ mod tests_process_array_field_repetition_count {
     #[test]
     fn test_process_array_field_matches_repetition_count() -> Result<(), Box<dyn Error>> {
         let field = "contacts";
-        // Create an array with 2 elements
         let value = json!([
             {"name": "Person 1", "tel": 123},
             {"name": "Person 2", "tel": 456}
@@ -1684,15 +1678,13 @@ mod tests_process_array_field_repetition_count {
 
         let mut metadata = HashMap::new();
         let mut meta_data_item = Metadata::new()?;
-        meta_data_item.determined_type = "array".to_string();
-        meta_data_item.determined_type_values = "record".to_string();
-        // Set repetition_count to 2, which matches the number of elements in the array
+        meta_data_item.determined_type = SkipprDataType::Array;
+        meta_data_item.determined_type_values = Some(SkipprDataType::Record);
         meta_data_item.repetition_count = 2;
 
-        // Add fields for the record type
         let mut field_zero = Metadata::new()?;
-        field_zero.determined_type = "record".to_string();
-        field_zero.determined_type_values = "".to_string();
+        field_zero.determined_type = SkipprDataType::Record;
+        field_zero.determined_type_values = None;
         meta_data_item.fields.insert("0".to_string(), field_zero);
 
         metadata.insert(field.to_string(), meta_data_item);
@@ -1707,15 +1699,13 @@ mod tests_process_array_field_repetition_count {
     #[test]
     fn test_primitive_array_ignores_repetition_count() -> Result<(), Box<dyn Error>> {
         let field = "numbers";
-        // Create an array with more elements than the repetition count
         let value = json!([1, 2, 3, 4, 5]);
         let flatten = false;
 
         let mut metadata = HashMap::new();
         let mut meta_data_item = Metadata::new()?;
-        meta_data_item.determined_type = "array".to_string();
-        meta_data_item.determined_type_values = "int".to_string(); // Not a record type
-                                                                   // Set repetition_count to 2, which is less than the 5 elements in the array
+        meta_data_item.determined_type = SkipprDataType::Array;
+        meta_data_item.determined_type_values = Some(SkipprDataType::Integer);
         meta_data_item.repetition_count = 2;
         metadata.insert(field.to_string(), meta_data_item);
 
@@ -1734,16 +1724,14 @@ mod tests_process_record_field {
 
     #[test]
     fn test_process_record_field_with_arrays() {
-        // Create metadata with a field containing an array of records
         let mut metadata = HashMap::new();
         let mut record_meta = Metadata::new().unwrap();
-        record_meta.determined_type = "record".to_string();
+        record_meta.determined_type = SkipprDataType::Record;
         record_meta.fields = Box::new(HashMap::new());
 
-        // Add a subfield that's an array of records with repetition_count of 2
         let mut array_field_meta = Metadata::new().unwrap();
-        array_field_meta.determined_type = "array".to_string();
-        array_field_meta.determined_type_values = "record".to_string();
+        array_field_meta.determined_type = SkipprDataType::Array;
+        array_field_meta.determined_type_values = Some(SkipprDataType::Record);
         array_field_meta.repetition_count = 2;
 
         record_meta
@@ -1776,21 +1764,18 @@ mod tests_process_record_field {
         let result_exceeds = process_record_field("person", &value_exceeds, &metadata, false);
         assert!(result_exceeds.is_err());
 
-        // Create a record with nested arrays
         let mut nested_metadata = HashMap::new();
         let mut outer_record_meta = Metadata::new().unwrap();
-        outer_record_meta.determined_type = "record".to_string();
+        outer_record_meta.determined_type = SkipprDataType::Record;
         outer_record_meta.fields = Box::new(HashMap::new());
 
-        // Add a nested record field
         let mut nested_record_meta = Metadata::new().unwrap();
-        nested_record_meta.determined_type = "record".to_string();
+        nested_record_meta.determined_type = SkipprDataType::Record;
         nested_record_meta.fields = Box::new(HashMap::new());
 
-        // Add an array inside the nested record
         let mut nested_array_meta = Metadata::new().unwrap();
-        nested_array_meta.determined_type = "array".to_string();
-        nested_array_meta.determined_type_values = "string".to_string();
+        nested_array_meta.determined_type = SkipprDataType::Array;
+        nested_array_meta.determined_type_values = Some(SkipprDataType::String);
         nested_array_meta.repetition_count = 3;
 
         nested_record_meta
@@ -1936,40 +1921,34 @@ mod tests_fast_path_ingest {
     fn create_test_metadata() -> HashMap<String, Metadata> {
         let mut metadata = HashMap::new();
 
-        // Create string field
         let mut string_meta = Metadata::new().unwrap();
-        string_meta.determined_type = "string".to_string();
+        string_meta.determined_type = SkipprDataType::String;
         metadata.insert("name".to_string(), string_meta);
 
-        // Create integer field
         let mut int_meta = Metadata::new().unwrap();
-        int_meta.determined_type = "int".to_string();
+        int_meta.determined_type = SkipprDataType::Integer;
         metadata.insert("age".to_string(), int_meta);
 
-        // Create boolean field
         let mut bool_meta = Metadata::new().unwrap();
-        bool_meta.determined_type = "boolean".to_string();
+        bool_meta.determined_type = SkipprDataType::Boolean;
         metadata.insert("active".to_string(), bool_meta);
 
-        // Create nested record field
         let mut record_meta = Metadata::new().unwrap();
-        record_meta.determined_type = "record".to_string();
+        record_meta.determined_type = SkipprDataType::Record;
 
-        // Add address fields within the record
         let mut street_meta = Metadata::new().unwrap();
-        street_meta.determined_type = "string".to_string();
+        street_meta.determined_type = SkipprDataType::String;
         record_meta.fields.insert("street".to_string(), street_meta);
 
         let mut city_meta = Metadata::new().unwrap();
-        city_meta.determined_type = "string".to_string();
+        city_meta.determined_type = SkipprDataType::String;
         record_meta.fields.insert("city".to_string(), city_meta);
 
         metadata.insert("address".to_string(), record_meta);
 
-        // Create array field
         let mut array_meta = Metadata::new().unwrap();
-        array_meta.determined_type = "array".to_string();
-        array_meta.determined_type_values = "string".to_string();
+        array_meta.determined_type = SkipprDataType::Array;
+        array_meta.determined_type_values = Some(SkipprDataType::String);
         array_meta.repetition_count = 5;
         metadata.insert("tags".to_string(), array_meta);
 
@@ -2126,11 +2105,11 @@ mod tests_fast_path_ingest {
 
         // Add a nested record with out_field_name for flattening
         let mut nested_meta = Metadata::new().unwrap();
-        nested_meta.determined_type = "record".to_string();
+        nested_meta.determined_type = SkipprDataType::Record;
         nested_meta.out_field_name = "metrics_flat".to_string();
 
         let mut count_meta = Metadata::new().unwrap();
-        count_meta.determined_type = "int".to_string();
+        count_meta.determined_type = SkipprDataType::Integer;
         count_meta.out_field_name = "count_flat".to_string();
         nested_meta.fields.insert("count".to_string(), count_meta);
 

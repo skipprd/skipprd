@@ -1,5 +1,5 @@
 use crate::discover::date_formats::DateFormats;
-use crate::discover::{AnalyseSchema, Metadata};
+use crate::discover::{AnalyseSchema, Metadata, SkipprDataType};
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use chrono::{DateTime, Utc};
@@ -101,7 +101,7 @@ pub fn ingest(
         let field_data_type = match metadata.get_mut(&field.to_string()) {
             Some(data_type) => {
                 // println!("{:?}",  data_type.determined_type.clone());
-                data_type.determined_type.clone()
+                data_type.determined_type.to_string()
             }
             None => "".to_string(),
         };
@@ -282,7 +282,7 @@ pub fn set_value(
                                     .get_mut(&sub_field.to_string())
                                     .unwrap()
                                     .determined_type
-                                    .clone(),
+                                    .to_string(),
                                 &sub_field.to_string(),
                                 // &mut sub_value.as_str().unwrap_or(&value.to_string()), // pass string val or string representation of map/array, etc
                                 sub_value,
@@ -359,7 +359,7 @@ pub fn set_value(
                                     .get_mut(&i.to_string())
                                     .unwrap()
                                     .determined_type
-                                    .clone(),
+                                    .to_string(),
                                 &i.to_string(),
                                 // &mut sub_value.as_str().unwrap_or(&value.to_string()), // pass string val or string representation of map/array, etc
                                 sub_value,
@@ -442,7 +442,7 @@ pub fn set_value(
                                         .get_mut(&key.to_string())
                                         .unwrap()
                                         .determined_type
-                                        .clone(),
+                                        .to_string(),
                                     &key.to_string(),
                                     val,
                                     Some(field),
@@ -483,7 +483,7 @@ pub fn set_value(
             } else if data_type == "array" {
                 let flatten = Config::get_transform_flatten_events();
 
-                if metadata.get(field).unwrap().determined_type_values == "record"
+                if metadata.get(field).unwrap().determined_type_values == Some(SkipprDataType::Record)
                     && value.is_array()
                 {
                     let mut arr_new_value: Vec<Value> = Vec::new();
@@ -601,13 +601,15 @@ pub fn set_value(
                                         }
                                     }
 
-                                    // let sub_data_type = &metadata.get(&field.to_string()).unwrap().determined_type_values.as_str().clone();
+                                    let sub_data_type = metadata
+                                        .get(&field.to_string())
+                                        .unwrap()
+                                        .determined_type_values
+                                        .as_ref()
+                                        .map(|t| t.to_string())
+                                        .unwrap_or_default();
                                     let foo = set_value(
-                                        &metadata
-                                            .get(&field.to_string())
-                                            .unwrap()
-                                            .determined_type_values
-                                            .clone(),
+                                        &sub_data_type,
                                         field,
                                         sub_value,
                                         parent_field,
@@ -1061,7 +1063,7 @@ pub fn discover_ingest(
     let _foo: AnalyseSchema = AnalyseSchema { i: 0 };
     let _was_present = metadata.contains_key(field);
 
-    let discoverd_data_type = "string".to_string().clone();
+    let discoverd_data_type = SkipprDataType::String;
 
     // For null values, we need to create a new field and default to string
     // This is to avoid constantly trying to discover the field and slowing ingestion
@@ -1168,7 +1170,7 @@ pub fn discover_ingest(
 
     *updated_schema = "yes".to_string();
 
-    metadata.get(field).unwrap().determined_type.clone()
+    metadata.get(field).unwrap().determined_type.to_string()
 }
 
 pub fn set_date(
@@ -1311,7 +1313,7 @@ mod tests_set_date {
             Metadata {
                 count: 1,
                 types: HashMap::new(),
-                parent_type: String::from("parent"),
+                parent_type: Some(SkipprDataType::Record),
                 fields: Box::new(HashMap::new()),
                 date_candidate: Some(date_candidate),
                 date_parser_kind: None,
@@ -1319,8 +1321,8 @@ mod tests_set_date {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: String::from(field),
-                determined_type: String::from("date"),
-                determined_type_values: "".to_string(),
+                determined_type: SkipprDataType::Date,
+                determined_type_values: None,
                 repetition_count: 1,
             },
         );

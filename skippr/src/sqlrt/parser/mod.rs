@@ -527,7 +527,7 @@ impl<'a> SParser<'a> {
                                         pipeline: ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(pipeline))]),
                                         schema,
                                         column_name,
-                                        // strip the <value type> from ARRAY<value type> to support matching against `SkipprTypes`
+                                        // strip the <value type> from ARRAY<value type> to support matching against `SkipprDataType`
                                         new_type: DataType::Array(ArrayElemTypeDef::None),
                                         values_new_type: Some(*value)
                                      }))

@@ -1965,11 +1965,16 @@ impl Config {
             );
             obj.insert(
                 "determined_type".to_string(),
-                Value::String(meta.determined_type.clone()),
+                Value::String(meta.determined_type.to_string()),
             );
             obj.insert(
                 "determined_type_values".to_string(),
-                Value::String(meta.determined_type_values.clone()),
+                Value::String(
+                    meta.determined_type_values
+                        .as_ref()
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                ),
             );
             obj.insert(
                 "repetition_count".to_string(),

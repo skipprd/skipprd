@@ -1,5 +1,5 @@
 use crate::discover::PipelineMetadata;
-use crate::discover::{AnalyseSchema, Metadata, LAST_SUCCESSFUL_EVOLUTION};
+use crate::discover::{AnalyseSchema, Metadata, SkipprDataType, LAST_SUCCESSFUL_EVOLUTION};
 use crate::ingest::fast_ingest::fast_set_value;
 use crate::ingest::ingest::{discover_ingest, ResolvedFieldValue};
 use arrow::error::ArrowError;
@@ -12,7 +12,7 @@ use tracing::info;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Evolution {
-    pub type_string: String,
+    pub type_string: SkipprDataType,
     pub new_field: String,
     pub sovled: bool,
 }
@@ -80,7 +80,8 @@ impl Evolution {
             .get(temp_feild_name)
             .unwrap()
             .determined_type_values
-            .clone();
+            .clone()
+            .unwrap_or(SkipprDataType::String);
 
         let new_feild_name = &format!("{}_array_{}", field, discoverd_data_type);
 
@@ -92,7 +93,7 @@ impl Evolution {
 
         // Update existing field with the evolution to the new field
         let evo = Evolution {
-            type_string: "array".to_string(),
+            type_string: SkipprDataType::Array,
             new_field: new_feild_name.clone(),
             sovled: true,
         };
@@ -124,14 +125,12 @@ impl Evolution {
 
         // println!("Evolving new data type: '{}' for field '{}' with value '{}' with current data type of '{}'", discoverd_data_type, field, value, metadata.get(field).unwrap().determined_type);
 
-        if discoverd_data_type != "" {
+        if discoverd_data_type != SkipprDataType::Unknown {
             let new_feild_name = &format!("{}_{}", field, discoverd_data_type);
 
             match metadata.get(field).unwrap().evolution.get(new_feild_name) {
                 Some(_evolution) => {
-                    if discoverd_data_type == "array" {
-                        // println!("Have an evolution for field: '{}' to type: '{}' but it is an array, so ignoring", field, discoverd_data_type);
-
+                    if discoverd_data_type == SkipprDataType::Array {
                         *updated_schema = "yes".to_string();
 
                         Evolution::evolve_array_field(
@@ -147,9 +146,7 @@ impl Evolution {
                     }
                 }
                 None => {
-                    if discoverd_data_type == "array" {
-                        // println!("Creating new evolution for array field: '{}' to type: '{}'", field, discoverd_data_type);
-
+                    if discoverd_data_type == SkipprDataType::Array {
                         *updated_schema = "yes".to_string();
 
                         Evolution::evolve_array_field(
@@ -233,7 +230,7 @@ impl Evolution {
                 let (_cached_key, new_field_name, type_string_opt): (
                     String,
                     Option<String>,
-                    Option<String>,
+                    Option<SkipprDataType>,
                 ) = {
                     if let Some(field_metadata) = metadata.get(field) {
                         if let Some(evolution) = field_metadata.evolution.get(evolution_key) {
@@ -253,7 +250,7 @@ impl Evolution {
                 if let (Some(new_field), Some(type_string)) = (new_field_name, type_string_opt) {
                     // Try fast mapping first; only discover if needed
                     match fast_set_value(
-                        &type_string,
+                        type_string.as_str(),
                         &new_field,
                         value,
                         metadata,
@@ -276,7 +273,7 @@ impl Evolution {
                             let mut updated = "no".to_string();
                             discover_ingest(&new_field, value, None, None, metadata, &mut updated);
                             if let Ok(v2) = fast_set_value(
-                                &type_string,
+                                type_string.as_str(),
                                 &new_field,
                                 value,
                                 metadata,
@@ -322,8 +319,8 @@ impl Evolution {
                     metadata: &HashMap<String, Metadata>,
                 ) -> i32 {
                     let mut s: i32 = 0;
-                    match evolution.type_string.as_str() {
-                        "timestamp_milli" => {
+                    match &evolution.type_string {
+                        SkipprDataType::TimestampMilli => {
                             // Prefer millis when the numeric magnitude suggests ms (>= 1e12)
                             if let Some(i) = value.as_i64() {
                                 if i >= 1_000_000_000_000 {
@@ -335,7 +332,7 @@ impl Evolution {
                                 s += 30;
                             }
                         }
-                        "timestamp" => {
+                        SkipprDataType::Timestamp => {
                             // Prefer seconds when the numeric magnitude suggests seconds (< 1e12)
                             if let Some(i) = value.as_i64() {
                                 if i < 1_000_000_000_000 {
@@ -347,35 +344,35 @@ impl Evolution {
                                 s += 30;
                             }
                         }
-                        "double" => {
+                        SkipprDataType::Double => {
                             s += 25;
                             if value.is_f64() {
                                 s += 10;
                             }
                         }
-                        "long" => {
+                        SkipprDataType::Long => {
                             s += 18;
                             if value.is_i64() {
                                 s += 5;
                             }
                         }
-                        "integer" => {
+                        SkipprDataType::Integer => {
                             s += 16;
                             if value.is_i64() {
                                 s += 4;
                             }
                         }
-                        "map" => {
+                        SkipprDataType::Map => {
                             s += 12;
                             if value.is_object() {
                                 s += 5;
                             }
                             if let Some(m) = metadata.get(&evolution.new_field) {
-                                if !m.determined_type_values.is_empty() {
-                                    // Prefer specified values types; numeric values -> prefer double
-                                    if m.determined_type_values == "double" {
+                                if m.determined_type_values.is_some() {
+                                    if m.determined_type_values == Some(SkipprDataType::Double) {
                                         s += 12;
-                                    } else if m.determined_type_values == "long" {
+                                    } else if m.determined_type_values == Some(SkipprDataType::Long)
+                                    {
                                         s += 8;
                                     } else {
                                         s += 4;
@@ -383,16 +380,17 @@ impl Evolution {
                                 }
                             }
                         }
-                        "array" => {
+                        SkipprDataType::Array => {
                             s += 12;
                             if value.is_array() {
                                 s += 5;
                             }
                             if let Some(m) = metadata.get(&evolution.new_field) {
-                                if !m.determined_type_values.is_empty() {
-                                    if m.determined_type_values == "double" {
+                                if m.determined_type_values.is_some() {
+                                    if m.determined_type_values == Some(SkipprDataType::Double) {
                                         s += 12;
-                                    } else if m.determined_type_values == "long" {
+                                    } else if m.determined_type_values == Some(SkipprDataType::Long)
+                                    {
                                         s += 8;
                                     } else {
                                         s += 4;
@@ -400,7 +398,7 @@ impl Evolution {
                                 }
                             }
                         }
-                        "record" => {
+                        SkipprDataType::Record => {
                             s += 14;
                             if value.is_object() {
                                 s += 4;
@@ -420,7 +418,7 @@ impl Evolution {
                 for (_score, (evolution_key, evolution)) in ranked.into_iter() {
                     // Try fast mapping first; if it fails, discover then retry
                     match fast_set_value(
-                        &evolution.type_string,
+                        evolution.type_string.as_str(),
                         &evolution.new_field,
                         value,
                         metadata,
@@ -456,7 +454,7 @@ impl Evolution {
                                 &mut updated,
                             );
                             match fast_set_value(
-                                &evolution.type_string,
+                                evolution.type_string.as_str(),
                                 &evolution.new_field,
                                 value,
                                 metadata,
@@ -519,8 +517,8 @@ impl Evolution {
 pub struct EvolutionSpec {
     pub parent: Option<String>,
     pub field: String,
-    pub required_type: String,
-    pub values_type: Option<String>,
+    pub required_type: SkipprDataType,
+    pub values_type: Option<SkipprDataType>,
 }
 
 #[derive(Clone, Debug)]
@@ -557,9 +555,8 @@ pub fn infer_specs_for_record(
                         &k.to_string(),
                         v.clone().borrow_mut(),
                     );
-                    if !detected.is_empty() && detected != md.determined_type {
-                        if detected == "array" {
-                            // refine using element type
+                    if detected != SkipprDataType::Unknown && detected != md.determined_type {
+                        if detected == SkipprDataType::Array {
                             let (req, vals) = infer_required_type(v);
                             specs.push(EvolutionSpec {
                                 parent: None,
@@ -583,27 +580,27 @@ pub fn infer_specs_for_record(
     specs
 }
 
-fn infer_required_type(value: &serde_json::Value) -> (String, Option<String>) {
+fn infer_required_type(value: &serde_json::Value) -> (SkipprDataType, Option<SkipprDataType>) {
     use serde_json::Value as V;
     match value {
-        V::Null => ("string".to_string(), None),
-        V::Bool(_) => ("boolean".to_string(), None),
+        V::Null => (SkipprDataType::String, None),
+        V::Bool(_) => (SkipprDataType::Boolean, None),
         V::Number(n) => {
             if n.is_i64() {
-                ("long".to_string(), None)
+                (SkipprDataType::Long, None)
             } else {
-                ("double".to_string(), None)
+                (SkipprDataType::Double, None)
             }
         }
-        V::String(_) => ("string".to_string(), None),
+        V::String(_) => (SkipprDataType::String, None),
         V::Array(arr) => {
             if let Some(V::Object(_)) = arr.get(0) {
-                ("array".to_string(), Some("record".to_string()))
+                (SkipprDataType::Array, Some(SkipprDataType::Record))
             } else {
-                ("array".to_string(), Some("string".to_string()))
+                (SkipprDataType::Array, Some(SkipprDataType::String))
             }
         }
-        V::Object(_) => ("record".to_string(), None),
+        V::Object(_) => (SkipprDataType::Record, None),
     }
 }
 
@@ -621,15 +618,15 @@ pub fn apply_specs_to_namespace(
                 },
                 None => &mut ns_meta.fields,
             };
-            let evolved_name = if s.required_type == "array" && s.values_type.is_some() {
-                format!("{}_array_{}", s.field, s.values_type.clone().unwrap())
+            let evolved_name = if s.required_type == SkipprDataType::Array && s.values_type.is_some() {
+                format!("{}_array_{}", s.field, s.values_type.as_ref().unwrap())
             } else {
                 format!("{}_{}", s.field, s.required_type)
             };
             if !target.contains_key(&evolved_name) {
                 let mut md = Metadata::new().unwrap();
-                md.determined_type = if s.required_type == "array" {
-                    s.values_type.clone().unwrap_or("string".to_string())
+                md.determined_type = if s.required_type == SkipprDataType::Array {
+                    s.values_type.clone().unwrap_or(SkipprDataType::String)
                 } else {
                     s.required_type.clone()
                 };
@@ -652,10 +649,10 @@ mod tests_apply_evolution_factory_recordish {
 
         // water_flowmeter (original) string with evolution to record sibling
         let mut wf = Metadata::new().unwrap();
-        wf.determined_type = "string".to_string();
+        wf.determined_type = SkipprDataType::String;
         wf.out_field_name = "water_flowmeter".to_string();
         let evo = Evolution {
-            type_string: "record".to_string(),
+            type_string: SkipprDataType::Record,
             new_field: "water_flowmeter_record".to_string(),
             sovled: true,
         };
@@ -665,10 +662,10 @@ mod tests_apply_evolution_factory_recordish {
 
         // water_flowmeter_record exists with some children but missing 'is_fitted'
         let mut wfr = Metadata::new().unwrap();
-        wfr.determined_type = "record".to_string();
+        wfr.determined_type = SkipprDataType::Record;
         // pre-populate a couple of children
         let mut data_valid = Metadata::new().unwrap();
-        data_valid.determined_type = "boolean".to_string();
+        data_valid.determined_type = SkipprDataType::Boolean;
         data_valid.out_field_name = "data_valid".to_string();
         wfr.fields.insert("data_valid".to_string(), data_valid);
 
@@ -704,7 +701,7 @@ mod tests_apply_evolution_factory_recordish {
         );
         assert_eq!(
             record_md.fields.get("is_fitted").unwrap().determined_type,
-            "boolean"
+            SkipprDataType::Boolean
         );
     }
 
@@ -714,10 +711,10 @@ mod tests_apply_evolution_factory_recordish {
         // Parent record with child temperature_degc as string; evolve to double
         let mut parent_fields: HashMap<String, Metadata> = HashMap::new();
         let mut temp = Metadata::new().unwrap();
-        temp.determined_type = "string".to_string();
+        temp.determined_type = SkipprDataType::String;
         // Add an evolution entry to double sibling
         let evo = Evolution {
-            type_string: "double".to_string(),
+            type_string: SkipprDataType::Double,
             new_field: "temperature_degc_double".to_string(),
             sovled: true,
         };
@@ -743,7 +740,7 @@ mod tests_apply_evolution_factory_recordish {
                 .get("temperature_degc_double")
                 .unwrap()
                 .determined_type,
-            "double"
+            SkipprDataType::Double
         );
     }
 }
@@ -765,12 +762,12 @@ mod tests_evolution_chained {
 
         // Field 'v' initially string with two sibling evolutions: long and double
         let mut v = md();
-        v.determined_type = "string".to_string();
+        v.determined_type = SkipprDataType::String;
         v.out_field_name = "v".to_string();
         v.evolution.insert(
             "v_long".to_string(),
             Evolution {
-                type_string: "long".to_string(),
+                type_string: SkipprDataType::Long,
                 new_field: "v_long".to_string(),
                 sovled: true,
             },
@@ -778,7 +775,7 @@ mod tests_evolution_chained {
         v.evolution.insert(
             "v_double".to_string(),
             Evolution {
-                type_string: "double".to_string(),
+                type_string: SkipprDataType::Double,
                 new_field: "v_double".to_string(),
                 sovled: true,
             },
@@ -806,12 +803,12 @@ mod tests_evolution_chained {
 
         // 'ts' has two evolutions: timestamp, then timestamp_milli
         let mut ts = md();
-        ts.determined_type = "string".to_string();
+        ts.determined_type = SkipprDataType::String;
         ts.out_field_name = "ts".to_string();
         ts.evolution.insert(
             "ts_timestamp".to_string(),
             Evolution {
-                type_string: "timestamp".to_string(),
+                type_string: SkipprDataType::Timestamp,
                 new_field: "ts_timestamp".to_string(),
                 sovled: true,
             },
@@ -819,7 +816,7 @@ mod tests_evolution_chained {
         ts.evolution.insert(
             "ts_timestamp_milli".to_string(),
             Evolution {
-                type_string: "timestamp_milli".to_string(),
+                type_string: SkipprDataType::TimestampMilli,
                 new_field: "ts_timestamp_milli".to_string(),
                 sovled: true,
             },
@@ -840,12 +837,12 @@ mod tests_evolution_chained {
 
         // sensor evolves to sensor_record
         let mut sensor = md();
-        sensor.determined_type = "string".to_string();
+        sensor.determined_type = SkipprDataType::String;
         sensor.out_field_name = "sensor".to_string();
         sensor.evolution.insert(
             "sensor_record".to_string(),
             Evolution {
-                type_string: "record".to_string(),
+                type_string: SkipprDataType::Record,
                 new_field: "sensor_record".to_string(),
                 sovled: true,
             },
@@ -854,14 +851,14 @@ mod tests_evolution_chained {
 
         // Prime record sibling with one child 'a' as string and evolution to 'a_double'
         let mut rec = md();
-        rec.determined_type = "record".to_string();
+        rec.determined_type = SkipprDataType::Record;
         let mut a = md();
-        a.determined_type = "string".to_string();
+        a.determined_type = SkipprDataType::String;
         a.out_field_name = "a".to_string();
         a.evolution.insert(
             "a_double".to_string(),
             Evolution {
-                type_string: "double".to_string(),
+                type_string: SkipprDataType::Double,
                 new_field: "a_double".to_string(),
                 sovled: true,
             },
@@ -898,12 +895,12 @@ mod tests_evolution_chained {
 
         // arr has two evolutions: array(long) then array(double)
         let mut arr = md();
-        arr.determined_type = "string".to_string();
+        arr.determined_type = SkipprDataType::String;
         arr.out_field_name = "arr".to_string();
         arr.evolution.insert(
             "arr_array_long".to_string(),
             Evolution {
-                type_string: "array".to_string(),
+                type_string: SkipprDataType::Array,
                 new_field: "arr_array_long".to_string(),
                 sovled: true,
             },
@@ -911,7 +908,7 @@ mod tests_evolution_chained {
         arr.evolution.insert(
             "arr_array_double".to_string(),
             Evolution {
-                type_string: "array".to_string(),
+                type_string: SkipprDataType::Array,
                 new_field: "arr_array_double".to_string(),
                 sovled: true,
             },
@@ -920,8 +917,8 @@ mod tests_evolution_chained {
 
         // Prime metadata for the target array values type so fast mapping can work without full discovery
         let mut arr_double = md();
-        arr_double.determined_type = "array".to_string();
-        arr_double.determined_type_values = "double".to_string();
+        arr_double.determined_type = SkipprDataType::Array;
+        arr_double.determined_type_values = Some(SkipprDataType::Double);
         arr_double.out_field_name = "arr_array_double".to_string();
         root.insert("arr_array_double".to_string(), arr_double);
 
@@ -939,12 +936,12 @@ mod tests_evolution_chained {
 
         // attrs evolves to map<string,double>
         let mut attrs = md();
-        attrs.determined_type = "string".to_string();
+        attrs.determined_type = SkipprDataType::String;
         attrs.out_field_name = "attrs".to_string();
         attrs.evolution.insert(
             "attrs_map".to_string(),
             Evolution {
-                type_string: "map".to_string(),
+                type_string: SkipprDataType::Map,
                 new_field: "attrs_map".to_string(),
                 sovled: true,
             },
@@ -952,7 +949,7 @@ mod tests_evolution_chained {
         attrs.evolution.insert(
             "attrs_map_double".to_string(),
             Evolution {
-                type_string: "map".to_string(),
+                type_string: SkipprDataType::Map,
                 new_field: "attrs_map_double".to_string(),
                 sovled: true,
             },
@@ -961,8 +958,8 @@ mod tests_evolution_chained {
 
         // Prime target map values type
         let mut map_double = md();
-        map_double.determined_type = "map".to_string();
-        map_double.determined_type_values = "double".to_string();
+        map_double.determined_type = SkipprDataType::Map;
+        map_double.determined_type_values = Some(SkipprDataType::Double);
         map_double.out_field_name = "attrs_map_double".to_string();
         root.insert("attrs_map_double".to_string(), map_double);
 
@@ -989,12 +986,12 @@ mod tests_evolution_more_types {
         let mut root: HashMap<String, Metadata> = HashMap::new();
 
         let mut f = md();
-        f.determined_type = "string".to_string();
+        f.determined_type = SkipprDataType::String;
         f.out_field_name = "flag".to_string();
         f.evolution.insert(
             "flag_bool".to_string(),
             Evolution {
-                type_string: "boolean".to_string(),
+                type_string: SkipprDataType::Boolean,
                 new_field: "flag_bool".to_string(),
                 sovled: true,
             },
@@ -1014,12 +1011,12 @@ mod tests_evolution_more_types {
         let mut root: HashMap<String, Metadata> = HashMap::new();
 
         let mut d = md();
-        d.determined_type = "string".to_string();
+        d.determined_type = SkipprDataType::String;
         d.out_field_name = "d".to_string();
         d.evolution.insert(
             "d_date".to_string(),
             Evolution {
-                type_string: "date".to_string(),
+                type_string: SkipprDataType::Date,
                 new_field: "d_date".to_string(),
                 sovled: true,
             },
@@ -1037,12 +1034,12 @@ mod tests_evolution_more_types {
         let flatten = false;
         let mut root: HashMap<String, Metadata> = HashMap::new();
         let mut ts = md();
-        ts.determined_type = "long".to_string();
+        ts.determined_type = SkipprDataType::Long;
         ts.out_field_name = "ts".to_string();
         ts.evolution.insert(
             "ts_timestamp".to_string(),
             Evolution {
-                type_string: "timestamp".to_string(),
+                type_string: SkipprDataType::Timestamp,
                 new_field: "ts_timestamp".to_string(),
                 sovled: true,
             },
@@ -1050,7 +1047,7 @@ mod tests_evolution_more_types {
         ts.evolution.insert(
             "ts_timestamp_milli".to_string(),
             Evolution {
-                type_string: "timestamp_milli".to_string(),
+                type_string: SkipprDataType::TimestampMilli,
                 new_field: "ts_timestamp_milli".to_string(),
                 sovled: true,
             },
@@ -1069,12 +1066,12 @@ mod tests_evolution_more_types {
         let mut root: HashMap<String, Metadata> = HashMap::new();
 
         let mut arr = md();
-        arr.determined_type = "string".to_string();
+        arr.determined_type = SkipprDataType::String;
         arr.out_field_name = "arr".to_string();
         arr.evolution.insert(
             "arr_array_long".to_string(),
             Evolution {
-                type_string: "array".to_string(),
+                type_string: SkipprDataType::Array,
                 new_field: "arr_array_long".to_string(),
                 sovled: true,
             },
@@ -1083,8 +1080,8 @@ mod tests_evolution_more_types {
 
         // Prime target array with values type = long so fast mapping can succeed
         let mut target = md();
-        target.determined_type = "array".to_string();
-        target.determined_type_values = "long".to_string();
+        target.determined_type = SkipprDataType::Array;
+        target.determined_type_values = Some(SkipprDataType::Long);
         target.out_field_name = "arr_array_long".to_string();
         root.insert("arr_array_long".to_string(), target);
 
@@ -1102,14 +1099,14 @@ mod tests_evolution_more_types {
 
         // parent record exists with child n: string -> n_long
         let mut rec = md();
-        rec.determined_type = "record".to_string();
+        rec.determined_type = SkipprDataType::Record;
         let mut n = md();
-        n.determined_type = "string".to_string();
+        n.determined_type = SkipprDataType::String;
         n.out_field_name = "n".to_string();
         n.evolution.insert(
             "n_long".to_string(),
             Evolution {
-                type_string: "long".to_string(),
+                type_string: SkipprDataType::Long,
                 new_field: "n_long".to_string(),
                 sovled: true,
             },
@@ -1143,7 +1140,7 @@ mod tests_evolve_field {
     fn setup_metadata() -> HashMap<String, Metadata> {
         let mut metadata = HashMap::new();
         let mut md = Metadata::new().unwrap();
-        md.determined_type = "string".to_string();
+        md.determined_type = SkipprDataType::String;
         md.out_field_name = "test_field".to_string();
         md.enabled = true;
         metadata.insert("test_field".to_string(), md);
@@ -1168,7 +1165,7 @@ mod tests_evolve_field {
             flatten,
         );
 
-        let expected_data_type = "long".to_string();
+        let expected_data_type = SkipprDataType::Long;
         let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
 
         assert!(result.is_ok());
@@ -1189,7 +1186,7 @@ mod tests_evolve_field {
             expected_data_type
         );
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, "string");
+        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
     }
 
     #[test]
@@ -1211,7 +1208,7 @@ mod tests_evolve_field {
         );
 
         // The expected type should be integer, not timestamp with our more conservative timestamp detection
-        let expected_data_type = "integer".to_string();
+        let expected_data_type = SkipprDataType::Integer;
         let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
 
         assert!(result.is_ok());
@@ -1232,7 +1229,7 @@ mod tests_evolve_field {
             expected_data_type
         );
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, "string");
+        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
     }
 
     #[test]
@@ -1254,7 +1251,7 @@ mod tests_evolve_field {
             flatten,
         );
 
-        let expected_data_type = "boolean".to_string();
+        let expected_data_type = SkipprDataType::Boolean;
         let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
 
         assert!(result.is_ok());
@@ -1275,7 +1272,7 @@ mod tests_evolve_field {
             expected_data_type
         );
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, "string");
+        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
     }
 
     #[test]
@@ -1296,7 +1293,7 @@ mod tests_evolve_field {
             flatten,
         );
 
-        let expected_data_type = "string".to_string();
+        let expected_data_type = SkipprDataType::String;
         let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
 
         assert!(result.is_ok());
@@ -1314,7 +1311,7 @@ mod tests_evolve_field {
         // The field is actually created, so check that it exists
         assert!(metadata.get(&expected_new_field).is_some());
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, "string");
+        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
     }
 
     #[test]
@@ -1356,7 +1353,7 @@ mod tests_evolve_field {
         // Assert the new evolved fields Metadata exists with the correct type
         assert!(metadata.get(&expected_new_field).is_some());
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, "string");
+        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
     }
 
     #[test]
@@ -1400,14 +1397,14 @@ mod tests_evolve_field {
         let (_, evolution) = field_metadata.evolution.iter().next().unwrap();
 
         // Assert the evolution points to a record type
-        assert_eq!(evolution.type_string, "record");
+        assert_eq!(evolution.type_string, SkipprDataType::Record);
 
         // Get the evolved field's metadata
         let evolved_field_metadata = metadata.get(&evolution.new_field).unwrap();
-        assert_eq!(evolved_field_metadata.determined_type, "record");
+        assert_eq!(evolved_field_metadata.determined_type, SkipprDataType::Record);
 
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, "string");
+        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
     }
 
     #[test]
@@ -1435,7 +1432,7 @@ mod tests_evolve_field {
             flatten,
         );
 
-        let expected_data_type = "record".to_string();
+        let expected_data_type = SkipprDataType::Record;
         let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
 
         assert!(result.is_ok());
@@ -1456,7 +1453,7 @@ mod tests_evolve_field {
             expected_data_type
         );
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, "string");
+        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
     }
 
     // #[test]

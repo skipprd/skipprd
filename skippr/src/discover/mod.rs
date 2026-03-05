@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::any::Any;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 #[allow(unused_imports)]
 use chrono::{DateTime, TimeZone, Utc};
@@ -80,8 +80,8 @@ pub fn discover_ingest(
     // If this is an array of records, make sure repetition_count matches the array length
     if value.is_array() {
         if let Some(field_metadata) = metadata.get_mut(field) {
-            if field_metadata.is_type(SkipprDataType::Array)
-                && field_metadata.is_values_type(SkipprDataType::Record)
+            if field_metadata.determined_type == SkipprDataType::Array
+                && field_metadata.determined_type_values == Some(SkipprDataType::Record)
             {
                 let array_length = value.as_array().unwrap().len() as i32;
                 if array_length > field_metadata.repetition_count {
@@ -105,14 +105,14 @@ pub fn discover_ingest(
     *updated_schema = "yes".to_string();
 
     // Derive parser kind once per field to avoid repeated string scans in ingest
-    if discoverd_data_type == "date" {
+    if discoverd_data_type == SkipprDataType::Date {
         if let Some(meta) = metadata.get_mut(field) {
             meta.date_parser_kind =
                 Some(AnalyseSchema::derive_date_parser_kind(value, meta.timezone));
         }
     }
 
-    discoverd_data_type
+    discoverd_data_type.to_string()
 }
 
 /**
@@ -124,8 +124,9 @@ pub fn discover_ingest(
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct OutputMetadata {
     pub(crate) out_field_name: String,
-    pub(crate) determined_type: String,
-    pub(crate) determined_type_values: String,
+    pub(crate) determined_type: SkipprDataType,
+    #[serde(with = "serde_opt_data_type")]
+    pub(crate) determined_type_values: Option<SkipprDataType>,
     pub(crate) fields: Box<HashMap<String, OutputMetadata>>,
 }
 
@@ -135,8 +136,8 @@ impl OutputMetadata {
     pub fn new() -> Self {
         Self {
             out_field_name: "".to_string(),
-            determined_type: "".to_string(),
-            determined_type_values: "".to_string(),
+            determined_type: SkipprDataType::Unknown,
+            determined_type_values: None,
             fields: Box::new(HashMap::new()),
         }
     }
@@ -152,12 +153,10 @@ impl OutputMetadata {
         output_metadata.determined_type_values = metadata.determined_type_values.clone();
 
         let mut fields = HashMap::new();
-        for (field, metadata) in metadata.fields.iter() {
-            fields.insert(field.clone(), OutputMetadata::from_metadata(metadata));
+        for (field, md) in metadata.fields.iter() {
+            fields.insert(field.clone(), OutputMetadata::from_metadata(md));
         }
-        let fields_outer: Box<HashMap<String, OutputMetadata>> = Box::new(fields);
-
-        output_metadata.fields = fields_outer;
+        output_metadata.fields = Box::new(fields);
 
         output_metadata
     }
@@ -239,8 +238,9 @@ impl crate::discover::PipelineMetadata {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Metadata {
     pub(crate) count: i32,
-    pub(crate) types: HashMap<String, u32>,
-    pub(crate) parent_type: String,
+    pub(crate) types: HashMap<SkipprDataType, u32>,
+    #[serde(with = "serde_opt_data_type")]
+    pub(crate) parent_type: Option<SkipprDataType>,
     pub(crate) fields: Box<HashMap<String, Metadata>>,
     pub(crate) date_candidate: Option<DateCandidate>,
     pub(crate) date_parser_kind: Option<DateParserKind>,
@@ -248,9 +248,10 @@ pub struct Metadata {
     pub(crate) evolution: Box<HashMap<String, Evolution>>,
     pub(crate) enabled: bool,
     pub(crate) out_field_name: String,
-    pub(crate) determined_type: String,
-    pub(crate) determined_type_values: String,
-    pub(crate) repetition_count: i32, // New field to track array repetition count
+    pub(crate) determined_type: SkipprDataType,
+    #[serde(with = "serde_opt_data_type")]
+    pub(crate) determined_type_values: Option<SkipprDataType>,
+    pub(crate) repetition_count: i32,
 }
 
 impl Metadata {
@@ -260,7 +261,7 @@ impl Metadata {
         Ok(Self {
             count: 0,
             types: Default::default(),
-            parent_type: "".to_string(),
+            parent_type: None,
             fields: Box::new(Default::default()),
             date_candidate: None,
             date_parser_kind: None,
@@ -268,40 +269,10 @@ impl Metadata {
             evolution: Box::new(Default::default()),
             enabled: true,
             out_field_name: "".to_string(),
-            determined_type: "".to_string(),
-            determined_type_values: "".to_string(),
+            determined_type: SkipprDataType::Unknown,
+            determined_type_values: None,
             repetition_count: 5,
         })
-    }
-
-    /// Gets the data type as a SkipprDataType enum
-    pub fn data_type(&self) -> SkipprDataType {
-        SkipprDataType::from_str(&self.determined_type)
-    }
-
-    /// Sets the data type using a SkipprDataType enum
-    pub fn set_data_type(&mut self, data_type: SkipprDataType) {
-        self.determined_type = data_type.as_str().to_string();
-    }
-
-    /// Gets the values data type as a SkipprDataType enum
-    pub fn values_data_type(&self) -> SkipprDataType {
-        SkipprDataType::from_str(&self.determined_type_values)
-    }
-
-    /// Sets the values data type using a SkipprDataType enum
-    pub fn set_values_data_type(&mut self, data_type: SkipprDataType) {
-        self.determined_type_values = data_type.as_str().to_string();
-    }
-
-    /// Check if the data type matches a specific type
-    pub fn is_type(&self, data_type: SkipprDataType) -> bool {
-        self.data_type() == data_type
-    }
-
-    /// Check if the values data type matches a specific type
-    pub fn is_values_type(&self, data_type: SkipprDataType) -> bool {
-        self.values_data_type() == data_type
     }
 
     pub fn flatten_metadata(metadata: &Metadata, flattened: &mut OutputMetadata) {
@@ -311,7 +282,7 @@ impl Metadata {
     fn _flatten_metadata(metadata: &Metadata, flattened: &mut OutputMetadata, field_path: String) {
         for (_key, val) in metadata.fields.iter() {
             // Special handling for array elements
-            if val.is_type(SkipprDataType::Array) && val.fields.contains_key("0") {
+            if val.determined_type == SkipprDataType::Array && val.fields.contains_key("0") {
                 let array_template = val.fields.get("0").unwrap();
                 let repetition_count = val.repetition_count; // Use repetition_count instead of count
 
@@ -334,9 +305,9 @@ impl Metadata {
                         let field_element_path =
                             format!("{}_{}", element_path, sub_val.out_field_name);
 
-                        if sub_val.determined_type == "record"
-                            || sub_val.determined_type == "map"
-                            || sub_val.determined_type == "array"
+                        if sub_val.determined_type == SkipprDataType::Record
+                            || sub_val.determined_type == SkipprDataType::Map
+                            || sub_val.determined_type == SkipprDataType::Array
                         {
                             // Recursively process complex types
                             let mut temp_metadata = sub_val.clone();
@@ -357,7 +328,7 @@ impl Metadata {
                         }
                     }
                 }
-            } else if val.determined_type == "array" && val.fields.is_empty() {
+            } else if val.determined_type == SkipprDataType::Array && val.fields.is_empty() {
                 // Handle primitive arrays that don't have a '0' field
                 // These are arrays of primitive types like double, int, etc.
                 let new_field_path = if field_path.is_empty() {
@@ -389,9 +360,9 @@ impl Metadata {
                     format!("{}_{}", field_path, val.out_field_name)
                 };
 
-                if val.determined_type == "record"
-                    || val.determined_type == "map"
-                    || val.determined_type == "array"
+                if val.determined_type == SkipprDataType::Record
+                    || val.determined_type == SkipprDataType::Map
+                    || val.determined_type == SkipprDataType::Array
                 {
                     Self::_flatten_metadata(val, flattened, new_field_path);
                 } else {
@@ -576,23 +547,7 @@ pub struct AnalyseSchema {
     // pub data_type_casts: HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum SkipprTypes {
-    String,
-    Integer,
-    Long,
-    Double,
-    Boolean,
-    Date,
-    Timestamp,
-    TimestampMilli,
-    Array,
-    Map,
-    Record,
-    Null,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SkipprDataType {
     Record,
     Map,
@@ -609,27 +564,99 @@ pub enum SkipprDataType {
     Unknown,
 }
 
+impl serde::Serialize for SkipprDataType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SkipprDataType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = <std::string::String as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(SkipprDataType::from_str(&s))
+    }
+}
+
+impl std::fmt::Display for SkipprDataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Default for SkipprDataType {
+    fn default() -> Self {
+        SkipprDataType::Unknown
+    }
+}
+
+pub(crate) mod serde_opt_data_type {
+    use super::SkipprDataType;
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<SkipprDataType>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(dt) => serializer.serialize_str(dt.as_str()),
+            None => serializer.serialize_str(""),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<SkipprDataType>, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        if s.is_empty() {
+            Ok(None)
+        } else {
+            let dt = SkipprDataType::from_str(&s);
+            if dt == SkipprDataType::Unknown {
+                Ok(None)
+            } else {
+                Ok(Some(dt))
+            }
+        }
+    }
+}
+
 impl SkipprDataType {
-    /// Convert a string data type to the corresponding enum variant
     pub fn from_str(data_type: &str) -> Self {
         match data_type {
-            "record" => SkipprDataType::Record,
+            "record" | "struct" => SkipprDataType::Record,
             "map" => SkipprDataType::Map,
             "array" => SkipprDataType::Array,
             "date" => SkipprDataType::Date,
             "string" => SkipprDataType::String,
-            "long" => SkipprDataType::Long,
+            "long" | "bigint" => SkipprDataType::Long,
             "int" | "integer" => SkipprDataType::Integer,
             "double" => SkipprDataType::Double,
             "boolean" => SkipprDataType::Boolean,
             "timestamp_milli" => SkipprDataType::TimestampMilli,
             "timestamp" => SkipprDataType::Timestamp,
-            "null" => SkipprDataType::Null,
+            "null" | "NULL" => SkipprDataType::Null,
             _ => SkipprDataType::Unknown,
         }
     }
 
-    /// Convert enum variant to string representation
+    pub fn from_string(s: &str) -> Option<SkipprDataType> {
+        match s.to_lowercase().as_str() {
+            "string" => Some(SkipprDataType::String),
+            "integer" | "int" => Some(SkipprDataType::Integer),
+            "long" | "bigint" => Some(SkipprDataType::Long),
+            "double" => Some(SkipprDataType::Double),
+            "boolean" => Some(SkipprDataType::Boolean),
+            "date" => Some(SkipprDataType::Date),
+            "timestamp" => Some(SkipprDataType::Timestamp),
+            "timestamp_milli" => Some(SkipprDataType::TimestampMilli),
+            "array" => Some(SkipprDataType::Array),
+            "map" => Some(SkipprDataType::Map),
+            "record" | "struct" => Some(SkipprDataType::Record),
+            "null" => Some(SkipprDataType::Null),
+            _ => None,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             SkipprDataType::Record => "record",
@@ -647,101 +674,23 @@ impl SkipprDataType {
             SkipprDataType::Unknown => "unknown",
         }
     }
-
-    /// Convert SkipprDataType to SkipprTypes
-    pub fn to_skippr_type(&self) -> Option<SkipprTypes> {
-        match self {
-            SkipprDataType::Record => Some(SkipprTypes::Record),
-            SkipprDataType::Map => Some(SkipprTypes::Map),
-            SkipprDataType::Array => Some(SkipprTypes::Array),
-            SkipprDataType::Date => Some(SkipprTypes::Date),
-            SkipprDataType::String => Some(SkipprTypes::String),
-            SkipprDataType::Long => Some(SkipprTypes::Long),
-            SkipprDataType::Integer => Some(SkipprTypes::Integer),
-            SkipprDataType::Double => Some(SkipprTypes::Double),
-            SkipprDataType::Boolean => Some(SkipprTypes::Boolean),
-            SkipprDataType::TimestampMilli => Some(SkipprTypes::TimestampMilli),
-            SkipprDataType::Timestamp => Some(SkipprTypes::Timestamp),
-            SkipprDataType::Null => Some(SkipprTypes::Null),
-            SkipprDataType::Unknown => None,
-        }
-    }
-
-    /// Convert from SkipprTypes to SkipprDataType
-    pub fn from_skippr_type(skippr_type: &SkipprTypes) -> Self {
-        match skippr_type {
-            SkipprTypes::Record => SkipprDataType::Record,
-            SkipprTypes::Map => SkipprDataType::Map,
-            SkipprTypes::Array => SkipprDataType::Array,
-            SkipprTypes::Date => SkipprDataType::Date,
-            SkipprTypes::String => SkipprDataType::String,
-            SkipprTypes::Long => SkipprDataType::Long,
-            SkipprTypes::Integer => SkipprDataType::Integer,
-            SkipprTypes::Double => SkipprDataType::Double,
-            SkipprTypes::Boolean => SkipprDataType::Boolean,
-            SkipprTypes::TimestampMilli => SkipprDataType::TimestampMilli,
-            SkipprTypes::Timestamp => SkipprDataType::Timestamp,
-            SkipprTypes::Null => SkipprDataType::Null,
-        }
-    }
-}
-
-// to string
-impl SkipprTypes {
-    pub(crate) fn to_string(&self) -> String {
-        match self {
-            SkipprTypes::String => "string".to_string(),
-            SkipprTypes::Integer => "integer".to_string(),
-            SkipprTypes::Long => "long".to_string(),
-            SkipprTypes::Double => "double".to_string(),
-            SkipprTypes::Boolean => "boolean".to_string(),
-            SkipprTypes::Date => "date".to_string(),
-            SkipprTypes::Timestamp => "timestamp".to_string(),
-            SkipprTypes::TimestampMilli => "timestamp_milli".to_string(),
-            SkipprTypes::Array => "array".to_string(),
-            SkipprTypes::Map => "map".to_string(),
-            SkipprTypes::Record => "record".to_string(),
-            SkipprTypes::Null => "null".to_string(),
-        }
-    }
-
-    pub(crate) fn from_string(s: &str) -> Option<SkipprTypes> {
-        match s.to_lowercase().as_str() {
-            "string" => Some(SkipprTypes::String),
-            "integer" => Some(SkipprTypes::Integer),
-            "int" => Some(SkipprTypes::Integer),
-            "long" => Some(SkipprTypes::Long),
-            "bigint" => Some(SkipprTypes::Long),
-            "double" => Some(SkipprTypes::Double),
-            "boolean" => Some(SkipprTypes::Boolean),
-            "date" => Some(SkipprTypes::Date),
-            "timestamp" => Some(SkipprTypes::Timestamp),
-            "timestamp_milli" => Some(SkipprTypes::TimestampMilli),
-            "array" => Some(SkipprTypes::Array),
-            "map" => Some(SkipprTypes::Map),
-            "record" => Some(SkipprTypes::Record),
-            "struct" => Some(SkipprTypes::Record),
-            "null" => Some(SkipprTypes::Null),
-            _ => None,
-        }
-    }
 }
 
 const DATE_FIELD_VALIDATION_MIN_SAMPLE: i32 = 100;
 
-fn get_type(value: &str) -> String {
+fn get_type(value: &str) -> SkipprDataType {
     let _foo = "";
 
     match value.parse::<i32>() {
         Ok(_bool) => {
-            return "integer".to_string();
+            return SkipprDataType::Integer;
         }
         Err(..) => {
             let timmed_value = value.trim_matches('"');
             let json_value: Result<i32, _> = serde_json::from_str(timmed_value);
             match json_value {
                 Ok(_) => {
-                    return "integer".to_string();
+                    return SkipprDataType::Integer;
                 }
                 Err(_) => {}
             }
@@ -750,14 +699,14 @@ fn get_type(value: &str) -> String {
 
     match value.parse::<i64>() {
         Ok(_bool) => {
-            return "long".to_string();
+            return SkipprDataType::Long;
         }
         Err(..) => {
             let timmed_value = value.trim_matches('"');
             let json_value: Result<i128, _> = serde_json::from_str(timmed_value);
             match json_value {
                 Ok(_) => {
-                    return "long".to_string();
+                    return SkipprDataType::Long;
                 }
                 Err(_) => {}
             }
@@ -766,14 +715,14 @@ fn get_type(value: &str) -> String {
 
     match &value.parse::<f32>() {
         Ok(_bool) => {
-            return "double".to_string();
+            return SkipprDataType::Double;
         }
         Err(_) => {
             let timmed_value = value.trim_matches('"');
             let json_value: Result<f32, _> = serde_json::from_str(timmed_value);
             match json_value {
                 Ok(_) => {
-                    return "double".to_string();
+                    return SkipprDataType::Double;
                 }
                 Err(_) => {}
             }
@@ -783,33 +732,33 @@ fn get_type(value: &str) -> String {
     let v: Value = serde_json::from_str(value).unwrap_or_default();
     match v.is_array().then_some(true) {
         Some(_bool) => {
-            return "array".to_string();
+            return SkipprDataType::Array;
         }
         None => {}
     }
 
     match v.is_object().then_some(true) {
         Some(_bool) => {
-            return "array".to_string();
+            return SkipprDataType::Array;
         }
         None => {}
     }
 
     match value.parse::<bool>() {
         Ok(_bool) => {
-            return "boolean".to_string();
+            return SkipprDataType::Boolean;
         }
         Err(_string) => {}
     }
 
     match value.parse::<String>() {
         Ok(_bool) => {
-            return "string".to_string();
+            return SkipprDataType::String;
         }
         Err(_string) => {}
     }
 
-    "unknown".to_string()
+    SkipprDataType::Unknown
 }
 
 const MIN_DISCOVERY_RECORDS: i32 = 100;
@@ -1015,8 +964,8 @@ impl AnalyseSchema {
         if value.is_array() {
             // Update repetition_count only for arrays of records
             if let Some(field_metadata) = metadata.get_mut(field) {
-                if field_metadata.determined_type == "array"
-                    && field_metadata.determined_type_values == "record"
+                if field_metadata.determined_type == SkipprDataType::Array
+                    && field_metadata.determined_type_values == Some(SkipprDataType::Record)
                 {
                     let array_length = value.as_array().unwrap().len() as i32;
                     if array_length > field_metadata.repetition_count {
@@ -1057,12 +1006,12 @@ impl AnalyseSchema {
         metadata: &mut HashMap<String, Metadata>,
         field: &String,
         value: &mut Value,
-    ) -> String {
+    ) -> SkipprDataType {
         self.init_discovered_type(metadata, field);
 
         let mut data_type = self.get_logical_type(field, value, metadata, true);
 
-        if data_type == "array"
+        if data_type == SkipprDataType::Array
         // && value.as_array().is_some()
         // && value.is_array()
         {
@@ -1112,7 +1061,7 @@ impl AnalyseSchema {
                 for sub_value in value.as_array().unwrap() {
                     let mut sv: Value = serde_json::from_str(&sub_value.to_string()).unwrap();
 
-                    let mut _logical_type = "".to_string();
+                    let mut _logical_type = SkipprDataType::Unknown;
 
                     _logical_type = self.resolve_field_type(
                         metadata
@@ -1161,31 +1110,31 @@ impl AnalyseSchema {
             //     }
             // }
 
-            if type_count.contains_key("record") {
+            if type_count.contains_key(&SkipprDataType::Record) {
                 // If the value is actually an array (JSON array) but contains records,
                 // it should be identified as an array of records, not just a record
                 if value.is_array() {
-                    data_type = "array".to_string();
+                    data_type = SkipprDataType::Array;
                 } else {
-                    data_type = "record".to_string();
+                    data_type = SkipprDataType::Record;
                 }
             } else if is_sequential {
                 // array of sequential int keys is an avro array
-                data_type = "array".to_string();
+                data_type = SkipprDataType::Array;
             } else
             // if type_count.len() > 1
             {
-                data_type = "record".to_string();
+                data_type = SkipprDataType::Record;
             }
 
             // Set the initial repetition_count for arrays of records
-            if data_type == "array" && value.is_array() {
+            if data_type == SkipprDataType::Array && value.is_array() {
                 // Check if this is an array of records by examining the first element
                 let array_values = value.as_array().unwrap();
                 if !array_values.is_empty() && array_values[0].is_object() {
                     let array_length = array_values.len() as i32;
                     if let Some(field_metadata) = metadata.get_mut(field) {
-                        field_metadata.determined_type_values = "record".to_string();
+                        field_metadata.determined_type_values = Some(SkipprDataType::Record);
                         field_metadata.repetition_count =
                             array_length.max(field_metadata.repetition_count);
                     }
@@ -1217,28 +1166,28 @@ impl AnalyseSchema {
         json_value: &mut Value,
         metadata: &mut HashMap<String, Metadata>,
         allow_date: bool,
-    ) -> String {
+    ) -> SkipprDataType {
         // let value: &mut String = &mut json_value.as_str().unwrap().to_string();
         let value: &mut String = &mut json_value.to_string();
 
         let mut data_type = get_type(value);
 
-        if data_type == *"string" || data_type == *"integer" {
+        if data_type == SkipprDataType::String || data_type == SkipprDataType::Integer {
             // String really an int?
             data_type = self.check_string_or_int(value);
 
             if allow_date {
                 let mut valid_timestamp = false;
 
-                if data_type == *"integer" {
+                if data_type == SkipprDataType::Integer {
                     valid_timestamp = self.is_valid_timestamp(value);
                     if valid_timestamp {
-                        data_type = "timestamp".to_string();
+                        data_type = SkipprDataType::Timestamp;
                     }
-                } else if data_type == *"long" {
+                } else if data_type == SkipprDataType::Long {
                     valid_timestamp = self.is_valid_timestamp(value);
                     if valid_timestamp {
-                        data_type = "timestamp_milli".to_string();
+                        data_type = SkipprDataType::TimestampMilli;
                     }
                 }
 
@@ -1253,7 +1202,7 @@ impl AnalyseSchema {
             // }
         }
 
-        if data_type == *"string" && allow_date {
+        if data_type == SkipprDataType::String && allow_date {
             // Limit number of check type attempts for data as expensive operation.
 
             if metadata
@@ -1276,7 +1225,7 @@ impl AnalyseSchema {
                 let value_str = json_value.as_str().unwrap_or("");
 
                 if let Some(format) = AnalyseSchema::is_valid_date(value_str) {
-                    data_type = "date".to_string();
+                    data_type = SkipprDataType::Date;
                     // self.set_date_field_candidate(field, metadata, &format);
                     self.increment_date_field_candidate_count(field, metadata, &format.to_string());
                     // If the string clearly includes a timezone indicator, mark metadata timezone as present
@@ -1300,19 +1249,19 @@ impl AnalyseSchema {
                 .valid_count
                 >= DATE_FIELD_VALIDATION_MIN_SAMPLE
             {
-                data_type = "date".to_string();
+                data_type = SkipprDataType::Date;
             }
         }
 
         // @todo - we don't support int bool anymore
-        if data_type == *"integer" || data_type == *"string" {
+        if data_type == SkipprDataType::Integer || data_type == SkipprDataType::String {
             match parse_bool(value) {
                 Err(_i32) => {
                     // println!("Not float");
                 }
                 Ok(_bool) => {
                     // println!("Is float");
-                    return "boolean".to_string();
+                    return SkipprDataType::Boolean;
                 }
             }
         }
@@ -1320,25 +1269,25 @@ impl AnalyseSchema {
         //     data_type = "boolean".to_string();
         // }
 
-        if data_type == *"NULL" {
+        if data_type == SkipprDataType::Null {
             // most systems won't support null
-            data_type = "string".to_string();
+            data_type = SkipprDataType::String;
         }
         // @todo - logical interpretation based on field name
 
         data_type
     }
 
-    pub fn check_string_or_int(&self, value: &mut String) -> String {
+    pub fn check_string_or_int(&self, value: &mut String) -> SkipprDataType {
         let mut data_type = get_type(value);
 
         // check is_32_bit_signed_int or is_64_bit_signed_int
 
-        if data_type == *"string" {
+        if data_type == SkipprDataType::String {
             if self.is_32_bit_signed_int(value) {
-                data_type = "integer".to_string();
+                data_type = SkipprDataType::Integer;
             } else if self.is_64_bit_signed_int(value) {
-                data_type = "long".to_string();
+                data_type = SkipprDataType::Long;
             }
         }
 
@@ -1733,38 +1682,21 @@ impl AnalyseSchema {
         &self,
         metadata: &mut HashMap<String, Metadata>,
         field: &String,
-        data_type: &String,
+        data_type: &SkipprDataType,
         value: &mut String,
     ) {
         if metadata
             .get(field)
             .unwrap()
             .types
-            .get(&data_type.to_string())
+            .get(data_type)
             .is_none()
         {
             metadata
                 .get_mut(field)
                 .unwrap()
                 .types
-                .insert(data_type.to_string(), 1);
-            // array.get_mut(field).unwrap().evolution.insert(
-            //     data_type.to_string(),
-            //     Evolution {
-            //         type_string: "".to_string(),
-            //         new_field: "".to_string(),
-            //         sovled: false,
-            //     },
-            // );
-
-            // @todo
-            // if !Config::analysing
-            //     && Config::run_mode == Config::RUN_MODE_SYNC
-            //     && Config::mutable_mode == Config::MUTABLE_MODE_EVOLVE
-            // {
-            //     // auto-accept new fields and types when syncing in 'evolve' mode
-            //     array.get_mut(field).unwrap().determined_type = data_type.to_string();
-            // }
+                .insert(data_type.clone(), 1);
         } else {
             let new_count: u32 = metadata
                 .get_mut(field)
@@ -1777,24 +1709,24 @@ impl AnalyseSchema {
                 .get_mut(field)
                 .unwrap()
                 .types
-                .insert(data_type.to_string(), new_count);
+                .insert(data_type.clone(), new_count);
         }
 
         // I found in practice theres too many false possitives for array values types of timestamp
         // @todo - probably better handeled in determine_field_types, not sure why it isn't already working
         // if metadata.get(field).unwrap().parent_type != "array" {
-        if data_type == "integer" {
+        if *data_type == SkipprDataType::Integer {
             let valid_timestamp = self.is_valid_timestamp(value);
             if valid_timestamp {
-                self.set_discovered_occurrence(metadata, field, &"timestamp".to_string(), value);
+                self.set_discovered_occurrence(metadata, field, &SkipprDataType::Timestamp, value);
             }
-        } else if data_type == "long" {
+        } else if *data_type == SkipprDataType::Long {
             let valid_timestamp = self.is_valid_timestamp_milli(value);
             if valid_timestamp {
                 self.set_discovered_occurrence(
                     metadata,
                     field,
-                    &"timestamp_milli".to_string(),
+                    &SkipprDataType::TimestampMilli,
                     value,
                 );
             }
@@ -1812,24 +1744,24 @@ impl AnalyseSchema {
         for (field_name, field) in metadata.iter_mut() {
             // Useful for field evolution logic for maps, which only support one sub-field type
             if let Some(parent_type) = parent_type {
-                field.parent_type = parent_type.to_string();
+                field.parent_type = Some(SkipprDataType::from_str(parent_type));
             }
 
             field.out_field_name = Helpers::clean_field_name(field_name.to_string());
 
-            if field.determined_type == *"" {
-                let mut highest_type = "".to_string();
+            if field.determined_type == SkipprDataType::Unknown {
+                let mut highest_type = SkipprDataType::Unknown;
                 let mut highest_count = 0;
 
                 if !field.types.is_empty() {
                     // Don't allow NULL type if we discovered any other types
                     if field.types.len() > 1 {
-                        field.types.remove("NULL");
+                        field.types.remove(&SkipprDataType::Null);
                     }
 
                     // force to record type over map or array if ever present
-                    if field.types.contains_key("record") {
-                        field.determined_type = "record".to_string();
+                    if field.types.contains_key(&SkipprDataType::Record) {
+                        field.determined_type = SkipprDataType::Record;
                     } else {
                         for (data_type, data_type_count) in field.types.iter() {
                             // println!("eavluating type {} with count {}", data_type, data_type_count);
@@ -1856,7 +1788,7 @@ impl AnalyseSchema {
                                 //     || (field.types.len() > 1
                                 //         && !demoted_types.contains(&data_type.as_str()))
                                 // {
-                                highest_type = data_type.to_string();
+                                highest_type = data_type.clone();
                                 highest_count = *data_type_count;
                                 // }
                             }
@@ -1867,12 +1799,12 @@ impl AnalyseSchema {
                 }
             }
 
-            if !field.determined_type.is_empty()
-                && vec!["map", "array", "record"].contains(&field.determined_type.as_str())
+            if field.determined_type != SkipprDataType::Unknown
+                && matches!(field.determined_type, SkipprDataType::Map | SkipprDataType::Array | SkipprDataType::Record)
                 && field.fields.len() > 0
             {
-                if field.determined_type_values == "".to_string()
-                    && (field.determined_type == "array" || field.determined_type == "map")
+                if field.determined_type_values.is_none()
+                    && (field.determined_type == SkipprDataType::Array || field.determined_type == SkipprDataType::Map)
                 {
                     // field.determined_type_values = "".to_string();
 
@@ -1881,7 +1813,7 @@ impl AnalyseSchema {
                     // e.g. [1,5,3,7,4,3,5]
                     // would incorrectly become ['a0' => 1, 'a1' => 5, ...]
 
-                    let mut type_count = BTreeMap::new();
+                    let mut type_count: HashMap<SkipprDataType, u32> = HashMap::new();
 
                     // @todo - not intended to build avro type array here
                     //         however, 'array' type is a special case... how to handle?
@@ -1889,52 +1821,28 @@ impl AnalyseSchema {
                     // Get avro arrays items primitive data type
                     for (_sub_field, sub_value) in field.fields.iter() {
                         for (data_type, data_type_count) in sub_value.types.iter() {
-                            // Prefer primitive types to logical types or types
-                            // that cause frequent false positives (demoted types).
-                            // - if there's multiple discovered types
-                            // - and the most common type is a demoted type
-                            // - select the next most common, non-date type
-                            //                                if (!in_array($dataType, $demotedTypes)) {
-
-                            // hacky, support inference on they fly when we only infer on one record.
-                            // much more likely to be an integer than a boolean
-                            // if sub_value.types.len() == 1
-                            //     && sub_value.types.contains_key("boolean")
-                            //     && sub_value.types.get("boolean").unwrap() == &1
-                            //
-                            // {
-                            //     type_count.insert("integer".to_string(), *data_type_count);
-                            //     break;
-                            // }
-
-                            // if type_count.len() <= 1
-                            //     || (type_count.len() > 1
-                            //         && !demoted_types.contains(&data_type.as_str()))
-                            // {
                             if type_count.get(data_type).is_none() {
-                                type_count.insert(data_type.to_string(), *data_type_count);
+                                type_count.insert(data_type.clone(), *data_type_count);
                             } else {
                                 *type_count.get_mut(data_type).unwrap() += data_type_count;
                             }
-                            // }
                         }
                     }
 
-                    let mut values_type: &String = &"".to_string();
+                    let mut values_type: Option<SkipprDataType> = None;
 
                     if !type_count.is_empty() {
                         values_type = type_count
                             .iter()
                             .max_by(|a, b| a.1.cmp(b.1))
-                            .map(|(k, _v)| k)
-                            .unwrap();
+                            .map(|(k, _v)| k.clone());
                     }
 
-                    // println!("HIGHEST TYPE: {}", values_type);
+                    // println!("HIGHEST TYPE: {:?}", values_type);
 
-                    field.determined_type_values = values_type.to_string();
+                    field.determined_type_values = values_type;
 
-                    if field.determined_type == *"array" && field.determined_type_values != "record"
+                    if field.determined_type == SkipprDataType::Array && field.determined_type_values != Some(SkipprDataType::Record)
                     {
                         field.fields.clear();
                     }
@@ -1943,13 +1851,13 @@ impl AnalyseSchema {
                 // println!("Field {} determined type is {}", field_name, field.determined_type);
                 // println!("Field {} values type is {}", field_name, field.determined_type_values);
 
-                if field.determined_type != *"array"
-                    || (field.determined_type == *"array"
-                        && field.determined_type_values == "record")
+                if field.determined_type != SkipprDataType::Array
+                    || (field.determined_type == SkipprDataType::Array
+                        && field.determined_type_values == Some(SkipprDataType::Record))
                 {
                     AnalyseSchema::determine_field_types(
                         &mut field.fields,
-                        Some(&field.determined_type),
+                        Some(field.determined_type.as_str()),
                         flatten,
                     );
                 }
@@ -1973,7 +1881,7 @@ impl AnalyseSchema {
                     for (t, count) in value.types {
                         *metadata.types.entry(t).or_insert(0) += count;
                     }
-                    if metadata.parent_type.is_empty() {
+                    if metadata.parent_type.is_none() {
                         metadata.parent_type = value.parent_type.clone();
                     }
                     for (field, field_metadata) in *value.fields {
@@ -1989,10 +1897,10 @@ impl AnalyseSchema {
                             .or_insert(evolution_value) = evolution_value.clone();
                     }
                     metadata.enabled = metadata.enabled || value.enabled;
-                    if !value.determined_type.is_empty() {
+                    if value.determined_type != SkipprDataType::Unknown {
                         metadata.determined_type = value.determined_type.clone();
                     }
-                    if !value.determined_type_values.is_empty() {
+                    if value.determined_type_values.is_some() {
                         metadata.determined_type_values = value.determined_type_values.clone();
                     }
                 })
@@ -2009,27 +1917,27 @@ mod check_string_or_int_tests {
     fn test_32_bit_signed_int() {
         let dummy = AnalyseSchema { i: 0 };
         let mut value = "2147483647".to_string(); // max i32
-        assert_eq!(dummy.check_string_or_int(&mut value), "integer");
+        assert_eq!(dummy.check_string_or_int(&mut value), SkipprDataType::Integer);
 
         let mut value = "-2147483648".to_string(); // min i32
-        assert_eq!(dummy.check_string_or_int(&mut value), "integer");
+        assert_eq!(dummy.check_string_or_int(&mut value), SkipprDataType::Integer);
     }
 
     #[test]
     fn test_64_bit_signed_int() {
         let dummy = AnalyseSchema { i: 0 };
         let mut value = "9223372036854775807".to_string(); // max i64
-        assert_eq!(dummy.check_string_or_int(&mut value), "long");
+        assert_eq!(dummy.check_string_or_int(&mut value), SkipprDataType::Long);
 
         let mut value = "-9223372036854775808".to_string(); // min i64
-        assert_eq!(dummy.check_string_or_int(&mut value), "long");
+        assert_eq!(dummy.check_string_or_int(&mut value), SkipprDataType::Long);
     }
 
     #[test]
     fn test_non_integer() {
         let dummy = AnalyseSchema { i: 0 };
         let mut value = "Hello".to_string();
-        assert_eq!(dummy.check_string_or_int(&mut value), "string"); // Assuming get_type returns "string"
+        assert_eq!(dummy.check_string_or_int(&mut value), SkipprDataType::String);
     }
 }
 
@@ -2102,11 +2010,11 @@ mod is_64_int_tests {
 #[cfg(test)]
 mod get_type_bool_tests {
 
-    use crate::discover::get_type;
+    use crate::discover::{get_type, SkipprDataType};
 
     #[test]
     fn test_get_type_int() {
-        let expected_type = "boolean".to_string();
+        let expected_type = SkipprDataType::Boolean;
 
         let subject = 123;
         assert_ne!(get_type(&mut subject.to_string()), expected_type);
@@ -2114,7 +2022,7 @@ mod get_type_bool_tests {
 
     #[test]
     fn test_get_type_true_int() {
-        let expected_type = "boolean".to_string();
+        let expected_type = SkipprDataType::Boolean;
 
         let subject = 1;
         assert_ne!(get_type(&mut subject.to_string()), expected_type);
@@ -2122,7 +2030,7 @@ mod get_type_bool_tests {
 
     #[test]
     fn test_get_type_false_int() {
-        let expected_type = "boolean".to_string();
+        let expected_type = SkipprDataType::Boolean;
 
         let subject = 0;
         assert_ne!(get_type(&mut subject.to_string()), expected_type);
@@ -2130,7 +2038,7 @@ mod get_type_bool_tests {
 
     #[test]
     fn test_get_type_true_bool() {
-        let expected_type = "boolean".to_string();
+        let expected_type = SkipprDataType::Boolean;
 
         let subject = true;
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
@@ -2138,7 +2046,7 @@ mod get_type_bool_tests {
 
     #[test]
     fn test_get_type_false_bool() {
-        let expected_type = "boolean".to_string();
+        let expected_type = SkipprDataType::Boolean;
 
         let subject = false;
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
@@ -2146,7 +2054,7 @@ mod get_type_bool_tests {
 
     #[test]
     fn test_get_type_true_str() {
-        let expected_type = "boolean".to_string();
+        let expected_type = SkipprDataType::Boolean;
 
         let subject = "true";
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
@@ -2154,7 +2062,7 @@ mod get_type_bool_tests {
 
     #[test]
     fn test_get_type_false_str() {
-        let expected_type = "boolean".to_string();
+        let expected_type = SkipprDataType::Boolean;
 
         let subject = "false";
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
@@ -2162,7 +2070,7 @@ mod get_type_bool_tests {
 
     #[test]
     fn test_get_type_true_upper_str() {
-        let expected_type = "string".to_string();
+        let expected_type = SkipprDataType::String;
 
         let subject = "True";
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
@@ -2170,7 +2078,7 @@ mod get_type_bool_tests {
 
     #[test]
     fn test_get_type_false_upper_str() {
-        let expected_type = "string".to_string();
+        let expected_type = SkipprDataType::String;
 
         let subject = "False";
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
@@ -2178,7 +2086,7 @@ mod get_type_bool_tests {
 
     #[test]
     fn test_get_type_yes_str() {
-        let expected_type = "string".to_string();
+        let expected_type = SkipprDataType::String;
 
         let subject = "yes";
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
@@ -2186,7 +2094,7 @@ mod get_type_bool_tests {
 
     #[test]
     fn test_get_type_no_str() {
-        let expected_type = "string".to_string();
+        let expected_type = SkipprDataType::String;
 
         let subject = "no";
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
@@ -2372,7 +2280,7 @@ mod tests {
     #[allow(unused_imports)]
     use std::io::{Seek, Write};
 
-    use crate::discover::{AnalyseSchema, Metadata};
+    use crate::discover::{AnalyseSchema, Metadata, SkipprDataType};
     use crate::helpers::configuration::Config;
     #[allow(unused_imports)]
     use parquet::data_type::AsBytes;
@@ -2468,7 +2376,7 @@ mod tests {
                 .get("abc1")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
         assert_eq!(
             _fields
@@ -2478,7 +2386,7 @@ mod tests {
                 .get("abc1")
                 .unwrap()
                 .determined_type_values,
-            "integer"
+            Some(SkipprDataType::Integer)
         );
         assert_eq!(
             _fields
@@ -2488,7 +2396,7 @@ mod tests {
                 .get("abc2")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
         assert_eq!(
             _fields
@@ -2498,7 +2406,7 @@ mod tests {
                 .get("abc2")
                 .unwrap()
                 .determined_type_values,
-            "string"
+            Some(SkipprDataType::String)
         );
         // assert_eq!(_fields.get("default").unwrap().fields.get("abc3").unwrap().determined_type, "array");
         // assert_eq!(_fields.get("default").unwrap().fields.get("abc3").unwrap().determined_type_values, "string" );
@@ -2514,7 +2422,7 @@ mod tests {
                 .get("abc6")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
         assert_eq!(
             _fields
@@ -2524,7 +2432,7 @@ mod tests {
                 .get("abc7")
                 .unwrap()
                 .determined_type,
-            "record"
+            SkipprDataType::Record
         );
 
         assert_eq!(
@@ -2535,7 +2443,7 @@ mod tests {
                 .get("abc8")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
         assert_eq!(
             _fields
@@ -2545,7 +2453,7 @@ mod tests {
                 .get("abc8")
                 .unwrap()
                 .determined_type_values,
-            "record"
+            Some(SkipprDataType::Record)
         );
 
         // match _fields.get("default").unwrap().fields.get("abc8").unwrap().fields.get("1") {
@@ -2635,7 +2543,7 @@ mod tests {
                 .get("boolean")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
         assert_eq!(
             _fields
@@ -2645,7 +2553,7 @@ mod tests {
                 .get("boolean") // I recall we stopped infering bool ints as boolean, it was too error prone and probably trying to be too smart
                 .unwrap()
                 .determined_type_values,
-            "integer"
+            Some(SkipprDataType::Integer)
         );
         assert_eq!(
             _fields
@@ -2655,7 +2563,7 @@ mod tests {
                 .get("boolean2")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
         assert_eq!(
             _fields
@@ -2665,7 +2573,7 @@ mod tests {
                 .get("boolean2")
                 .unwrap()
                 .determined_type_values,
-            "boolean"
+            Some(SkipprDataType::Boolean)
         );
         // assert_eq!(newMeta.get("").unwrap().fields.get("date").unwrap().determined_type, "array");
         // assert_eq!(newMeta.get("").unwrap().fields.get("date").unwrap().determined_type_values, "date");
@@ -2677,7 +2585,7 @@ mod tests {
                 .get("timestamp")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
         assert_eq!(
             _fields
@@ -2687,7 +2595,7 @@ mod tests {
                 .get("timestamp")
                 .unwrap()
                 .determined_type_values,
-            "timestamp"
+            Some(SkipprDataType::Timestamp)
         );
         assert_eq!(
             _fields
@@ -2697,7 +2605,7 @@ mod tests {
                 .get("timestamp_milli")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
         assert_eq!(
             _fields
@@ -2707,7 +2615,7 @@ mod tests {
                 .get("timestamp_milli")
                 .unwrap()
                 .determined_type_values,
-            "timestamp_milli"
+            Some(SkipprDataType::TimestampMilli)
         );
         assert_eq!(
             _fields
@@ -2717,7 +2625,7 @@ mod tests {
                 .get("abc3")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
         assert_eq!(
             _fields
@@ -2727,7 +2635,7 @@ mod tests {
                 .get("abc3")
                 .unwrap()
                 .determined_type_values,
-            "integer"
+            Some(SkipprDataType::Integer)
         );
         assert_eq!(
             _fields
@@ -2737,7 +2645,7 @@ mod tests {
                 .get("abc4")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
         assert_eq!(
             _fields
@@ -2747,7 +2655,7 @@ mod tests {
                 .get("abc4")
                 .unwrap()
                 .determined_type_values,
-            "integer"
+            Some(SkipprDataType::Integer)
         );
     }
 
@@ -2854,7 +2762,7 @@ mod tests {
                 .get("sheep")
                 .unwrap()
                 .determined_type,
-            "string"
+            SkipprDataType::String
         );
         assert_eq!(
             _fields
@@ -2864,7 +2772,7 @@ mod tests {
                 .get("arable")
                 .unwrap()
                 .determined_type,
-            "boolean"
+            SkipprDataType::Boolean
         );
 
         assert_eq!(
@@ -2875,7 +2783,7 @@ mod tests {
                 .get("crank")
                 .unwrap()
                 .determined_type,
-            "record"
+            SkipprDataType::Record
         );
         assert_eq!(
             _fields
@@ -2888,7 +2796,7 @@ mod tests {
                 .get("voltage")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
         assert_eq!(
             _fields
@@ -2901,7 +2809,7 @@ mod tests {
                 .get("voltage")
                 .unwrap()
                 .determined_type_values,
-            "integer"
+            Some(SkipprDataType::Integer)
         );
 
         assert_eq!(
@@ -2915,7 +2823,7 @@ mod tests {
                 .get("engine")
                 .unwrap()
                 .determined_type,
-            "record"
+            SkipprDataType::Record
         );
         assert_eq!(
             _fields
@@ -2931,7 +2839,7 @@ mod tests {
                 .get("rebuild_dates")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
 
         // println!("{:?}", newMeta.get("").unwrap().fields.get("crank_torques").unwrap());
@@ -2944,7 +2852,7 @@ mod tests {
                 .get("crank_torques")
                 .unwrap()
                 .determined_type,
-            "array" // Correctly identified as array
+            SkipprDataType::Array
         );
 
         // Since crank_torques is now properly identified as an array,
@@ -2958,7 +2866,7 @@ mod tests {
                 .get("crank_torques")
                 .unwrap()
                 .determined_type_values,
-            "array" // The elements are arrays themselves
+            Some(SkipprDataType::Array)
         );
 
         // Remove assertions that no longer apply with the new type determination logic
@@ -3014,7 +2922,7 @@ mod tests {
                 .get("tags")
                 .unwrap()
                 .determined_type,
-            "array"
+            SkipprDataType::Array
         );
         assert_eq!(
             _fields
@@ -3030,7 +2938,7 @@ mod tests {
                 .get("0")
                 .unwrap()
                 .determined_type,
-            "record"
+            SkipprDataType::Record
         );
 
         // // assert_eq!(newMeta.get("").unwrap().fields.get("date").unwrap().determined_type, "array");
@@ -3058,7 +2966,7 @@ mod tests_flatten_metadata {
         let metadata_child = Metadata {
             count: 1,
             types: HashMap::new(),
-            parent_type: "record".to_string(),
+            parent_type: Some(SkipprDataType::Record),
             fields: Box::new(HashMap::new()),
             date_candidate: None,
             date_parser_kind: None,
@@ -3066,9 +2974,9 @@ mod tests_flatten_metadata {
             evolution: Box::new(HashMap::new()),
             enabled: true,
             out_field_name: "child".to_string(),
-            determined_type: "string".to_string(),
-            determined_type_values: "".to_string(),
-            repetition_count: 1, // New field to track array repetition count
+            determined_type: SkipprDataType::String,
+            determined_type_values: None,
+            repetition_count: 1,
         };
 
         fields.insert("child".to_string(), metadata_child.clone());
@@ -3076,7 +2984,7 @@ mod tests_flatten_metadata {
         let metadata = Metadata {
             count: 1,
             types: HashMap::new(),
-            parent_type: "".to_string(),
+            parent_type: None,
             fields: fields,
             date_candidate: None,
             date_parser_kind: None,
@@ -3084,9 +2992,9 @@ mod tests_flatten_metadata {
             evolution: Box::new(HashMap::new()),
             enabled: true,
             out_field_name: "parent".to_string(),
-            determined_type: "record".to_string(),
-            determined_type_values: "".to_string(),
-            repetition_count: 1, // New field to track array repetition count
+            determined_type: SkipprDataType::Record,
+            determined_type_values: None,
+            repetition_count: 1,
         };
 
         let mut flattened: OutputMetadata = OutputMetadata::new();
@@ -3115,7 +3023,7 @@ mod tests_flatten_metadata {
             Metadata {
                 count: 1,
                 types: HashMap::new(),
-                parent_type: "".into(),
+                parent_type: None,
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
                 date_parser_kind: None,
@@ -3123,9 +3031,9 @@ mod tests_flatten_metadata {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "".into(),
-                determined_type: "".into(),
-                determined_type_values: "".into(),
-                repetition_count: 1, // New field to track array repetition count
+                determined_type: SkipprDataType::Unknown,
+                determined_type_values: None,
+                repetition_count: 1,
             },
         );
         metadata.get_mut("schema").unwrap().fields.insert(
@@ -3133,7 +3041,7 @@ mod tests_flatten_metadata {
             Metadata {
                 count: 1,
                 types: HashMap::new(),
-                parent_type: "".into(),
+                parent_type: None,
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
                 date_parser_kind: None,
@@ -3141,9 +3049,9 @@ mod tests_flatten_metadata {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "contacts".into(),
-                determined_type: "array".into(),
-                determined_type_values: "".into(),
-                repetition_count: 2, // Explicitly setting repetition_count to 2
+                determined_type: SkipprDataType::Array,
+                determined_type_values: None,
+                repetition_count: 2,
             },
         );
         metadata
@@ -3158,7 +3066,7 @@ mod tests_flatten_metadata {
                 Metadata {
                     count: 2,
                     types: HashMap::new(),
-                    parent_type: "".into(),
+                    parent_type: None,
                     fields: Box::new(HashMap::new()),
                     date_candidate: None,
                     date_parser_kind: None,
@@ -3166,9 +3074,9 @@ mod tests_flatten_metadata {
                     evolution: Box::new(HashMap::new()),
                     enabled: true,
                     out_field_name: "0".into(),
-                    determined_type: "string".into(),
-                    determined_type_values: "".into(),
-                    repetition_count: 1, // New field to track array repetition count
+                    determined_type: SkipprDataType::String,
+                    determined_type_values: None,
+                    repetition_count: 1,
                 },
             );
         metadata
@@ -3186,7 +3094,7 @@ mod tests_flatten_metadata {
                 Metadata {
                     count: 2,
                     types: HashMap::new(),
-                    parent_type: "".into(),
+                    parent_type: None,
                     fields: Box::new(HashMap::new()),
                     date_candidate: None,
                     date_parser_kind: None,
@@ -3194,9 +3102,9 @@ mod tests_flatten_metadata {
                     evolution: Box::new(HashMap::new()),
                     enabled: true,
                     out_field_name: "name".into(),
-                    determined_type: "string".into(),
-                    determined_type_values: "".into(),
-                    repetition_count: 1, // New field to track array repetition count
+                    determined_type: SkipprDataType::String,
+                    determined_type_values: None,
+                    repetition_count: 1,
                 },
             );
         metadata
@@ -3214,7 +3122,7 @@ mod tests_flatten_metadata {
                 Metadata {
                     count: 2,
                     types: HashMap::new(),
-                    parent_type: "".into(),
+                    parent_type: None,
                     fields: Box::new(HashMap::new()),
                     date_candidate: None,
                     date_parser_kind: None,
@@ -3222,9 +3130,9 @@ mod tests_flatten_metadata {
                     evolution: Box::new(HashMap::new()),
                     enabled: true,
                     out_field_name: "tel".into(),
-                    determined_type: "int".into(),
-                    determined_type_values: "".into(),
-                    repetition_count: 1, // New field to track array repetition count
+                    determined_type: SkipprDataType::Integer,
+                    determined_type_values: None,
+                    repetition_count: 1,
                 },
             );
 
@@ -3259,7 +3167,7 @@ mod tests_flatten_metadata {
                 .get("contacts_0_name")
                 .unwrap()
                 .determined_type,
-            "string"
+            SkipprDataType::String
         );
         assert_eq!(
             flattened
@@ -3267,7 +3175,7 @@ mod tests_flatten_metadata {
                 .get("contacts_0_tel")
                 .unwrap()
                 .determined_type,
-            "int"
+            SkipprDataType::Integer
         );
 
         assert_eq!(
@@ -3292,7 +3200,7 @@ mod tests_flatten_metadata {
                 .get("contacts_1_name")
                 .unwrap()
                 .determined_type,
-            "string"
+            SkipprDataType::String
         );
         assert_eq!(
             flattened
@@ -3300,7 +3208,7 @@ mod tests_flatten_metadata {
                 .get("contacts_1_tel")
                 .unwrap()
                 .determined_type,
-            "int"
+            SkipprDataType::Integer
         );
 
         // assert!(flattened.contains_key("parent_record_child"));
@@ -3314,8 +3222,8 @@ mod tests_flatten_metadata {
         // Create a primitive array field
         let mut array_field = Metadata::new().unwrap();
         array_field.out_field_name = "x_axis_linear_mean".to_string();
-        array_field.determined_type = "array".to_string();
-        array_field.determined_type_values = "double".to_string();
+        array_field.determined_type = SkipprDataType::Array;
+        array_field.determined_type_values = Some(SkipprDataType::Double);
         array_field.enabled = true;
 
         fields.insert("x_axis_linear_mean".to_string(), array_field.clone());
@@ -3323,7 +3231,7 @@ mod tests_flatten_metadata {
         // Create the parent record
         let mut metadata = Metadata::new().unwrap();
         metadata.out_field_name = "imu".to_string();
-        metadata.determined_type = "record".to_string();
+        metadata.determined_type = SkipprDataType::Record;
         metadata.enabled = true;
         metadata.fields = fields;
 
@@ -3345,7 +3253,7 @@ mod tests_flatten_metadata {
         // Verify the field properties
         let field = flattened.fields.get(expected_field_name).unwrap();
         assert_eq!(field.out_field_name, expected_field_name);
-        assert_eq!(field.determined_type, "array");
-        assert_eq!(field.determined_type_values, "double");
+        assert_eq!(field.determined_type, SkipprDataType::Array);
+        assert_eq!(field.determined_type_values, Some(SkipprDataType::Double));
     }
 }

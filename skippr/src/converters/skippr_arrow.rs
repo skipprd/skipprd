@@ -1,4 +1,4 @@
-use crate::discover::OutputMetadata;
+use crate::discover::{OutputMetadata, SkipprDataType};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use std::collections::{HashMap, HashSet};
@@ -122,23 +122,20 @@ fn set_object_scalar_field_type(
     Ok(())
 }
 
-fn convert_skippr_type_to_arrow_data_type(skippr_type: &str) -> Result<DataType, ArrowError> {
+fn convert_skippr_type_to_arrow_data_type(
+    skippr_type: &SkipprDataType,
+) -> Result<DataType, ArrowError> {
     match skippr_type {
-        "boolean" => Ok(DataType::Boolean),
-        "NULL" => Ok(DataType::Null),
-        "integer" => Ok(DataType::Int32),
-        "long" => Ok(DataType::Int64),
-        "double" => Ok(DataType::Float64),
-        "string" => Ok(DataType::Utf8),
-        "timestamp" => Ok(DataType::Timestamp(Millisecond, None)),
-        "timestamp_milli" => Ok(DataType::Timestamp(Millisecond, None)),
-        "date" => Ok(DataType::Timestamp(Millisecond, None)),
-        &_ => {
-            Ok(DataType::Utf8)
-            // return Err(ArrowError::JsonError(format!(
-            //     "Only Scala possible found &_ instead of Scalar: {}", skippr_type
-            // )));
-        }
+        SkipprDataType::Boolean => Ok(DataType::Boolean),
+        SkipprDataType::Null => Ok(DataType::Null),
+        SkipprDataType::Integer => Ok(DataType::Int32),
+        SkipprDataType::Long => Ok(DataType::Int64),
+        SkipprDataType::Double => Ok(DataType::Float64),
+        SkipprDataType::String => Ok(DataType::Utf8),
+        SkipprDataType::Timestamp => Ok(DataType::Timestamp(Millisecond, None)),
+        SkipprDataType::TimestampMilli => Ok(DataType::Timestamp(Millisecond, None)),
+        SkipprDataType::Date => Ok(DataType::Timestamp(Millisecond, None)),
+        _ => Ok(DataType::Utf8),
     }
 }
 
@@ -223,11 +220,8 @@ fn convert_skippr_to_arrow_field_types(
     let mut field_types: HashMap<String, InferredType> = HashMap::new();
 
     for (_k, v) in metadata.iter() {
-        let _foo = &*v.determined_type;
-
-        match &*v.determined_type {
-            "record" => {
-                // Skip fields that are empty structs
+        match &v.determined_type {
+            SkipprDataType::Record => {
                 if !v.fields.is_empty() {
                     field_types.insert(
                         v.out_field_name.to_string(),
@@ -237,24 +231,21 @@ fn convert_skippr_to_arrow_field_types(
                     );
                 }
             }
-            "array" => {
-                if v.determined_type_values == "record" {
-                    // let object_fields = convert_skippr_to_arrow_field_types(&v.fields).unwrap();
-                    // let mut object_fields = InferredType::Object();
+            SkipprDataType::Array => {
+                if v.determined_type_values == Some(SkipprDataType::Record) {
                     let mut fields: HashMap<String, InferredType> = HashMap::new();
                     for (_k, v) in v.fields.iter() {
                         for (sk, sv) in v.fields.iter() {
-                            // Check if this is an array field within the record
-                            if sv.determined_type == "array" {
-                                // Handle array field within a record
+                            if sv.determined_type == SkipprDataType::Array {
                                 let mut inner_field = HashSet::new();
                                 let inner_data_type = convert_skippr_type_to_arrow_data_type(
-                                    &sv.determined_type_values,
+                                    sv.determined_type_values
+                                        .as_ref()
+                                        .unwrap_or(&SkipprDataType::String),
                                 )
                                 .unwrap();
                                 inner_field.insert(inner_data_type);
 
-                                // Create the array field
                                 fields.insert(
                                     sk.to_string(),
                                     InferredType::Array(Box::new(InferredType::Scalar(
@@ -262,7 +253,6 @@ fn convert_skippr_to_arrow_field_types(
                                     ))),
                                 );
                             } else {
-                                // Regular field (not an array)
                                 let mut field = HashSet::new();
                                 let data_type =
                                     convert_skippr_type_to_arrow_data_type(&sv.determined_type)
@@ -272,35 +262,27 @@ fn convert_skippr_to_arrow_field_types(
                                 fields.insert(sk.to_string(), InferredType::Scalar(field));
                             }
                         }
-                        // object_fields.insert(InferredType::Object(convert_skippr_to_arrow_field_types(&v.fields).unwrap()));
-                        // fields.insert(v.out_field_name.to_string(), InferredType::Object(convert_skippr_to_arrow_field_types(&v.fields).unwrap()));
                     }
 
                     field_types.insert(
                         v.out_field_name.to_string(),
                         InferredType::Array(Box::new(InferredType::Object(fields))),
                     );
-
-                    // let fields = convert_skippr_to_arrow_field_types(&v.fields)?;
-                    // field_types.insert(
-                    //     v.out_field_name.to_string(),
-                    //     InferredType::Array(Box::new(InferredType::Object(fields))),
-                    // );
-                } else if v.determined_type_values == "array" {
-                    // Handle array of arrays
+                } else if v.determined_type_values == Some(SkipprDataType::Array) {
                     if let Some(inner_array) = v.fields.get("0") {
                         let mut inner_field = HashSet::new();
                         let inner_data_type = convert_skippr_type_to_arrow_data_type(
-                            &inner_array.determined_type_values,
+                            inner_array
+                                .determined_type_values
+                                .as_ref()
+                                .unwrap_or(&SkipprDataType::String),
                         )
                         .unwrap();
                         inner_field.insert(inner_data_type);
 
-                        // Create the inner array
                         let inner_array_type =
                             InferredType::Array(Box::new(InferredType::Scalar(inner_field)));
 
-                        // Wrap in the outer array
                         field_types.insert(
                             v.out_field_name.to_string(),
                             InferredType::Array(Box::new(inner_array_type)),
@@ -308,8 +290,12 @@ fn convert_skippr_to_arrow_field_types(
                     }
                 } else {
                     let mut field = HashSet::new();
-                    let data_type =
-                        convert_skippr_type_to_arrow_data_type(&v.determined_type_values).unwrap();
+                    let data_type = convert_skippr_type_to_arrow_data_type(
+                        v.determined_type_values
+                            .as_ref()
+                            .unwrap_or(&SkipprDataType::String),
+                    )
+                    .unwrap();
                     field.insert(data_type);
 
                     field_types.insert(
@@ -318,13 +304,13 @@ fn convert_skippr_to_arrow_field_types(
                     );
                 }
             }
-            "map" => {
+            SkipprDataType::Map => {
                 field_types.insert(
                     v.out_field_name.to_string(),
                     InferredType::Object(convert_skippr_to_arrow_field_types(&v.fields).unwrap()),
                 );
             }
-            "boolean" => {
+            SkipprDataType::Boolean => {
                 set_object_scalar_field_type(
                     &mut field_types,
                     &v.out_field_name,
@@ -332,51 +318,45 @@ fn convert_skippr_to_arrow_field_types(
                 )
                 .expect("Error setting object scalar field type");
             }
-            "NULL" => {
+            SkipprDataType::Null => {
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Null)
                     .expect("Error setting object scalar NULL type");
             }
-            "integer" => {
+            SkipprDataType::Integer => {
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int32)
                     .expect("Error setting object scalar field integer type");
             }
-            "long" => {
+            SkipprDataType::Long => {
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int64)
                     .expect("Error setting object scalar field long type")
             }
-            "double" => {
+            SkipprDataType::Double => {
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Float64)
                     .expect("Error setting object scalar field double type")
             }
-            "string" => {
+            SkipprDataType::String => {
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Utf8)
                     .expect("Error setting object scalar field string type")
             }
-            "timestamp" => set_object_scalar_field_type(
+            SkipprDataType::Timestamp => set_object_scalar_field_type(
                 &mut field_types,
                 &v.out_field_name,
                 DataType::Timestamp(Millisecond, None),
             )
             .expect("Error setting object scalar field timestamp type"),
-            "timestamp_milli" => set_object_scalar_field_type(
+            SkipprDataType::TimestampMilli => set_object_scalar_field_type(
                 &mut field_types,
                 &v.out_field_name,
                 DataType::Timestamp(Millisecond, None),
             )
             .expect("Error setting object scalar field timestamp_milli type"),
-            "date" => set_object_scalar_field_type(
+            SkipprDataType::Date => set_object_scalar_field_type(
                 &mut field_types,
                 &v.out_field_name,
                 DataType::Timestamp(Millisecond, None),
             )
             .expect("Error setting object scalar field date type"),
-            "" => {}
-            _any => {
-                return Err(ArrowError::JsonError(format!(
-                    "Only Scalar possible found Any instead of determined_type string: {}",
-                    v.determined_type
-                )));
-            }
+            SkipprDataType::Unknown => {}
         }
     }
 
@@ -395,8 +375,8 @@ mod tests {
         // Create a simple array of integers test metadata
         let mut metadata = OutputMetadata::new();
         metadata.out_field_name = "numbers".to_string();
-        metadata.determined_type = "array".to_string();
-        metadata.determined_type_values = "integer".to_string();
+        metadata.determined_type = SkipprDataType::Array;
+        metadata.determined_type_values = Some(SkipprDataType::Integer);
 
         let mut meta_map = HashMap::new();
         meta_map.insert("numbers".to_string(), metadata);
@@ -424,22 +404,22 @@ mod tests {
         // Create an array of records test metadata
         let mut root_metadata = OutputMetadata::new();
         root_metadata.out_field_name = "contacts".to_string();
-        root_metadata.determined_type = "array".to_string();
-        root_metadata.determined_type_values = "record".to_string();
+        root_metadata.determined_type = SkipprDataType::Array;
+        root_metadata.determined_type_values = Some(SkipprDataType::Record);
 
         // Create a record field for the array elements
         let mut record_field = OutputMetadata::new();
         record_field.out_field_name = "0".to_string();
-        record_field.determined_type = "record".to_string();
+        record_field.determined_type = SkipprDataType::Record;
 
         // Add fields to the record
         let mut name_field = OutputMetadata::new();
         name_field.out_field_name = "name".to_string();
-        name_field.determined_type = "string".to_string();
+        name_field.determined_type = SkipprDataType::String;
 
         let mut age_field = OutputMetadata::new();
         age_field.out_field_name = "age".to_string();
-        age_field.determined_type = "integer".to_string();
+        age_field.determined_type = SkipprDataType::Integer;
 
         record_field.fields.insert("name".to_string(), name_field);
         record_field.fields.insert("age".to_string(), age_field);
@@ -486,14 +466,14 @@ mod tests {
         // Create an array of arrays test metadata
         let mut root_metadata = OutputMetadata::new();
         root_metadata.out_field_name = "matrix".to_string();
-        root_metadata.determined_type = "array".to_string();
-        root_metadata.determined_type_values = "array".to_string();
+        root_metadata.determined_type = SkipprDataType::Array;
+        root_metadata.determined_type_values = Some(SkipprDataType::Array);
 
         // Create an inner array field
         let mut inner_array_field = OutputMetadata::new();
         inner_array_field.out_field_name = "0".to_string();
-        inner_array_field.determined_type = "array".to_string();
-        inner_array_field.determined_type_values = "integer".to_string();
+        inner_array_field.determined_type = SkipprDataType::Array;
+        inner_array_field.determined_type_values = Some(SkipprDataType::Integer);
 
         // Add the inner array field to the outer array field
         root_metadata
@@ -541,34 +521,34 @@ mod tests {
         // Add a simple field
         let mut name_field = OutputMetadata::new();
         name_field.out_field_name = "name".to_string();
-        name_field.determined_type = "string".to_string();
+        name_field.determined_type = SkipprDataType::String;
         metadata_map.insert("name".to_string(), name_field);
 
         // Create an array of records with a nested array
         let mut array_of_records = OutputMetadata::new();
         array_of_records.out_field_name = "contacts".to_string();
-        array_of_records.determined_type = "array".to_string();
-        array_of_records.determined_type_values = "record".to_string();
+        array_of_records.determined_type = SkipprDataType::Array;
+        array_of_records.determined_type_values = Some(SkipprDataType::Record);
 
         // Create a record field for the array elements
         let mut record_field = OutputMetadata::new();
         record_field.out_field_name = "0".to_string();
-        record_field.determined_type = "record".to_string();
+        record_field.determined_type = SkipprDataType::Record;
 
         // Add fields to the record
         let mut contact_name_field = OutputMetadata::new();
         contact_name_field.out_field_name = "name".to_string();
-        contact_name_field.determined_type = "string".to_string();
+        contact_name_field.determined_type = SkipprDataType::String;
 
         let mut contact_age_field = OutputMetadata::new();
         contact_age_field.out_field_name = "age".to_string();
-        contact_age_field.determined_type = "integer".to_string();
+        contact_age_field.determined_type = SkipprDataType::Integer;
 
         // A nested array of strings for each contact's emails
         let mut emails_field = OutputMetadata::new();
         emails_field.out_field_name = "emails".to_string();
-        emails_field.determined_type = "array".to_string();
-        emails_field.determined_type_values = "string".to_string();
+        emails_field.determined_type = SkipprDataType::Array;
+        emails_field.determined_type_values = Some(SkipprDataType::String);
 
         record_field
             .fields
@@ -643,13 +623,13 @@ mod tests {
         // Create the parent record
         let mut record_field = OutputMetadata::new();
         record_field.out_field_name = "imu".to_string();
-        record_field.determined_type = "record".to_string();
+        record_field.determined_type = SkipprDataType::Record;
 
         // Create the primitive array field
         let mut array_field = OutputMetadata::new();
         array_field.out_field_name = "x_axis_linear_mean".to_string();
-        array_field.determined_type = "array".to_string();
-        array_field.determined_type_values = "double".to_string();
+        array_field.determined_type = SkipprDataType::Array;
+        array_field.determined_type_values = Some(SkipprDataType::Double);
 
         // Add the array field to the record field
         record_field
