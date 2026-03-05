@@ -56,6 +56,7 @@ nav:
           - Kafka: plugins/outputs/kafka/index.md
   - Advanced:
       - Core Concepts: advanced/core-concepts.md
+      - Logging Event Map: advanced/logging-event-map.md
 #  - Enterprise:
 #      - AWS: enterprise/aws/index.md
 #      - Azure (Coming Soon): 404.md
