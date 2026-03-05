@@ -7,21 +7,21 @@ Public docs: [docs/](docs/) | SQL reference: [sql-docs.md](sql-docs.md) | Perfor
 ## Repository structure
 
 ```
-skippr/                 Cargo crate — the CLI binary and all core logic
-  src/
-    main.rs             Entry point, CLI dispatch, sync orchestration
-    cli/                Clap command definitions (discover, sync, query, schema, sql-help, benchmark)
-    plugins/            Input/output plugins (s3_input, file_input, athena, file_output)
-    buffer/             WAL segments, ingest buffer, compactor service
-    discover/           Schema inference and type detection
-    sqlrt/              DataFusion SQL runtime, parser, query execution, docs
-    ingest_work.rs      Core ingestion loop and schema preparation
-    ingest/             Ingestion internals (partitioning, record processing)
-    serdes/             Serialization/deserialization (JSON, CSV, Parquet)
-    converters/         Type converters (Arrow, Hive)
-    helpers/            Configuration, S3 helpers, offsets DB, manifest
-    metrics/            Stats collection and reporting
-    adapters/           Storage adapters (S3, local)
+src/
+  main.rs               Entry point, CLI dispatch, sync orchestration
+  cli/                  Clap command definitions (discover, sync, query, schema, sql-help, benchmark)
+  plugins/              Input/output plugins (s3_input, file_input, athena, file_output)
+  buffer/               WAL segments, ingest buffer, compactor service
+  discover/             Schema inference and type detection
+  sqlrt/                DataFusion SQL runtime, parser, query execution, docs
+  ingest_work.rs        Core ingestion loop and schema preparation
+  ingest/               Ingestion internals (partitioning, record processing)
+  serdes/               Serialization/deserialization (JSON, CSV, Parquet)
+  converters/           Type converters (Arrow, Hive)
+  helpers/              Configuration, S3 helpers, offsets DB, manifest
+  metrics/              Stats collection and reporting
+  adapters/             Storage adapters (S3, local)
+tests/                  Integration tests
 docs/                   MkDocs public documentation site
 ci-e2e/                 E2E test orchestration scripts
 soda/                   Soda Core data quality checks for E2E tests
@@ -37,20 +37,18 @@ test-data/              Sample data for tests
 ## Build and test
 
 ```bash
-cargo build -p skippr
-cargo test -p skippr
+cargo build
+cargo test
 cargo fmt --all -- --check
 cargo clippy
 ```
-
-Prefer crate-scoped builds (`-p skippr`) over workspace-wide builds to avoid memory pressure during linking.
 
 ## CLI commands
 
 Run via cargo during development:
 
 ```bash
-cargo run -p skippr -- <command> [flags]
+cargo run -- <command> [flags]
 ```
 
 Global flag: `--log [LEVEL]` enables logging (default `info`; override with `debug`, `warn`, `error`).
@@ -60,7 +58,7 @@ Global flag: `--log [LEVEL]` enables logging (default `info`; override with `deb
 Connect to a source, sample data, infer schemas. Persists metadata to S3.
 
 ```bash
-cargo run -p skippr -- discover --pipeline bikehire --log
+cargo run -- discover --pipeline bikehire --log
 ```
 
 Flags: `--pipeline/-p <name>`, `--verbose`
@@ -70,7 +68,7 @@ Flags: `--pipeline/-p <name>`, `--verbose`
 Run the ingestion loop: read source → WAL → compact → Parquet → S3 + Glue.
 
 ```bash
-cargo run -p skippr -- sync --pipeline bikehire --log
+cargo run -- sync --pipeline bikehire --log
 ```
 
 Flags: `--pipeline/-p <name>`
@@ -80,9 +78,9 @@ Flags: `--pipeline/-p <name>`
 SQL engine (DataFusion) over Athena tables and WAL. Supports pipeline management commands.
 
 ```bash
-cargo run -p skippr -- query --sql "SELECT COUNT(*) FROM bikehire"
-cargo run -p skippr -- query --sql "ENABLE PIPELINE bikehire"
-cargo run -p skippr -- query --sql "STREAM * FROM bikehire LIMIT 10"
+cargo run -- query --sql "SELECT COUNT(*) FROM bikehire"
+cargo run -- query --sql "ENABLE PIPELINE bikehire"
+cargo run -- query --sql "STREAM * FROM bikehire LIMIT 10"
 ```
 
 Flags: `--sql/-s "<SQL>"`, `--watch <seconds>`, `--plain`
@@ -92,7 +90,7 @@ Flags: `--sql/-s "<SQL>"`, `--watch <seconds>`, `--plain`
 Inspect a pipeline's discovered schema.
 
 ```bash
-cargo run -p skippr -- schema --pipeline bikehire
+cargo run -- schema --pipeline bikehire
 ```
 
 ### sql-help
@@ -100,8 +98,8 @@ cargo run -p skippr -- schema --pipeline bikehire
 List all SQL extensions or export docs.
 
 ```bash
-cargo run -p skippr -- sql-help
-cargo run -p skippr -- sql-help --command "RESET PIPELINE" --output docs.md --format md
+cargo run -- sql-help
+cargo run -- sql-help --command "RESET PIPELINE" --output docs.md --format md
 ```
 
 ### benchmark
@@ -109,7 +107,7 @@ cargo run -p skippr -- sql-help --command "RESET PIPELINE" --output docs.md --fo
 Generate synthetic data and measure throughput.
 
 ```bash
-cargo run -p skippr -- benchmark -f 100 -r 50000 -s 800 --name baseline
+cargo run -- benchmark -f 100 -r 50000 -s 800 --name baseline
 ```
 
 ## Configuration
@@ -195,7 +193,7 @@ DATA_OUTPUT_S3_PREFIX=warehouse/events \
 SCHEMA_OUTPUT_GLUE_DATABASE_NAME=my_database \
 PIPELINE_NAME=events \
 SKIPPR_S3_BUCKET=my-state-bucket \
-cargo run -p skippr -- sync --pipeline events --log
+cargo run -- sync --pipeline events --log
 ```
 
 ## Data type detection

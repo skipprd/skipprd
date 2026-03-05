@@ -34,4 +34,4 @@ dbt.log
 20260116_001842.sql
 app-dbt
 _bak
-skippr/data
+data

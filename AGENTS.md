@@ -22,12 +22,12 @@ This repository contains **Skippr** — a Rust-based data ingestion and transfor
 
 ## Build, test, and lint
 
-- **Build:** `cargo build -p skippr`
-- **Test:** `cargo test -p skippr`
+- **Build:** `cargo build`
+- **Test:** `cargo test`
 - **Format check:** `cargo fmt --all -- --check` (existing formatting diffs may exist)
 - **Clippy:** `cargo clippy` (run without `-D warnings` unless explicitly requested)
 
 ## Key gotchas
 
-1. **Memory-constrained linking:** workspace-wide test builds can be heavy; prefer crate-scoped checks/tests where possible.
+1. **Memory-constrained linking:** test builds can be heavy on memory.
 2. **Feature safety:** verify feature-gated code with `cargo check --all-features` when touching features.
