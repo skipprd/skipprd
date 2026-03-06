@@ -24,6 +24,14 @@ static METADATA_WRITE_SEM: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 static SCHEMA_SYNC_SEM: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
+static INGEST_RT: once_cell::sync::Lazy<runtime::Runtime> = once_cell::sync::Lazy::new(|| {
+    runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .thread_name("skippr-ingest-rt")
+        .build()
+        .expect("shared ingest runtime")
+});
 
 use once_cell::sync::Lazy;
 use serde_json::Value;
@@ -274,7 +282,6 @@ pub struct Ingest {
     optimal_chunk_size: Arc<AtomicUsize>,
     throughput_history: Arc<RwLock<VecDeque<(Instant, u64)>>>, // Track throughput over time
     max_chunk_size: usize,
-    _shared_rt: Arc<runtime::Runtime>,
 }
 
 use tracing::{debug, error, info, warn};
@@ -492,15 +499,7 @@ impl Ingest {
         let thread_pool = Arc::new(ThreadPool::new(num_cpus));
         let thread_pool_clone = thread_pool.clone();
 
-        let shared_rt = Arc::new(
-            runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .thread_name("skippr-ingest-rt")
-                .build()
-                .expect("shared ingest runtime"),
-        );
-        let shared_handle = shared_rt.handle().clone();
+        let shared_handle = INGEST_RT.handle().clone();
 
         let queue_factor: usize =
             Config::getenv("INGEST_MAX_QUEUE_FACTOR", if is_ci { "1" } else { "2" })
@@ -639,7 +638,6 @@ impl Ingest {
             optimal_chunk_size,
             throughput_history,
             max_chunk_size,
-            _shared_rt: shared_rt,
         }
     }
 
