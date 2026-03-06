@@ -19,6 +19,11 @@ static SCHEMA_PREP_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::M
 static EVOLUTION_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::Mutex<()>>>> =
     once_cell::sync::Lazy::new(|| DashMap::new());
 use crate::metrics::counters as metrics_hot;
+// Bounded concurrency for background metadata writes and Glue schema syncs
+static METADATA_WRITE_SEM: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
+    once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+static SCHEMA_SYNC_SEM: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
+    once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
 
 use once_cell::sync::Lazy;
 use serde_json::Value;
@@ -114,7 +119,9 @@ fn ensure_slow_ingest_worker() {
                                 // Persist immediately so output plugin sees new namespaces/fields
                                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                                     let md_clone = md_local.clone();
+                                    let sem = METADATA_WRITE_SEM.clone();
                                     handle.spawn(async move {
+                                        let _permit = sem.acquire().await;
                                         Config::set_metadata(&md_clone, false).await;
                                     });
                                 } else {
@@ -1686,9 +1693,12 @@ impl Ingest {
             {
                 let md_clone: std::collections::HashMap<String, Metadata> = metadata.clone();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    handle.spawn(async move {
-                        crate::helpers::configuration::Config::sync_schema(&md_clone).await;
-                    });
+                    if let Ok(permit) = SCHEMA_SYNC_SEM.clone().try_acquire_owned() {
+                        handle.spawn(async move {
+                            crate::helpers::configuration::Config::sync_schema(&md_clone).await;
+                            drop(permit);
+                        });
+                    }
                 } else {
                     error!("No tokio runtime available for schema sync");
                 }
