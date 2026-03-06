@@ -1,3 +1,4 @@
+pub mod deadletter;
 pub mod fast_ingest;
 pub mod ingest;
 pub mod partition_time;
