@@ -6,9 +6,6 @@ name: Rust CI/CD Pipeline
 
 on:
   push:
-    branches:
-      - master
-      - 'v*'
     tags:
       - '*'
 
