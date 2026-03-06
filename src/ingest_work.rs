@@ -266,9 +266,8 @@ pub struct Ingest {
     max_queue_length: usize,            // Maximum number of tasks to queue
     optimal_chunk_size: Arc<AtomicUsize>,
     throughput_history: Arc<RwLock<VecDeque<(Instant, u64)>>>, // Track throughput over time
-    max_chunk_size: usize, // Upper bound for adaptive chunking to limit memory
-                           // last_adjustment: Arc<RwLock<Instant>>, // Track when we last adjusted chunk size
-                           // adjustment_cooldown: Duration, // Minimum time between adjustments
+    max_chunk_size: usize,
+    _shared_rt: Arc<runtime::Runtime>,
 }
 
 use tracing::{debug, error, info, warn};
@@ -486,13 +485,21 @@ impl Ingest {
         let thread_pool = Arc::new(ThreadPool::new(num_cpus));
         let thread_pool_clone = thread_pool.clone();
 
+        let shared_rt = Arc::new(
+            runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .thread_name("skippr-ingest-rt")
+                .build()
+                .expect("shared ingest runtime"),
+        );
+        let shared_handle = shared_rt.handle().clone();
+
         let queue_factor: usize =
             Config::getenv("INGEST_MAX_QUEUE_FACTOR", if is_ci { "1" } else { "2" })
                 .parse::<usize>()
                 .unwrap_or(if is_ci { 1 } else { 2 });
         let max_queue_length = (num_cpus * queue_factor).max(num_cpus);
-
-        // This monitoring thread tracks task completion and processes queued tasks
         std::thread::spawn(move || {
             while let Ok(_) = rx.recv() {
                 // Check if we're shutting down
@@ -558,29 +565,20 @@ impl Ingest {
                         // Note: We don't increment queue_length here since we're processing from the queue,
                         // and the task was already counted in queue_length when it was added to the queue
 
+                        let queued_handle = shared_handle.clone();
                         thread_pool_clone.execute(move || {
-                            // Ensure panics and runtime init failures do not wedge queue accounting.
                             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                match tokio::runtime::Runtime::new() {
-                                    Ok(rt) => {
-                                        let handle = rt.handle().clone();
-                                        Ingest::process_batch(
-                                            &datas_clone,
-                                            &offset_db_clone,
-                                            &mut schema_hashes,
-                                            handle,
-                                            shared_output_clone,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to create runtime for queued ingest task: {}", e);
-                                    }
-                                }
+                                Ingest::process_batch(
+                                    &datas_clone,
+                                    &offset_db_clone,
+                                    &mut schema_hashes,
+                                    queued_handle,
+                                    shared_output_clone,
+                                );
                             }));
                             if result.is_err() {
                                 error!("Queued ingest task panicked; forcing completion signal");
                             }
-                            // Don't panic if sending fails (channel might be closed during shutdown)
                             let _ = tx.send(0);
                         });
                     }
@@ -634,8 +632,7 @@ impl Ingest {
             optimal_chunk_size,
             throughput_history,
             max_chunk_size,
-            // last_adjustment,
-            // adjustment_cooldown,
+            _shared_rt: shared_rt,
         }
     }
 
