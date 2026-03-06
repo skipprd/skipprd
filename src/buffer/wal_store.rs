@@ -13,6 +13,30 @@ use std::time::SystemTime;
 use tokio::runtime::Handle;
 use url::Url;
 
+/// Run an async future to completion from synchronous code, regardless of whether
+/// a tokio runtime is already active on this thread. When inside an existing runtime
+/// the work is offloaded to a helper thread to avoid nesting `block_on` calls.
+fn block_on_async<F, T>(fut: F) -> io::Result<T>
+where
+    F: std::future::Future<Output = io::Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    let build = || {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))
+    };
+    if Handle::try_current().is_ok() {
+        let join = thread::spawn(move || build()?.block_on(fut));
+        join.join()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "join panic"))?
+    } else {
+        build()?.block_on(fut)
+    }
+}
+
 /// Minimal WAL store interface (synchronous facade).
 pub trait WalStore {
     /// Writes a snapshot and publishes a commit marker. Returns (total_bytes, total_rows, parts_count, sha256).
@@ -66,26 +90,7 @@ impl WalStore for S3WalStore {
             )
             .await
         };
-        if Handle::try_current().is_ok() {
-            // Inside a runtime: run the async work on a dedicated thread with its own small runtime
-            let join = thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(1)
-                    .enable_all()
-                    .build()
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
-                rt.block_on(fut)
-            });
-            join.join()
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "join panic"))?
-        } else {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .build()
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
-            rt.block_on(fut)
-        }
+        block_on_async(fut)
     }
 }
 
@@ -307,25 +312,7 @@ impl WalReader for S3WalReader {
             }
             Ok(out)
         };
-        if Handle::try_current().is_ok() {
-            let join = thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(1)
-                    .enable_all()
-                    .build()
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
-                rt.block_on(fut)
-            });
-            join.join()
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "join panic"))?
-        } else {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .build()
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
-            rt.block_on(fut)
-        }
+        block_on_async(fut)
     }
 }
 
