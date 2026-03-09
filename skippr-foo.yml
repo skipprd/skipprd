@@ -70,10 +70,3 @@ data_inputs:
 
 
 data_outputs:
-
-
-data_deadletters:
-  sample:
-    s3:
-      s3_bucket: skippr-e2e-sample-data-output
-      s3_prefix: /deadletters

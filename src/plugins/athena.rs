@@ -1468,7 +1468,10 @@ impl AwsAthena {
         let mut partition_indexes: Vec<PartitionIndex> = Vec::new();
         let mut partition_index_keys: Vec<String> = Vec::new();
 
-        AwsAthena::get_partition_by_fields(&mut partitions);
+        let is_deadletter = namespace.starts_with("_dl_");
+        if !is_deadletter {
+            AwsAthena::get_partition_by_fields(&mut partitions);
+        }
 
         // Time Partitioning
         if !granularity_target.is_empty() {

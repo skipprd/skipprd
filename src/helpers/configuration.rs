@@ -165,7 +165,6 @@ pub struct Pipeline {
     pub input: Option<String>,
     pub output: Option<String>,
     pub schema: Option<String>,
-    pub deadletter: Option<String>,
     pub stats: Option<Stats>,
     pub semantic_layer: Option<SemanticLayerSettings>,
 }
@@ -177,7 +176,6 @@ pub struct Config {
     pub pipelines: HashMap<String, Pipeline>,
     pub data_inputs: Option<HashMap<String, PluginConfig>>,
     pub data_outputs: Option<HashMap<String, PluginConfig>>,
-    pub data_deadletters: Option<HashMap<String, PluginConfig>>,
     pub schema_outputs: Option<HashMap<String, PluginConfig>>,
 }
 
@@ -306,7 +304,6 @@ impl Config {
             pipelines: HashMap::new(),
             data_inputs: None,
             data_outputs: None,
-            data_deadletters: None,
             schema_outputs: None,
         }
     }
@@ -580,53 +577,6 @@ impl Config {
         }
     }
 
-    pub fn get_pipeline_deadletter_plugin_name() -> String {
-        if Config::get_envcache("DATA_DEADLETTER_PLUGIN_NAME") != "" {
-            return Config::get_envcache("DATA_DEADLETTER_PLUGIN_NAME");
-        } else {
-            let config = Config::get();
-
-            let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
-                Some(pipeline) => pipeline,
-                None => {
-                    let plugin_name = Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "");
-                    Config::set_evncache("DATA_DEADLETTER_PLUGIN_NAME", &plugin_name.clone());
-                    return plugin_name;
-                }
-            };
-
-            if pipline.deadletter.is_some() {
-                // split dot string
-                let deadletter_plugin_name = pipline
-                    .deadletter
-                    .as_ref()
-                    .unwrap()
-                    .split('.')
-                    .collect::<Vec<&str>>()[1]
-                    .to_string();
-
-                let res = match config.data_deadletters.as_ref() {
-                    Some(data_deadletters) => match data_deadletters.get(&deadletter_plugin_name) {
-                        Some(plugin_config) => plugin_config
-                            .plugin_name()
-                            .clone()
-                            .or(Some("".to_string()))
-                            .unwrap(),
-                        None => Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", ""),
-                    },
-                    None => Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", ""),
-                };
-
-                Config::set_evncache("DATA_DEADLETTER_PLUGIN_NAME", &res.clone());
-                res
-            } else {
-                let res = Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "");
-                Config::set_evncache("DATA_DEADLETTER_PLUGIN_NAME", &res.clone());
-                res
-            }
-        }
-    }
-
     pub fn get_skippr_s3_bucket() -> String {
         if Config::get_envcache("SKIPPR_S3_BUCKET") != "" {
             return Config::get_envcache("SKIPPR_S3_BUCKET");
@@ -740,7 +690,6 @@ impl Config {
                     input: None,
                     output: None,
                     schema: None,
-                    deadletter: None,
                     stats: None,
                     semantic_layer: None,
                 }
@@ -1323,22 +1272,6 @@ impl Config {
                     }
                 } else {
                     Err("Output not found".to_string())
-                }
-            }
-            "deadletter" => {
-                if let Some(data_deadletters) = config.data_deadletters {
-                    let input_name = match pipeline_config.deadletter.as_ref() {
-                        Some(input) => input.split('.').collect::<Vec<&str>>()[1].to_string(),
-                        None => return Err("Deadletter not found".to_string()),
-                    };
-
-                    if let Some(config) = data_deadletters.get(&input_name) {
-                        Ok(config.clone())
-                    } else {
-                        Err("Deadletter not found".to_string())
-                    }
-                } else {
-                    Err("Deadletter not found".to_string())
                 }
             }
             "schema" => {
@@ -1937,16 +1870,7 @@ impl Config {
 
         let data_dir = Config::get_data_dir();
         let ingest_dir = &format!("{}/ingest_buffer", data_dir);
-        let deadletter_dir = &format!("{}/deadletter_buffer", data_dir);
         let output_dir = &format!("{}/output_buffer", data_dir);
-        match fs::create_dir(deadletter_dir) {
-            Ok(_g) => {}
-            Err(_err) => {}
-        }
-        match fs::create_dir(format!("{}/done", deadletter_dir)) {
-            Ok(_g) => {}
-            Err(_err) => {}
-        }
         match fs::create_dir(ingest_dir) {
             Ok(_g) => {}
             Err(_err) => {}

@@ -42,7 +42,6 @@ struct MetricsEnvConfig {
     data_source_plugin_name: String,
     data_output_plugin_name: String,
     schema_output_plugin_name: String,
-    data_deadletter_plugin_name: String,
     data_source_batch_size_bytes: i64,
     data_source_batch_size_seconds: i64,
     buffer_threshold_bytes: u64,
@@ -67,7 +66,6 @@ impl MetricsEnvConfig {
             data_source_plugin_name: Config::get_pipeline_input_plugin_name(),
             data_output_plugin_name: Config::get_pipeline_output_plugin_name(),
             schema_output_plugin_name: Config::get_pipeline_schema_plugin_name(),
-            data_deadletter_plugin_name: Config::get_pipeline_deadletter_plugin_name(),
             data_source_batch_size_bytes: match Config::get_pipline_plugin_config("input") {
                 Ok(config) => config.batch_size_bytes().or(Some(0)).unwrap(),
                 Err(_) => 0,

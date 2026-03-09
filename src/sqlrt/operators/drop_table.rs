@@ -68,27 +68,6 @@ pub async fn drop_table(
                         }
                     }
                 }
-                // Delete deadletters for this namespace if configured
-                if let Ok(plugin) =
-                    crate::helpers::configuration::Config::get_pipline_plugin_config("deadletter")
-                {
-                    if let crate::helpers::configuration::PluginConfig::S3(conf) = plugin {
-                        let mut p = conf.s3_prefix.trim_matches('/').to_string();
-                        if p.is_empty() {
-                            p = ns.to_string();
-                        } else {
-                            p = format!("{}/{}", p, ns);
-                        }
-                        if !p.ends_with('/') {
-                            p.push('/');
-                        }
-                        if !conf.s3_bucket.is_empty() {
-                            let _ =
-                                crate::helpers::s3::delete_prefix_in_bucket(&conf.s3_bucket, &p)
-                                    .await;
-                        }
-                    }
-                }
             }
             // Delete pipeline data prefixes if present
             let _ = crate::helpers::s3::delete_prefix(&format!("{}/wal/", prefix_root)).await;
