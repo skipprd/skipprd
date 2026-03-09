@@ -985,13 +985,26 @@ impl Config {
             .any(|allowed| unit.eq_ignore_ascii_case(allowed))
     }
 
+    fn normalize_optional_config_value(value: String) -> String {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed == DEFAULT_CONFIG {
+            String::new()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
     pub fn get_config_dependency_violations() -> Vec<String> {
         let mut violations: Vec<String> = Vec::new();
 
-        let batch_time_unit = Config::get_transform_batch_time_unit();
-        let batch_time_fields = Config::get_transform_batch_time_fields();
-        let batch_partition_fields = Config::get_transform_batch_partition_fields();
-        let partition_allowed_values = Config::get_partition_allowed_values();
+        let batch_time_unit =
+            Self::normalize_optional_config_value(Config::get_transform_batch_time_unit());
+        let batch_time_fields =
+            Self::normalize_optional_config_value(Config::get_transform_batch_time_fields());
+        let batch_partition_fields =
+            Self::normalize_optional_config_value(Config::get_transform_batch_partition_fields());
+        let partition_allowed_values =
+            Self::normalize_optional_config_value(Config::get_partition_allowed_values());
 
         if !batch_time_unit.is_empty() {
             if !Self::is_valid_batch_time_unit(&batch_time_unit) {
