@@ -192,6 +192,8 @@ pub static PIPELINE_NAME: Lazy<Arc<TimedRwLock<String>>> = Lazy::new(|| {
 
 #[allow(dead_code)]
 impl Config {
+    const ALLOWED_BATCH_TIME_UNITS: [&'static str; 5] = ["year", "month", "day", "hour", "minute"];
+
     // Reserved pipeline/table names that cannot be used
     pub fn reserved_pipeline_names() -> &'static [&'static str] {
         &["deadletters", "wal", "_skippr", "skippr", "metadata"]
@@ -977,6 +979,63 @@ impl Config {
         }
     }
 
+    fn is_valid_batch_time_unit(unit: &str) -> bool {
+        Self::ALLOWED_BATCH_TIME_UNITS
+            .iter()
+            .any(|allowed| unit.eq_ignore_ascii_case(allowed))
+    }
+
+    pub fn get_config_dependency_violations() -> Vec<String> {
+        let mut violations: Vec<String> = Vec::new();
+
+        let batch_time_unit = Config::get_transform_batch_time_unit();
+        let batch_time_fields = Config::get_transform_batch_time_fields();
+        let batch_partition_fields = Config::get_transform_batch_partition_fields();
+        let partition_allowed_values = Config::get_partition_allowed_values();
+
+        if !batch_time_unit.is_empty() {
+            if !Self::is_valid_batch_time_unit(&batch_time_unit) {
+                violations.push(format!(
+                    "Invalid 'TRANSFORM_BATCH_TIME_UNIT' value '{}'. Allowed values: {:?}.",
+                    batch_time_unit,
+                    Self::ALLOWED_BATCH_TIME_UNITS
+                ));
+            }
+
+            if batch_time_fields.is_empty() {
+                violations.push(
+                    "Config dependency missing: 'TRANSFORM_BATCH_TIME_FIELDS' is required when 'TRANSFORM_BATCH_TIME_UNIT' is set."
+                        .to_string(),
+                );
+            }
+        }
+
+        if !partition_allowed_values.is_empty() && batch_partition_fields.is_empty() {
+            violations.push(
+                "Config dependency missing: 'TRANSFORM_BATCH_PARTITION_FIELDS' is required when 'TRANSFORM_PARTITION_ALLOWED_VALUES' is set."
+                    .to_string(),
+            );
+        }
+
+        violations
+    }
+
+    pub fn config_dependencies_valid() -> bool {
+        Self::get_config_dependency_violations().is_empty()
+    }
+
+    pub fn assert_config_dependencies_valid() {
+        let violations = Self::get_config_dependency_violations();
+        if violations.is_empty() {
+            return;
+        }
+
+        for violation in violations {
+            error!("{}", violation);
+        }
+        std::process::exit(1);
+    }
+
     pub fn get_time_partition_prefix() -> Option<String> {
         if Config::get_envcache("TRANSFORM_TIME_PARTITION_PREFIX") != "" {
             if Config::get_envcache("TRANSFORM_TIME_PARTITION_PREFIX") == DEFAULT_CONFIG {
@@ -1465,12 +1524,6 @@ impl Config {
     }
 
     pub async fn get_metadata() -> Result<PipelineMetadata, bool> {
-        if Config::get_transform_batch_time_unit() != ""
-            && Config::get_transform_batch_time_fields() == ""
-        {
-            error!("Config: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
-        }
-
         let _data_dir = Config::get_data_dir();
 
         let tenant = Self::get_tenant();
@@ -1859,6 +1912,8 @@ impl Config {
     pub async fn init() {
         // Enforce reserved name policy early
         Self::assert_pipeline_not_reserved();
+        // Enforce config dependency rules before pipeline runtime starts.
+        Self::assert_config_dependencies_valid();
 
         if crate::helpers::configuration::DATA_DIR_INIT_ONCE
             .get()

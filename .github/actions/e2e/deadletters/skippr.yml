@@ -10,6 +10,9 @@ pipelines:
     env: test
     buffer_threshold_bytes: 20000000
     buffer_threshold_seconds: 600
+    transform:
+      batch_time_fields: start_ts
+      batch_time_unit: minute
     input: data_inputs.s3_deadletters_test
     output: data_outputs.test_datalake
 

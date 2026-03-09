@@ -52,6 +52,8 @@ struct MetricsEnvConfig {
     transform_flatten_events: String,
     transform_batch_time_fields: String,
     transform_batch_time_units: String,
+    config_dependency_valid: bool,
+    config_dependency_error_count: usize,
     data_dir: String,
     chaos_mode: String,
     input_format: String,
@@ -81,6 +83,8 @@ impl MetricsEnvConfig {
             transform_flatten_events: Config::get_transform_flatten_events().to_string(),
             transform_batch_time_fields: Config::get_transform_batch_time_fields(),
             transform_batch_time_units: Config::get_transform_batch_time_unit(),
+            config_dependency_valid: Config::config_dependencies_valid(),
+            config_dependency_error_count: Config::get_config_dependency_violations().len(),
             data_dir: Config::get_pipeline_data_dir(),
             chaos_mode: Config::get_pipeline_chaos_mode().to_string(),
             input_format: match Config::get_pipline_plugin_config("input") {
