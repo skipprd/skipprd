@@ -1016,20 +1016,22 @@ async fn sync() {
         progress.complete("Finalising");
     }
 
-    // Summary and integrity check: uploaded rows vs expected msgs, quarantined parts
+    // Summary and integrity check: uploaded rows vs expected rows (normal + deadletters), quarantined parts
     {
         use std::sync::atomic::Ordering as AO;
         let uploaded_rows =
             skippr::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(AO::Relaxed);
         let expected_msgs = skippr::metrics::counters::MESSAGES_TOTAL.load(AO::Relaxed);
+        let expected_deadletters = skippr::metrics::counters::DEADLETTERS_TOTAL.load(AO::Relaxed);
+        let expected_uploaded_rows = expected_msgs.saturating_add(expected_deadletters);
         let quarantined_parts =
             skippr::metrics::counters::QUARANTINED_PARTITIONS_TOTAL.load(AO::Relaxed);
         info!(
-            "Compactor: summary uploaded_rows={} expected_msgs={} quarantined_parts={}",
-            uploaded_rows, expected_msgs, quarantined_parts
+            "Compactor: summary uploaded_rows={} expected_msgs={} expected_deadletters={} expected_uploaded_rows={} quarantined_parts={}",
+            uploaded_rows, expected_msgs, expected_deadletters, expected_uploaded_rows, quarantined_parts
         );
-        if quarantined_parts > 0 || uploaded_rows != expected_msgs {
-            warn!("Compactor: integrity check mismatch (uploaded_rows != expected_msgs or quarantined_parts > 0). Proceeding; this may occur when compacting pre-existing WAL.");
+        if quarantined_parts > 0 || uploaded_rows != expected_uploaded_rows {
+            warn!("Compactor: integrity check mismatch (uploaded_rows != expected_msgs + expected_deadletters or quarantined_parts > 0). Proceeding; this may occur when compacting pre-existing WAL.");
         }
     }
 

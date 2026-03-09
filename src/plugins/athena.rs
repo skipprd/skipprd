@@ -1725,7 +1725,7 @@ impl AwsAthena {
                 Err(e) => {
                     if let SdkError::ServiceError(se) = &e {
                         if matches!(se.err(), GetTableError::EntityNotFoundException(_)) {
-                            println!(
+                            info!(
                                 "Glue table '{}' not found in database '{}'; creating it...",
                                 namespace, database
                             );
@@ -1739,7 +1739,7 @@ impl AwsAthena {
                                     )
                                     .await
                                     {
-                                        println!(
+                                        error!(
                                             "ERROR creating Glue database '{}': {}",
                                             database, err
                                         );
@@ -1756,7 +1756,7 @@ impl AwsAthena {
                             )
                             .await
                             {
-                                println!(
+                                error!(
                                     "ERROR creating Glue table '{}.{}': {}",
                                     database, namespace, err
                                 );
