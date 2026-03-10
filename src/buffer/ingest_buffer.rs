@@ -419,12 +419,15 @@ impl Buffers {
                 snapshot_id = s.id.clone();
                 let partitions_meta = Self::segment_meta_to_store_meta(&s.meta);
                 let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&s.batches);
-                match store.write_snapshot_and_commit(
+                match store
+                    .write_snapshot_and_commit(
                     &snapshot_id,
                     &s.offsets,
                     &s.batches,
                     &partitions_meta,
-                ) {
+                )
+                    .await
+                {
                     Ok(t) => t,
                     Err(e) => {
                         error!("Segment write failed: id={} err={}", snapshot_id, e);
@@ -2503,12 +2506,15 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
             snapshot_id = s.id.clone();
             let partitions_meta = Buffers::segment_meta_to_store_meta(&s.meta);
             let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&s.batches);
-            match store.write_snapshot_and_commit(
+            match store
+                .write_snapshot_and_commit(
                 &snapshot_id,
                 &s.offsets,
                 &s.batches,
                 &partitions_meta,
-            ) {
+            )
+                .await
+            {
                 Ok(t) => t,
                 Err(e) => {
                     error!(
@@ -2557,12 +2563,15 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
             partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now()));
         }
         let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&to_flush_batches);
-        let (seg_bytes, seg_rows, _parts_count, _sha256) = match store.write_snapshot_and_commit(
-            &snapshot_id,
-            &to_flush_offsets,
-            &to_flush_batches,
-            &partitions_meta,
-        ) {
+        let (seg_bytes, seg_rows, _parts_count, _sha256) = match store
+            .write_snapshot_and_commit(
+                &snapshot_id,
+                &to_flush_offsets,
+                &to_flush_batches,
+                &partitions_meta,
+            )
+            .await
+        {
             Ok(t) => t,
             Err(e) => {
                 error!(

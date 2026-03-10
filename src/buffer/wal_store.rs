@@ -1,6 +1,7 @@
 use crate::buffer::segment_file::{PartitionKey, SegmentFile};
 use crate::buffer::segment_object::SegmentObject;
 use crate::helpers::configuration::Config;
+use async_trait::async_trait;
 use arrow::array::RecordBatch;
 use arrow::ipc::reader::StreamReader;
 use std::collections::HashMap;
@@ -33,10 +34,11 @@ where
     }
 }
 
-/// Minimal WAL store interface (synchronous facade).
+/// Minimal WAL store interface.
+#[async_trait]
 pub trait WalStore {
     /// Writes a snapshot and publishes a commit marker. Returns (total_bytes, total_rows, parts_count, sha256).
-    fn write_snapshot_and_commit(
+    async fn write_snapshot_and_commit(
         &self,
         snapshot_id: &str,
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
@@ -60,37 +62,34 @@ impl S3WalStore {
     // no extra helpers; streaming lives in SegmentObject
 }
 
+#[async_trait]
 impl WalStore for S3WalStore {
-    fn write_snapshot_and_commit(
+    async fn write_snapshot_and_commit(
         &self,
         snapshot_id: &str,
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
         partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/)>,
     ) -> io::Result<(u64, u64, u32, [u8; 32])> {
-        let prefix = self.prefix_url.clone();
-        let sid = snapshot_id.to_string();
-        let fut = async move {
-            let client = crate::helpers::s3::get_s3_client().await;
-            SegmentObject::stream_snapshot_to_s3(
-                &client,
-                &prefix,
-                &sid,
-                offsets,
-                batches,
-                partitions_meta,
-            )
-            .await
-        };
-        block_on_async(fut)
+        let client = crate::helpers::s3::get_s3_client().await;
+        SegmentObject::stream_snapshot_to_s3(
+            &client,
+            &self.prefix_url,
+            snapshot_id,
+            offsets,
+            batches,
+            partitions_meta,
+        )
+        .await
     }
 }
 
 /// Disk-backed WAL store using SegmentFile + local commit.
 pub struct DiskWalStore;
 
+#[async_trait]
 impl WalStore for DiskWalStore {
-    fn write_snapshot_and_commit(
+    async fn write_snapshot_and_commit(
         &self,
         snapshot_id: &str,
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
