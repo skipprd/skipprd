@@ -153,6 +153,7 @@ Skippr is configured via environment variables. Key groups:
 | `TRANSFORM_BATCH_TIME_FIELDS` | | Timestamp field(s) for time partitioning |
 | `TRANSFORM_BATCH_TIME_UNIT` | | `year`, `month`, `day`, `hour`, `minute` |
 | `TRANSFORM_FLATTEN_EVENTS` | `no` | Flatten nested structures |
+| `TRANSFORM_BATCH_ORDER_FIELDS` | | Sort rows within Parquet files for predicate pruning |
 
 ### WAL and buffering
 

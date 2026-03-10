@@ -30,6 +30,7 @@ Skippr is configured entirely via environment variables (or an optional config f
 | `TRANSFORM_BATCH_TIME_FIELDS` | | [Transforms](transforms.md) | Timestamp field(s) for time partitioning |
 | `TRANSFORM_BATCH_TIME_UNIT` | | [Transforms](transforms.md) | Time granularity: `year`, `month`, `day`, `hour`, `minute` |
 | `TRANSFORM_FLATTEN_EVENTS` | `no` | [Transforms](transforms.md) | Flatten nested structures |
+| `TRANSFORM_BATCH_ORDER_FIELDS` | | [Transforms](transforms.md) | Sort rows within Parquet files for predicate pruning |
 | **Buffering & WAL** | | | |
 | `BUFFER_THRESHOLD_BYTES` | `10485760` | [Buffering](buffering.md) | Buffer flush threshold (bytes) |
 | `BUFFER_THRESHOLD_SECONDS` | `60` | [Buffering](buffering.md) | Buffer flush threshold (seconds) |

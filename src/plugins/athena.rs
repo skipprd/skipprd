@@ -26,8 +26,6 @@ use bytes::Bytes;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::StreamExt;
 use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
-use parquet::file::properties::WriterProperties;
 use std::collections::HashMap;
 use std::io;
 use tokio::task::block_in_place;
@@ -572,12 +570,36 @@ impl DataOutputAwsAthenaPlugin {
             }
         }
 
-        // Configure parquet writer
-        let props = WriterProperties::builder()
-            .set_dictionary_enabled(false)
-            .set_encoding(parquet::basic::Encoding::PLAIN)
-            .set_compression(Compression::SNAPPY)
-            .build();
+        // Materialize batches from stream
+        let schema = stream.schema();
+        let mut raw_batches: Vec<arrow::array::RecordBatch> = Vec::new();
+        let mut rows_written: u64 = 0;
+        let mut batches_stream = stream;
+        while let Some(batch_res) = batches_stream.next().await {
+            let batch = batch_res.map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("Stream error: {}", e))
+            })?;
+            rows_written += batch.num_rows() as u64;
+            raw_batches.push(batch);
+            tokio::task::yield_now().await;
+        }
+
+        // Resolve ordering and sort if configured
+        let order_fields =
+            crate::converters::parquet_ordering::resolve_effective_order(&schema);
+        let sorted_batches = crate::converters::parquet_ordering::materialize_and_sort(
+            raw_batches,
+            &schema,
+            &order_fields,
+        )?;
+
+        let row_group_size =
+            crate::converters::parquet_ordering::estimate_row_group_size(&sorted_batches, &order_fields);
+        let props = crate::converters::parquet_ordering::build_writer_properties(
+            &schema,
+            &order_fields,
+            row_group_size,
+        );
 
         let mut writer = MultipartWriter::new(
             self.s3_client.clone(),
@@ -589,7 +611,6 @@ impl DataOutputAwsAthenaPlugin {
                 .unwrap_or(64 * 1024 * 1024),
         );
 
-        let schema = stream.schema();
         let mut parquet_writer =
             ArrowWriter::try_new(&mut writer, schema, Some(props)).map_err(|e| {
                 io::Error::new(
@@ -598,16 +619,8 @@ impl DataOutputAwsAthenaPlugin {
                 )
             })?;
 
-        let mut rows_written: u64 = 0;
-        let mut batches = stream;
-        // Drive streaming write with small in-loop yields to allow multiple uploads interleave fairly
-        let mut batch_index: u64 = 0;
-        while let Some(batch_res) = batches.next().await {
-            let batch = batch_res.map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("Stream error: {}", e))
-            })?;
-            rows_written += batch.num_rows() as u64;
-            parquet_writer.write(&batch).map_err(|e| {
+        for (batch_index, batch) in sorted_batches.iter().enumerate() {
+            parquet_writer.write(batch).map_err(|e| {
                 io::Error::new(io::ErrorKind::Other, format!("Parquet write error: {}", e))
             })?;
             if Config::debug_enabled() {
@@ -618,9 +631,6 @@ impl DataOutputAwsAthenaPlugin {
                     key_for_upload
                 );
             }
-            batch_index += 1;
-            // Cooperative yield for fairness among concurrent tasks
-            tokio::task::yield_now().await;
         }
 
         let _meta = parquet_writer.close().map_err(|e| {
@@ -718,27 +728,37 @@ impl DataOutputAwsAthenaPlugin {
     pub(crate) async fn serialize_to_parquet(
         mut batches: SendableRecordBatchStream,
     ) -> Result<ParquetBytes, io::Error> {
-        // Get schema from the first batch
         let schema = batches.schema();
 
-        let mut bytes = Vec::new();
-
-        // Configure parquet writer properties
-        let props = WriterProperties::builder()
-            .set_dictionary_enabled(false)
-            .set_encoding(parquet::basic::Encoding::PLAIN)
-            .set_compression(Compression::SNAPPY)
-            .build();
-
-        let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(props))?;
-
-        // Process batches asynchronously
+        let mut raw_batches: Vec<arrow::array::RecordBatch> = Vec::new();
         while let Some(batch) = batches.next().await {
             let batch = batch?;
-            writer.write(&batch)?;
+            raw_batches.push(batch);
         }
 
-        // Close writer and get metadata
+        let order_fields =
+            crate::converters::parquet_ordering::resolve_effective_order(&schema);
+        let sorted_batches = crate::converters::parquet_ordering::materialize_and_sort(
+            raw_batches,
+            &schema,
+            &order_fields,
+        )?;
+
+        let row_group_size =
+            crate::converters::parquet_ordering::estimate_row_group_size(&sorted_batches, &order_fields);
+        let props = crate::converters::parquet_ordering::build_writer_properties(
+            &schema,
+            &order_fields,
+            row_group_size,
+        );
+
+        let mut bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(props))?;
+
+        for batch in &sorted_batches {
+            writer.write(batch)?;
+        }
+
         let writer_meta = writer.close()?;
         if writer_meta.num_rows == 0 {
             return Err(io::Error::new(

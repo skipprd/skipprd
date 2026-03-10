@@ -61,3 +61,39 @@ Whether to flatten nested structures into dot-separated column names.
 | **Values** | `yes` / `no` (also accepts `true`/`false`, `1`/`0`) |
 
 When enabled, a nested field like `contact.name` becomes a top-level column named `contact.name` instead of a nested struct.
+
+## TRANSFORM_BATCH_ORDER_FIELDS
+
+Columns used to sort rows within each Parquet file before writing. Sorting improves query performance in Athena and other engines that use Parquet row-group min/max statistics for predicate pruning.
+
+| | |
+|---|---|
+| **Environment variable** | `TRANSFORM_BATCH_ORDER_FIELDS` |
+| **Config key** | `transform.batch_order_fields` |
+| **Default** | *(unset — no ordering)* |
+| **Example** | `customer_id,event_time` |
+
+Comma-separated list of output column names. For each namespace Skippr writes, only the fields that exist in that namespace's output schema are used; missing fields are silently ignored. If no configured fields match a given namespace, records are written unsorted.
+
+At the end of a run, Skippr logs a warning listing any configured order fields that never matched any namespace observed during the run.
+
+### How ordering helps
+
+Without ordering, a filter like `SELECT * FROM foo WHERE bar = 4` may scan the same amount of data as `SELECT * FROM foo` because matching values of `bar` are scattered across every row group in the file.
+
+When rows are sorted by `bar` before writing, values of `bar` cluster together. Each Parquet row group records the min and max value of every column, so the query engine can skip entire row groups that cannot contain `bar = 4`.
+
+### Multi-column ordering
+
+Fields are applied in the order listed. The first field provides the strongest clustering and benefits the most from pruning. Adding a second field helps queries that filter on both columns together but dilutes the clustering of the first column.
+
+In practice, one or two fields is usually optimal. Long sort lists can reduce the pruning benefit for any single field.
+
+### Automatic row-group sizing
+
+When ordering is active, Skippr automatically tunes the Parquet row-group size based on:
+
+- **Average row width** in the current batch.
+- **Run lengths** of the leading sort column — high-cardinality columns produce shorter runs and smaller row groups; low-cardinality columns produce longer runs and larger row groups.
+
+Row groups are kept between approximately 16 MiB and 64 MiB uncompressed (25,000–500,000 rows). This balances metadata overhead against predicate pruning granularity without requiring manual configuration.

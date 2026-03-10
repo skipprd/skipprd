@@ -783,6 +783,8 @@ async fn discover(log: bool) {
         OUTPUT_RUNNING.write().store(false, Ordering::SeqCst);
     }
 
+    skippr::converters::parquet_ordering::log_unmatched_order_fields();
+
     {
         let mut counter_lock = METRICS.write();
         counter_lock.status = MetricsStatus::Completed;
@@ -1034,6 +1036,8 @@ async fn sync() {
             warn!("Compactor: integrity check mismatch (uploaded_rows != expected_msgs + expected_deadletters or quarantined_parts > 0). Proceeding; this may occur when compacting pre-existing WAL.");
         }
     }
+
+    skippr::converters::parquet_ordering::log_unmatched_order_fields();
 
     {
         METRICS.write().status = MetricsStatus::Completed;

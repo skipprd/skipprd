@@ -66,6 +66,7 @@ pub struct Transform {
     pub time_partition_prefix: Option<String>,
     pub enable_single_quote_parsing: Option<String>,
     pub enable_unicode_parsing: Option<String>,
+    pub batch_order_fields: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -715,6 +716,7 @@ impl Config {
                 time_partition_prefix: None,
                 enable_single_quote_parsing: None,
                 enable_unicode_parsing: None,
+                batch_order_fields: None,
             },
         }
     }
@@ -771,6 +773,33 @@ impl Config {
                 &batch_partition_fields.clone(),
             );
             batch_partition_fields.to_string()
+        }
+    }
+
+    pub fn get_transform_batch_order_fields() -> String {
+        if Config::get_envcache("TRANSFORM_BATCH_ORDER_FIELDS") != "" {
+            if Config::get_envcache("TRANSFORM_BATCH_ORDER_FIELDS") == DEFAULT_CONFIG {
+                return "".to_string();
+            }
+            return Config::get_envcache("TRANSFORM_BATCH_ORDER_FIELDS");
+        } else {
+            let pipline = Config::get_pipeline_config();
+
+            let default_batch_order_fields =
+                &Config::getenv("TRANSFORM_BATCH_ORDER_FIELDS", DEFAULT_CONFIG);
+            let batch_order_fields = match pipline.transform.as_ref() {
+                Some(transform) => transform
+                    .batch_order_fields
+                    .as_ref()
+                    .unwrap_or(default_batch_order_fields),
+                None => default_batch_order_fields,
+            };
+
+            Config::set_evncache(
+                "TRANSFORM_BATCH_ORDER_FIELDS",
+                &batch_order_fields.clone(),
+            );
+            batch_order_fields.to_string()
         }
     }
 
