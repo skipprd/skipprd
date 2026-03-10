@@ -244,10 +244,8 @@ impl DataOutputAwsAthenaPlugin {
             }
         }
 
-        // Spawn Glue partition creation concurrently; await later before upload completion
-        let glue_task: Option<tokio::task::JoinHandle<Result<bool, Error>>> = if !partition_values
-            .is_empty()
-        {
+        // Spawn Glue partition creation concurrently and keep it off the upload critical path.
+        if !partition_values.is_empty() {
             let flatten = Config::get_transform_flatten_events();
             let metadata: PipelineMetadata = METADATA.load().as_ref().clone();
             let ns_md_opt = metadata.metadata.get(&namespace);
@@ -274,24 +272,31 @@ impl DataOutputAwsAthenaPlugin {
                 let ns_clone = namespace.clone();
                 let key_clone = full_key.clone();
                 let pvals = partition_values.clone();
-                // Use a fresh cache in the task scope (single partition)
-                Some(tokio::spawn(async move {
+                PARTITION_TASKS_IN_FLIGHT.fetch_add(1, AO::Relaxed);
+                tokio::spawn(async move {
                     let mut cache_local: Vec<String> = Vec::with_capacity(1);
-                    AwsAthena::glue_create_partition(
+                    let result = AwsAthena::glue_create_partition(
                         &ns_clone,
                         pvals,
                         &key_clone,
                         &mut cache_local,
                         &pm,
                     )
-                    .await
-                }))
-            } else {
-                None
+                    .await;
+                    match result {
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!(
+                                "Glue partition creation failed for '{}': {}",
+                                key_clone, e
+                            );
+                        }
+                    }
+                    PARTITION_TASKS_IN_FLIGHT.fetch_sub(1, AO::Relaxed);
+                    PARTITIONS_NOTIFY.notify_waiters();
+                });
             }
-        } else {
-            None
-        };
+        }
 
         // Use deterministic hashed filename to avoid leaking internal encodings
         let md5_digest = md5::compute(&filename);
@@ -636,24 +641,6 @@ impl DataOutputAwsAthenaPlugin {
         let _meta = parquet_writer.close().map_err(|e| {
             io::Error::new(io::ErrorKind::Other, format!("Parquet close error: {}", e))
         })?;
-        // Await Glue partition creation before completing upload; proceed on failure
-        if let Some(task) = glue_task {
-            match tokio::time::timeout(std::time::Duration::from_secs(300), task).await {
-                Ok(Ok(Ok(_))) => { /* success */ }
-                Ok(Ok(Err(e))) => {
-                    warn!("Glue partition creation failed for {}: {}", final_key, e);
-                }
-                Ok(Err(join_err)) => {
-                    warn!(
-                        "Glue partition task join error for {}: {}",
-                        final_key, join_err
-                    );
-                }
-                Err(_) => {
-                    warn!("Glue partition creation timed out for {}", final_key);
-                }
-            }
-        }
 
         let uploaded_bytes = match writer.complete() {
             Ok(sz) => sz,
