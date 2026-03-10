@@ -1,4 +1,6 @@
-use crate::buffer::segment_file::{PartitionKey, SegmentFile};
+use crate::buffer::segment_file::{
+    PartitionKey, SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry,
+};
 use crate::metrics::counters as metrics_counters;
 use arrow::array::RecordBatch;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
@@ -25,6 +27,8 @@ struct S3MultipartWriter {
     hasher: Sha256,
     total_written: u64,
     part_number: i32,
+    /// Shadow copy of all bytes written, kept for the segment cache.
+    full_data: Vec<u8>,
 }
 
 impl S3MultipartWriter {
@@ -72,6 +76,7 @@ impl S3MultipartWriter {
             hasher: Sha256::new(),
             total_written: 0,
             part_number: 1,
+            full_data: Vec::with_capacity(MPU_PART_SIZE),
         })
     }
 
@@ -130,6 +135,7 @@ impl S3MultipartWriter {
         self.hasher.update(bytes);
         self.total_written = self.total_written.saturating_add(bytes.len() as u64);
         self.buf.extend_from_slice(bytes);
+        self.full_data.extend_from_slice(bytes);
         Ok(())
     }
 
@@ -148,7 +154,7 @@ impl S3MultipartWriter {
         sha
     }
 
-    async fn complete(mut self) -> io::Result<()> {
+    async fn complete(mut self) -> io::Result<Vec<u8>> {
         self.flush_part().await?;
         // Retry MPU complete for transient issues
         let mut attempts: u32 = 0;
@@ -184,7 +190,7 @@ impl S3MultipartWriter {
                 }
             }
         }
-        Ok(())
+        Ok(self.full_data)
     }
 }
 
@@ -222,6 +228,8 @@ impl SegmentObject {
         Ok((bucket, seg_key, commit_key))
     }
 
+    /// Streams a WAL snapshot to S3 and publishes a commit marker.
+    /// Returns (meta, rows, sha256, bucket, key, captured_segment_bytes).
     pub async fn stream_snapshot_to_s3(
         client: &aws_sdk_s3::Client,
         prefix_url: &str,
@@ -229,12 +237,18 @@ impl SegmentObject {
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
         parts_meta: &HashMap<PartitionKey, (u64, SystemTime)>,
-    ) -> io::Result<(u64, u64, u32, [u8; 32])> {
+    ) -> io::Result<(
+        SegmentFileMetadata,
+        u64,      /*rows*/
+        [u8; 32], /*sha256*/
+        String,   /*bucket*/
+        String,   /*key*/
+        Vec<u8>,  /*segment bytes*/
+    )> {
         let (bucket, seg_key, commit_key) = Self::compute_keys(prefix_url, snapshot_id)?;
         let mut writer =
             S3MultipartWriter::begin(client.clone(), bucket.clone(), seg_key.clone()).await?;
 
-        // Header MAGIC + VERSION + created_at
         writer.write_bytes(b"SEGF")?;
         writer.write_bytes(&2u32.to_le_bytes())?;
         let created_at_secs = SystemTime::now()
@@ -243,17 +257,17 @@ impl SegmentObject {
             .as_secs();
         writer.write_bytes(&created_at_secs.to_le_bytes())?;
 
-        // Offsets block
         let offsets_blob = bincode::serialize(offsets).unwrap();
         let offsets_len = offsets_blob.len() as u64;
         writer.write_bytes(&offsets_len.to_le_bytes())?;
         writer.write_bytes(&offsets_blob)?;
         writer.maybe_flush().await?;
 
-        // Partitions
         let mut total_rows: u64 = 0;
         let mut total_bytes: u64 = 0;
         let mut parts_count: u32 = 0;
+        let mut index: Vec<SegmentPartitionIndexEntry> = Vec::with_capacity(batches.len());
+        // Track the byte position within the virtual segment stream.
         for (key, rbatches) in batches.iter() {
             if rbatches.is_empty() {
                 continue;
@@ -275,7 +289,6 @@ impl SegmentObject {
             writer.write_bytes(&p_bytes.to_le_bytes())?;
             writer.write_bytes(&updated_secs.to_le_bytes())?;
 
-            // Serialize Arrow stream to a temp buffer to know data_len
             let mut data_buf: Vec<u8> = Vec::new();
             {
                 let options = IpcWriteOptions::default();
@@ -297,23 +310,31 @@ impl SegmentObject {
             let data_len = data_buf.len() as u64;
             total_bytes = total_bytes.saturating_add(data_len);
             writer.write_bytes(&data_len.to_le_bytes())?;
+
+            // The Arrow data starts right after the data_len u64 we just wrote.
+            let start = writer.total_written;
             writer.write_bytes(&data_buf)?;
             writer.maybe_flush().await?;
+
+            index.push(SegmentPartitionIndexEntry {
+                key: key.clone(),
+                bytes: p_bytes,
+                updated_at_secs: updated_secs,
+                start,
+                len: data_len,
+            });
         }
 
-        // Compute SHA over content up to footer
         let sha = writer.current_sha256();
         writer.write_bytes(b"FOOT")?;
         writer.write_bytes(&parts_count.to_le_bytes())?;
         writer.write_bytes(&sha)?;
         writer.maybe_flush().await?;
 
-        // Complete MPU (publish .seg)
-        writer.complete().await?;
+        let captured_data = std::mem::take(&mut writer.full_data);
+        let _ = writer.complete().await?;
 
-        // Upload .seg.commit marker
         let commit_bytes = SegmentFile::build_commit_header_bytes(parts_count, total_bytes, &sha);
-        // Retry commit marker upload to ensure visibility gating is durable
         {
             let mut attempts: u32 = 0;
             loop {
@@ -346,6 +367,13 @@ impl SegmentObject {
             }
         }
 
-        Ok((total_bytes, total_rows, parts_count, sha))
+        let meta = SegmentFileMetadata {
+            created_at_secs,
+            total_bytes,
+            num_partitions: parts_count,
+            offsets: offsets.clone(),
+            index,
+        };
+        Ok((meta, total_rows, sha, bucket, seg_key, captured_data))
     }
 }

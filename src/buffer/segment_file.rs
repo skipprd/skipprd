@@ -176,13 +176,7 @@ impl SegmentFile {
             PartitionKey,
             (u64 /*bytes*/, SystemTime /*updated*/),
         >,
-    ) -> io::Result<(
-        u64,      /*bytes*/
-        u64,      /*rows*/
-        u32,      /*parts_count*/
-        [u8; 32], /*sha256*/
-    )> {
-        // Write directly to final path; visibility will be controlled by .seg.commit
+    ) -> io::Result<(SegmentFileMetadata, u64 /*rows*/, [u8; 32] /*sha256*/)> {
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -191,32 +185,29 @@ impl SegmentFile {
             .open(&self.path)?;
         file.seek(io::SeekFrom::Start(0))?;
 
-        // Header MAGIC + VERSION
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
-        // created_at
         let created_at_secs = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         file.write_all(&created_at_secs.to_le_bytes())?;
 
-        // Offsets block
         let offsets_blob = bincode::serialize(offsets).unwrap();
         let offsets_len = offsets_blob.len() as u64;
         file.write_all(&offsets_len.to_le_bytes())?;
         file.write_all(&offsets_blob)?;
 
-        // We'll write partitions sequentially with inline headers
         let mut total_rows: u64 = 0;
         let mut total_bytes: u64 = 0;
         let mut parts_count: u32 = 0;
+        let mut index: Vec<SegmentPartitionIndexEntry> = Vec::with_capacity(batches.len());
+
         for (key, rbatches) in batches.iter() {
             if rbatches.is_empty() {
                 continue;
             }
             parts_count = parts_count.saturating_add(1);
-            // Partition header
             file.write_all(PART)?;
             let key_blob = bincode::serialize(key).unwrap();
             let key_len = key_blob.len() as u64;
@@ -233,14 +224,11 @@ impl SegmentFile {
             file.write_all(&p_bytes.to_le_bytes())?;
             file.write_all(&updated_secs.to_le_bytes())?;
 
-            // VERSION=2: reserve space for data_len (u64), then write stream, then backfill
             let data_len_pos = file.stream_position()?;
-            file.write_all(&0u64.to_le_bytes())?; // placeholder
+            file.write_all(&0u64.to_le_bytes())?;
 
-            // Record start pos (immediately after the placeholder)
             let start = file.stream_position()?;
             {
-                // Write Arrow stream (scope to drop writer before querying file position)
                 let options = IpcWriteOptions::default();
                 let mut writer = StreamWriter::try_new_with_options(
                     &mut file,
@@ -260,16 +248,21 @@ impl SegmentFile {
             }
             let end = file.stream_position()?;
             let len = end - start;
-            total_bytes = total_bytes.saturating_add(len as u64);
+            total_bytes = total_bytes.saturating_add(len);
 
-            // Backfill data_len
-            let cur = end;
             file.seek(io::SeekFrom::Start(data_len_pos))?;
-            file.write_all(&(len as u64).to_le_bytes())?;
-            file.seek(io::SeekFrom::Start(cur))?;
-            // Continue to next partition
+            file.write_all(&len.to_le_bytes())?;
+            file.seek(io::SeekFrom::Start(end))?;
+
+            index.push(SegmentPartitionIndexEntry {
+                key: key.clone(),
+                bytes: p_bytes,
+                updated_at_secs: updated_secs,
+                start,
+                len,
+            });
         }
-        // Compute checksum over file content up to this point (excluding footer)
+
         let end_before_footer = file.stream_position()?;
         let mut f2 = OpenOptions::new().read(true).open(&self.path)?;
         use sha2::Digest;
@@ -292,14 +285,19 @@ impl SegmentFile {
         let mut sha_bytes: [u8; 32] = [0u8; 32];
         sha_bytes.copy_from_slice(&digest[..]);
 
-        // Write footer with checksum
         file.write_all(FOOT)?;
         file.write_all(&parts_count.to_le_bytes())?;
         file.write_all(&sha_bytes)?;
-
         file.sync_all()?;
 
-        Ok((total_bytes, total_rows, parts_count, sha_bytes))
+        let meta = SegmentFileMetadata {
+            created_at_secs,
+            total_bytes,
+            num_partitions: parts_count,
+            offsets: offsets.clone(),
+            index,
+        };
+        Ok((meta, total_rows, sha_bytes))
     }
 
     pub fn read_metadata(&self) -> io::Result<SegmentFileMetadata> {
@@ -440,8 +438,9 @@ mod tests_wal_writer {
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let offsets: HashMap<crate::helpers::offsets::OffsetKey, u64> = HashMap::new();
 
-        let (_bytes, _rows, parts_count, sha) =
+        let (meta, _rows, sha) =
             seg.write_snapshot(&offsets, &batches, &parts_meta).unwrap();
+        let parts_count = meta.num_partitions;
         assert_eq!(parts_count, 1);
 
         // Read footer and verify

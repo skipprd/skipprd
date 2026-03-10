@@ -3,7 +3,10 @@ enum Durability {
     Memory,
     Disk,
 }
-use crate::buffer::segment_file::{SegmentFile, SegmentFileMetadata};
+use crate::buffer::segment_file::{
+    SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry,
+};
+use crate::buffer::wal_store::{SegmentWriteLocation, SegmentWriteResult};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
@@ -176,11 +179,16 @@ static SEGMENT_SNAPSHOTS: Lazy<
 static COMPACTION_IN_FLIGHT: OnceLazy<DashMap<(String, u64, u64), ()>> =
     OnceLazy::new(|| DashMap::new());
 
-// lazy_static! {
-//     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
-// }
+/// In-memory cache of committed WAL segments.
+/// Populated on startup (wal_recover) and during ingest (flush).
+/// Entries are removed when all partitions in a segment have been compacted.
+struct CachedSegment {
+    source: SegmentSource,
+    meta: SegmentFileMetadata,
+}
 
-// Moved into WalS3Object as read_from_stream()
+static SEGMENT_CACHE: OnceLazy<DashMap<String, CachedSegment>> =
+    OnceLazy::new(DashMap::new);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct OffsetKeySerialize {
@@ -411,7 +419,7 @@ impl Buffers {
             }
             let snap_arc = next_snapshot_opt.unwrap();
             let snapshot_id;
-            let (seg_bytes, seg_rows, _parts_count, _sha256) = {
+            let write_result = {
                 let s = snap_arc.lock().unwrap();
                 if s.durability != Durability::Memory {
                     continue;
@@ -428,21 +436,19 @@ impl Buffers {
                 )
                     .await
                 {
-                    Ok(t) => t,
+                    Ok(r) => r,
                     Err(e) => {
                         error!("Segment write failed: id={} err={}", snapshot_id, e);
                         continue;
                     }
                 }
             };
-            let _s3_ok = true;
-            uploaded_bytes += seg_bytes;
-            rows += seg_rows;
-            // Update snapshot state to on-disk
+            uploaded_bytes += write_result.meta.total_bytes;
+            rows += write_result.total_rows;
+            Self::segment_cache_register_from_write(&write_result);
             {
                 let mut s = snap_arc.lock().unwrap();
                 s.durability = Durability::Disk;
-                // No WAL_INDEX: compactor will inspect SEGMENT_SNAPSHOTS to decide work.
                 for (offset, position) in s.offsets.iter() {
                     let offset_key = OffsetKey {
                         namespace: offset.namespace.clone(),
@@ -601,49 +607,28 @@ impl Buffers {
             .load(std::sync::atomic::Ordering::Relaxed)
             .clamp(1, 64) as usize;
 
-        if is_s3_wal() {
-            loop {
-                let candidates = Self::next_compaction_candidates_s3(concurrency, force).await;
-                if candidates.is_empty() {
-                    break;
-                }
-                did_work = true;
-                let mut in_flight: futures::stream::FuturesUnordered<
-                    Pin<Box<dyn Future<Output = ()> + Send>>,
-                > = futures::stream::FuturesUnordered::new();
-                for (source, meta, idx) in candidates {
-                    let out = shared_output.clone();
-                    let off = offsets_db.clone();
-                    in_flight.push(Box::pin(async move {
-                        let _ =
-                            Self::compact_segment_partition_source(&source, &meta, &idx, out, off)
-                                .await;
-                    }));
-                }
-                while let Some(_) = in_flight.next().await {}
+        loop {
+            let candidates = Self::next_compaction_candidates(concurrency, force);
+            if candidates.is_empty() {
+                break;
             }
-        } else {
-            loop {
-                let candidates = Self::next_compaction_candidates(concurrency, force);
-                if candidates.is_empty() {
-                    break;
-                }
-                did_work = true;
-                let mut in_flight: futures::stream::FuturesUnordered<
-                    Pin<Box<dyn Future<Output = ()> + Send>>,
-                > = futures::stream::FuturesUnordered::new();
-                for (path, meta, idx) in candidates {
-                    let out = shared_output.clone();
-                    let off = offsets_db.clone();
-                    in_flight.push(Box::pin(async move {
-                        let _ = Self::compact_segment_partition(&path, &meta, &idx, out, off).await;
-                    }));
-                }
-                while let Some(_) = in_flight.next().await {}
+            did_work = true;
+            let mut in_flight: futures::stream::FuturesUnordered<
+                Pin<Box<dyn Future<Output = ()> + Send>>,
+            > = futures::stream::FuturesUnordered::new();
+            for (source, meta, idx) in candidates {
+                let out = shared_output.clone();
+                let off = offsets_db.clone();
+                in_flight.push(Box::pin(async move {
+                    let _ =
+                        Self::compact_segment_partition_source(&source, &meta, &idx, out, off)
+                            .await;
+                }));
             }
-            if did_work {
-                Self::sweep_segment_cleanup();
-            }
+            while let Some(_) = in_flight.next().await {}
+        }
+        if did_work && !is_s3_wal() {
+            Self::sweep_segment_cleanup();
         }
         did_work
     }
@@ -654,77 +639,14 @@ impl Buffers {
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
         offsets_db: Arc<Offsets>,
     ) -> io::Result<bool> {
-        let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
-        let mut best: Option<(
-            PathBuf,
-            SegmentFileMetadata,
-            crate::buffer::segment_file::SegmentPartitionIndexEntry,
-        )> = None;
-        // Scan .seg files and pick the first partition meeting thresholds
-        if seg_dir.exists() {
-            for entry in fs::read_dir(&seg_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("seg") {
-                    continue;
-                }
-                let commit = path.with_extension("seg.commit");
-                if !commit.exists() {
-                    continue;
-                }
-                // Read metadata once per file
-                let seg = SegmentFile { path: path.clone() };
-                let meta = match seg.read_metadata() {
-                    Ok(m) => m,
-                    Err(e) => {
-                        error!(
-                            "Failed to read segment metadata {}: {}",
-                            path.to_string_lossy(),
-                            e
-                        );
-                        continue;
-                    }
-                };
-                let now_secs = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                for idx in meta.index.iter() {
-                    if Self::is_partition_tombstoned(&path, &idx.key) {
-                        continue;
-                    }
-                    // Skip partitions already in-flight
-                    let inflight_key = (path.to_string_lossy().to_string(), idx.start, idx.len);
-                    if COMPACTION_IN_FLIGHT.contains_key(&inflight_key) {
-                        continue;
-                    }
-                    let should =
-                        Self::should_compact(idx.bytes, idx.updated_at_secs, now_secs, force);
-                    if should {
-                        best = Some((path.clone(), meta.clone(), idx.clone()));
-                        break;
-                    }
-                }
-                if best.is_some() {
-                    break;
-                }
-            }
-        }
-        if let Some((path, meta, idx)) = best {
-            let (ns, part, time, shard) =
-                (&idx.key.0, &idx.key.1, idx.key.2.unwrap_or(0), &idx.key.3);
-            if Config::debug_enabled() || Config::log_wal_enabled() {
-                debug!(
-                    "Compactor: candidate ns={} part={} time={} shard={} bytes={} updated_at={}",
-                    ns, part, time, shard, idx.bytes, idx.updated_at_secs
-                );
-            }
-            let started = Self::compact_segment_partition(
-                &path,
+        let candidates = Self::next_compaction_candidates(1, force);
+        if let Some((source, meta, idx)) = candidates.into_iter().next() {
+            let started = Self::compact_segment_partition_source(
+                &source,
                 &meta,
                 &idx,
-                shared_output.clone(),
-                offsets_db.clone(),
+                shared_output,
+                offsets_db,
             )
             .await
             .unwrap_or(false);
@@ -740,6 +662,70 @@ impl Buffers {
         let byte_threshold = Config::get_pipeline_buffer_threshold_bytes();
         let time_threshold = Config::get_pipeline_buffer_threshold_seconds() as u64;
         bytes >= byte_threshold || now_secs.saturating_sub(updated_at_secs) >= time_threshold
+    }
+
+    // ── Segment cache: single write / single remove / unified read ──────
+
+    fn segment_cache_register(source: SegmentSource, meta: SegmentFileMetadata) {
+        let id = source.segment_id().to_string();
+        SEGMENT_CACHE.insert(id, CachedSegment { source, meta });
+    }
+
+    fn segment_cache_remove(segment_id: &str) {
+        SEGMENT_CACHE.remove(segment_id);
+    }
+
+    fn segment_cache_register_from_write(result: &SegmentWriteResult) {
+        let source = match &result.location {
+            SegmentWriteLocation::Disk { path } => SegmentSource::Disk(path.clone()),
+            SegmentWriteLocation::S3 { key, bucket, data } => SegmentSource::S3 {
+                key: key.clone(),
+                bucket: bucket.clone(),
+                data: Arc::new(data.clone()),
+            },
+        };
+        Self::segment_cache_register(source, result.meta.clone());
+    }
+
+    fn next_compaction_candidates(
+        limit: usize,
+        force: bool,
+    ) -> Vec<(
+        SegmentSource,
+        SegmentFileMetadata,
+        SegmentPartitionIndexEntry,
+    )> {
+        let now_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut out = Vec::with_capacity(limit);
+        for entry in SEGMENT_CACHE.iter() {
+            if out.len() >= limit {
+                break;
+            }
+            let cached = entry.value();
+            for idx in cached.meta.index.iter() {
+                if Self::is_source_tombstoned(&cached.source, &idx.key) {
+                    continue;
+                }
+                let inflight_key = (cached.source.display_name(), idx.start, idx.len);
+                if COMPACTION_IN_FLIGHT.contains_key(&inflight_key) {
+                    continue;
+                }
+                if Self::should_compact(idx.bytes, idx.updated_at_secs, now_secs, force) {
+                    out.push((
+                        cached.source.clone(),
+                        cached.meta.clone(),
+                        idx.clone(),
+                    ));
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn tombstone_dir() -> PathBuf {
@@ -1140,10 +1126,15 @@ impl Buffers {
                     // Write a recovered segment from batches
                     let sid = format!("salv-{}", Helpers::random_str(8));
                     let segf = SegmentFile::new(&seg_dir, &sid).unwrap();
-                    if let Ok((bytes, _rows, parts, sha)) =
+                    if let Ok((meta, _rows, sha)) =
                         segf.write_snapshot(&offsets_map, &batches, &parts_meta)
                     {
-                        if let Err(e) = Buffers::write_seg_commit(&segf.path, &sha, parts, bytes) {
+                        if let Err(e) = Buffers::write_seg_commit(
+                            &segf.path,
+                            &sha,
+                            meta.num_partitions,
+                            meta.total_bytes,
+                        ) {
                             error!(
                                 "Migration: salvage commit write failed seg={} err={}",
                                 segf.path.to_string_lossy(),
@@ -1154,8 +1145,8 @@ impl Buffers {
                                 "Migration: salvaged tmp={} -> seg={} parts={} bytes={} sha={}",
                                 p.to_string_lossy(),
                                 segf.path.to_string_lossy(),
-                                parts,
-                                bytes,
+                                meta.num_partitions,
+                                meta.total_bytes,
                                 hex::encode(sha)
                             );
                         }
@@ -1243,183 +1234,6 @@ impl Buffers {
         }
 
         (scanned, removed, errors)
-    }
-
-    fn next_compaction_candidates(
-        limit: usize,
-        force: bool,
-    ) -> Vec<(
-        PathBuf,
-        SegmentFileMetadata,
-        crate::buffer::segment_file::SegmentPartitionIndexEntry,
-    )> {
-        let mut out: Vec<(
-            PathBuf,
-            SegmentFileMetadata,
-            crate::buffer::segment_file::SegmentPartitionIndexEntry,
-        )> = Vec::with_capacity(limit);
-        let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
-        if !seg_dir.exists() {
-            return out;
-        }
-        for entry in fs::read_dir(&seg_dir).unwrap_or_else(|_| fs::read_dir("/").unwrap()) {
-            if out.len() >= limit {
-                break;
-            }
-            if let Ok(ent) = entry {
-                let path = ent.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("seg") {
-                    continue;
-                }
-                let commit = path.with_extension("seg.commit");
-                if !commit.exists() {
-                    continue;
-                }
-                let seg = SegmentFile { path: path.clone() };
-                if let Ok(meta) = seg.read_metadata() {
-                    let now_secs = SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    for idx in meta.index.iter() {
-                        if Self::is_partition_tombstoned(&path, &idx.key) {
-                            continue;
-                        }
-                        let inflight_key = (path.to_string_lossy().to_string(), idx.start, idx.len);
-                        if COMPACTION_IN_FLIGHT.contains_key(&inflight_key) {
-                            continue;
-                        }
-                        if Self::should_compact(idx.bytes, idx.updated_at_secs, now_secs, force) {
-                            out.push((path.clone(), meta.clone(), idx.clone()));
-                            if out.len() >= limit {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    async fn next_compaction_candidates_s3(
-        limit: usize,
-        force: bool,
-    ) -> Vec<(
-        SegmentSource,
-        SegmentFileMetadata,
-        crate::buffer::segment_file::SegmentPartitionIndexEntry,
-    )> {
-        let mut out: Vec<(
-            SegmentSource,
-            SegmentFileMetadata,
-            crate::buffer::segment_file::SegmentPartitionIndexEntry,
-        )> = Vec::with_capacity(limit);
-        let bucket = Config::get_wal_s3_bucket();
-        let prefix = Config::get_wal_s3_prefix();
-        let client = crate::helpers::s3::get_s3_client().await;
-
-        let mut token: Option<String> = None;
-        let mut segs: HashSet<String> = HashSet::new();
-        let mut commits: HashSet<String> = HashSet::new();
-        loop {
-            let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix);
-            if let Some(t) = &token {
-                req = req.continuation_token(t);
-            }
-            match req.send().await {
-                Ok(resp) => {
-                    if let Some(contents) = resp.contents {
-                        for obj in contents {
-                            if let Some(k) = obj.key() {
-                                if k.ends_with(".seg") {
-                                    segs.insert(k.to_string());
-                                }
-                                if k.ends_with(".seg.commit") {
-                                    commits
-                                        .insert(k.trim_end_matches(".commit").to_string());
-                                }
-                            }
-                        }
-                    }
-                    if resp.is_truncated.unwrap_or(false) {
-                        token = resp.next_continuation_token;
-                    } else {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    error!("S3 WAL compaction list error: {}", e);
-                    break;
-                }
-            }
-        }
-
-        let now_secs = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        for seg_key in segs.iter() {
-            if out.len() >= limit {
-                break;
-            }
-            if !commits.contains(seg_key) {
-                continue;
-            }
-            let data = match client
-                .get_object()
-                .bucket(&bucket)
-                .key(seg_key)
-                .send()
-                .await
-            {
-                Ok(resp) => match resp.body.collect().await {
-                    Ok(agg) => agg.into_bytes().to_vec(),
-                    Err(e) => {
-                        warn!("S3 WAL compaction body error {}: {}", seg_key, e);
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    warn!("S3 WAL compaction get error {}: {}", seg_key, e);
-                    continue;
-                }
-            };
-
-            let source = SegmentSource::S3 {
-                key: seg_key.clone(),
-                bucket: bucket.clone(),
-                data: Arc::new(data),
-            };
-
-            if let SegmentSource::S3 { ref data, .. } = source {
-                if let Ok(meta) = SegmentFile::read_metadata_from_bytes(data) {
-                    for idx in meta.index.iter() {
-                        if Self::is_source_tombstoned(&source, &idx.key) {
-                            continue;
-                        }
-                        let inflight_key =
-                            (source.display_name(), idx.start, idx.len);
-                        if COMPACTION_IN_FLIGHT.contains_key(&inflight_key) {
-                            continue;
-                        }
-                        if Self::should_compact(
-                            idx.bytes,
-                            idx.updated_at_secs,
-                            now_secs,
-                            force,
-                        ) {
-                            out.push((source.clone(), meta.clone(), idx.clone()));
-                            if out.len() >= limit {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        out
     }
 
     fn sweep_segment_cleanup() {
@@ -1905,6 +1719,7 @@ impl Buffers {
                 }
             };
             if segment_deleted {
+                Self::segment_cache_remove(source.segment_id());
                 for part in meta.index.iter() {
                     let tp = Self::tombstone_path_for_source(source, &part.key);
                     if tp.exists() {
@@ -1918,22 +1733,6 @@ impl Buffers {
         Ok(true)
     }
 
-    async fn compact_segment_partition(
-        seg_path: &PathBuf,
-        meta: &SegmentFileMetadata,
-        idx: &crate::buffer::segment_file::SegmentPartitionIndexEntry,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
-        offsets_db: Arc<Offsets>,
-    ) -> io::Result<bool> {
-        Self::compact_segment_partition_source(
-            &SegmentSource::Disk(seg_path.clone()),
-            meta,
-            idx,
-            shared_output,
-            offsets_db,
-        )
-        .await
-    }
 }
 
 pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
@@ -1985,7 +1784,6 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
         };
         match seg.read_metadata() {
             Ok(meta) => {
-                // Accumulate bytes and partitions from index
                 for idx in meta.index.iter() {
                     let key = idx.key.clone();
                     namespaces.insert(key.0.clone());
@@ -1996,7 +1794,6 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
                 }
                 bytes = bytes.saturating_add(meta.total_bytes);
                 count = count.saturating_add(1);
-                // Commit offsets from this segment
                 for (ok, pos) in meta.offsets.iter() {
                     let offset_key = OffsetKey {
                         namespace: ok.namespace.clone(),
@@ -2006,6 +1803,10 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
                     offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
                     committed_offsets = committed_offsets.saturating_add(1);
                 }
+                Buffers::segment_cache_register(
+                    SegmentSource::Disk(file_path),
+                    meta,
+                );
             }
             Err(e) => {
                 warn!(
@@ -2065,8 +1866,8 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
 }
 
 /// Async S3 WAL offset recovery: lists committed segments in S3, reads their
-/// metadata, and commits source offsets to the offsets DB. No data is written to
-/// local disk — compaction reads from S3 directly via `next_compaction_candidates_s3`.
+/// S3 WAL recovery: lists committed segments, downloads each, parses
+/// metadata, commits offsets, and populates the segment cache.
 async fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
     let bucket = Config::get_wal_s3_bucket();
     let prefix = Config::get_wal_s3_prefix();
@@ -2130,7 +1931,7 @@ async fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
         {
             Ok(resp) => match resp.body.collect().await {
                 Ok(agg) => {
-                    let data = agg.into_bytes();
+                    let data = agg.into_bytes().to_vec();
                     if let Ok(meta) = SegmentFile::read_metadata_from_bytes(&data) {
                         for idx in meta.index.iter() {
                             namespaces.insert(idx.key.0.clone());
@@ -2146,6 +1947,14 @@ async fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
                         }
                         bytes_total = bytes_total.saturating_add(meta.total_bytes);
                         processed = processed.saturating_add(1);
+                        Buffers::segment_cache_register(
+                            SegmentSource::S3 {
+                                key: seg_key.clone(),
+                                bucket: bucket.clone(),
+                                data: Arc::new(data),
+                            },
+                            meta,
+                        );
                     }
                 }
                 Err(e) => {
@@ -2315,14 +2124,15 @@ mod tests_wal_commit {
         let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
-        let (bytes, _rows, parts, sha) = segf
+        let (meta, _rows, sha) = segf
             .write_snapshot(&offsets, &batches, &parts_meta)
             .unwrap();
-        Buffers::write_seg_commit(&segf.path, &sha, parts, bytes).unwrap();
+        Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes)
+            .unwrap();
         let (ver, _ts, size, pcount, got_sha) = Buffers::read_seg_commit(&segf.path).unwrap();
         assert_eq!(ver, 1);
-        assert_eq!(size, bytes);
-        assert_eq!(pcount, parts);
+        assert_eq!(size, meta.total_bytes);
+        assert_eq!(pcount, meta.num_partitions);
         assert_eq!(got_sha, sha);
     }
 
@@ -2343,13 +2153,12 @@ mod tests_wal_commit {
         let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
-        let (_b, _r, _p, _s) = segf
+        let (meta, _rows, sha) = segf
             .write_snapshot(&offsets, &batches, &parts_meta)
             .unwrap();
-        // Without commit, verify this segment's commit does not exist
         assert!(!commit_exists(&segf.path));
-        // Write commit and verify
-        Buffers::write_seg_commit(&segf.path, &_s, _p, _b).unwrap();
+        Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes)
+            .unwrap();
         assert!(commit_exists(&segf.path));
     }
 
@@ -2375,14 +2184,13 @@ mod tests_wal_commit {
         batches.insert(key.clone(), vec![make_batch()]);
         let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
-        let (b1, _r1, p1, s1) = segf1
+        let (meta1, _r1, sha1) = segf1
             .write_snapshot(&offsets_map, &batches, &parts_meta)
             .unwrap();
-        // Crash before commit: our manual recovery should not advance offsets
         let off = Arc::new(Offsets::init().unwrap());
         assert!(off.get(&ok).is_none());
-        // Publish commit and manually commit offsets from our known offsets_map
-        Buffers::write_seg_commit(&segf1.path, &s1, p1, b1).unwrap();
+        Buffers::write_seg_commit(&segf1.path, &sha1, meta1.num_partitions, meta1.total_bytes)
+            .unwrap();
         for (k, pos) in offsets_map.iter() {
             let offset_key = crate::helpers::offsets::OffsetKey {
                 namespace: k.namespace.clone(),
@@ -2498,7 +2306,7 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
         }
         let snap_arc = next_snapshot_opt.unwrap();
         let snapshot_id;
-        let (seg_bytes, seg_rows, _parts_count, _sha256) = {
+        let write_result = {
             let s = snap_arc.lock().unwrap();
             if s.durability != Durability::Memory {
                 continue;
@@ -2515,7 +2323,7 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
             )
                 .await
             {
-                Ok(t) => t,
+                Ok(r) => r,
                 Err(e) => {
                     error!(
                         "Segment write failed (drain rotated): id={} err={}",
@@ -2525,12 +2333,12 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
                 }
             }
         };
-        uploaded_bytes += seg_bytes;
-        rows += seg_rows;
+        uploaded_bytes += write_result.meta.total_bytes;
+        rows += write_result.total_rows;
+        Buffers::segment_cache_register_from_write(&write_result);
         {
             let mut s = snap_arc.lock().unwrap();
             s.durability = Durability::Disk;
-            // Compactor will inspect SEGMENT_SNAPSHOTS instead.
             for (offset, position) in s.offsets.iter() {
                 let offset_key = OffsetKey {
                     namespace: offset.namespace.clone(),
@@ -2554,16 +2362,14 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
     };
 
     if !to_flush_batches.is_empty() {
-        // Write remaining live segment; in S3 mode stream directly, otherwise write locally
         let snapshot_id = Helpers::random_str(16);
-        // Build per-partition meta
         let mut partitions_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
         for (k, v) in to_flush_batches.iter() {
             let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum();
             partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now()));
         }
         let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&to_flush_batches);
-        let (seg_bytes, seg_rows, _parts_count, _sha256) = match store
+        let write_result = match store
             .write_snapshot_and_commit(
                 &snapshot_id,
                 &to_flush_offsets,
@@ -2572,26 +2378,28 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
             )
             .await
         {
-            Ok(t) => t,
+            Ok(r) => Some(r),
             Err(e) => {
                 error!(
                     "Segment commit failed (live flush): id={} err={}",
                     snapshot_id, e
                 );
-                (0, 0, 0, [0u8; 32])
+                None
             }
         };
-        uploaded_bytes += seg_bytes;
-        rows += seg_rows;
-        // Persist offsets Position/Closed now that segment is durable
-        if seg_bytes > 0 {
-            for (offset, position) in to_flush_offsets.iter() {
-                let offset_key = OffsetKey {
-                    namespace: offset.namespace.clone(),
-                    partition: offset.partition.clone(),
-                };
-                offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
-                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+        if let Some(ref result) = write_result {
+            uploaded_bytes += result.meta.total_bytes;
+            rows += result.total_rows;
+            Buffers::segment_cache_register_from_write(result);
+            if result.meta.total_bytes > 0 {
+                for (offset, position) in to_flush_offsets.iter() {
+                    let offset_key = OffsetKey {
+                        namespace: offset.namespace.clone(),
+                        partition: offset.partition.clone(),
+                    };
+                    offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+                    offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+                }
             }
         }
     }
