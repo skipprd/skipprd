@@ -284,6 +284,14 @@ pub struct Buffers {
 }
 
 impl Buffers {
+    fn segment_meta_to_store_meta(
+        meta: &HashMap<PartitionKey, SegmentPartitionMeta>,
+    ) -> HashMap<PartitionKey, (u64, SystemTime)> {
+        meta.iter()
+            .map(|(key, value)| (key.clone(), (value.bytes, value.updated_at)))
+            .collect()
+    }
+
     pub fn new() -> Self {
         Buffers {
             buf: Vec::with_capacity(32),
@@ -402,35 +410,26 @@ impl Buffers {
                 break;
             }
             let snap_arc = next_snapshot_opt.unwrap();
-            let (snapshot_id, snapshot_offsets, snapshot_batches) = {
+            let snapshot_id;
+            let (seg_bytes, seg_rows, _parts_count, _sha256) = {
                 let s = snap_arc.lock().unwrap();
-                // Only persist if in Memory durability
                 if s.durability != Durability::Memory {
                     continue;
                 }
-                (s.id.clone(), s.offsets.clone(), s.batches.clone())
-            };
-            // Persist to SegmentFile
-            // Build partition metadata
-            let mut partitions_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
-            for (k, v) in snapshot_batches.iter() {
-                let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum();
-                partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now()));
-            }
-
-            // Use WalStore factory to select S3 or Disk and write
-            let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&snapshot_batches);
-            let (seg_bytes, seg_rows, _parts_count, _sha256) = match store
-                .write_snapshot_and_commit(
+                snapshot_id = s.id.clone();
+                let partitions_meta = Self::segment_meta_to_store_meta(&s.meta);
+                let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&s.batches);
+                match store.write_snapshot_and_commit(
                     &snapshot_id,
-                    &snapshot_offsets,
-                    &snapshot_batches,
+                    &s.offsets,
+                    &s.batches,
                     &partitions_meta,
                 ) {
-                Ok(t) => t,
-                Err(e) => {
-                    error!("Segment write failed: id={} err={}", snapshot_id, e);
-                    continue;
+                    Ok(t) => t,
+                    Err(e) => {
+                        error!("Segment write failed: id={} err={}", snapshot_id, e);
+                        continue;
+                    }
                 }
             };
             let _s3_ok = true;
@@ -440,29 +439,15 @@ impl Buffers {
             {
                 let mut s = snap_arc.lock().unwrap();
                 s.durability = Durability::Disk;
-            }
-            // Publish to index
-            for ((namespace, partition, time, shard), batches) in snapshot_batches.into_iter() {
-                if batches.is_empty() {
-                    continue;
+                // No WAL_INDEX: compactor will inspect SEGMENT_SNAPSHOTS to decide work.
+                for (offset, position) in s.offsets.iter() {
+                    let offset_key = OffsetKey {
+                        namespace: offset.namespace.clone(),
+                        partition: offset.partition.clone(),
+                    };
+                    offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+                    offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
                 }
-                let mut per_partition_offsets: HashMap<OffsetKey, u64> = HashMap::new();
-                for (ok, pos) in snapshot_offsets.iter() {
-                    if ok.namespace == namespace && ok.partition == partition {
-                        per_partition_offsets.insert(ok.clone(), *pos);
-                    }
-                }
-                let _partition_key: PartitionKey =
-                    (namespace.clone(), partition.clone(), time, shard.clone());
-                // No WAL_INDEX: compactor will inspect SEGMENT_SNAPSHOTS to decide work
-            }
-            for (offset, position) in snapshot_offsets.iter() {
-                let offset_key = OffsetKey {
-                    namespace: offset.namespace.clone(),
-                    partition: offset.partition.clone(),
-                };
-                offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
-                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
             }
         }
 
@@ -2509,32 +2494,29 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
             break;
         }
         let snap_arc = next_snapshot_opt.unwrap();
-        let (snapshot_id, snapshot_offsets, snapshot_batches) = {
+        let snapshot_id;
+        let (seg_bytes, seg_rows, _parts_count, _sha256) = {
             let s = snap_arc.lock().unwrap();
             if s.durability != Durability::Memory {
                 continue;
             }
-            (s.id.clone(), s.offsets.clone(), s.batches.clone())
-        };
-        let mut partitions_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
-        for (k, v) in snapshot_batches.iter() {
-            let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum();
-            partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now()));
-        }
-        let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&snapshot_batches);
-        let (seg_bytes, seg_rows, _parts_count, _sha256) = match store.write_snapshot_and_commit(
-            &snapshot_id,
-            &snapshot_offsets,
-            &snapshot_batches,
-            &partitions_meta,
-        ) {
-            Ok(t) => t,
-            Err(e) => {
-                error!(
-                    "Segment write failed (drain rotated): id={} err={}",
-                    snapshot_id, e
-                );
-                continue;
+            snapshot_id = s.id.clone();
+            let partitions_meta = Buffers::segment_meta_to_store_meta(&s.meta);
+            let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&s.batches);
+            match store.write_snapshot_and_commit(
+                &snapshot_id,
+                &s.offsets,
+                &s.batches,
+                &partitions_meta,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    error!(
+                        "Segment write failed (drain rotated): id={} err={}",
+                        snapshot_id, e
+                    );
+                    continue;
+                }
             }
         };
         uploaded_bytes += seg_bytes;
@@ -2542,28 +2524,14 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
         {
             let mut s = snap_arc.lock().unwrap();
             s.durability = Durability::Disk;
-        }
-        for ((namespace, partition, time, shard), batches) in snapshot_batches.into_iter() {
-            if batches.is_empty() {
-                continue;
+            // Compactor will inspect SEGMENT_SNAPSHOTS instead.
+            for (offset, position) in s.offsets.iter() {
+                let offset_key = OffsetKey {
+                    namespace: offset.namespace.clone(),
+                    partition: offset.partition.clone(),
+                };
+                offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
             }
-            let mut per_partition_offsets: HashMap<OffsetKey, u64> = HashMap::new();
-            for (ok, pos) in snapshot_offsets.iter() {
-                if ok.namespace == namespace && ok.partition == partition {
-                    per_partition_offsets.insert(ok.clone(), *pos);
-                }
-            }
-            let _partition_key: PartitionKey =
-                (namespace.clone(), partition.clone(), time, shard.clone());
-            // compactor will inspect SEGMENT_SNAPSHOTS instead
-        }
-        // Commit offsets after successful store write
-        for (offset, position) in snapshot_offsets.iter() {
-            let offset_key = OffsetKey {
-                namespace: offset.namespace.clone(),
-                partition: offset.partition.clone(),
-            };
-            offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
         }
     }
 

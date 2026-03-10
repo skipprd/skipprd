@@ -8,7 +8,6 @@ use std::fs;
 use std::io;
 use std::io::{Read, Seek};
 use std::path::PathBuf;
-use std::thread;
 use std::time::SystemTime;
 use tokio::runtime::Handle;
 use url::Url;
@@ -18,8 +17,7 @@ use url::Url;
 /// the work is offloaded to a helper thread to avoid nesting `block_on` calls.
 fn block_on_async<F, T>(fut: F) -> io::Result<T>
 where
-    F: std::future::Future<Output = io::Result<T>> + Send + 'static,
-    T: Send + 'static,
+    F: std::future::Future<Output = io::Result<T>>,
 {
     let build = || {
         tokio::runtime::Builder::new_multi_thread()
@@ -28,10 +26,8 @@ where
             .build()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))
     };
-    if Handle::try_current().is_ok() {
-        let join = thread::spawn(move || build()?.block_on(fut));
-        join.join()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "join panic"))?
+    if let Ok(handle) = Handle::try_current() {
+        handle.block_on(fut)
     } else {
         build()?.block_on(fut)
     }
@@ -72,21 +68,17 @@ impl WalStore for S3WalStore {
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
         partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/)>,
     ) -> io::Result<(u64, u64, u32, [u8; 32])> {
-        // Make owned clones to satisfy 'static for spawned thread
         let prefix = self.prefix_url.clone();
         let sid = snapshot_id.to_string();
-        let offs = offsets.clone();
-        let batches_owned = batches.clone();
-        let parts_owned = partitions_meta.clone();
         let fut = async move {
             let client = crate::helpers::s3::get_s3_client().await;
             SegmentObject::stream_snapshot_to_s3(
                 &client,
                 &prefix,
                 &sid,
-                &offs,
-                &batches_owned,
-                &parts_owned,
+                offsets,
+                batches,
+                partitions_meta,
             )
             .await
         };
