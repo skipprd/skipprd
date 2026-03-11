@@ -7,7 +7,7 @@ use arrow::array::{ArrayRef, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 
-use crate::discover::{Metadata, SkipprDataType};
+use crate::discover::{Metadata, OutputMetadata, SkipprDataType};
 use crate::helpers::configuration::Config;
 use crate::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA};
 
@@ -40,6 +40,53 @@ pub(crate) fn arrow_schema() -> Arc<ArrowSchema> {
         ArrowField::new("offset_key", ArrowDataType::Utf8, true),
         ArrowField::new("offset_pos", ArrowDataType::Int64, true),
     ]))
+}
+
+pub(crate) fn output_metadata() -> OutputMetadata {
+    let mut output_metadata = OutputMetadata::new();
+    output_metadata.determined_type = SkipprDataType::Record;
+
+    fn field(name: &str, dt: SkipprDataType) -> OutputMetadata {
+        let mut field = OutputMetadata::new();
+        field.out_field_name = name.to_string();
+        field.determined_type = dt;
+        field
+    }
+
+    let mut fields: HashMap<String, OutputMetadata> = HashMap::new();
+    fields.insert("id".into(), field("id", SkipprDataType::String));
+    fields.insert(
+        "namespace".into(),
+        field("namespace", SkipprDataType::String),
+    );
+    fields.insert("record".into(), field("record", SkipprDataType::String));
+    fields.insert("error".into(), field("error", SkipprDataType::String));
+    fields.insert(
+        "failure_code".into(),
+        field("failure_code", SkipprDataType::String),
+    );
+    fields.insert(
+        "event_time".into(),
+        field("event_time", SkipprDataType::Long),
+    );
+    fields.insert(
+        "processed_time".into(),
+        field("processed_time", SkipprDataType::Long),
+    );
+    fields.insert(
+        "source_uri".into(),
+        field("source_uri", SkipprDataType::String),
+    );
+    fields.insert(
+        "offset_key".into(),
+        field("offset_key", SkipprDataType::String),
+    );
+    fields.insert(
+        "offset_pos".into(),
+        field("offset_pos", SkipprDataType::Long),
+    );
+    output_metadata.fields = Box::new(fields);
+    output_metadata
 }
 
 pub(crate) fn build_batch(records: &[DeadletterRecord]) -> Option<RecordBatch> {

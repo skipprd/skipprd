@@ -1969,9 +1969,10 @@ impl Config {
                             if let Ok(Some(crate::helpers::configuration::OutputPluginConfig::Athena(config))) =
                                 Config::get_pipeline_deadletter_plugin_config()
                             {
+                                let deadletter_out_meta = crate::ingest::deadletter::output_metadata();
                                 let _ = AwsAthena::create_or_update_schema_with_config(
                                     &ns,
-                                    &out_meta,
+                                    &deadletter_out_meta,
                                     config,
                                 )
                                 .await;
