@@ -1712,8 +1712,13 @@ impl Ingest {
         // from already-persisted/newly initialized metadata. 
         // Metadata persistence is the caller's responsibility (e.g. slow-ingest worker, new-namespace discovery).
         if did_update_schema {
-            if crate::helpers::configuration::Config::get_pipeline_output_plugin_name() == "Athena"
-            {
+            let output_uses_athena =
+                crate::helpers::configuration::Config::get_pipeline_output_plugin_name() == "Athena";
+            let deadletter_uses_athena = matches!(
+                crate::helpers::configuration::Config::get_pipeline_deadletter_plugin_name(),
+                Ok(Some(plugin_name)) if plugin_name == "Athena"
+            );
+            if output_uses_athena || deadletter_uses_athena {
                 let md_clone: std::collections::HashMap<String, Metadata> = metadata.clone();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     if let Ok(permit) = SCHEMA_SYNC_SEM.clone().try_acquire_owned() {

@@ -840,17 +840,21 @@ impl AwsAthena {
             }
         }
     }
-    pub async fn create_or_update_schema(namespace: &str, schema: &OutputMetadata) {
+    pub async fn create_or_update_schema_with_config(
+        namespace: &str,
+        schema: &OutputMetadata,
+        config: DataOutputAwsAthenaPluginConfig,
+    ) {
         // Serialize workgroup changes to avoid Athena InvalidRequestException on concurrent updates
         let _wg_guard = ATHENA_WG_LOCK.lock().await;
-        match AwsAthena::get_work_group().await {
+        match AwsAthena::get_work_group(&config).await {
             Ok(true) => {}
             Ok(false) => {}
-            Err(_err) => match AwsAthena::create_workgroup().await {
+            Err(_err) => match AwsAthena::create_workgroup(&config).await {
                 Ok(_) => {
                     info!("Created Athena Workgroup");
                 }
-                Err(_err) => match AwsAthena::update_workgroup().await {
+                Err(_err) => match AwsAthena::update_workgroup(&config).await {
                     Ok(_) => {
                         info!("Updated Athena Workgroup");
                     }
@@ -868,7 +872,6 @@ impl AwsAthena {
         // Serialize by namespace to avoid ConcurrentModificationException
         let ns_lock = get_namespace_lock(namespace);
         let _ns_guard = ns_lock.lock().await;
-        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         match AwsAthena::glue_get_database(&config).await {
             Ok(true) => {}
@@ -912,9 +915,13 @@ impl AwsAthena {
         }
     }
 
-    pub async fn get_work_group() -> Result<bool, String> {
+    pub async fn create_or_update_schema(namespace: &str, schema: &OutputMetadata) {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
-        let workgroup = config.athena_workgroup_name;
+        Self::create_or_update_schema_with_config(namespace, schema, config).await;
+    }
+
+    pub async fn get_work_group(config: &DataOutputAwsAthenaPluginConfig) -> Result<bool, String> {
+        let workgroup = config.athena_workgroup_name.clone();
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
             .await;
@@ -985,12 +992,12 @@ impl AwsAthena {
             .await
     }
 
-    pub async fn create_workgroup() -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
-
-        let workgroup = config.athena_workgroup_name;
-        let bucket = config.athena_results_s3_bucket;
-        let path = config.s3_prefix;
+    pub async fn create_workgroup(
+        config: &DataOutputAwsAthenaPluginConfig,
+    ) -> Result<bool, String> {
+        let workgroup = config.athena_workgroup_name.clone();
+        let bucket = config.athena_results_s3_bucket.clone();
+        let path = config.s3_prefix.clone();
         let path = path.trim_matches('/');
 
         let path = std::path::Path::new(&bucket)
@@ -1039,12 +1046,12 @@ impl AwsAthena {
         }
     }
 
-    pub async fn update_workgroup() -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
-
-        let workgroup = config.athena_workgroup_name;
-        let bucket = config.athena_results_s3_bucket;
-        let path = config.s3_prefix;
+    pub async fn update_workgroup(
+        config: &DataOutputAwsAthenaPluginConfig,
+    ) -> Result<bool, String> {
+        let workgroup = config.athena_workgroup_name.clone();
+        let bucket = config.athena_results_s3_bucket.clone();
+        let path = config.s3_prefix.clone();
         let path = path.trim_matches('/');
 
         let path = std::path::Path::new(&bucket)

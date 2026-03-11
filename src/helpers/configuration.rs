@@ -1961,13 +1961,26 @@ impl Config {
                                 &md_snapshot,
                                 flatten,
                             );
-                            // optional Athena
-                            if Config::get_pipeline_output_plugin_name() == "Athena" {
-                                let out_meta = if flatten {
-                                    OutputMetadata::from_flatterened_metadata(schema)
-                                } else {
-                                    OutputMetadata::from_metadata(schema)
-                                };
+                            let out_meta = if flatten {
+                                OutputMetadata::from_flatterened_metadata(schema)
+                            } else {
+                                OutputMetadata::from_metadata(schema)
+                            };
+
+                            // optional Athena for primary and deadletter outputs
+                            let deadletter_namespace = crate::ingest::deadletter::table_name();
+                            if ns == deadletter_namespace {
+                                if let Ok(Some(crate::helpers::configuration::OutputPluginConfig::Athena(config))) =
+                                    Config::get_pipeline_deadletter_plugin_config()
+                                {
+                                    let _ = AwsAthena::create_or_update_schema_with_config(
+                                        &ns,
+                                        &out_meta,
+                                        config,
+                                    )
+                                    .await;
+                                }
+                            } else if Config::get_pipeline_output_plugin_name() == "Athena" {
                                 let _ = AwsAthena::create_or_update_schema(&ns, &out_meta).await;
                             }
                         }
