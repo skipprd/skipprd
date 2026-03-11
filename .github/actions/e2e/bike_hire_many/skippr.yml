@@ -10,6 +10,8 @@ pipelines:
     env: test
     buffer_threshold_bytes: 10000000
     buffer_threshold_seconds: 600
+    transform:
+      batch_order_fields: bike_id
     input: data_inputs.s3_bike_hire
     output: data_outputs.test_datalake
 
