@@ -49,6 +49,10 @@ const DEFAULT_CONFIG: &'static str = "NULL_VALUE";
 
 pub static DATA_DIR_INIT_ONCE: OnceCell<()> = OnceCell::new();
 
+type SchemaWorkerState = (UnboundedSender<String>, Option<std::thread::JoinHandle<()>>);
+static SCHEMA_WORKER: Lazy<std::sync::Mutex<Option<SchemaWorkerState>>> =
+    Lazy::new(|| std::sync::Mutex::new(None));
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Skippr {
     pub workspace: Option<String>,
@@ -1917,83 +1921,84 @@ impl Config {
         Self::truth_value(&Self::getenv("CATALOG_LLM_ENABLED", "true"))
     }
 
-    // Schema update worker
     fn ensure_schema_worker() -> UnboundedSender<String> {
-        use once_cell::sync::Lazy as OnceLazy;
-        static SENDER: OnceLazy<std::sync::Mutex<Option<UnboundedSender<String>>>> =
-            OnceLazy::new(|| std::sync::Mutex::new(None));
-        {
-            let mut guard = SENDER.lock().unwrap();
-            if let Some(tx) = guard.as_ref() {
-                return tx.clone();
-            }
-            let (tx, mut rx): (UnboundedSender<String>, UnboundedReceiver<String>) =
-                unbounded_channel();
-            *guard = Some(tx.clone());
+        let mut guard = SCHEMA_WORKER.lock().unwrap();
+        if let Some((tx, _)) = guard.as_ref() {
+            return tx.clone();
+        }
+        let (tx, mut rx): (UnboundedSender<String>, UnboundedReceiver<String>) =
+            unbounded_channel();
 
-            // Coalesce pending namespaces
-            let pending: DashMap<String, ()> = DashMap::new();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                rt.block_on(async move {
-                    while let Some(ns) = rx.recv().await {
-                        if pending.insert(ns.clone(), ()).is_some() {
-                            continue;
-                        }
-                        // small debounce window (increase to curb churn)
-                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                        // process and clear
-                        let flatten = Config::get_transform_flatten_events();
-                        let md_snapshot = { METADATA.load().metadata.clone() };
-                        if let Some(schema) = md_snapshot.get(&ns) {
-                            // template update
-                            let default_message = create_default_nested_message(&schema.fields);
-                            {
-                                let mut lock = DEFAULT_NESTED_MESSAGE.write();
-                                lock.insert(ns.clone(), default_message);
-                            }
-                            // arrow schema publish
-                            let _ = Ingest::prepare_arrow_schema_with_metadata(
-                                &ns,
-                                &md_snapshot,
-                                flatten,
-                            );
-                            let out_meta = if flatten {
-                                OutputMetadata::from_flatterened_metadata(schema)
-                            } else {
-                                OutputMetadata::from_metadata(schema)
-                            };
-
-                            // optional Athena for primary and deadletter outputs
-                            let deadletter_namespace = crate::ingest::deadletter::table_name();
-                            if ns == deadletter_namespace {
-                                if let Ok(Some(crate::helpers::configuration::OutputPluginConfig::Athena(config))) =
-                                    Config::get_pipeline_deadletter_plugin_config()
-                                {
-                                    let _ = AwsAthena::create_or_update_schema_with_config(
-                                        &ns,
-                                        &out_meta,
-                                        config,
-                                    )
-                                    .await;
-                                }
-                            } else if Config::get_pipeline_output_plugin_name() == "Athena" {
-                                let _ = AwsAthena::create_or_update_schema(&ns, &out_meta).await;
-                            }
-                        }
-                        pending.remove(&ns);
+        let pending: DashMap<String, ()> = DashMap::new();
+        let handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                while let Some(ns) = rx.recv().await {
+                    if pending.insert(ns.clone(), ()).is_some() {
+                        continue;
                     }
-                });
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    let flatten = Config::get_transform_flatten_events();
+                    let md_snapshot = { METADATA.load().metadata.clone() };
+                    if let Some(schema) = md_snapshot.get(&ns) {
+                        let default_message = create_default_nested_message(&schema.fields);
+                        {
+                            let mut lock = DEFAULT_NESTED_MESSAGE.write();
+                            lock.insert(ns.clone(), default_message);
+                        }
+                        let _ = Ingest::prepare_arrow_schema_with_metadata(
+                            &ns,
+                            &md_snapshot,
+                            flatten,
+                        );
+                        let out_meta = if flatten {
+                            OutputMetadata::from_flatterened_metadata(schema)
+                        } else {
+                            OutputMetadata::from_metadata(schema)
+                        };
+
+                        if Config::get_pipeline_output_plugin_name() == "Athena" {
+                            let _ = AwsAthena::create_or_update_schema(&ns, &out_meta).await;
+                        }
+
+                        let deadletter_namespace = crate::ingest::deadletter::table_name();
+                        if ns == deadletter_namespace {
+                            if let Ok(Some(crate::helpers::configuration::OutputPluginConfig::Athena(config))) =
+                                Config::get_pipeline_deadletter_plugin_config()
+                            {
+                                let _ = AwsAthena::create_or_update_schema_with_config(
+                                    &ns,
+                                    &out_meta,
+                                    config,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    pending.remove(&ns);
+                }
             });
-            return tx;
+        });
+        *guard = Some((tx.clone(), Some(handle)));
+        tx
+    }
+
+    /// Drop the sender to close the channel, then join the worker thread so all
+    /// pending Glue/Athena operations complete before the process exits.
+    pub fn drain_schema_worker() {
+        let mut guard = SCHEMA_WORKER.lock().unwrap();
+        if let Some((tx, handle)) = guard.take() {
+            drop(tx);
+            if let Some(h) = handle {
+                let _ = h.join();
+            }
         }
     }
 
     pub async fn sync_schema(metadata: &HashMap<String, Metadata>) {
-        // Enqueue namespaces for background processing and return immediately
         let tx = Config::ensure_schema_worker();
         for (namespace, _schema) in metadata.into_iter() {
             let _ = tx.send(namespace.clone());

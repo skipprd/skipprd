@@ -817,6 +817,8 @@ async fn discover(log: bool) {
 
     skippr::converters::parquet_ordering::log_unmatched_order_fields();
 
+    Config::drain_schema_worker();
+
     {
         let mut counter_lock = METRICS.write();
         counter_lock.status = MetricsStatus::Completed;
@@ -1046,6 +1048,11 @@ async fn sync() {
     info!("Finalising: waiting for Athena partition tasks to drain");
     skippr::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
     info!("Finalising: Athena partition tasks drained");
+
+    info!("Finalising: draining schema worker");
+    Config::drain_schema_worker();
+    info!("Finalising: schema worker drained");
+
     if progress.enabled() {
         progress.complete("Finalising");
     }
