@@ -121,9 +121,13 @@ impl BufferChunker {
             None => "".to_string(),
         };
 
+        let raw_sink = sink_ref.unwrap_or("");
+        let (sink_type, sink_name) = raw_sink.split_once('.').unwrap_or((raw_sink, ""));
+
         let chunks = vec![
             ("buffer".to_string(), buffer_name.to_string()),
-            ("sink".to_string(), sink_ref.unwrap_or("").to_string()),
+            ("sink_type".to_string(), sink_type.to_string()),
+            ("sink_name".to_string(), sink_name.to_string()),
             ("namespace".to_string(), namespace.unwrap_or("").to_string()),
             ("partition".to_string(), partition.unwrap_or("").to_string()),
             ("time".to_string(), time_string),
@@ -141,7 +145,6 @@ impl BufferChunker {
         let mut time = -1;
 
         let filename = filename.trim_start_matches("./");
-        let filename = filename.split('.').next().unwrap();
 
         let pairs = url::form_urlencoded::parse(filename.as_bytes());
 
@@ -150,7 +153,12 @@ impl BufferChunker {
                 if value.is_empty() {
                     continue;
                 }
-                time = value.parse::<i64>().unwrap_or(0);
+                // Strip trailing file extension (e.g. ".part", ".parquet") from
+                // the value; other parameters may legitimately contain periods
+                // (e.g. sink=data_outputs.test_datalake), so we only trim here
+                // rather than splitting the entire filename on '.'.
+                let clean = value.split('.').next().unwrap_or(&value);
+                time = clean.parse::<i64>().unwrap_or(0);
             }
         }
 
@@ -207,7 +215,17 @@ impl BufferChunker {
     }
 
     pub fn decode_file_sink_ref(filename: &str) -> String {
-        BufferChunker::get_file_part(filename, "sink")
+        let sink_type = BufferChunker::get_file_part(filename, "sink_type");
+        let sink_name = BufferChunker::get_file_part(filename, "sink_name");
+        if sink_type.is_empty() {
+            // Backwards-compat: fall back to single "sink" key for old WAL files
+            return BufferChunker::get_file_part(filename, "sink");
+        }
+        if sink_name.is_empty() {
+            sink_type
+        } else {
+            format!("{}.{}", sink_type, sink_name)
+        }
     }
 
     pub fn decode_file_shard(filename: &str) -> String {
@@ -358,6 +376,13 @@ mod get_file_chunk_time_tests {
             "buffer=output&namespace=bike_hire&partition=&time=1645296045&shard=1.merged";
         assert_eq!(BufferChunker::get_file_time(filename), 1645296045);
     }
+
+    #[test]
+    fn test_get_file_chunk_time_with_split_sink_ref() {
+        let filename =
+            "buffer=output&sink_type=data_outputs&sink_name=test_datalake&namespace=test&partition=&time=1700000280&shard=abc-c=def";
+        assert_eq!(BufferChunker::get_file_time(filename), 1700000280);
+    }
 }
 
 #[cfg(test)]
@@ -416,7 +441,7 @@ mod encode_chunk_name_tests {
     #[test]
     fn test_encode_chunk_name_no_options() {
         let buffer_name = "test_buffer";
-        let expected_chunk_name = "buffer=test_buffer&sink=&namespace=&partition=&time=&shard=";
+        let expected_chunk_name = "buffer=test_buffer&sink_type=&sink_name=&namespace=&partition=&time=&shard=";
         let actual_chunk_name =
             BufferChunker::encode_chunk_name(buffer_name, None, None, None, None, None);
         assert_eq!(expected_chunk_name, actual_chunk_name);
@@ -427,7 +452,7 @@ mod encode_chunk_name_tests {
         let buffer_name = "test_buffer";
         let namespace = Some("test_namespace");
         let expected_chunk_name =
-            "buffer=test_buffer&sink=&namespace=test_namespace&partition=&time=&shard=";
+            "buffer=test_buffer&sink_type=&sink_name=&namespace=test_namespace&partition=&time=&shard=";
         let actual_chunk_name =
             BufferChunker::encode_chunk_name(buffer_name, None, namespace, None, None, None);
         assert_eq!(expected_chunk_name, actual_chunk_name);
@@ -438,7 +463,7 @@ mod encode_chunk_name_tests {
         let buffer_name = "test_buffer";
         let partition = Some("test_partition");
         let expected_chunk_name =
-            "buffer=test_buffer&sink=&namespace=&partition=test_partition&time=&shard=";
+            "buffer=test_buffer&sink_type=&sink_name=&namespace=&partition=test_partition&time=&shard=";
         let actual_chunk_name =
             BufferChunker::encode_chunk_name(buffer_name, None, None, partition, None, None);
         assert_eq!(expected_chunk_name, actual_chunk_name);
@@ -449,7 +474,7 @@ mod encode_chunk_name_tests {
         let buffer_name = "test_buffer";
         let time_bucket = Some(123);
         let expected_chunk_name =
-            "buffer=test_buffer&sink=&namespace=&partition=&time=123&shard=";
+            "buffer=test_buffer&sink_type=&sink_name=&namespace=&partition=&time=123&shard=";
         let actual_chunk_name =
             BufferChunker::encode_chunk_name(buffer_name, None, None, None, time_bucket, None);
         assert_eq!(expected_chunk_name, actual_chunk_name);
@@ -462,7 +487,7 @@ mod encode_chunk_name_tests {
         let partition = Some("test_partition");
         let time_bucket = Some(456);
         let expected_chunk_name =
-            "buffer=test_buffer&sink=&namespace=test_namespace&partition=test_partition&time=456&shard=";
+            "buffer=test_buffer&sink_type=&sink_name=&namespace=test_namespace&partition=test_partition&time=456&shard=";
         let actual_chunk_name =
             BufferChunker::encode_chunk_name(
                 buffer_name,
@@ -473,5 +498,22 @@ mod encode_chunk_name_tests {
                 None,
             );
         assert_eq!(expected_chunk_name, actual_chunk_name);
+    }
+
+    #[test]
+    fn test_encode_decode_sink_ref_roundtrip() {
+        let name = BufferChunker::encode_chunk_name(
+            "output",
+            Some("data_outputs.test_datalake"),
+            Some("ns"),
+            None,
+            Some(100),
+            None,
+        );
+        assert_eq!(
+            BufferChunker::decode_file_sink_ref(&name),
+            "data_outputs.test_datalake"
+        );
+        assert_eq!(BufferChunker::get_file_time(&name), 100);
     }
 }

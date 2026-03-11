@@ -87,7 +87,7 @@ runs:
           --database-name deadletters \
           --name _dl_deadletters_test \
           --query 'Table.StorageDescriptor.Columns[].Name' \
-          --output text)
+          --output text | tr '\t' ' ')
         for required_col in id namespace record error failure_code processed_time; do
           if [[ " $columns " != *" $required_col "* ]]; then
             echo "Missing expected deadletter column: $required_col" >&2
