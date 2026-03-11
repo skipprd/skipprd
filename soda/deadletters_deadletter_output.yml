@@ -1,4 +1,4 @@
-checks for deadletters_test:
+checks for _dl_deadletters_test:
   - row_count > 0
   - schema:
       fail:

@@ -612,7 +612,7 @@ impl Config {
 
             if pipeline.output.as_ref() == Some(deadletters_ref) {
                 violations.push(
-                    "Deadletter sink must not reference the same registry entry as the primary output when deadletter table names no longer use a dedicated prefix."
+                    "Deadletter sink must not reference the same registry entry as the primary output."
                         .to_string(),
                 );
             }

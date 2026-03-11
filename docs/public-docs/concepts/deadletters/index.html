@@ -1103,7 +1103,7 @@
 <li>A pipeline can optionally point at a dedicated deadletter sink from the top-level <code>data_deadletters</code> registry.</li>
 <li>If <code>deadletters</code> is unset for a pipeline, deadletter records are discarded after being counted and logged.</li>
 <li>If <code>deadletters</code> is set but the referenced sink is invalid, startup fails.</li>
-<li>Deadletter table names no longer use the <code>_dl_</code> prefix. The deadletter table name is the pipeline name, so you should route deadletters to a separate destination.</li>
+<li>Deadletter Athena tables use the <code>_dl_&lt;pipeline&gt;</code> name, so the deadletter schema stays isolated from the primary table even when both live in Athena.</li>
 </ul>
 <h2 id="config-file-example">Config file example<a class="headerlink" href="#config-file-example" title="Permanent link">&para;</a></h2>
 <pre><code class="language-yaml">pipelines:
@@ -1195,9 +1195,9 @@ data_deadletters:
 </tbody>
 </table>
 <h2 id="querying-athena-deadletters">Querying Athena deadletters<a class="headerlink" href="#querying-athena-deadletters" title="Permanent link">&para;</a></h2>
-<p>When the deadletter sink is Athena, query the configured deadletter database using the pipeline name as the table name:</p>
+<p>When the deadletter sink is Athena, query the configured deadletter database using <code>_dl_&lt;pipeline&gt;</code> as the table name:</p>
 <pre><code class="language-sql">SELECT id, namespace, error, failure_code
-FROM bike_hire
+FROM _dl_bike_hire
 WHERE namespace = 'rides'
 ORDER BY processed_time DESC
 LIMIT 50;

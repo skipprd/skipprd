@@ -54,4 +54,4 @@ pipelines:
 
 - If `deadletters` is unset, deadletters are discarded.
 - If `deadletters` points to an invalid registry entry, startup fails.
-- Deadletter table names no longer use `_dl_`, so prefer a separate destination for deadletters.
+- Deadletter Athena tables are named `_dl_<pipeline>` to keep their schema isolated from the primary table.

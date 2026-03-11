@@ -1187,7 +1187,7 @@
 <ul>
 <li>If <code>deadletters</code> is unset, deadletters are discarded.</li>
 <li>If <code>deadletters</code> points to an invalid registry entry, startup fails.</li>
-<li>Deadletter table names no longer use <code>_dl_</code>, so prefer a separate destination for deadletters.</li>
+<li>Deadletter Athena tables are named <code>_dl_&lt;pipeline&gt;</code> to keep their schema isolated from the primary table.</li>
 </ul>
 
 

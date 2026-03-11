@@ -177,15 +177,15 @@ DROP DATABASE data_warehouse
 
 **Syntax:**
 ```sql
-SELECT <columns> FROM deadletters [WHERE namespace = '<ns>'] [AND dt BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD']
+SELECT <columns> FROM _dl_<pipeline_name> [WHERE namespace = '<ns>'] [ORDER BY processed_time DESC]
 ```
 
 **Description:**
-Query deadletter events uploaded directly to the Skippr state bucket under `deadletters/`. Supports JSON extraction via `json_extract_scalar(record.raw_json, '$.<path>')`.
+Query deadletters from the configured deadletter destination. When Athena is used as the deadletter sink, the table name is `_dl_<pipeline_name>` in the deadletter database.
 
 **Example:**
 ```sql
-SELECT id, namespace, failure_error_messages[1] AS err FROM deadletters WHERE namespace = 'bike_hire' AND dt BETWEEN '2025-11-05' AND '2025-11-07'
+SELECT id, namespace, error FROM _dl_bike_hire WHERE namespace = 'rides' ORDER BY processed_time DESC LIMIT 50
 ```
 
 ## Query Operations

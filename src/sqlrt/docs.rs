@@ -146,9 +146,9 @@ pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
         "DEADLETTERS TABLE".to_string(),
         SqlStatementDoc {
             name: "DEADLETTERS TABLE".to_string(),
-            syntax: "SELECT <columns> FROM <pipeline_name> [WHERE namespace = '<ns>'] [ORDER BY processed_time DESC]".to_string(),
-            description: "Query deadletters from the configured deadletter destination. When Athena is used as the deadletter sink, the table name is the pipeline name in the deadletter database.".to_string(),
-            example: "SELECT id, namespace, error FROM bike_hire WHERE namespace = 'rides' ORDER BY processed_time DESC LIMIT 50".to_string(),
+            syntax: "SELECT <columns> FROM _dl_<pipeline_name> [WHERE namespace = '<ns>'] [ORDER BY processed_time DESC]".to_string(),
+            description: "Query deadletters from the configured deadletter destination. When Athena is used as the deadletter sink, the table name is `_dl_<pipeline_name>` in the deadletter database.".to_string(),
+            example: "SELECT id, namespace, error FROM _dl_bike_hire WHERE namespace = 'rides' ORDER BY processed_time DESC LIMIT 50".to_string(),
         },
     );
 

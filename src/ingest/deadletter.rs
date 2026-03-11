@@ -24,7 +24,7 @@ pub(crate) struct DeadletterRecord {
 }
 
 pub(crate) fn table_name() -> String {
-    Config::get_pipeline_name()
+    format!("_dl_{}", Config::get_pipeline_name())
 }
 
 pub(crate) fn arrow_schema() -> Arc<ArrowSchema> {

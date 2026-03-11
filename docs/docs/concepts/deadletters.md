@@ -8,7 +8,7 @@ Records that fail validation or cannot be normalized are captured as deadletters
 - A pipeline can optionally point at a dedicated deadletter sink from the top-level `data_deadletters` registry.
 - If `deadletters` is unset for a pipeline, deadletter records are discarded after being counted and logged.
 - If `deadletters` is set but the referenced sink is invalid, startup fails.
-- Deadletter table names no longer use the `_dl_` prefix. The deadletter table name is the pipeline name, so you should route deadletters to a separate destination.
+- Deadletter Athena tables use the `_dl_<pipeline>` name, so the deadletter schema stays isolated from the primary table even when both live in Athena.
 
 ## Config file example
 
@@ -59,11 +59,11 @@ Deadletter tables are written as Parquet with these columns:
 
 ## Querying Athena deadletters
 
-When the deadletter sink is Athena, query the configured deadletter database using the pipeline name as the table name:
+When the deadletter sink is Athena, query the configured deadletter database using `_dl_<pipeline>` as the table name:
 
 ```sql
 SELECT id, namespace, error, failure_code
-FROM bike_hire
+FROM _dl_bike_hire
 WHERE namespace = 'rides'
 ORDER BY processed_time DESC
 LIMIT 50;

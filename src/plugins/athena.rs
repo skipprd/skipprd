@@ -61,7 +61,7 @@ fn get_namespace_lock(namespace: &str) -> Arc<Mutex<()>> {
         .clone()
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 pub struct DataOutputAwsAthenaPluginConfig {
     pub format: Option<String>,
     // pub batch_size_seconds: Option<i64>,
@@ -87,6 +87,19 @@ impl From<OutputPluginConfig> for DataOutputAwsAthenaPluginConfig {
             _ => panic!("Invalid plugin type"),
         }
     }
+}
+
+fn is_deadletter_athena_target(
+    config: &DataOutputAwsAthenaPluginConfig,
+    namespace: &str,
+) -> bool {
+    if namespace != crate::ingest::deadletter::table_name() {
+        return false;
+    }
+    matches!(
+        Config::get_pipeline_deadletter_plugin_config(),
+        Ok(Some(OutputPluginConfig::Athena(deadletter_config))) if deadletter_config == *config
+    )
 }
 
 #[async_trait]
@@ -226,9 +239,10 @@ impl DataOutputAwsAthenaPlugin {
             full_key = format!("{}/{}", full_key, partition_path);
         }
 
+        let is_deadletter_target = is_deadletter_athena_target(&self.config, &namespace);
         let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
 
-        if !time_partition_str.is_empty() {
+        if !is_deadletter_target && !time_partition_str.is_empty() {
             match TimePartitioner::new(&filename).get_granularity_values() {
                 Ok(time_partition_values) => {
                     let granularity_names = TimePartitioner::get_granularity_names();
@@ -250,7 +264,7 @@ impl DataOutputAwsAthenaPlugin {
         }
 
         // Spawn Glue partition creation concurrently and keep it off the upload critical path.
-        if !partition_values.is_empty() {
+        if !is_deadletter_target && !partition_values.is_empty() {
             let flatten = Config::get_transform_flatten_events();
             let metadata: PipelineMetadata = METADATA.load().as_ref().clone();
             let ns_md_opt = metadata.metadata.get(&namespace);
@@ -1515,7 +1529,7 @@ impl AwsAthena {
         let mut partition_indexes: Vec<PartitionIndex> = Vec::new();
         let mut partition_index_keys: Vec<String> = Vec::new();
 
-        let is_deadletter = namespace == crate::ingest::deadletter::table_name();
+        let is_deadletter = is_deadletter_athena_target(config, namespace);
         if !is_deadletter {
             AwsAthena::get_partition_by_fields(&mut partitions);
         }
