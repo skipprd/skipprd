@@ -905,8 +905,7 @@ impl AwsAthena {
 
         match AwsAthena::glue_get_table(&config, namespace).await {
             Ok(table) => {
-                let deadletter_namespace = crate::ingest::deadletter::table_name();
-                let deadletter_table_needs_rebuild = namespace == deadletter_namespace
+                let deadletter_table_needs_rebuild = is_deadletter_athena_target(&config, namespace)
                     && table
                         .table()
                         .and_then(|t| t.partition_keys.as_ref())

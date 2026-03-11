@@ -1960,12 +1960,14 @@ impl Config {
                             OutputMetadata::from_metadata(schema)
                         };
 
-                        if Config::get_pipeline_output_plugin_name() == "Athena" {
+                        let deadletter_namespace = crate::ingest::deadletter::table_name();
+                        let is_deadletter_ns = ns == deadletter_namespace;
+
+                        if !is_deadletter_ns && Config::get_pipeline_output_plugin_name() == "Athena" {
                             let _ = AwsAthena::create_or_update_schema(&ns, &out_meta).await;
                         }
 
-                        let deadletter_namespace = crate::ingest::deadletter::table_name();
-                        if ns == deadletter_namespace {
+                        if is_deadletter_ns {
                             if let Ok(Some(crate::helpers::configuration::OutputPluginConfig::Athena(config))) =
                                 Config::get_pipeline_deadletter_plugin_config()
                             {

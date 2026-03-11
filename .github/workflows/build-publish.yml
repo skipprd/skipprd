@@ -74,6 +74,7 @@ jobs:
           aws s3 rm s3://skippr-e2e-sample-data-output --recursive
           aws s3 rm s3://skippr-metadata-test --recursive
           aws glue delete-database --catalog-id 353855562591 --name bikehire || true
+          aws glue delete-database --catalog-id 353855562591 --name deadletters || true
 
   purge_dynamodb:
     runs-on: ubuntu-latest
