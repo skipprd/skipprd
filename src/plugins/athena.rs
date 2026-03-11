@@ -891,6 +891,34 @@ impl AwsAthena {
 
         match AwsAthena::glue_get_table(&config, namespace).await {
             Ok(table) => {
+                let deadletter_namespace = crate::ingest::deadletter::table_name();
+                let deadletter_table_needs_rebuild = namespace == deadletter_namespace
+                    && table
+                        .table()
+                        .and_then(|t| t.partition_keys.as_ref())
+                        .is_some_and(|keys| !keys.is_empty());
+                if deadletter_table_needs_rebuild {
+                    info!(
+                        "Rebuilding deadletter Glue table '{}' in database '{}' without partitions",
+                        namespace, config.glue_database_name
+                    );
+                    if let Err(err) = AwsAthena::backoff_retry(
+                        || AwsAthena::glue_delete_table(&config, namespace),
+                        "delete_table",
+                    )
+                    .await
+                    {
+                        error!("deleting misconfigured deadletter Glue table: {}", err);
+                    } else if let Err(err) = AwsAthena::backoff_retry(
+                        || AwsAthena::glue_create_table(&config, namespace, schema),
+                        "create_table",
+                    )
+                    .await
+                    {
+                        error!("recreating deadletter Glue table: {}", err);
+                    }
+                    return;
+                }
                 if let Err(err) = AwsAthena::backoff_retry(
                     || AwsAthena::glue_update_table(&config, namespace, schema, table.clone()),
                     "update_table",
@@ -1492,8 +1520,9 @@ impl AwsAthena {
             AwsAthena::get_partition_by_fields(&mut partitions);
         }
 
-        // Time Partitioning
-        if !granularity_target.is_empty() {
+        // Deadletters are always written flat to a dedicated sink, so do not
+        // attach the pipeline's time partitioning config to their Glue table.
+        if !is_deadletter && !granularity_target.is_empty() {
             for granularity in TimePartitioner::get_granularity_names() {
                 partitions.push(
                     Column::builder()
