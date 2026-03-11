@@ -8,8 +8,17 @@ use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use std::{fs, io};
-pub type PartitionKey = (String, String, Option<i64>, String);
 use bincode;
+use serde_derive::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
+pub struct PartitionKey {
+    pub sink_ref: String,
+    pub namespace: String,
+    pub partition: String,
+    pub time: Option<i64>,
+    pub shard: String,
+}
 
 const MAGIC: &[u8; 4] = b"SEGF";
 const PART: &[u8; 4] = b"PART";
@@ -427,12 +436,13 @@ mod tests_wal_writer {
         let dir = temp_dir();
         let seg = SegmentFile::new(&dir, "t1").unwrap();
         let mut batches: HashMap<PartitionKey, Vec<RecordBatch>> = HashMap::new();
-        let key: PartitionKey = (
-            "ns".to_string(),
-            "".to_string(),
-            Some(0),
-            "shard".to_string(),
-        );
+        let key = PartitionKey {
+            sink_ref: "data_outputs.test".to_string(),
+            namespace: "ns".to_string(),
+            partition: "".to_string(),
+            time: Some(0),
+            shard: "shard".to_string(),
+        };
         batches.insert(key.clone(), vec![make_batch()]);
         let mut parts_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));

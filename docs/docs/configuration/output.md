@@ -38,3 +38,20 @@ For local development, Skippr also supports writing Parquet to local disk:
 | Variable | Default | Description |
 |---|---|---|
 | `DATA_OUTPUT_PATH` | *(required)* | Output directory for Parquet files |
+
+## Deadletter outputs
+
+Pipelines can optionally route deadletters to a separate output registry:
+
+```yaml
+pipelines:
+  analytics:
+    output: data_outputs.main
+    deadletters: data_deadletters.archive
+```
+
+`data_deadletters` uses the same output plugin shapes as `data_outputs` and supports `Athena`, `S3`, and `File`.
+
+- If `deadletters` is unset, deadletters are discarded.
+- If `deadletters` points to an invalid registry entry, startup fails.
+- Deadletter table names no longer use `_dl_`, so prefer a separate destination for deadletters.

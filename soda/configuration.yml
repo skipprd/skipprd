@@ -9,3 +9,12 @@ data_source datalake_e2e:
 #    schema_name: datalake
 #    work_group: datalake
 #    profile_name: cloudcycle-dev
+
+data_source deadletters_e2e:
+  type: athena
+  connection:
+    region_name: us-east-1
+    staging_dir: s3://skippr-e2e-sample-data-output/soda
+    database: deadletters
+    catalog: AwsDataCatalog
+    schema: deadletters

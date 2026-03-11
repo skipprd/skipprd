@@ -10,6 +10,7 @@ use std::{io, process};
 use std::sync::Arc;
 
 use std::fs;
+use std::collections::HashMap;
 
 use std::sync::atomic::Ordering;
 use std::thread::sleep;
@@ -25,7 +26,8 @@ use clap::Parser;
 
 use std::string::ToString;
 
-use skippr::helpers::configuration::{Config, PIPELINE_NAME};
+use skippr::buffer::BufferChunker;
+use skippr::helpers::configuration::{Config, OutputPluginConfig, PIPELINE_NAME};
 use skippr::helpers::logging::init_logging;
 use skippr::helpers::progress::ProgressUi;
 use tracing::{error, info, warn};
@@ -39,9 +41,11 @@ use skippr::plugins::s3_input::DataSourceS3Plugin;
 
 use skippr::metrics::{Metrics, MetricsStatus};
 use skippr::plugins::file_input::DataSourceLocalFilePlugin;
+use skippr::plugins::s3_output::DataOutputS3Plugin;
 use skippr::{LOGGER, METADATA, METRICS, OUTPUT_RUNNING, RUNNING};
 
 use datafusion::prelude::*;
+use datafusion::physical_plan::SendableRecordBatchStream;
 use skippr::buffer::ingest_buffer::{wal_recover, Buffers};
 use skippr::benchmark::PerformanceBenchmark;
 use skippr::ingest_work::Ingest;
@@ -61,6 +65,34 @@ use std::io::IsTerminal as _;
 
 #[derive(Clone, Debug)]
 struct PipelineCache {}
+
+struct OutputRouter {
+    primary_sink_ref: String,
+    sinks: HashMap<String, Arc<Box<dyn DataOutputPlugin + Send + Sync>>>,
+}
+
+#[async_trait::async_trait]
+impl DataOutputPlugin for OutputRouter {
+    async fn sync(
+        &self,
+        stream: SendableRecordBatchStream,
+        filename: String,
+    ) -> Result<(), std::io::Error> {
+        let sink_ref = BufferChunker::decode_file_sink_ref(&filename);
+        let target_sink_ref = if sink_ref.is_empty() {
+            self.primary_sink_ref.clone()
+        } else {
+            sink_ref
+        };
+        let plugin = self.sinks.get(&target_sink_ref).ok_or_else(|| {
+            std::io::Error::other(format!(
+                "No output sink registered for persisted sink_ref '{}'",
+                target_sink_ref
+            ))
+        })?;
+        plugin.sync(stream, filename).await
+    }
+}
 
 // @todo, last_ran should be the updated_at timestamp for the file DATA_DIR/LASTRAN
 impl PipelineCache {
@@ -1097,54 +1129,80 @@ async fn sync() {
     }
 }
 
+async fn build_output_plugin_from_config(
+    output_config: OutputPluginConfig,
+    buffer_name: String,
+) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
+    match output_config {
+        OutputPluginConfig::File(file_config) => {
+            let plugin = DataOutputFilePlugin::new_with_config(buffer_name, Some(file_config)).await;
+            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+        }
+        OutputPluginConfig::Athena(athena_config) => {
+            let plugin =
+                DataOutputAwsAthenaPlugin::new_with_config(buffer_name, athena_config).await;
+            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+        }
+        OutputPluginConfig::S3(s3_config) => {
+            let plugin = DataOutputS3Plugin::new_with_config(buffer_name, Some(s3_config)).await;
+            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+        }
+    }
+}
+
 pub async fn sync_output_plugin(
     plugin_name: &str,
     buffer_name: String,
 ) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
     info!("Output plugin: {}", plugin_name);
 
-    match plugin_name {
-        // "stdout" => {
-        //     let output = DataOutputStdoutPlugin::new(buffer_name).await;
-        //     output
-        //         .sync()
-        //         .await;
-        // }
-        "File" => {
-            let plugin = DataOutputFilePlugin::new(buffer_name).await;
-            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
-        }
-        // "s3" => {
-        //     if *HAS_LICENSE.read() {
-        //         let output = DataOutputS3Plugin::new(buffer_name).await;
-        //         output
-        //             .sync()
-        //             .await;
-        //     } else {
-        //         println!("No license found for S3 output plugin. Visit https://skippr.io to get a license.");
-        //     }
-        //
-        // }
-        "Athena" => {
-            let plugin = DataOutputAwsAthenaPlugin::new(buffer_name).await;
-            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
-        }
-        "" => {
+    let primary_sink_ref = Config::get_pipeline_output_sink_ref();
+    let primary_plugin = match Config::get_pipeline_output_plugin_config() {
+        Ok(output_config) => build_output_plugin_from_config(output_config, buffer_name.clone()).await?,
+        Err(_) if plugin_name.is_empty() => {
             info!(
                 "No Data {} plugin specified, defaulting to local file",
                 buffer_name
             );
-            let plugin = DataOutputFilePlugin::new(buffer_name).await;
-            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+            Box::new(DataOutputFilePlugin::new(buffer_name.clone()).await)
+                as Box<dyn DataOutputPlugin + Send + Sync>
         }
-        _ => {
-            // println!("Unknown Data {} plugin specified", buffer_name);
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Unknown Data plugin specified",
-            ))
+        Err(err) => {
+            return Err(io::Error::other(format!(
+                "Failed to resolve output plugin config: {err}"
+            )))
         }
+    };
+
+    let mut sinks: HashMap<String, Arc<Box<dyn DataOutputPlugin + Send + Sync>>> = HashMap::new();
+    sinks.insert(primary_sink_ref.clone(), Arc::new(primary_plugin));
+
+    if let Some((deadletter_sink_ref, deadletter_plugin)) =
+        sync_deadletter_plugin("deadletters".to_string()).await?
+    {
+        sinks.insert(deadletter_sink_ref, Arc::new(deadletter_plugin));
     }
+
+    Ok(Box::new(OutputRouter {
+        primary_sink_ref,
+        sinks,
+    }) as Box<dyn DataOutputPlugin + Send + Sync>)
+}
+
+pub async fn sync_deadletter_plugin(
+    buffer_name: String,
+) -> Result<Option<(String, Box<dyn DataOutputPlugin + Send + Sync>)>, io::Error> {
+    let sink_ref = match Config::get_pipeline_deadletters_ref() {
+        Some(sink_ref) => sink_ref,
+        None => return Ok(None),
+    };
+    let output_config = Config::get_pipeline_deadletter_plugin_config()
+        .map_err(|err| io::Error::other(format!("Failed to resolve deadletter sink: {err}")))?;
+    let Some(output_config) = output_config else {
+        return Ok(None);
+    };
+    let plugin = build_output_plugin_from_config(output_config, buffer_name).await?;
+    Ok(Some((sink_ref, plugin)))
 }
 
 pub async fn sync_input_plugin(

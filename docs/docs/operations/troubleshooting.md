@@ -41,11 +41,17 @@
 
 **Fix:** Ensure `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` are set. Alternatively, use an instance profile or IAM role.
 
+### `Discarded <n> deadletter records because no deadletter sink is configured`
+
+**Cause:** The pipeline produced deadletters but does not define a `deadletters: data_deadletters.<name>` sink.
+
+**Fix:** Add a deadletter sink if you want those records retained. Otherwise this message is informational.
+
 ### `Deadletter id=<id> ns=<namespace> err=<error>`
 
 **Cause:** A record failed validation or schema matching during ingestion.
 
-**Fix:** This is expected behaviour — Skippr captures invalid records rather than dropping them. Query the deadletters table in Athena to inspect failures. See [Deadletters](../concepts/deadletters.md).
+**Fix:** This is expected behaviour. Query the configured deadletter destination to inspect failures. See [Deadletters](../concepts/deadletters.md).
 
 ## Recovery after crash
 

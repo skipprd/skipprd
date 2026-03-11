@@ -1024,11 +1024,15 @@ impl Ingest {
         let mut _j = 0;
         let x = 0;
 
-        deadletter::ensure_namespace_registered();
+        let primary_sink_ref = Config::get_pipeline_output_sink_ref();
+        let deadletter_sink_ref = Config::get_pipeline_deadletters_ref();
+        if deadletter_sink_ref.is_some() {
+            deadletter::ensure_namespace_registered();
+        }
         let mut dl_records: Vec<DeadletterRecord> = Vec::new();
         let mut batch_line: u64;
 
-        let format = match Config::get_pipline_plugin_config("input") {
+        let format = match Config::get_pipeline_input_plugin_config() {
             Ok(plugin) => plugin.format(),
             Err(_) => "json".to_string(),
         };
@@ -1048,10 +1052,10 @@ impl Ingest {
             None => "".to_string(),
         };
 
-        let mut buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch> =
+        let mut buf: HashMap<(String, String, String, Option<i64>, String), IngestBufferBatch> =
             HashMap::with_capacity(32);
         // Temporary storage for raw JSON records prior to Arrow batch building
-        let mut raw_values: HashMap<(String, String, Option<i64>, String), Vec<IngestRecord>> =
+        let mut raw_values: HashMap<(String, String, String, Option<i64>, String), Vec<IngestRecord>> =
             HashMap::with_capacity(32);
 
         let pipeline_name_cached = Config::get_pipeline_name();
@@ -1066,9 +1070,16 @@ impl Ingest {
             let md_snapshot = METADATA.load();
             let schema_hash = Ingest::load_stable_schema_hash(ns, &md_snapshot.metadata, flatten);
             drop(md_snapshot);
-            let key = (ns.clone(), part.clone(), time_b.clone(), schema_hash.hash);
+            let key = (
+                primary_sink_ref.clone(),
+                ns.clone(),
+                part.clone(),
+                time_b.clone(),
+                schema_hash.hash,
+            );
             let buf_entry = buf.entry(key.clone()).or_insert_with(|| IngestBufferBatch {
                 offsets: HashMap::new(),
+                sink_ref: primary_sink_ref.clone(),
                 _namespace: ns.clone(),
                 _partition: part.clone(),
                 _time: time_b.clone(),
@@ -1556,29 +1567,43 @@ impl Ingest {
         if !dl_records.is_empty() {
             let dl_count = dl_records.len();
             metrics_hot::add_deadletters(dl_count as u64);
-            let dl_ns = deadletter::table_name();
-            let dl_schema: SchemaRef = deadletter::arrow_schema();
-            let dl_time_bucket = BufferChunker::event_time_bucket(
-                SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64,
-            );
-            if let Some(batch) = deadletter::build_batch(&dl_records) {
-                let key = (dl_ns.clone(), String::new(), Some(dl_time_bucket), "0".to_string());
-                buf.insert(
-                    key,
-                    IngestBufferBatch {
-                        offsets: HashMap::new(),
-                        _namespace: dl_ns,
-                        _partition: String::new(),
-                        _time: Some(dl_time_bucket),
-                        _shard: String::new(),
-                        schema: dl_schema,
-                        record_batches: Some(vec![batch]),
-                    },
+            if let Some(deadletter_sink_ref) = deadletter_sink_ref.clone() {
+                let dl_ns = deadletter::table_name();
+                let dl_schema: SchemaRef = deadletter::arrow_schema();
+                let dl_time_bucket = BufferChunker::event_time_bucket(
+                    SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64,
                 );
-                warn!("Deadlettered {} records into WAL", dl_count);
+                if let Some(batch) = deadletter::build_batch(&dl_records) {
+                    let key = (
+                        deadletter_sink_ref.clone(),
+                        dl_ns.clone(),
+                        String::new(),
+                        Some(dl_time_bucket),
+                        "0".to_string(),
+                    );
+                    buf.insert(
+                        key,
+                        IngestBufferBatch {
+                            offsets: HashMap::new(),
+                            sink_ref: deadletter_sink_ref,
+                            _namespace: dl_ns,
+                            _partition: String::new(),
+                            _time: Some(dl_time_bucket),
+                            _shard: String::new(),
+                            schema: dl_schema,
+                            record_batches: Some(vec![batch]),
+                        },
+                    );
+                    warn!("Deadlettered {} records into WAL", dl_count);
+                }
+            } else {
+                warn!(
+                    "Discarded {} deadletter records because no deadletter sink is configured",
+                    dl_count
+                );
             }
         }
 

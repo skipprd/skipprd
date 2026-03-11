@@ -279,7 +279,7 @@ jobs:
       - cleanup
       - purge_dynamodb
       - linux_x86
-    name: Deadletters Test
+    name: Deadletter Output Routing Test
     runs-on:
       - ubuntu-latest
     steps:

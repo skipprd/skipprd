@@ -462,42 +462,29 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#s3-layout" class="md-nav__link">
-    S3 layout
+  <a href="#config-file-example" class="md-nav__link">
+    Config file example
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#parquet-schema" class="md-nav__link">
-    Parquet schema
+  <a href="#deadletter-schema" class="md-nav__link">
+    Deadletter schema
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#querying-deadletters-with-athena" class="md-nav__link">
-    Querying deadletters with Athena
+  <a href="#querying-athena-deadletters" class="md-nav__link">
+    Querying Athena deadletters
   </a>
-  
-    <nav class="md-nav" aria-label="Querying deadletters with Athena">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#example-queries" class="md-nav__link">
-    Example queries
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#configuration" class="md-nav__link">
-    Configuration
+  <a href="#operational-guidance" class="md-nav__link">
+    Operational guidance
   </a>
   
 </li>
@@ -1063,42 +1050,29 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#s3-layout" class="md-nav__link">
-    S3 layout
+  <a href="#config-file-example" class="md-nav__link">
+    Config file example
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#parquet-schema" class="md-nav__link">
-    Parquet schema
+  <a href="#deadletter-schema" class="md-nav__link">
+    Deadletter schema
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#querying-deadletters-with-athena" class="md-nav__link">
-    Querying deadletters with Athena
+  <a href="#querying-athena-deadletters" class="md-nav__link">
+    Querying Athena deadletters
   </a>
-  
-    <nav class="md-nav" aria-label="Querying deadletters with Athena">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#example-queries" class="md-nav__link">
-    Example queries
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#configuration" class="md-nav__link">
-    Configuration
+  <a href="#operational-guidance" class="md-nav__link">
+    Operational guidance
   </a>
   
 </li>
@@ -1122,23 +1096,43 @@
 
 
 <h1 id="deadletters">Deadletters<a class="headerlink" href="#deadletters" title="Permanent link">&para;</a></h1>
-<p>Records that fail validation or hit schema conflicts during ingestion are captured as deadletters rather than silently dropped.</p>
+<p>Records that fail validation or cannot be normalized are captured as deadletters instead of being mixed into the primary output.</p>
 <h2 id="how-deadletters-work">How deadletters work<a class="headerlink" href="#how-deadletters-work" title="Permanent link">&para;</a></h2>
 <ul>
-<li>Deadletters are written directly to S3 as individual Parquet files — no WAL or compaction step</li>
-<li>A log line is emitted for each deadletter: <code>Deadletter id=&lt;id&gt; ns=&lt;namespace&gt; err=&lt;first_error&gt;</code></li>
-<li>The raw record is preserved along with full error context and a snapshot of the namespace metadata at the time of failure</li>
+<li>Deadletters still go through Skippr's normal WAL and compaction pipeline.</li>
+<li>A pipeline can optionally point at a dedicated deadletter sink from the top-level <code>data_deadletters</code> registry.</li>
+<li>If <code>deadletters</code> is unset for a pipeline, deadletter records are discarded after being counted and logged.</li>
+<li>If <code>deadletters</code> is set but the referenced sink is invalid, startup fails.</li>
+<li>Deadletter table names no longer use the <code>_dl_</code> prefix. The deadletter table name is the pipeline name, so you should route deadletters to a separate destination.</li>
 </ul>
-<h2 id="s3-layout">S3 layout<a class="headerlink" href="#s3-layout" title="Permanent link">&para;</a></h2>
-<pre><code>s3://{SKIPPR_S3_BUCKET}/deadletters/{tenant}/{workspace}/{pipeline}/
-  namespace={namespace}/
-    p_year={YYYY}/
-      p_month={MM}/
-        p_day={DD}/
-          {id}.parquet
+<h2 id="config-file-example">Config file example<a class="headerlink" href="#config-file-example" title="Permanent link">&para;</a></h2>
+<pre><code class="language-yaml">pipelines:
+  bike_hire:
+    input: data_inputs.source
+    output: data_outputs.analytics
+    deadletters: data_deadletters.analytics_deadletters
+
+data_outputs:
+  analytics:
+    Athena:
+      athena_workgroup_name: analytics
+      glue_database_name: analytics
+      s3_bucket: my-main-bucket
+      athena_results_s3_bucket: my-query-results
+      s3_prefix: warehouse/events
+
+data_deadletters:
+  analytics_deadletters:
+    Athena:
+      athena_workgroup_name: analytics
+      glue_database_name: analytics_deadletters
+      s3_bucket: my-deadletter-bucket
+      athena_results_s3_bucket: my-query-results
+      s3_prefix: warehouse/deadletters
 </code></pre>
-<h2 id="parquet-schema">Parquet schema<a class="headerlink" href="#parquet-schema" title="Permanent link">&para;</a></h2>
-<p>Each deadletter Parquet file contains a single row with these columns:</p>
+<p>You can also use <code>S3</code> or <code>File</code> sinks in <code>data_deadletters</code>.</p>
+<h2 id="deadletter-schema">Deadletter schema<a class="headerlink" href="#deadletter-schema" title="Permanent link">&para;</a></h2>
+<p>Deadletter tables are written as Parquet with these columns:</p>
 <table>
 <thead>
 <tr>
@@ -1151,62 +1145,22 @@
 <tr>
 <td><code>id</code></td>
 <td>string</td>
-<td>Unique deadletter ID</td>
-</tr>
-<tr>
-<td><code>tenant</code></td>
-<td>string</td>
-<td>Tenant identifier</td>
-</tr>
-<tr>
-<td><code>workspace</code></td>
-<td>string</td>
-<td>Workspace name</td>
-</tr>
-<tr>
-<td><code>pipeline</code></td>
-<td>string</td>
-<td>Pipeline name</td>
-</tr>
-<tr>
-<td><code>pipeline_run_id</code></td>
-<td>string</td>
-<td>Run that produced this deadletter</td>
+<td>Stable deadletter identifier derived from namespace and offset</td>
 </tr>
 <tr>
 <td><code>namespace</code></td>
 <td>string</td>
-<td>Source namespace</td>
+<td>Source namespace that failed</td>
 </tr>
 <tr>
-<td><code>partition</code></td>
+<td><code>record</code></td>
 <td>string</td>
-<td>Partition value</td>
+<td>Original raw record payload</td>
 </tr>
 <tr>
-<td><code>time_bucket</code></td>
-<td>bigint</td>
-<td>Time bucket</td>
-</tr>
-<tr>
-<td><code>source_uri</code></td>
+<td><code>error</code></td>
 <td>string</td>
-<td>Source file/object</td>
-</tr>
-<tr>
-<td><code>offset_namespace</code></td>
-<td>string</td>
-<td>Offset namespace</td>
-</tr>
-<tr>
-<td><code>offset_partition</code></td>
-<td>string</td>
-<td>Offset partition</td>
-</tr>
-<tr>
-<td><code>offset_pos</code></td>
-<td>bigint</td>
-<td>Offset position</td>
+<td>Human-readable failure message</td>
 </tr>
 <tr>
 <td><code>failure_code</code></td>
@@ -1214,120 +1168,45 @@
 <td>Error classification</td>
 </tr>
 <tr>
-<td><code>failure_error_messages</code></td>
-<td>array&lt;string&gt;</td>
-<td>Error messages</td>
-</tr>
-<tr>
-<td><code>failure_error_kinds</code></td>
-<td>array&lt;string&gt;</td>
-<td>Error kinds</td>
-</tr>
-<tr>
-<td><code>component</code></td>
-<td>string</td>
-<td>Component that raised the error</td>
-</tr>
-<tr>
-<td><code>backtrace</code></td>
-<td>string</td>
-<td>Stack trace (if available)</td>
-</tr>
-<tr>
-<td><code>record_raw_json</code></td>
-<td>string</td>
-<td>Original raw record</td>
-</tr>
-<tr>
-<td><code>record_normalized_json</code></td>
-<td>string</td>
-<td>Normalized record (if enabled)</td>
-</tr>
-<tr>
-<td><code>schema_hash</code></td>
-<td>string</td>
-<td>Schema hash at time of failure</td>
-</tr>
-<tr>
-<td><code>schema_version</code></td>
-<td>int</td>
-<td>Schema version</td>
-</tr>
-<tr>
-<td><code>metadata_snapshot</code></td>
-<td>string</td>
-<td>Full metadata snapshot as JSON</td>
-</tr>
-<tr>
-<td><code>ingest_time_millis</code></td>
+<td><code>event_time</code></td>
 <td>bigint</td>
-<td>Ingestion timestamp</td>
+<td>Source event time when available</td>
+</tr>
+<tr>
+<td><code>processed_time</code></td>
+<td>bigint</td>
+<td>Time Skippr emitted the deadletter</td>
+</tr>
+<tr>
+<td><code>source_uri</code></td>
+<td>string</td>
+<td>Source file or object path</td>
+</tr>
+<tr>
+<td><code>offset_key</code></td>
+<td>string</td>
+<td>Source offset key</td>
+</tr>
+<tr>
+<td><code>offset_pos</code></td>
+<td>bigint</td>
+<td>Source offset position</td>
 </tr>
 </tbody>
 </table>
-<h2 id="querying-deadletters-with-athena">Querying deadletters with Athena<a class="headerlink" href="#querying-deadletters-with-athena" title="Permanent link">&para;</a></h2>
-<p>Create an external table over the deadletters prefix:</p>
-<pre><code class="language-sql">CREATE EXTERNAL TABLE IF NOT EXISTS deadletters (
-  id string,
-  tenant string,
-  workspace string,
-  pipeline string,
-  pipeline_run_id string,
-  namespace string,
-  partition string,
-  time_bucket bigint,
-  source_uri string,
-  offset_namespace string,
-  offset_partition string,
-  offset_pos bigint,
-  failure_code string,
-  failure_error_messages array&lt;string&gt;,
-  failure_error_kinds array&lt;string&gt;,
-  component string,
-  backtrace string,
-  record_raw_json string,
-  record_normalized_json string,
-  schema_hash string,
-  schema_version int,
-  metadata_snapshot string,
-  ingest_time_millis bigint
-)
-PARTITIONED BY (namespace string, p_year string, p_month string, p_day string)
-STORED AS PARQUET
-LOCATION 's3://&lt;your-state-bucket&gt;/deadletters/&lt;tenant&gt;/&lt;workspace&gt;/&lt;pipeline&gt;/';
+<h2 id="querying-athena-deadletters">Querying Athena deadletters<a class="headerlink" href="#querying-athena-deadletters" title="Permanent link">&para;</a></h2>
+<p>When the deadletter sink is Athena, query the configured deadletter database using the pipeline name as the table name:</p>
+<pre><code class="language-sql">SELECT id, namespace, error, failure_code
+FROM bike_hire
+WHERE namespace = 'rides'
+ORDER BY processed_time DESC
+LIMIT 50;
 </code></pre>
-<h3 id="example-queries">Example queries<a class="headerlink" href="#example-queries" title="Permanent link">&para;</a></h3>
-<p>All deadletters for a namespace and date range:</p>
-<pre><code class="language-sql">SELECT id, namespace, failure_error_messages[1] AS err
-FROM deadletters
-WHERE namespace = 'bike_hire'
-  AND p_year = '2025' AND p_month = '11';
-</code></pre>
-<p>Inspect the raw payload:</p>
-<pre><code class="language-sql">SELECT id,
-       json_extract_scalar(record_raw_json, '$.device_id') AS device_id,
-       failure_error_messages[1] AS err
-FROM deadletters
-WHERE namespace = 'bike_hire'
-  AND p_year = '2025' AND p_month = '11' AND p_day = '06';
-</code></pre>
-<h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
-<table>
-<thead>
-<tr>
-<th>Variable</th>
-<th>Default</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>DEADLETTER_INCLUDE_NORMALIZED_JSON</code></td>
-<td><code>yes</code></td>
-<td>Include the normalized JSON in deadletter records</td>
-</tr>
-</tbody>
-</table>
+<h2 id="operational-guidance">Operational guidance<a class="headerlink" href="#operational-guidance" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Prefer a dedicated Glue database or S3 prefix for deadletters.</li>
+<li>Do not point <code>deadletters</code> at the same registry entry as the primary output.</li>
+</ul>
 
 
   

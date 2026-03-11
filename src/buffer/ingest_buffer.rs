@@ -4,7 +4,7 @@ enum Durability {
     Disk,
 }
 use crate::buffer::segment_file::{
-    SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry,
+    PartitionKey, SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry,
 };
 use crate::buffer::wal_store::{SegmentWriteLocation, SegmentWriteResult};
 use crate::buffer::BufferChunker;
@@ -46,7 +46,6 @@ use std::{fs, io};
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use tracing::{debug, error, info, warn};
 
-type PartitionKey = (String, String, Option<i64>, String);
 use tokio::sync::mpsc;
 
 /// Identifies a WAL segment and provides access to its data.
@@ -210,6 +209,7 @@ pub struct IngestRecord {
 
 pub struct IngestBufferBatch {
     pub(crate) offsets: HashMap<OffsetKey, u64>,
+    pub(crate) sink_ref: String,
     pub(crate) _namespace: String,
     pub(crate) _partition: String,
     pub(crate) _time: Option<i64>,
@@ -314,6 +314,7 @@ impl Buffers {
 
     pub fn write(&mut self, batches: Vec<IngestBufferBatch>) {
         for mut ingest_buffer_batch in batches.into_iter() {
+            let sink_ref = ingest_buffer_batch.sink_ref.clone();
             let namespace = ingest_buffer_batch._namespace.clone();
             let partition = ingest_buffer_batch._partition.clone();
             let time = ingest_buffer_batch._time.clone();
@@ -323,7 +324,13 @@ impl Buffers {
             } else {
                 ingest_buffer_batch._shard.clone()
             };
-            let key: PartitionKey = (namespace, partition, time, shard);
+            let key = PartitionKey {
+                sink_ref,
+                namespace,
+                partition,
+                time,
+                shard,
+            };
 
             let mut batches_vec = ingest_buffer_batch
                 .record_batches
@@ -733,16 +740,16 @@ impl Buffers {
     }
 
     fn tombstone_path_for_id(segment_id: &str, key: &PartitionKey) -> PathBuf {
-        let (ns, part, time_opt, shard) = key;
-        let time = time_opt.unwrap_or(0);
+        let time = key.time.unwrap_or(0);
         let safe = |s: &str| s.replace('/', "_");
         let file = format!(
-            "{}.seg.{}.{}.{}.{}.tombstone",
+            "{}.seg.{}.{}.{}.{}.{}.tombstone",
             segment_id,
-            safe(ns),
-            safe(part),
+            safe(&key.sink_ref),
+            safe(&key.namespace),
+            safe(&key.partition),
             time,
-            safe(shard)
+            safe(&key.shard)
         );
         Buffers::tombstone_dir().join(file)
     }
@@ -1312,15 +1319,15 @@ impl Buffers {
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
         _offsets_db: Arc<Offsets>,
     ) -> io::Result<bool> {
-        let (namespace, partition, time, shard) = (
-            idx.key.0.clone(),
-            idx.key.1.clone(),
-            idx.key.2,
-            idx.key.3.clone(),
-        );
+        let sink_ref = idx.key.sink_ref.clone();
+        let namespace = idx.key.namespace.clone();
+        let partition = idx.key.partition.clone();
+        let time = idx.key.time;
+        let shard = idx.key.shard.clone();
         let seg_display = source.display_name();
         let mut out_key = BufferChunker::encode_chunk_name(
             "output",
+            Some(&sink_ref),
             Some(&namespace),
             Some(&partition),
             time,
@@ -1771,10 +1778,8 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
         dir_entries_scanned, commit_markers_seen, seg_files_count
     );
     let mut namespaces: HashSet<String> = HashSet::new();
-    let mut namespace_partition_files: HashMap<(String, String, Option<i64>, String), u64> =
-        HashMap::new();
-    let mut namespace_partition_bytes: HashMap<(String, String, Option<i64>, String), u64> =
-        HashMap::new();
+    let mut namespace_partition_files: HashMap<PartitionKey, u64> = HashMap::new();
+    let mut namespace_partition_bytes: HashMap<PartitionKey, u64> = HashMap::new();
 
     let mut committed_offsets: u64 = 0;
 
@@ -1786,7 +1791,7 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
             Ok(meta) => {
                 for idx in meta.index.iter() {
                     let key = idx.key.clone();
-                    namespaces.insert(key.0.clone());
+                    namespaces.insert(key.namespace.clone());
                     *namespace_partition_files.entry(key.clone()).or_insert(0) += 1;
                     *namespace_partition_bytes.entry(key.clone()).or_insert(0) =
                         (*namespace_partition_bytes.get(&key).unwrap_or(&0))
@@ -1839,14 +1844,14 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
     let mut wal_index_metrics: WalIndexMetrics = WalIndexMetrics {
         metrics: Vec::new(),
     };
-    for ((ns, _part, _time, _shard), file_count) in namespace_partition_files.iter() {
+    for (key, file_count) in namespace_partition_files.iter() {
         let bytes_sum: u64 = namespace_partition_bytes
             .iter()
-            .filter(|(k, _)| &k.0 == ns)
+            .filter(|(candidate, _)| candidate.namespace == key.namespace)
             .map(|(_, v)| *v)
             .sum();
         wal_index_metrics.metrics.push(WalIndexMetric {
-            namespace: ns.clone(),
+            namespace: key.namespace.clone(),
             partitions: 0,
             files: *file_count,
             bytes: bytes_sum,
@@ -1934,7 +1939,7 @@ async fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
                     let data = agg.into_bytes().to_vec();
                     if let Ok(meta) = SegmentFile::read_metadata_from_bytes(&data) {
                         for idx in meta.index.iter() {
-                            namespaces.insert(idx.key.0.clone());
+                            namespaces.insert(idx.key.namespace.clone());
                         }
                         for (ok, pos) in meta.offsets.iter() {
                             let offset_key = OffsetKey {
@@ -2113,12 +2118,13 @@ mod tests_wal_commit {
     fn test_write_seg_commit_header_roundtrip() {
         let (base, _guard) = setup_data_dir();
         let segf = SegmentFile::new(&base, "t1").unwrap();
-        let key: PartitionKey = (
-            "ns".to_string(),
-            "".to_string(),
-            Some(0),
-            "shard".to_string(),
-        );
+        let key = PartitionKey {
+            sink_ref: "data_outputs.test".to_string(),
+            namespace: "ns".to_string(),
+            partition: "".to_string(),
+            time: Some(0),
+            shard: "shard".to_string(),
+        };
         let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
         batches.insert(key.clone(), vec![make_batch()]);
         let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
@@ -2142,12 +2148,13 @@ mod tests_wal_commit {
         let (base, _guard) = setup_data_dir();
         // Write segment without commit
         let segf = SegmentFile::new(&base, "t2").unwrap();
-        let key: PartitionKey = (
-            "ns".to_string(),
-            "".to_string(),
-            Some(0),
-            "shard".to_string(),
-        );
+        let key = PartitionKey {
+            sink_ref: "data_outputs.test".to_string(),
+            namespace: "ns".to_string(),
+            partition: "".to_string(),
+            time: Some(0),
+            shard: "shard".to_string(),
+        };
         let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
         batches.insert(key.clone(), vec![make_batch()]);
         let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
@@ -2174,12 +2181,13 @@ mod tests_wal_commit {
         let mut offsets_map: StdHashMap<crate::helpers::offsets::OffsetKey, u64> =
             StdHashMap::new();
         offsets_map.insert(ok.clone(), 42);
-        let key: PartitionKey = (
-            "ns".to_string(),
-            "part".to_string(),
-            Some(0),
-            "shard".to_string(),
-        );
+        let key = PartitionKey {
+            sink_ref: "data_outputs.test".to_string(),
+            namespace: "ns".to_string(),
+            partition: "part".to_string(),
+            time: Some(0),
+            shard: "shard".to_string(),
+        };
         let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
         batches.insert(key.clone(), vec![make_batch()]);
         let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
@@ -2445,6 +2453,7 @@ impl WalEntry {
 
 #[allow(dead_code)]
 fn load_partition_segment_counter(
+    sink_ref: &str,
     namespace: &str,
     partition: &str,
     time: Option<i64>,
@@ -2453,6 +2462,7 @@ fn load_partition_segment_counter(
     let dir = WalFile::get_wal_partition_dir(namespace, partition, time, shard);
     let base = BufferChunker::encode_chunk_name(
         "ingest",
+        Some(sink_ref),
         Some(namespace),
         Some(partition),
         time,
@@ -2467,6 +2477,7 @@ fn load_partition_segment_counter(
 
 #[allow(dead_code)]
 fn persist_partition_segment_counter(
+    sink_ref: &str,
     namespace: &str,
     partition: &str,
     time: Option<i64>,
@@ -2476,6 +2487,7 @@ fn persist_partition_segment_counter(
     let dir = WalFile::get_wal_partition_dir(namespace, partition, time, shard);
     let base = BufferChunker::encode_chunk_name(
         "ingest",
+        Some(sink_ref),
         Some(namespace),
         Some(partition),
         time,
@@ -2493,6 +2505,7 @@ pub struct WalPartition {
     updated_at: SystemTime,
 
     pub(crate) namespace: String,
+    pub(crate) sink_ref: String,
     pub(crate) partition: String,
     pub(crate) time: Option<i64>,
     pub(crate) shard: String,
@@ -2579,6 +2592,7 @@ impl WalPartition {
         let data_dir = Config::get_data_dir();
         let mut output_file_name = BufferChunker::encode_chunk_name(
             "output",
+            Some(&self.sink_ref),
             Some(&self.namespace),
             Some(&self.partition),
             self.time,
@@ -2959,6 +2973,7 @@ pub async fn force_drain_all(
 #[allow(dead_code)]
 pub struct WalFile {
     pub(crate) path: PathBuf,
+    pub(crate) sink_ref: String,
     pub(crate) namespace: String,
     pub(crate) partition: String,
     pub(crate) time: Option<i64>,
@@ -2972,13 +2987,15 @@ pub struct WalFile {
 
 impl WalFile {
     pub fn new(
+        sink_ref: &str,
         namespace: &str,
         partition: &str,
         time: Option<i64>,
         shard: &str,
         offsets: HashMap<OffsetKey, u64>,
     ) -> io::Result<Self> {
-        let path_str = Self::generate_temp_wal_file_name(namespace, partition, time, shard);
+        let path_str =
+            Self::generate_temp_wal_file_name(sink_ref, namespace, partition, time, shard);
         let path = PathBuf::from(&path_str);
 
         // Ensure file exists and then allow the fp to drop out of scope to limit open file handles
@@ -2995,6 +3012,7 @@ impl WalFile {
 
         Ok(WalFile {
             path,
+            sink_ref: sink_ref.to_string(),
             bytes: 0,
             namespace: namespace.to_string(),
             partition: partition.to_string(),
@@ -3027,6 +3045,7 @@ impl WalFile {
 
         let offsets = Self::offset_from_file(&mut file)?;
 
+        let sink_ref = BufferChunker::decode_file_sink_ref(path.to_str().unwrap());
         let namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
         let partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
         let time = BufferChunker::decode_file_time(path.to_str().unwrap());
@@ -3042,6 +3061,7 @@ impl WalFile {
 
         Ok(WalFile {
             path: path.clone(),
+            sink_ref,
             bytes,
             namespace,
             partition,
@@ -3215,6 +3235,7 @@ impl WalFile {
     }
 
     fn generate_temp_wal_file_name(
+        sink_ref: &str,
         namespace: &str,
         partition: &str,
         time: Option<i64>,
@@ -3222,6 +3243,7 @@ impl WalFile {
     ) -> String {
         let wal_file_name = BufferChunker::encode_chunk_name(
             "ingest",
+            Some(sink_ref),
             Some(namespace),
             Some(partition),
             time,

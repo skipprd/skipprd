@@ -32,6 +32,8 @@ use crate::helpers::Helpers;
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE};
 use crate::ingest_work::Ingest;
 use crate::plugins::file_input::DataSourceLocalFilePluginConfig;
+use crate::plugins::file_output::DataOutputFilePluginConfig;
+use crate::plugins::s3_output::DataOutputS3PluginConfig;
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use toml;
@@ -84,32 +86,22 @@ pub struct SemanticLayerSettings {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub enum PluginConfig {
+pub enum InputPluginConfig {
     S3(DataSourceS3PluginConfig),
-    // s3_inventory(DataSourceS3InventoryPluginConfig),
-    Athena(DataOutputAwsAthenaPluginConfig),
     File(DataSourceLocalFilePluginConfig),
 }
 
-impl PluginConfig {
+impl InputPluginConfig {
     pub fn format(&self) -> String {
         match self {
-            PluginConfig::S3(s3_config) => s3_config
+            InputPluginConfig::S3(s3_config) => s3_config
                 .format
                 .clone()
                 .or(Some("json".to_string()))
                 .as_ref()
                 .unwrap()
                 .clone(),
-            // PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
-            PluginConfig::Athena(athena_config) => athena_config
-                .format
-                .clone()
-                .or(Some("json".to_string()))
-                .as_ref()
-                .unwrap()
-                .clone(),
-            PluginConfig::File(file_config) => file_config
+            InputPluginConfig::File(file_config) => file_config
                 .format
                 .clone()
                 .or(Some("json".to_string()))
@@ -119,28 +111,61 @@ impl PluginConfig {
 
     pub fn plugin_name(&self) -> Option<String> {
         match self {
-            PluginConfig::S3(_s3_config) => Some("S3".to_string()),
-            // PluginConfig::s3_inventory(_s3_inventory_config) => Some("s3_inventory".to_string()),
-            PluginConfig::Athena(_athena_config) => Some("Athena".to_string()),
-            PluginConfig::File(_file_config) => Some("File".to_string()),
+            InputPluginConfig::S3(_s3_config) => Some("S3".to_string()),
+            InputPluginConfig::File(_file_config) => Some("File".to_string()),
         }
     }
 
     pub fn batch_size_bytes(&self) -> Option<i64> {
         match self {
-            PluginConfig::S3(s3_config) => s3_config.batch_size_bytes.clone(),
-            // PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.batch_size_bytes.clone(),
-            PluginConfig::Athena(_athena_config) => None,
-            PluginConfig::File(file_config) => file_config.batch_size_bytes.clone(),
+            InputPluginConfig::S3(s3_config) => s3_config.batch_size_bytes.clone(),
+            InputPluginConfig::File(file_config) => file_config.batch_size_bytes.clone(),
         }
     }
 
     pub fn batch_size_seconds(&self) -> Option<i64> {
         match self {
-            PluginConfig::S3(s3_config) => s3_config.batch_size_seconds.clone(),
-            // PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.batch_size_seconds.clone(),
-            PluginConfig::Athena(_athena_config) => None,
-            PluginConfig::File(file_config) => file_config.batch_size_seconds.clone(),
+            InputPluginConfig::S3(s3_config) => s3_config.batch_size_seconds.clone(),
+            InputPluginConfig::File(file_config) => file_config.batch_size_seconds.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub enum OutputPluginConfig {
+    Athena(DataOutputAwsAthenaPluginConfig),
+    File(DataOutputFilePluginConfig),
+    S3(DataOutputS3PluginConfig),
+}
+
+impl OutputPluginConfig {
+    pub fn format(&self) -> String {
+        match self {
+            OutputPluginConfig::Athena(athena_config) => athena_config
+                .format
+                .clone()
+                .or(Some("json".to_string()))
+                .as_ref()
+                .unwrap()
+                .clone(),
+            OutputPluginConfig::File(file_config) => file_config
+                .format
+                .clone()
+                .or(Some("json".to_string()))
+                .unwrap(),
+            OutputPluginConfig::S3(s3_config) => s3_config
+                .format
+                .clone()
+                .or(Some("json".to_string()))
+                .unwrap(),
+        }
+    }
+
+    pub fn plugin_name(&self) -> Option<String> {
+        match self {
+            OutputPluginConfig::Athena(_athena_config) => Some("Athena".to_string()),
+            OutputPluginConfig::File(_file_config) => Some("File".to_string()),
+            OutputPluginConfig::S3(_s3_config) => Some("S3".to_string()),
         }
     }
 }
@@ -165,6 +190,7 @@ pub struct Pipeline {
     pub transform: Option<Transform>,
     pub input: Option<String>,
     pub output: Option<String>,
+    pub deadletters: Option<String>,
     pub schema: Option<String>,
     pub stats: Option<Stats>,
     pub semantic_layer: Option<SemanticLayerSettings>,
@@ -175,9 +201,10 @@ pub struct Config {
     pub skippr: Option<Skippr>,
     #[serde(default)]
     pub pipelines: HashMap<String, Pipeline>,
-    pub data_inputs: Option<HashMap<String, PluginConfig>>,
-    pub data_outputs: Option<HashMap<String, PluginConfig>>,
-    pub schema_outputs: Option<HashMap<String, PluginConfig>>,
+    pub data_inputs: Option<HashMap<String, InputPluginConfig>>,
+    pub data_outputs: Option<HashMap<String, OutputPluginConfig>>,
+    pub data_deadletters: Option<HashMap<String, OutputPluginConfig>>,
+    pub schema_outputs: Option<HashMap<String, OutputPluginConfig>>,
 }
 
 pub static APP_CONFIG: Lazy<Arc<TimedRwLock<Option<Config>>>> =
@@ -305,6 +332,7 @@ impl Config {
             pipelines: HashMap::new(),
             data_inputs: None,
             data_outputs: None,
+            data_deadletters: None,
             schema_outputs: None,
         }
     }
@@ -435,6 +463,17 @@ impl Config {
         config
     }
 
+    fn parse_registry_ref(reference: &str, expected_prefix: &str) -> Result<String, String> {
+        let parts: Vec<&str> = reference.split('.').collect();
+        if parts.len() != 2 || parts[0] != expected_prefix || parts[1].is_empty() {
+            return Err(format!(
+                "Invalid registry reference '{}'. Expected '{}.<name>'.",
+                reference, expected_prefix
+            ));
+        }
+        Ok(parts[1].to_string())
+    }
+
     pub fn get_pipeline_input_plugin_name() -> String {
         if Config::get_envcache("DATA_SOURCE_PLUGIN_NAME") != "" {
             return Config::get_envcache("DATA_SOURCE_PLUGIN_NAME");
@@ -528,6 +567,69 @@ impl Config {
                 Config::set_evncache("DATA_OUTPUT_PLUGIN_NAME", &res.clone());
                 res
             }
+        }
+    }
+
+    pub fn get_pipeline_deadletters_ref() -> Option<String> {
+        let pipeline = Config::get_pipeline_config();
+        pipeline.deadletters.clone()
+    }
+
+    fn resolve_deadletter_plugin_config_for(
+        config: &Config,
+        pipeline: &Pipeline,
+    ) -> Result<Option<OutputPluginConfig>, String> {
+        let reference = match pipeline.deadletters.as_ref() {
+            Some(reference) => reference,
+            None => return Ok(None),
+        };
+        let deadletter_name = Self::parse_registry_ref(reference, "data_deadletters")?;
+
+        match config
+            .data_deadletters
+            .as_ref()
+            .and_then(|registry| registry.get(&deadletter_name))
+            .cloned()
+        {
+            Some(plugin_config) => Ok(Some(plugin_config)),
+            None => Err(format!(
+                "Deadletter sink '{}' was configured but not found in data_deadletters.",
+                reference
+            )),
+        }
+    }
+
+    fn deadletter_config_violations_for(config: &Config, pipeline: &Pipeline) -> Vec<String> {
+        let mut violations = Vec::new();
+        if let Some(deadletters_ref) = pipeline.deadletters.as_ref() {
+            if let Err(err) = Self::resolve_deadletter_plugin_config_for(config, pipeline) {
+                violations.push(err);
+            }
+
+            if pipeline.output.as_ref() == Some(deadletters_ref) {
+                violations.push(
+                    "Deadletter sink must not reference the same registry entry as the primary output when deadletter table names no longer use a dedicated prefix."
+                        .to_string(),
+                );
+            }
+        }
+        violations
+    }
+
+    pub fn get_pipeline_output_sink_ref() -> String {
+        let pipeline = Config::get_pipeline_config();
+        pipeline
+            .output
+            .clone()
+            .unwrap_or_else(|| "data_outputs.__default__".to_string())
+    }
+
+    pub fn get_pipeline_deadletter_plugin_name() -> Result<Option<String>, String> {
+        let config = Config::get();
+        let pipeline = Config::get_pipeline_config();
+        match Self::resolve_deadletter_plugin_config_for(&config, &pipeline)? {
+            Some(plugin_config) => Ok(plugin_config.plugin_name()),
+            None => Ok(None),
         }
     }
 
@@ -690,6 +792,7 @@ impl Config {
                     transform: None,
                     input: None,
                     output: None,
+                    deadletters: None,
                     schema: None,
                     stats: None,
                     semantic_layer: None,
@@ -1008,6 +1111,10 @@ impl Config {
             );
         }
 
+        let config = Config::get();
+        let pipeline = Config::get_pipeline_config();
+        violations.extend(Self::deadletter_config_violations_for(&config, &pipeline));
+
         violations
     }
 
@@ -1265,62 +1372,58 @@ impl Config {
         }
     }
 
-    pub fn get_pipline_plugin_config(plugin_type: &str) -> Result<PluginConfig, String> {
+    pub fn get_pipeline_input_plugin_config() -> Result<InputPluginConfig, String> {
         let pipeline_config = Config::get_pipeline_config();
-
         let config = Config::get();
+        let input_name = match pipeline_config.input.as_ref() {
+            Some(input) => Self::parse_registry_ref(input, "data_inputs")?,
+            None => return Err("Input not found".to_string()),
+        };
 
-        match plugin_type {
-            "input" => {
-                if let Some(data_inputs) = config.data_inputs {
-                    let input_name = match pipeline_config.input.as_ref() {
-                        Some(input) => input.split('.').collect::<Vec<&str>>()[1].to_string(),
-                        None => return Err("Input not found".to_string()),
-                    };
+        config
+            .data_inputs
+            .as_ref()
+            .and_then(|registry| registry.get(&input_name))
+            .cloned()
+            .ok_or_else(|| "Input not found".to_string())
+    }
 
-                    if let Some(config) = data_inputs.get(&input_name) {
-                        Ok(config.clone())
-                    } else {
-                        Err("Input not found".to_string())
-                    }
-                } else {
-                    Err("Input not found".to_string())
-                }
-            }
-            "output" => {
-                if let Some(data_outputs) = config.data_outputs {
-                    let input_name = match pipeline_config.output.as_ref() {
-                        Some(input) => input.split('.').collect::<Vec<&str>>()[1].to_string(),
-                        None => return Err("Output not found".to_string()),
-                    };
+    pub fn get_pipeline_output_plugin_config() -> Result<OutputPluginConfig, String> {
+        let pipeline_config = Config::get_pipeline_config();
+        let config = Config::get();
+        let output_name = match pipeline_config.output.as_ref() {
+            Some(output) => Self::parse_registry_ref(output, "data_outputs")?,
+            None => return Err("Output not found".to_string()),
+        };
 
-                    if let Some(config) = data_outputs.get(&input_name) {
-                        Ok(config.clone())
-                    } else {
-                        Err("Output not found".to_string())
-                    }
-                } else {
-                    Err("Output not found".to_string())
-                }
-            }
-            "schema" => {
-                if let Some(schema_outputs) = config.schema_outputs {
-                    let input_name = match pipeline_config.schema.as_ref() {
-                        Some(input) => input.split('.').collect::<Vec<&str>>()[1].to_string(),
-                        None => return Err("Schema not found".to_string()),
-                    };
+        config
+            .data_outputs
+            .as_ref()
+            .and_then(|registry| registry.get(&output_name))
+            .cloned()
+            .ok_or_else(|| "Output not found".to_string())
+    }
 
-                    if let Some(config) = schema_outputs.get(&input_name) {
-                        Ok(config.clone())
-                    } else {
-                        Err("Schema not found".to_string())
-                    }
-                } else {
-                    Err("Schema not found".to_string())
-                }
-            }
-            _ => Err(format!("Invalid plugin type: {}", plugin_type)),
-        }
+    pub fn get_pipeline_deadletter_plugin_config() -> Result<Option<OutputPluginConfig>, String> {
+        let config = Config::get();
+        let pipeline = Config::get_pipeline_config();
+        Self::resolve_deadletter_plugin_config_for(&config, &pipeline)
+    }
+
+    pub fn get_pipeline_schema_plugin_config() -> Result<OutputPluginConfig, String> {
+        let pipeline_config = Config::get_pipeline_config();
+        let config = Config::get();
+        let schema_name = match pipeline_config.schema.as_ref() {
+            Some(schema) => Self::parse_registry_ref(schema, "schema_outputs")?,
+            None => return Err("Schema not found".to_string()),
+        };
+
+        config
+            .schema_outputs
+            .as_ref()
+            .and_then(|registry| registry.get(&schema_name))
+            .cloned()
+            .ok_or_else(|| "Schema not found".to_string())
     }
 
     // Function to access the config anywhere in the code.
@@ -2025,11 +2128,6 @@ impl Config {
         format!("{:?}", md5::compute(s))
     }
 
-    // Deadletter settings
-    pub fn get_deadletter_include_normalized_json() -> bool {
-        Self::truth_value(&Self::getenv("DEADLETTER_INCLUDE_NORMALIZED_JSON", "yes"))
-    }
-
     pub fn pipeline_llm_enabled() -> bool {
         // env override
         if Self::getenv("LLM_ENABLED", "").len() > 0 {
@@ -2098,5 +2196,84 @@ mod tests {
 
         // Clean up
         std::env::remove_var("SKIPPR_ENABLE_UNICODE_PARSING");
+    }
+
+    #[test]
+    fn test_deadletter_config_unset_returns_none() {
+        let pipeline = Pipeline {
+            r#type: None,
+            reset_offsets: None,
+            reset_metadata: None,
+            auto_approve: None,
+            env: None,
+            buffer_threshold_bytes: None,
+            buffer_threshold_seconds: None,
+            buffer_disk_threshold_bytes: None,
+            chaos_mode: None,
+            sync_frequency_seconds: None,
+            data_dir: None,
+            transform: None,
+            input: None,
+            output: Some("data_outputs.main".to_string()),
+            deadletters: None,
+            schema: None,
+            stats: None,
+            semantic_layer: None,
+        };
+        let config = Config {
+            skippr: Some(Skippr {
+                workspace: None,
+                tenant: None,
+                skippr_s3_bucket: None,
+            }),
+            pipelines: HashMap::new(),
+            data_inputs: None,
+            data_outputs: None,
+            data_deadletters: Some(HashMap::new()),
+            schema_outputs: None,
+        };
+
+        assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_deadletter_config_invalid_reference_is_rejected() {
+        let pipeline = Pipeline {
+            r#type: None,
+            reset_offsets: None,
+            reset_metadata: None,
+            auto_approve: None,
+            env: None,
+            buffer_threshold_bytes: None,
+            buffer_threshold_seconds: None,
+            buffer_disk_threshold_bytes: None,
+            chaos_mode: None,
+            sync_frequency_seconds: None,
+            data_dir: None,
+            transform: None,
+            input: None,
+            output: Some("data_outputs.main".to_string()),
+            deadletters: Some("data_deadletters.missing".to_string()),
+            schema: None,
+            stats: None,
+            semantic_layer: None,
+        };
+        let config = Config {
+            skippr: Some(Skippr {
+                workspace: None,
+                tenant: None,
+                skippr_s3_bucket: None,
+            }),
+            pipelines: HashMap::new(),
+            data_inputs: None,
+            data_outputs: None,
+            data_deadletters: Some(HashMap::new()),
+            schema_outputs: None,
+        };
+
+        assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline).is_err());
+        assert!(!Config::deadletter_config_violations_for(&config, &pipeline).is_empty());
     }
 }

@@ -200,7 +200,7 @@ impl WalReader for DiskWalReader {
                 Err(_) => continue,
             };
             for idx in meta.index.iter() {
-                if idx.key.0 != pipeline {
+                if idx.key.namespace != pipeline {
                     continue;
                 }
                 let mut file = match fs::OpenOptions::new().read(true).open(&path) {
@@ -306,7 +306,7 @@ impl WalReader for S3WalReader {
                             let bytes = agg.into_bytes().to_vec();
                             if let Ok(meta) = SegmentFile::read_metadata_from_bytes(&bytes) {
                                 for idx in meta.index.iter() {
-                                    if idx.key.0 != pipe {
+                                    if idx.key.namespace != pipe {
                                         continue;
                                     }
                                     let start = idx.start as usize;

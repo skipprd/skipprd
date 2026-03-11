@@ -67,11 +67,11 @@ impl MetricsEnvConfig {
             data_source_plugin_name: Config::get_pipeline_input_plugin_name(),
             data_output_plugin_name: Config::get_pipeline_output_plugin_name(),
             schema_output_plugin_name: Config::get_pipeline_schema_plugin_name(),
-            data_source_batch_size_bytes: match Config::get_pipline_plugin_config("input") {
+            data_source_batch_size_bytes: match Config::get_pipeline_input_plugin_config() {
                 Ok(config) => config.batch_size_bytes().or(Some(0)).unwrap(),
                 Err(_) => 0,
             },
-            data_source_batch_size_seconds: match Config::get_pipline_plugin_config("input") {
+            data_source_batch_size_seconds: match Config::get_pipeline_input_plugin_config() {
                 Ok(config) => config.batch_size_seconds().or(Some(0)).unwrap(),
                 Err(_) => 0,
             },
@@ -87,11 +87,11 @@ impl MetricsEnvConfig {
             config_dependency_error_count: Config::get_config_dependency_violations().len(),
             data_dir: Config::get_pipeline_data_dir(),
             chaos_mode: Config::get_pipeline_chaos_mode().to_string(),
-            input_format: match Config::get_pipline_plugin_config("input") {
+            input_format: match Config::get_pipeline_input_plugin_config() {
                 Ok(config) => config.format().to_string(),
                 Err(_) => String::from(""),
             },
-            output_format: match Config::get_pipline_plugin_config("output") {
+            output_format: match Config::get_pipeline_output_plugin_config() {
                 Ok(config) => config.format().to_string(),
                 Err(_) => String::from(""),
             },

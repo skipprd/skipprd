@@ -1002,6 +1002,13 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#discarded-n-deadletter-records-because-no-deadletter-sink-is-configured" class="md-nav__link">
+    Discarded &lt;n&gt; deadletter records because no deadletter sink is configured
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#deadletter-idid-nsnamespace-errerror" class="md-nav__link">
     Deadletter id=&lt;id&gt; ns=&lt;namespace&gt; err=&lt;error&gt;
   </a>
@@ -1134,6 +1141,13 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#discarded-n-deadletter-records-because-no-deadletter-sink-is-configured" class="md-nav__link">
+    Discarded &lt;n&gt; deadletter records because no deadletter sink is configured
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#deadletter-idid-nsnamespace-errerror" class="md-nav__link">
     Deadletter id=&lt;id&gt; ns=&lt;namespace&gt; err=&lt;error&gt;
   </a>
@@ -1200,9 +1214,12 @@
 <h3 id="aws-credential-errors">AWS credential errors<a class="headerlink" href="#aws-credential-errors" title="Permanent link">&para;</a></h3>
 <p><strong>Cause:</strong> Missing or invalid AWS credentials.</p>
 <p><strong>Fix:</strong> Ensure <code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, and <code>AWS_DEFAULT_REGION</code> are set. Alternatively, use an instance profile or IAM role.</p>
+<h3 id="discarded-n-deadletter-records-because-no-deadletter-sink-is-configured"><code>Discarded &lt;n&gt; deadletter records because no deadletter sink is configured</code><a class="headerlink" href="#discarded-n-deadletter-records-because-no-deadletter-sink-is-configured" title="Permanent link">&para;</a></h3>
+<p><strong>Cause:</strong> The pipeline produced deadletters but does not define a <code>deadletters: data_deadletters.&lt;name&gt;</code> sink.</p>
+<p><strong>Fix:</strong> Add a deadletter sink if you want those records retained. Otherwise this message is informational.</p>
 <h3 id="deadletter-idid-nsnamespace-errerror"><code>Deadletter id=&lt;id&gt; ns=&lt;namespace&gt; err=&lt;error&gt;</code><a class="headerlink" href="#deadletter-idid-nsnamespace-errerror" title="Permanent link">&para;</a></h3>
 <p><strong>Cause:</strong> A record failed validation or schema matching during ingestion.</p>
-<p><strong>Fix:</strong> This is expected behaviour — Skippr captures invalid records rather than dropping them. Query the deadletters table in Athena to inspect failures. See <a href="../../concepts/deadletters/">Deadletters</a>.</p>
+<p><strong>Fix:</strong> This is expected behaviour. Query the configured deadletter destination to inspect failures. See <a href="../../concepts/deadletters/">Deadletters</a>.</p>
 <h2 id="recovery-after-crash">Recovery after crash<a class="headerlink" href="#recovery-after-crash" title="Permanent link">&para;</a></h2>
 <p>Skippr is designed to recover automatically:</p>
 <ol>

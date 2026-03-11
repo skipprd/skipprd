@@ -1,7 +1,7 @@
 use crate::buffer::BufferChunker;
 use crate::converters::skippr_hive::SkipprHive;
 use crate::discover::{OutputMetadata, PipelineMetadata};
-use crate::helpers::configuration::{Config, PluginConfig};
+use crate::helpers::configuration::{Config, OutputPluginConfig};
 use crate::helpers::Helpers;
 use crate::metrics::counters as metrics_counters;
 use crate::METADATA;
@@ -80,10 +80,10 @@ pub struct ParquetBytes {
     pub meta_data: parquet::format::FileMetaData,
 }
 
-impl From<PluginConfig> for DataOutputAwsAthenaPluginConfig {
-    fn from(plugin_config: PluginConfig) -> Self {
+impl From<OutputPluginConfig> for DataOutputAwsAthenaPluginConfig {
+    fn from(plugin_config: OutputPluginConfig) -> Self {
         match plugin_config {
-            PluginConfig::Athena(athena_config) => athena_config,
+            OutputPluginConfig::Athena(athena_config) => athena_config,
             _ => panic!("Invalid plugin type"),
         }
     }
@@ -118,7 +118,7 @@ pub struct DataOutputAwsAthenaPlugin {
 
 impl DataOutputAwsAthenaPlugin {
     pub fn get_config() -> DataOutputAwsAthenaPluginConfig {
-        match Config::get_pipline_plugin_config("output") {
+        match Config::get_pipeline_output_plugin_config() {
             Ok(config) => config.into(),
             Err(_) => DataOutputAwsAthenaPluginConfig {
                 format: None,
@@ -135,6 +135,15 @@ impl DataOutputAwsAthenaPlugin {
     }
 
     pub async fn new(buffer_name: String) -> DataOutputAwsAthenaPlugin {
+        let athena_config: DataOutputAwsAthenaPluginConfig =
+            DataOutputAwsAthenaPlugin::get_config();
+        Self::new_with_config(buffer_name, athena_config).await
+    }
+
+    pub async fn new_with_config(
+        buffer_name: String,
+        athena_config: DataOutputAwsAthenaPluginConfig,
+    ) -> DataOutputAwsAthenaPlugin {
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
             .await;
@@ -145,10 +154,6 @@ impl DataOutputAwsAthenaPlugin {
         // let s3_bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         // let s3_prefix = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         // let time_bucket = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
-
-        // let athena_config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
-        let athena_config: DataOutputAwsAthenaPluginConfig =
-            DataOutputAwsAthenaPlugin::get_config();
 
         let max_async_uploads_env = Config::getenv("DATA_OUTPUT_MAX_ASYNC_UPLOADS", "16");
         let env_uploads = max_async_uploads_env.parse::<usize>().ok();
@@ -272,10 +277,12 @@ impl DataOutputAwsAthenaPlugin {
                 let ns_clone = namespace.clone();
                 let key_clone = full_key.clone();
                 let pvals = partition_values.clone();
+                let athena_config = self.config.clone();
                 PARTITION_TASKS_IN_FLIGHT.fetch_add(1, AO::Relaxed);
                 tokio::spawn(async move {
                     let mut cache_local: Vec<String> = Vec::with_capacity(1);
                     let result = AwsAthena::glue_create_partition(
+                        &athena_config,
                         &ns_clone,
                         pvals,
                         &key_clone,
@@ -861,14 +868,15 @@ impl AwsAthena {
         // Serialize by namespace to avoid ConcurrentModificationException
         let ns_lock = get_namespace_lock(namespace);
         let _ns_guard = ns_lock.lock().await;
+        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
-        match AwsAthena::glue_get_database().await {
+        match AwsAthena::glue_get_database(&config).await {
             Ok(true) => {}
             Ok(false) => {}
             Err(_err) => {
                 // Create database with backoff; AlreadyExists => success
                 if let Err(err) = AwsAthena::backoff_retry(
-                    || AwsAthena::glue_create_database(),
+                    || AwsAthena::glue_create_database(&config),
                     "create_database",
                 )
                 .await
@@ -878,10 +886,10 @@ impl AwsAthena {
             }
         }
 
-        match AwsAthena::glue_get_table(namespace).await {
+        match AwsAthena::glue_get_table(&config, namespace).await {
             Ok(table) => {
                 if let Err(err) = AwsAthena::backoff_retry(
-                    || AwsAthena::glue_update_table(namespace, schema, table.clone()),
+                    || AwsAthena::glue_update_table(&config, namespace, schema, table.clone()),
                     "update_table",
                 )
                 .await
@@ -892,7 +900,7 @@ impl AwsAthena {
             Err(_err) => {
                 // Create table with backoff; AlreadyExists => success
                 if let Err(err) = AwsAthena::backoff_retry(
-                    || AwsAthena::glue_create_table(namespace, schema),
+                    || AwsAthena::glue_create_table(&config, namespace, schema),
                     "create_table",
                 )
                 .await
@@ -936,10 +944,8 @@ impl AwsAthena {
         }
     }
 
-    pub async fn glue_get_database() -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
-
-        let database_name = config.glue_database_name;
+    pub async fn glue_get_database(config: &DataOutputAwsAthenaPluginConfig) -> Result<bool, String> {
+        let database_name = config.glue_database_name.clone();
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -960,11 +966,10 @@ impl AwsAthena {
     }
 
     pub async fn glue_get_table(
+        config: &DataOutputAwsAthenaPluginConfig,
         namespace: &str,
     ) -> Result<GetTableOutput, SdkError<GetTableError>> {
-        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
-
-        let database_name = config.glue_database_name;
+        let database_name = config.glue_database_name.clone();
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -1085,12 +1090,12 @@ impl AwsAthena {
         }
     }
 
-    pub async fn glue_create_database() -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
-
-        let database = config.glue_database_name;
-        let bucket = config.s3_bucket;
-        let path = config.s3_prefix;
+    pub async fn glue_create_database(
+        config: &DataOutputAwsAthenaPluginConfig,
+    ) -> Result<bool, String> {
+        let database = config.glue_database_name.clone();
+        let bucket = config.s3_bucket.clone();
+        let path = config.s3_prefix.clone();
         let path = path.trim_matches('/');
 
         let path = std::path::Path::new(&bucket)
@@ -1426,10 +1431,11 @@ impl AwsAthena {
         }
     }
 
-    pub async fn glue_delete_table(namespace: &str) -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
-
-        let database = config.glue_database_name;
+    pub async fn glue_delete_table(
+        config: &DataOutputAwsAthenaPluginConfig,
+        namespace: &str,
+    ) -> Result<bool, String> {
+        let database = config.glue_database_name.clone();
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -1453,16 +1459,15 @@ impl AwsAthena {
     }
 
     pub async fn glue_create_table(
+        config: &DataOutputAwsAthenaPluginConfig,
         namespace: &str,
         metadata: &OutputMetadata,
     ) -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
-
-        let database = config.glue_database_name;
-        let bucket = config.s3_bucket;
+        let database = config.glue_database_name.clone();
+        let bucket = config.s3_bucket.clone();
         let granularity_target = Config::get_transform_batch_time_unit();
 
-        let path = config.s3_prefix;
+        let path = config.s3_prefix.clone();
         let path = path.trim_matches('/');
         let path = std::path::Path::new(&bucket)
             .join(&path)
@@ -1475,7 +1480,7 @@ impl AwsAthena {
         let mut partition_indexes: Vec<PartitionIndex> = Vec::new();
         let mut partition_index_keys: Vec<String> = Vec::new();
 
-        let is_deadletter = namespace.starts_with("_dl_");
+        let is_deadletter = namespace == crate::ingest::deadletter::table_name();
         if !is_deadletter {
             AwsAthena::get_partition_by_fields(&mut partitions);
         }
@@ -1568,16 +1573,15 @@ impl AwsAthena {
     }
 
     pub async fn glue_update_table(
+        config: &DataOutputAwsAthenaPluginConfig,
         namespace: &str,
         metadata: &OutputMetadata,
         existing_table: GetTableOutput,
     ) -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
+        let database = config.glue_database_name.clone();
+        let bucket = config.s3_bucket.clone();
 
-        let database = config.glue_database_name;
-        let bucket = config.s3_bucket;
-
-        let path = config.s3_prefix;
+        let path = config.s3_prefix.clone();
         let path = path.trim_matches('/');
         let path = std::path::Path::new(&bucket)
             .join(&path)
@@ -1649,16 +1653,15 @@ impl AwsAthena {
     }
 
     pub async fn glue_create_partition(
+        config: &DataOutputAwsAthenaPluginConfig,
         namespace: &str,
         partition_values: Vec<String>,
         key: &str,
         partition_cache: &mut Vec<String>,
         metadata: &OutputMetadata,
     ) -> Result<bool, Error> {
-        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
-
-        let database = config.glue_database_name;
-        let bucket = config.s3_bucket;
+        let database = config.glue_database_name.clone();
+        let bucket = config.s3_bucket.clone();
 
         // let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         // let path = path.trim_matches('/');
@@ -1740,11 +1743,11 @@ impl AwsAthena {
                                 namespace, database
                             );
                             // Ensure database exists
-                            match AwsAthena::glue_get_database().await {
+                            match AwsAthena::glue_get_database(config).await {
                                 Ok(true) => {}
                                 _ => {
                                     if let Err(err) = AwsAthena::backoff_retry(
-                                        || AwsAthena::glue_create_database(),
+                                        || AwsAthena::glue_create_database(config),
                                         "create_database",
                                     )
                                     .await
@@ -1761,7 +1764,7 @@ impl AwsAthena {
                             }
                             // Create table with backoff; if it already exists due to race, it's fine
                             if let Err(err) = AwsAthena::backoff_retry(
-                                || AwsAthena::glue_create_table(namespace, metadata),
+                                || AwsAthena::glue_create_table(config, namespace, metadata),
                                 "create_table",
                             )
                             .await

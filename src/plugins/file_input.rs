@@ -11,7 +11,7 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 use zip::ZipArchive;
 
-use crate::helpers::configuration::{Config, PluginConfig};
+use crate::helpers::configuration::{Config, InputPluginConfig};
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
@@ -33,10 +33,10 @@ pub struct DataSourceLocalFilePluginConfig {
     path: String,
 }
 
-impl From<PluginConfig> for DataSourceLocalFilePluginConfig {
-    fn from(plugin_config: PluginConfig) -> Self {
+impl From<InputPluginConfig> for DataSourceLocalFilePluginConfig {
+    fn from(plugin_config: InputPluginConfig) -> Self {
         match plugin_config {
-            PluginConfig::File(file_config) => file_config,
+            InputPluginConfig::File(file_config) => file_config,
             _ => panic!("Invalid plugin type"),
         }
     }
@@ -60,7 +60,7 @@ impl DataSourceLocalFilePlugin {
         }
 
         let config: DataSourceLocalFilePluginConfig =
-            match Config::get_pipline_plugin_config("input") {
+            match Config::get_pipeline_input_plugin_config() {
                 Ok(config) => config.into(),
                 Err(_) => DataSourceLocalFilePluginConfig {
                     format: None,

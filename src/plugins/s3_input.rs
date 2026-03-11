@@ -1,4 +1,4 @@
-use crate::helpers::configuration::{Config, PluginConfig};
+use crate::helpers::configuration::{Config, InputPluginConfig};
 
 use aws_sdk_s3::Client;
 
@@ -69,10 +69,10 @@ pub struct DataSourceS3PluginConfig {
     pub s3_delimiter: Option<String>,
 }
 
-impl From<PluginConfig> for DataSourceS3PluginConfig {
-    fn from(plugin_config: PluginConfig) -> Self {
+impl From<InputPluginConfig> for DataSourceS3PluginConfig {
+    fn from(plugin_config: InputPluginConfig) -> Self {
         match plugin_config {
-            PluginConfig::S3(s3_config) => s3_config,
+            InputPluginConfig::S3(s3_config) => s3_config,
             _ => panic!("Invalid plugin type"),
         }
     }
@@ -110,7 +110,7 @@ impl DataSourceS3Plugin {
 
         let s3_client = Client::new(&s3_config);
 
-        let config: DataSourceS3PluginConfig = match Config::get_pipline_plugin_config("input") {
+        let config: DataSourceS3PluginConfig = match Config::get_pipeline_input_plugin_config() {
             Ok(config) => config.into(),
             Err(_) => DataSourceS3PluginConfig {
                 format: None,

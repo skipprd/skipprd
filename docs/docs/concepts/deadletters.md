@@ -1,113 +1,75 @@
 # Deadletters
 
-Records that fail validation or hit schema conflicts during ingestion are captured as deadletters rather than silently dropped.
+Records that fail validation or cannot be normalized are captured as deadletters instead of being mixed into the primary output.
 
 ## How deadletters work
 
-- Deadletters are written directly to S3 as individual Parquet files — no WAL or compaction step
-- A log line is emitted for each deadletter: `Deadletter id=<id> ns=<namespace> err=<first_error>`
-- The raw record is preserved along with full error context and a snapshot of the namespace metadata at the time of failure
+- Deadletters still go through Skippr's normal WAL and compaction pipeline.
+- A pipeline can optionally point at a dedicated deadletter sink from the top-level `data_deadletters` registry.
+- If `deadletters` is unset for a pipeline, deadletter records are discarded after being counted and logged.
+- If `deadletters` is set but the referenced sink is invalid, startup fails.
+- Deadletter table names no longer use the `_dl_` prefix. The deadletter table name is the pipeline name, so you should route deadletters to a separate destination.
 
-## S3 layout
+## Config file example
 
+```yaml
+pipelines:
+  bike_hire:
+    input: data_inputs.source
+    output: data_outputs.analytics
+    deadletters: data_deadletters.analytics_deadletters
+
+data_outputs:
+  analytics:
+    Athena:
+      athena_workgroup_name: analytics
+      glue_database_name: analytics
+      s3_bucket: my-main-bucket
+      athena_results_s3_bucket: my-query-results
+      s3_prefix: warehouse/events
+
+data_deadletters:
+  analytics_deadletters:
+    Athena:
+      athena_workgroup_name: analytics
+      glue_database_name: analytics_deadletters
+      s3_bucket: my-deadletter-bucket
+      athena_results_s3_bucket: my-query-results
+      s3_prefix: warehouse/deadletters
 ```
-s3://{SKIPPR_S3_BUCKET}/deadletters/{tenant}/{workspace}/{pipeline}/
-  namespace={namespace}/
-    p_year={YYYY}/
-      p_month={MM}/
-        p_day={DD}/
-          {id}.parquet
-```
 
-## Parquet schema
+You can also use `S3` or `File` sinks in `data_deadletters`.
 
-Each deadletter Parquet file contains a single row with these columns:
+## Deadletter schema
+
+Deadletter tables are written as Parquet with these columns:
 
 | Column | Type | Description |
 |---|---|---|
-| `id` | string | Unique deadletter ID |
-| `tenant` | string | Tenant identifier |
-| `workspace` | string | Workspace name |
-| `pipeline` | string | Pipeline name |
-| `pipeline_run_id` | string | Run that produced this deadletter |
-| `namespace` | string | Source namespace |
-| `partition` | string | Partition value |
-| `time_bucket` | bigint | Time bucket |
-| `source_uri` | string | Source file/object |
-| `offset_namespace` | string | Offset namespace |
-| `offset_partition` | string | Offset partition |
-| `offset_pos` | bigint | Offset position |
+| `id` | string | Stable deadletter identifier derived from namespace and offset |
+| `namespace` | string | Source namespace that failed |
+| `record` | string | Original raw record payload |
+| `error` | string | Human-readable failure message |
 | `failure_code` | string | Error classification |
-| `failure_error_messages` | array&lt;string&gt; | Error messages |
-| `failure_error_kinds` | array&lt;string&gt; | Error kinds |
-| `component` | string | Component that raised the error |
-| `backtrace` | string | Stack trace (if available) |
-| `record_raw_json` | string | Original raw record |
-| `record_normalized_json` | string | Normalized record (if enabled) |
-| `schema_hash` | string | Schema hash at time of failure |
-| `schema_version` | int | Schema version |
-| `metadata_snapshot` | string | Full metadata snapshot as JSON |
-| `ingest_time_millis` | bigint | Ingestion timestamp |
+| `event_time` | bigint | Source event time when available |
+| `processed_time` | bigint | Time Skippr emitted the deadletter |
+| `source_uri` | string | Source file or object path |
+| `offset_key` | string | Source offset key |
+| `offset_pos` | bigint | Source offset position |
 
-## Querying deadletters with Athena
+## Querying Athena deadletters
 
-Create an external table over the deadletters prefix:
+When the deadletter sink is Athena, query the configured deadletter database using the pipeline name as the table name:
 
 ```sql
-CREATE EXTERNAL TABLE IF NOT EXISTS deadletters (
-  id string,
-  tenant string,
-  workspace string,
-  pipeline string,
-  pipeline_run_id string,
-  namespace string,
-  partition string,
-  time_bucket bigint,
-  source_uri string,
-  offset_namespace string,
-  offset_partition string,
-  offset_pos bigint,
-  failure_code string,
-  failure_error_messages array<string>,
-  failure_error_kinds array<string>,
-  component string,
-  backtrace string,
-  record_raw_json string,
-  record_normalized_json string,
-  schema_hash string,
-  schema_version int,
-  metadata_snapshot string,
-  ingest_time_millis bigint
-)
-PARTITIONED BY (namespace string, p_year string, p_month string, p_day string)
-STORED AS PARQUET
-LOCATION 's3://<your-state-bucket>/deadletters/<tenant>/<workspace>/<pipeline>/';
+SELECT id, namespace, error, failure_code
+FROM bike_hire
+WHERE namespace = 'rides'
+ORDER BY processed_time DESC
+LIMIT 50;
 ```
 
-### Example queries
+## Operational guidance
 
-All deadletters for a namespace and date range:
-
-```sql
-SELECT id, namespace, failure_error_messages[1] AS err
-FROM deadletters
-WHERE namespace = 'bike_hire'
-  AND p_year = '2025' AND p_month = '11';
-```
-
-Inspect the raw payload:
-
-```sql
-SELECT id,
-       json_extract_scalar(record_raw_json, '$.device_id') AS device_id,
-       failure_error_messages[1] AS err
-FROM deadletters
-WHERE namespace = 'bike_hire'
-  AND p_year = '2025' AND p_month = '11' AND p_day = '06';
-```
-
-## Configuration
-
-| Variable | Default | Description |
-|---|---|---|
-| `DEADLETTER_INCLUDE_NORMALIZED_JSON` | `yes` | Include the normalized JSON in deadletter records |
+- Prefer a dedicated Glue database or S3 prefix for deadletters.
+- Do not point `deadletters` at the same registry entry as the primary output.

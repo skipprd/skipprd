@@ -972,7 +972,12 @@ pub async fn query(sql_str: &str) {
                     Config::set_metadata(&skippr_metadata, false).await; // we don't need to sync the schemas as we are dropping the table below
 
                     // Delete Glue table
-                    match AwsAthena::glue_delete_table(&table_str).await {
+                    match AwsAthena::glue_delete_table(
+                        &crate::plugins::athena::DataOutputAwsAthenaPlugin::get_config(),
+                        &table_str,
+                    )
+                    .await
+                    {
                         Ok(_) => {
                             println!("Dropped table: {}", table_str);
                         }
@@ -1457,7 +1462,7 @@ pub async fn query(sql_str: &str) {
                                         let seg = SegmentFile { path: path.clone() };
                                         if let Ok(meta) = seg.read_metadata() {
                                             for idx in meta.index.iter() {
-                                                if idx.key.0 != pipeline_name {
+                                                if idx.key.namespace != pipeline_name {
                                                     continue;
                                                 }
                                                 if let Ok(mut file) = std::fs::OpenOptions::new()

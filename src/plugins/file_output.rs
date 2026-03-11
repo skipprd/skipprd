@@ -1,5 +1,5 @@
 use crate::buffer::BufferChunker;
-use crate::helpers::configuration::Config;
+use crate::helpers::configuration::{Config, OutputPluginConfig};
 
 use std::fs;
 use std::io::Write;
@@ -9,8 +9,24 @@ use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
+use serde_derive::Deserialize;
 use std::path::Path;
 use tracing::error;
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DataOutputFilePluginConfig {
+    pub format: Option<String>,
+    pub output_dir: Option<String>,
+}
+
+impl From<OutputPluginConfig> for DataOutputFilePluginConfig {
+    fn from(plugin_config: OutputPluginConfig) -> Self {
+        match plugin_config {
+            OutputPluginConfig::File(file_config) => file_config,
+            _ => panic!("Invalid plugin type"),
+        }
+    }
+}
 
 pub struct DataOutputFilePlugin {
     #[allow(dead_code)]
@@ -34,7 +50,30 @@ impl DataOutputPlugin for DataOutputFilePlugin {
 
 impl DataOutputFilePlugin {
     pub async fn new(buffer_name: String) -> DataOutputFilePlugin {
-        let output_dir = Config::getenv("DATA_OUTPUT_FILE_DIR", "");
+        let output_config = Config::get_pipeline_output_plugin_config()
+            .ok()
+            .and_then(|config| match config {
+                OutputPluginConfig::File(file_config) => Some(file_config),
+                _ => None,
+            });
+        Self::new_with_config(buffer_name, output_config).await
+    }
+
+    pub async fn new_with_config(
+        buffer_name: String,
+        output_config: Option<DataOutputFilePluginConfig>,
+    ) -> DataOutputFilePlugin {
+        let output_dir = output_config
+            .as_ref()
+            .and_then(|config| config.output_dir.clone())
+            .unwrap_or_else(|| {
+                let configured = Config::getenv("DATA_OUTPUT_FILE_DIR", "");
+                if configured.is_empty() {
+                    Config::getenv("DATA_OUTPUT_PATH", "")
+                } else {
+                    configured
+                }
+            });
         let time_bucket = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
         // Ensure the output_dir exists, creating parent directories if needed

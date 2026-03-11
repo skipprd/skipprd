@@ -15,6 +15,7 @@ pipelines:
       batch_time_unit: minute
     input: data_inputs.s3_deadletters_test
     output: data_outputs.test_datalake
+    deadletters: data_deadletters.test_deadletters
 
 data_inputs:
   s3_deadletters_test:
@@ -31,4 +32,13 @@ data_outputs:
       s3_bucket: skippr-e2e-sample-data-output
       athena_results_s3_bucket: skippr-e2e-sample-data-output
       s3_prefix: deadletters
+
+data_deadletters:
+  test_deadletters:
+    Athena:
+      athena_workgroup_name: bikehire
+      glue_database_name: deadletters
+      s3_bucket: skippr-e2e-sample-data-output
+      athena_results_s3_bucket: skippr-e2e-sample-data-output
+      s3_prefix: deadletters-archive
 

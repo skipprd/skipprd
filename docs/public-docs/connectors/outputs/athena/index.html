@@ -1170,6 +1170,7 @@ SCHEMA_OUTPUT_GLUE_DATABASE_NAME=my_database
         {segment_id}.parquet
 </code></pre>
 <p>Each namespace becomes a separate Glue table within the configured database.</p>
+<p>If Athena is used under <code>data_deadletters</code>, deadletters are written to the configured deadletter database using the pipeline name as the table name.</p>
 <h2 id="performance-tuning">Performance tuning<a class="headerlink" href="#performance-tuning" title="Permanent link">&para;</a></h2>
 <table>
 <thead>

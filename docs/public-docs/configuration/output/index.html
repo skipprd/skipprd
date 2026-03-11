@@ -711,6 +711,13 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#deadletter-outputs" class="md-nav__link">
+    Deadletter outputs
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1063,6 +1070,13 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#deadletter-outputs" class="md-nav__link">
+    Deadletter outputs
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1162,6 +1176,19 @@
 </tr>
 </tbody>
 </table>
+<h2 id="deadletter-outputs">Deadletter outputs<a class="headerlink" href="#deadletter-outputs" title="Permanent link">&para;</a></h2>
+<p>Pipelines can optionally route deadletters to a separate output registry:</p>
+<pre><code class="language-yaml">pipelines:
+  analytics:
+    output: data_outputs.main
+    deadletters: data_deadletters.archive
+</code></pre>
+<p><code>data_deadletters</code> uses the same output plugin shapes as <code>data_outputs</code> and supports <code>Athena</code>, <code>S3</code>, and <code>File</code>.</p>
+<ul>
+<li>If <code>deadletters</code> is unset, deadletters are discarded.</li>
+<li>If <code>deadletters</code> points to an invalid registry entry, startup fails.</li>
+<li>Deadletter table names no longer use <code>_dl_</code>, so prefer a separate destination for deadletters.</li>
+</ul>
 
 
   
