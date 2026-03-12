@@ -18,6 +18,10 @@ static SCHEMA_PREP_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::M
 // Single-flight guard for metadata evolution per namespace
 static EVOLUTION_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::Mutex<()>>>> =
     once_cell::sync::Lazy::new(|| DashMap::new());
+static DATA_DIR_INGEST_PAUSED: once_cell::sync::Lazy<AtomicBool> =
+    once_cell::sync::Lazy::new(|| AtomicBool::new(false));
+static DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS: once_cell::sync::Lazy<AtomicU64> =
+    once_cell::sync::Lazy::new(|| AtomicU64::new(0));
 use crate::metrics::counters as metrics_hot;
 // Bounded concurrency for background metadata writes and Glue schema syncs
 static METADATA_WRITE_SEM: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
@@ -298,6 +302,131 @@ impl Drop for Ingest {
 }
 
 impl Ingest {
+    fn normalize_data_dir_watermarks(high: u8, low: u8) -> Option<(u8, u8)> {
+        if high == 0 {
+            return None;
+        }
+        let high = high.clamp(1, 99);
+        let low = low.clamp(0, 98);
+        if low < high {
+            Some((high, low))
+        } else {
+            Some((high, high.saturating_sub(5).max(1)))
+        }
+    }
+
+    fn data_dir_watermarks() -> Option<(u8, u8)> {
+        let high = Config::getenv("DATA_DIR_HIGH_WATERMARK_PCT", "90")
+            .parse::<u8>()
+            .unwrap_or(90);
+        let low = Config::getenv("DATA_DIR_LOW_WATERMARK_PCT", "80")
+            .parse::<u8>()
+            .unwrap_or(80);
+        Self::normalize_data_dir_watermarks(high, low)
+    }
+
+    #[cfg(unix)]
+    fn data_dir_disk_usage() -> Option<(u64, u64, f64)> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Path;
+
+        let data_dir = Config::get_data_dir();
+        let path = Path::new(&data_dir);
+        let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        let rc = unsafe { libc::statvfs(c_path.as_ptr(), stats.as_mut_ptr()) };
+        if rc != 0 {
+            return None;
+        }
+        let stats = unsafe { stats.assume_init() };
+        let block_size = u128::from(if stats.f_frsize > 0 {
+            stats.f_frsize
+        } else {
+            stats.f_bsize
+        });
+        let total_bytes_u128 = u128::from(stats.f_blocks).checked_mul(block_size)?;
+        let avail_bytes_u128 = u128::from(stats.f_bavail).checked_mul(block_size)?;
+        let total_bytes = u64::try_from(total_bytes_u128).ok()?;
+        let avail_bytes = u64::try_from(avail_bytes_u128).ok()?;
+        if total_bytes == 0 {
+            return None;
+        }
+        let used_pct = 100.0 - ((avail_bytes as f64 * 100.0) / total_bytes as f64);
+        Some((avail_bytes, total_bytes, used_pct))
+    }
+
+    #[cfg(not(unix))]
+    fn data_dir_disk_usage() -> Option<(u64, u64, f64)> {
+        None
+    }
+
+    fn wait_for_data_dir_capacity() {
+        let Some((high_watermark, low_watermark)) = Self::data_dir_watermarks() else {
+            return;
+        };
+        let mut paused = DATA_DIR_INGEST_PAUSED.load(Ordering::SeqCst);
+
+        loop {
+            let Some((avail_bytes, total_bytes, used_pct)) = Self::data_dir_disk_usage() else {
+                if paused {
+                    DATA_DIR_INGEST_PAUSED.store(false, Ordering::SeqCst);
+                }
+                return;
+            };
+
+            if !paused {
+                if used_pct < high_watermark as f64 {
+                    return;
+                }
+                paused = true;
+                DATA_DIR_INGEST_PAUSED.store(true, Ordering::SeqCst);
+                DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(0, Ordering::Relaxed);
+                warn!(
+                    "Pausing ingest: DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}). Background compaction will continue.",
+                    used_pct,
+                    high_watermark,
+                    Helpers::human_readable_size(avail_bytes),
+                    Helpers::human_readable_size(total_bytes)
+                );
+            }
+
+            if used_pct <= low_watermark as f64 {
+                DATA_DIR_INGEST_PAUSED.store(false, Ordering::SeqCst);
+                info!(
+                    "Resuming ingest: DATA_DIR usage {:.1}% is below low watermark {}% (free {} / total {}).",
+                    used_pct,
+                    low_watermark,
+                    Helpers::human_readable_size(avail_bytes),
+                    Helpers::human_readable_size(total_bytes)
+                );
+                return;
+            }
+
+            let now_secs = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let last_log = DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.load(Ordering::Relaxed);
+            if now_secs.saturating_sub(last_log) >= 30 {
+                DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(now_secs, Ordering::Relaxed);
+                info!(
+                    "Ingest remains paused: DATA_DIR usage {:.1}% is above resume watermark {}% (free {} / total {}).",
+                    used_pct,
+                    low_watermark,
+                    Helpers::human_readable_size(avail_bytes),
+                    Helpers::human_readable_size(total_bytes)
+                );
+            }
+
+            if !RUNNING.read().load(Ordering::SeqCst) {
+                return;
+            }
+
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
     // Lightweight Linux memory readers; on non-Linux fall back to None
     fn read_meminfo_kib(key: &str) -> Option<u64> {
         if let Ok(file) = std::fs::File::open("/proc/meminfo") {
@@ -840,6 +969,7 @@ impl Ingest {
             let mut _active_threads_snapshot = self.active_count.load(Ordering::SeqCst);
 
             for datas in ingest_batches.tasks.iter() {
+                Self::wait_for_data_dir_capacity();
                 let task_bytes: u64 = datas.datas.iter().map(|d| d.bytes as u64).sum();
                 // Per-task queue gating: block with Condvar until queue depth below max
                 if self.queue_length.load(Ordering::Acquire) >= self.max_queue_length {
@@ -984,6 +1114,7 @@ impl Ingest {
         handle: runtime::Handle,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) {
+        Self::wait_for_data_dir_capacity();
         let _guard = handle.enter();
 
         let allowed_values = Config::get_partition_allowed_values();
@@ -1824,6 +1955,26 @@ impl Ingest {
             .store(true, Ordering::Relaxed);
 
         Ok(_schema_ref)
+    }
+}
+
+#[cfg(test)]
+mod data_dir_watermark_tests {
+    use super::Ingest;
+
+    #[test]
+    fn zero_high_watermark_disables_pause() {
+        assert_eq!(Ingest::normalize_data_dir_watermarks(0, 80), None);
+    }
+
+    #[test]
+    fn invalid_low_watermark_is_adjusted_below_high() {
+        assert_eq!(Ingest::normalize_data_dir_watermarks(90, 95), Some((90, 85)));
+    }
+
+    #[test]
+    fn valid_watermarks_are_preserved() {
+        assert_eq!(Ingest::normalize_data_dir_watermarks(92, 80), Some((92, 80)));
     }
 }
 
