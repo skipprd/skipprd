@@ -379,6 +379,15 @@ impl Ingest {
                 if used_pct < high_watermark as f64 {
                     return;
                 }
+                if !Buffers::has_reclaimable_wal() {
+                    panic!(
+                        "DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}), but this pipeline has no reclaimable committed WAL to compact. Free disk or clean another pipeline before retrying.",
+                        used_pct,
+                        high_watermark,
+                        Helpers::human_readable_size(avail_bytes),
+                        Helpers::human_readable_size(total_bytes)
+                    );
+                }
                 paused = true;
                 DATA_DIR_INGEST_PAUSED.store(true, Ordering::SeqCst);
                 DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(0, Ordering::Relaxed);

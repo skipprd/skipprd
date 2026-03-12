@@ -735,6 +735,10 @@ impl Buffers {
         out
     }
 
+    pub fn has_reclaimable_wal() -> bool {
+        !Self::next_compaction_candidates(1, true).is_empty()
+    }
+
     fn tombstone_dir() -> PathBuf {
         PathBuf::from(format!("{}/segment_buffer/done", Config::get_data_dir()))
     }
