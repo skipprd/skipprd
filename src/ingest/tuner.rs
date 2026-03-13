@@ -4,6 +4,20 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tracing::{debug, info};
 
+fn update_retry_ema_x100() -> u64 {
+    static LAST_WAL_RETRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let total = crate::metrics::counters::S3_WAL_RETRIES_TOTAL.load(Ordering::Relaxed);
+    let last = LAST_WAL_RETRIES.swap(total, Ordering::SeqCst);
+    let delta = total.saturating_sub(last); // retries during this tick
+                                           // EMA_x100 = 0.8 * prev + 0.2 * (delta * 100)
+    let prev = crate::metrics::counters::S3_WAL_RETRY_EMA_X100.load(Ordering::Relaxed);
+    let ema = ((prev.saturating_mul(80))
+        .saturating_add(delta.saturating_mul(100).saturating_mul(20)))
+        / 100;
+    crate::metrics::counters::set_s3_wal_retry_ema_x100(ema);
+    ema
+}
+
 /// Apply one-time environment overrides and CI caps for upload, WAL compaction, and S3 download.
 pub fn apply_env_caps() {
     // Upload concurrency override (no CI-specific caps)
@@ -80,17 +94,7 @@ pub fn tick(active: usize, capacity: usize, queued: usize, pressure: f64) {
 
     // Error-aware tuning: compute EMA of S3 WAL retry rate and throttle if above threshold
     {
-        static LAST_WAL_RETRIES: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
-        let total = crate::metrics::counters::S3_WAL_RETRIES_TOTAL.load(Ordering::Relaxed);
-        let last = LAST_WAL_RETRIES.swap(total, Ordering::SeqCst);
-        let delta = total.saturating_sub(last); // retries during this tick
-                                                // EMA_x100 = 0.8 * prev + 0.2 * (delta * 100)
-        let prev = crate::metrics::counters::S3_WAL_RETRY_EMA_X100.load(Ordering::Relaxed);
-        let ema = ((prev.saturating_mul(80))
-            .saturating_add(delta.saturating_mul(100).saturating_mul(20)))
-            / 100;
-        crate::metrics::counters::set_s3_wal_retry_ema_x100(ema);
+        let ema = update_retry_ema_x100();
         // If EMA > 2.0 retries/tick, throttle; if < 0.5, allow gentle restore
         if ema > 200 {
             let uc = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
@@ -186,6 +190,57 @@ pub fn tick(active: usize, capacity: usize, queued: usize, pressure: f64) {
                 dl_cur, dl_next, active, capacity, queued, pressure
             );
         }
+    }
+}
+
+/// Drain-time tuning: prefer fast completion once ingest is over.
+/// This ramps compaction/upload concurrency toward CPU-shaped maxima and only
+/// backs off when S3 retry pressure rises.
+pub fn drain_tick(num_cpus: usize, has_backlog: bool) {
+    if !has_backlog {
+        return;
+    }
+
+    let max_upload = Config::getenv("UPLOAD_CONCURRENCY_MAX", "")
+        .parse::<usize>()
+        .ok()
+        .filter(|v| *v > 0)
+        .unwrap_or_else(|| (num_cpus.saturating_mul(2)).clamp(16, 128));
+    let max_wal = Config::getenv("WAL_COMPACTION_CONCURRENCY_MAX", "")
+        .parse::<usize>()
+        .ok()
+        .filter(|v| *v > 0)
+        .unwrap_or_else(|| num_cpus.clamp(4, 64));
+
+    let ema = update_retry_ema_x100();
+    let upload_cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
+    let wal_cur =
+        crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed);
+
+    let (upload_next, wal_next) = if ema > 200 {
+        (
+            upload_cur.saturating_sub(1).max(2),
+            wal_cur.saturating_sub(1).max(2),
+        )
+    } else {
+        (
+            upload_cur.saturating_add(4).min(max_upload),
+            wal_cur.saturating_add(2).min(max_wal),
+        )
+    };
+
+    if upload_next != upload_cur {
+        crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(upload_next, Ordering::Relaxed);
+    }
+    if wal_next != wal_cur {
+        crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(wal_next, Ordering::Relaxed);
+    }
+
+    if (upload_next != upload_cur || wal_next != wal_cur) && Config::log_wal_enabled() {
+        info!(
+            "drain tune: upload_concurrency {} -> {}, wal_compaction {} -> {} (retry_ema_x100={})",
+            upload_cur, upload_next, wal_cur, wal_next, ema
+        );
     }
 }
 

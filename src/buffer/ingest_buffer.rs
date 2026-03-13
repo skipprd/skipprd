@@ -529,7 +529,32 @@ impl Buffers {
         if tx.send(CompactorCommand::DrainAndStop(done_tx)).is_err() {
             return false;
         }
-        match done_rx.await {
+        let num_cpus = num_cpus::get();
+        tokio::pin!(done_rx);
+        let drain_result = loop {
+            tokio::select! {
+                res = &mut done_rx => break res,
+                _ = tokio_sleep(TokioDuration::from_secs(1)) => {
+                    let uploads_in_flight =
+                        crate::metrics::counters::UPLOADS_IN_FLIGHT.load(AtomicOrdering::Relaxed);
+                    let wal_in_flight =
+                        crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT.load(AtomicOrdering::Relaxed);
+                    let reclaimable_wal = Self::has_reclaimable_wal();
+                    let has_backlog =
+                        wal_in_flight > 0 || uploads_in_flight > 0 || reclaimable_wal;
+                    crate::ingest::tuner::drain_tick(num_cpus, has_backlog);
+                    if has_backlog && Config::log_wal_enabled() {
+                        debug!(
+                            "Compactor drain: wal_in_flight={} uploads_in_flight={} reclaimable_wal={}",
+                            wal_in_flight,
+                            uploads_in_flight,
+                            reclaimable_wal
+                        );
+                    }
+                }
+            }
+        };
+        match drain_result {
             Ok(true) => {
                 let handle = {
                     let mut guard = match COMPACTOR_HANDLE.lock() {
