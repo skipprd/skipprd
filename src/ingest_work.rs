@@ -1863,7 +1863,7 @@ impl Ingest {
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     if let Ok(permit) = SCHEMA_SYNC_SEM.clone().try_acquire_owned() {
                         handle.spawn(async move {
-                            crate::helpers::configuration::Config::sync_schema(&md_clone).await;
+                            crate::helpers::configuration::Config::sync_glue_schema(&md_clone).await;
                             drop(permit);
                         });
                     }

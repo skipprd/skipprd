@@ -559,7 +559,7 @@ async fn discover(log: bool) {
 
     // sync schema if output plugin configured
     if output_plugin_name != "" {
-        Config::sync_schema(&pipeline_metadata.metadata).await;
+        Config::sync_glue_schema(&pipeline_metadata.metadata).await;
     } else {
         // Just build the arrow schemas internally
         let flatten = Config::get_transform_flatten_events();
@@ -817,7 +817,7 @@ async fn discover(log: bool) {
 
     skippr::converters::parquet_ordering::log_unmatched_order_fields();
 
-    Config::drain_schema_worker();
+    Config::drain_glue_sync_worker();
 
     {
         let mut counter_lock = METRICS.write();
@@ -980,7 +980,7 @@ async fn sync() {
 
     // sync schema if output plugin configured
     if output_plugin_name != "" {
-        Config::sync_schema(&pipeline_metadata.metadata).await;
+        Config::sync_glue_schema(&pipeline_metadata.metadata).await;
     } else {
         // Just build the arrow schemas internally
         let flatten = Config::get_transform_flatten_events();
@@ -1049,9 +1049,9 @@ async fn sync() {
     skippr::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
     info!("Finalising: Athena partition tasks drained");
 
-    info!("Finalising: draining schema worker");
-    Config::drain_schema_worker();
-    info!("Finalising: schema worker drained");
+    info!("Finalising: draining Glue sync worker");
+    Config::drain_glue_sync_worker();
+    info!("Finalising: Glue sync worker drained");
 
     if progress.enabled() {
         progress.complete("Finalising");
