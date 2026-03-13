@@ -557,11 +557,7 @@ async fn discover(log: bool) {
         .unwrap();
     let shared_output = Arc::new(output);
 
-    // sync schema if output plugin configured
-    if output_plugin_name != "" {
-        Config::sync_glue_schema(&pipeline_metadata.metadata).await;
-    } else {
-        // Just build the arrow schemas internally
+    {
         let flatten = Config::get_transform_flatten_events();
         for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
             match Ingest::prepare_arrow_schema_with_metadata(
@@ -978,11 +974,11 @@ async fn sync() {
         );
     }
 
-    // sync schema if output plugin configured
-    if output_plugin_name != "" {
-        Config::sync_glue_schema(&pipeline_metadata.metadata).await;
-    } else {
-        // Just build the arrow schemas internally
+    // Build Arrow schema cache for all known namespaces so that the ingest
+    // hot-path does not treat first-seen records as "schema changes".  For
+    // Athena output this also enqueues each namespace for Glue table sync
+    // (one-by-one, via the worker), replacing the previous bulk re-send.
+    {
         let flatten = Config::get_transform_flatten_events();
         for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
             match Ingest::prepare_arrow_schema_with_metadata(

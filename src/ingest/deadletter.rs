@@ -217,4 +217,6 @@ pub(crate) fn ensure_namespace_registered() {
     let mut pm = METADATA.load().as_ref().clone();
     pm.metadata.insert(dl_ns.clone(), ns_meta);
     METADATA.store(Arc::new(pm));
+
+    Config::sync_glue_namespace(&dl_ns);
 }

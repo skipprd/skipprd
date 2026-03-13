@@ -2027,11 +2027,9 @@ impl Config {
         }
     }
 
-    pub async fn sync_glue_schema(metadata: &HashMap<String, Metadata>) {
+    pub fn sync_glue_namespace(namespace: &str) {
         let tx = Config::ensure_glue_sync_worker();
-        for (namespace, _schema) in metadata.into_iter() {
-            let _ = tx.send(namespace.clone());
-        }
+        let _ = tx.send(namespace.to_string());
     }
 
     pub async fn init() {

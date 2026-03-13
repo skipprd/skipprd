@@ -26,8 +26,6 @@ use crate::metrics::counters as metrics_hot;
 // Bounded concurrency for background metadata writes and Glue schema syncs
 static METADATA_WRITE_SEM: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
-static SCHEMA_SYNC_SEM: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
-    once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
 static INGEST_RT: once_cell::sync::Lazy<runtime::Runtime> = once_cell::sync::Lazy::new(|| {
     runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -1848,9 +1846,6 @@ impl Ingest {
             }
         }
 
-        // Sync Glue tables on genuine schema changes, and first-time cache init
-        // from already-persisted/newly initialized metadata. 
-        // Metadata persistence is the caller's responsibility (e.g. slow-ingest worker, new-namespace discovery).
         if did_update_schema {
             let output_uses_athena =
                 crate::helpers::configuration::Config::get_pipeline_output_plugin_name() == "Athena";
@@ -1859,17 +1854,7 @@ impl Ingest {
                 Ok(Some(plugin_name)) if plugin_name == "Athena"
             );
             if output_uses_athena || deadletter_uses_athena {
-                let md_clone: std::collections::HashMap<String, Metadata> = metadata.clone();
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    if let Ok(permit) = SCHEMA_SYNC_SEM.clone().try_acquire_owned() {
-                        handle.spawn(async move {
-                            crate::helpers::configuration::Config::sync_glue_schema(&md_clone).await;
-                            drop(permit);
-                        });
-                    }
-                } else {
-                    error!("No tokio runtime available for schema sync");
-                }
+                crate::helpers::configuration::Config::sync_glue_namespace(skpr_namespace);
             }
         }
 
