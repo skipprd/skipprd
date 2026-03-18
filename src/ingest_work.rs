@@ -1168,6 +1168,7 @@ impl Ingest {
             deadletter::ensure_namespace_registered();
         }
         let mut dl_records: Vec<DeadletterRecord> = Vec::new();
+        let mut dl_offsets: HashMap<OffsetKey, u64> = HashMap::new();
         let mut batch_line: u64;
 
         let format = match Config::get_pipeline_input_plugin_config() {
@@ -1300,11 +1301,6 @@ impl Ingest {
                                     offset_key: format!("{}:{}", ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition),
                                     offset_pos: batch_line,
                                 });
-                                offset_db_clone.insert(
-                                    &ingest_batch.offset_key,
-                                    OffsetTypes::Position,
-                                    batch_line,
-                                );
                             }
                         }
                     }
@@ -1333,11 +1329,6 @@ impl Ingest {
                         offset_key: format!("{}:{}", ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition),
                         offset_pos: batch_line,
                     });
-                    offset_db_clone.insert(
-                        &ingest_batch.offset_key,
-                        OffsetTypes::Position,
-                        batch_line,
-                    );
 
                     continue;
                 }
@@ -1632,12 +1623,10 @@ impl Ingest {
                     });
                 }
                 for (ok, pos) in entry.offsets.iter() {
-                    let offset_key = OffsetKey {
-                        namespace: ok.namespace.clone(),
-                        partition: ok.partition.clone(),
-                    };
-                    offset_db_clone.insert(&offset_key, OffsetTypes::Position, *pos);
-                    offset_db_clone.insert(&offset_key, OffsetTypes::Closed, 1);
+                    dl_offsets
+                        .entry(ok.clone())
+                        .and_modify(|p| *p = (*p).max(*pos))
+                        .or_insert(*pos);
                 }
                 continue;
             }
@@ -1685,12 +1674,10 @@ impl Ingest {
                     });
                 }
                 for (ok, pos) in entry.offsets.iter() {
-                    let offset_key = OffsetKey {
-                        namespace: ok.namespace.clone(),
-                        partition: ok.partition.clone(),
-                    };
-                    offset_db_clone.insert(&offset_key, OffsetTypes::Position, *pos);
-                    offset_db_clone.insert(&offset_key, OffsetTypes::Closed, 1);
+                    dl_offsets
+                        .entry(ok.clone())
+                        .and_modify(|p| *p = (*p).max(*pos))
+                        .or_insert(*pos);
                 }
                 if Config::debug_enabled() {
                     debug!(
@@ -1701,10 +1688,14 @@ impl Ingest {
             }
         }
 
-        // Flush accumulated deadletter records into buf as a regular WAL entry
+        // Flush accumulated deadletter records into buf as a regular WAL entry.
+        // The deadletter batch carries dl_offsets so the source offsets are
+        // committed only when the WAL segment is durably flushed, matching the
+        // guarantees for normal data.
         if !dl_records.is_empty() {
             let dl_count = dl_records.len();
             metrics_hot::add_deadletters(dl_count as u64);
+            let mut dl_offsets_committed = false;
             if let Some(deadletter_sink_ref) = deadletter_sink_ref.clone() {
                 let dl_ns = deadletter::table_name();
                 let dl_schema: SchemaRef = deadletter::arrow_schema();
@@ -1725,7 +1716,7 @@ impl Ingest {
                     buf.insert(
                         key,
                         IngestBufferBatch {
-                            offsets: HashMap::new(),
+                            offsets: std::mem::take(&mut dl_offsets),
                             sink_ref: deadletter_sink_ref,
                             _namespace: dl_ns,
                             _partition: String::new(),
@@ -1735,6 +1726,7 @@ impl Ingest {
                             record_batches: Some(vec![batch]),
                         },
                     );
+                    dl_offsets_committed = true;
                     warn!("Deadlettered {} records into WAL", dl_count);
                 }
             } else {
@@ -1742,6 +1734,16 @@ impl Ingest {
                     "Discarded {} deadletter records because no deadletter sink is configured",
                     dl_count
                 );
+            }
+            if !dl_offsets_committed && !dl_offsets.is_empty() {
+                for (ok, pos) in dl_offsets.drain() {
+                    let offset_key = OffsetKey {
+                        namespace: ok.namespace.clone(),
+                        partition: ok.partition.clone(),
+                    };
+                    offset_db_clone.insert(&offset_key, OffsetTypes::Position, pos);
+                    offset_db_clone.insert(&offset_key, OffsetTypes::Closed, 1);
+                }
             }
         }
 

@@ -1783,6 +1783,7 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
     // Scan the on-disk segment directory for .seg files
     let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
     let mut seg_files: Vec<PathBuf> = Vec::new();
+    let mut uncommitted_segs = 0u64;
     if seg_dir.exists() {
         for entry in fs::read_dir(&seg_dir)? {
             let entry = entry?;
@@ -1796,6 +1797,8 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
                 let commit = path.with_extension("seg.commit");
                 if commit.exists() {
                     seg_files.push(path);
+                } else {
+                    uncommitted_segs = uncommitted_segs.saturating_add(1);
                 }
             }
         }
@@ -1803,9 +1806,15 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
 
     let seg_files_count = seg_files.len();
     info!(
-        "WAL scan examined {} entries (commit_markers_seen={}, committed_seg_candidates={})",
-        dir_entries_scanned, commit_markers_seen, seg_files_count
+        "WAL scan examined {} entries (commit_markers_seen={}, committed_seg_candidates={}, uncommitted_segs={})",
+        dir_entries_scanned, commit_markers_seen, seg_files_count, uncommitted_segs
     );
+    if uncommitted_segs > 0 {
+        warn!(
+            "WAL: found {} .seg files without .seg.commit markers — delete SEGS_MIGRATED marker and restart to re-index them",
+            uncommitted_segs
+        );
+    }
     let mut namespaces: HashSet<String> = HashSet::new();
     let mut namespace_partition_files: HashMap<PartitionKey, u64> = HashMap::new();
     let mut namespace_partition_bytes: HashMap<PartitionKey, u64> = HashMap::new();
