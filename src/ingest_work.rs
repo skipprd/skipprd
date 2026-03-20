@@ -789,55 +789,24 @@ impl Ingest {
     }
 
     pub fn wait_for_completion(&self) {
-        // Signal that we're shutting down
         self.is_shutting_down.store(1, Ordering::SeqCst);
 
-        let mut current_active_count = self.active_count.load(Ordering::SeqCst);
+        let remaining = self.active_count.load(Ordering::SeqCst);
+        info!("Waiting for {remaining} ingest tasks to finish, signaling shutdown...");
+
         let mut last_report_time = Instant::now();
-
-        info!(
-            "Waiting for {} ingest tasks to finish, signaling shutdown...",
-            current_active_count
-        );
-
-        // Give tasks a chance to complete gracefully
-        let timeout = Instant::now() + Duration::from_secs(60); // 1 minute timeout
-
-        while self.active_count.load(Ordering::SeqCst) > 0 && Instant::now() < timeout {
-            if current_active_count != self.active_count.load(Ordering::SeqCst)
-                || last_report_time.elapsed() > Duration::from_secs(5)
-            {
+        while self.active_count.load(Ordering::SeqCst) > 0 {
+            if last_report_time.elapsed() > Duration::from_secs(5) {
                 info!(
                     "Waiting for {} ingest tasks to finish",
                     self.active_count.load(Ordering::SeqCst)
                 );
-                current_active_count = self.active_count.load(Ordering::SeqCst);
                 last_report_time = Instant::now();
             }
-
-            // Use exponential backoff to avoid excessive CPU usage when waiting
-            if current_active_count > 10 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            } else {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        // If we still have active threads after timeout, force decrement them
-        if self.active_count.load(Ordering::SeqCst) > 0 {
-            warn!(
-                "Forcing completion of {} remaining tasks after timeout",
-                self.active_count.load(Ordering::SeqCst)
-            );
-            self.active_count.store(0, Ordering::SeqCst);
-            self.queue_length.store(0, Ordering::SeqCst);
-            // Clear the task queue
-            if let Ok(mut task_queue) = self.task_queue.write() {
-                task_queue.clear();
-            }
-        }
-
-        info!("All ingest tasks finished or timed out");
+        info!("All ingest tasks finished");
     }
 
     fn update_throughput(&self, bytes: u64) {
