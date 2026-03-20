@@ -50,9 +50,11 @@ nav:
       - Inputs:
           - S3: connectors/inputs/s3.md
           - Local File: connectors/inputs/file.md
+          - MSSQL: connectors/inputs/mssql.md
       - Outputs:
           - Athena (S3 + Glue): connectors/outputs/athena.md
           - Local File: connectors/outputs/file.md
+          - Snowflake: connectors/outputs/snowflake.md
   - Operations:
       - Logging Event Map: operations/logging.md
       - Troubleshooting: operations/troubleshooting.md

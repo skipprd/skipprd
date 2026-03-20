@@ -574,6 +574,7 @@ impl DataSourceS3InventoryPlugin {
                                 data: decompressed_data.clone(),
                                 bytes: decompressed_data.len(),
                                 source_uri: format!("s3://{}/{}", bucket_name_clone, download.key),
+                                namespace: None,
                             });
                         } else {
                             let str_data = String::from_utf8(data_vec).unwrap();
@@ -586,6 +587,7 @@ impl DataSourceS3InventoryPlugin {
                                 data: str_data.clone(),
                                 bytes: str_data.len(),
                                 source_uri: format!("s3://{}/{}", bucket_name_clone, download.key),
+                                namespace: None,
                             });
                         }
 

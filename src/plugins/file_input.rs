@@ -218,6 +218,7 @@ impl DataSourceLocalFilePlugin {
                                         data: ingest_data,
                                         bytes: _batch_bytes as usize,
                                         source_uri: "".to_string(),
+                                        namespace: None,
                                     });
 
                                     if !current_batch.is_empty() {
@@ -257,6 +258,7 @@ impl DataSourceLocalFilePlugin {
                                                 data: ingest_data,
                                                 bytes: _batch_bytes as usize,
                                                 source_uri: "".to_string(),
+                                                namespace: None,
                                             });
                                         }
 
@@ -299,6 +301,7 @@ impl DataSourceLocalFilePlugin {
                                                 data: ingest_data,
                                                 bytes: _batch_bytes as usize,
                                                 source_uri: "".to_string(),
+                                                namespace: None,
                                             });
                                         }
 
@@ -350,6 +353,7 @@ impl DataSourceLocalFilePlugin {
                                                     data: ingest_data,
                                                     bytes: _batch_bytes as usize,
                                                     source_uri: "".to_string(),
+                                                    namespace: None,
                                                 });
 
                                                 tx.unbounded_send(vec![current_batch.clone()])
@@ -397,6 +401,7 @@ impl DataSourceLocalFilePlugin {
                                                 data: ingest_data.clone(),
                                                 bytes: _batch_bytes as usize,
                                                 source_uri: "".to_string(),
+                                                namespace: None,
                                             };
                                             let current_batch: Vec<IngestBatch> = vec![batch];
                                             tx.unbounded_send(vec![current_batch]).unwrap();
@@ -411,6 +416,7 @@ impl DataSourceLocalFilePlugin {
                                             data: ingest_data,
                                             bytes: _batch_bytes as usize,
                                             source_uri: "".to_string(),
+                                            namespace: None,
                                         };
                                         let current_batch: Vec<IngestBatch> = vec![batch];
                                         tx.unbounded_send(vec![current_batch]).unwrap();

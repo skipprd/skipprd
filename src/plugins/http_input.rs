@@ -72,7 +72,7 @@ impl DataSourceHttpPlugin {
         };
 
         let bytes = data.len();
-        let batch = IngestBatch { offset_key, data: data.clone(), bytes, source_uri: "".to_string() };
+        let batch = IngestBatch { offset_key, data: data.clone(), bytes, source_uri: "".to_string(), namespace: None };
 
         self.ingest.ingest_file(
             vec![batch],

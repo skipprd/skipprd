@@ -100,11 +100,12 @@ impl DataSourceStdinPlugin {
                     let batch = IngestBatch {
                         offset_key: OffsetKey {
                             namespace: "stdin".to_string(),
-                            partition: Helpers::random_str(10), // no partition for stdin
+                            partition: Helpers::random_str(10),
                         },
                         data: data.clone(),
                         bytes: data.len(),
                         source_uri: "".to_string(),
+                        namespace: None,
                     };
 
                     // Spawn a new task in the runtime for each batch received.

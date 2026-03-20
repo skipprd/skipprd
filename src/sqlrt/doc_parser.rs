@@ -67,6 +67,12 @@ impl SqlDocParser {
                 syntax: "SHOW CATALOG FOR <pipeline>[.<namespace>]".to_string(),
                 example: "SHOW CATALOG FOR bike_hire.ride_start".to_string(),
             },
+            Statement::ShowPipeline { .. } => SqlStatementDoc {
+                name: "SHOW PIPELINE".to_string(),
+                description: "Show pipeline status including namespaces, field counts, and offsets.".to_string(),
+                syntax: "SHOW PIPELINE <pipeline_name>".to_string(),
+                example: "SHOW PIPELINE el_mssql".to_string(),
+            },
         }
     }
 

@@ -74,6 +74,9 @@ impl DataOutputS3Plugin {
         stream: SendableRecordBatchStream,
         filename: String,
     ) -> Result<(), std::io::Error> {
+        use crate::metrics::counters;
+        counters::inc_uploads_in_flight();
+
         let namespace = BufferChunker::decode_file_namespace(&filename);
         let trimmed_key = self.config.s3_prefix.trim_matches('/').to_string();
 
@@ -100,7 +103,11 @@ impl DataOutputS3Plugin {
         let md5_digest = md5::compute(&filename);
         let final_key = format!("{}/{}.parquet", full_key, hex::encode(&md5_digest.0));
 
-        let parquet_bytes = DataOutputAwsAthenaPlugin::serialize_to_parquet(stream).await?;
+        let parquet_bytes = DataOutputAwsAthenaPlugin::serialize_to_parquet(stream).await
+            .map_err(|e| { counters::dec_uploads_in_flight(); e })?;
+        let row_count = parquet_bytes.meta_data.num_rows as u64;
+        let byte_count = parquet_bytes.size_bytes;
+
         self.s3_client
             .put_object()
             .bucket(&self.config.s3_bucket)
@@ -108,8 +115,15 @@ impl DataOutputS3Plugin {
             .body(ByteStream::from(parquet_bytes.bytes))
             .send()
             .await
-            .map_err(|e| std::io::Error::other(format!("Failed to upload to S3: {e}")))?;
+            .map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::other(format!("Failed to upload to S3: {e}"))
+            })?;
 
+        counters::add_parquet_rows(row_count);
+        counters::add_parquet_bytes(byte_count);
+        counters::add_upload(1);
+        counters::dec_uploads_in_flight();
         info!("Uploaded to S3: {}", final_key);
         Ok(())
     }

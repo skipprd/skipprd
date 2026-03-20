@@ -22,6 +22,7 @@ pub mod manifest;
 pub mod offsets;
 pub mod progress;
 pub mod s3;
+pub mod sync_reporter;
 pub mod timed_rwlock;
 
 // let CLEAN_FIELD_CACHE = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
@@ -423,10 +424,8 @@ impl Helpers {
         if !parse_namespace_cache.contains_key(&namespace)
             || parse_namespace_cache.get(&namespace).unwrap() == "yes"
         {
-            // default to data source partition (table, topic, queue, file dir, etc)
             clean_namespace = Helpers::clean_field_name(clean_namespace);
 
-            // optional: partition by composite key
             if !Config::get_transform_namespace_fields().is_empty() {
                 let mut namespaces = vec!["".to_string()];
 

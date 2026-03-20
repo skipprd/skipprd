@@ -1,11 +1,11 @@
 # skippr discover
 
-Connect to the data source, sample records, and infer the pipeline schema.
+Connect to the data source, sample records, and infer the pipeline schema. Unlike `sync`, discover never writes to the output destination -- it only discovers schemas and persists metadata.
 
 ## Usage
 
 ```bash
-skippr discover --pipeline <name> [--log [LEVEL]] [--verbose]
+skippr discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
 ```
 
 ## Flags
@@ -13,15 +13,19 @@ skippr discover --pipeline <name> [--log [LEVEL]] [--verbose]
 | Flag | Required | Description |
 |---|---|---|
 | `--pipeline, -p` | No | Pipeline name. Falls back to `PIPELINE_NAME` env var. |
+| `--output` | No | Output mode: `progress` (default, interactive spinner), `json` (structured JSON lines to stdout), or `text` (plain text summaries). |
 | `--log` | No | Enable logging. Optional level: `debug`, `info`, `warn`, `error`. Defaults to `info` when flag is present. |
-| `--verbose` | No | Stream verbose logs to stdout instead of showing a progress bar. |
 
 ## What it does
 
-1. Reads configuration from environment variables (and optional config file)
-2. Connects to the data source configured by `DATA_SOURCE_PLUGIN_NAME`
-3. Samples records and infers the complete nested schema
-4. Persists the schema as pipeline metadata to `SKIPPR_S3_BUCKET`
+1. Loads or creates pipeline metadata (from S3 or local disk, depending on `SKIPPR_STORAGE_MODE`)
+2. Initializes the offset database
+3. Connects to the data source configured by `DATA_SOURCE_PLUGIN_NAME`
+4. Samples records and infers the complete nested schema via type inference
+5. Persists the updated pipeline metadata
+6. Exits
+
+Discover does **not** initialize or sync to any output plugin. It is purely a schema inference operation.
 
 ## Example
 
@@ -33,14 +37,39 @@ SKIPPR_S3_BUCKET=my-state-bucket \
 skippr discover --pipeline events --log
 ```
 
+### Structured output for programmatic use
+
+```bash
+skippr discover --pipeline el_mssql --output json
+```
+
+This emits JSON events to stdout:
+
+```json
+{"event":"discover_start","pipeline":"el_mssql","timestamp":"2026-03-18T12:00:00Z"}
+{"event":"namespace_discovered","namespace":"mssql.MyDB.dbo.customers","fields":[{"name":"id","type":"Long"},{"name":"email","type":"String"}],"timestamp":"..."}
+{"event":"namespace_discovered","namespace":"mssql.MyDB.dbo.orders","fields":[{"name":"order_id","type":"Long"},{"name":"total","type":"Double"}],"timestamp":"..."}
+{"event":"discover_complete","pipeline":"el_mssql","namespaces_discovered":2,"elapsed_ms":12000,"timestamp":"..."}
+```
+
+The `fields` array uses `SkipprDataType` names (`String`, `Long`, `Double`, `Boolean`, `Date`, `Timestamp`, etc.) representing the inferred source types.
+
+## Reading discovered schemas
+
+After `skippr discover` completes, use [`SHOW PIPELINE`](../sql/reference.md#show-pipeline) to retrieve the full discovered schema including field names and inferred types:
+
+```bash
+skippr query --sql "SHOW PIPELINE el_mssql" --plain
+```
+
 ## Key log events
 
-- `Discovered new namespace: <name>` — a new event type/schema was found
-- `Discovered new field: <field>` — a new field was added to the schema
-- `Updated pipeline metadata in S3` — schema persisted
+- `Discovered new namespace: <name>` -- a new event type/schema was found
+- `Discovered new field: <field>` -- a new field was added to the schema
+- `Updated pipeline metadata` -- schema persisted
 
 ## Notes
 
 - Discovery must be run before the first `sync` to establish the pipeline schema.
 - Re-running discover updates the schema if the source data has changed.
-- Discovery does not ingest or move data — it only reads a sample.
+- Discovery does not ingest or move data -- it only reads a sample and infers types.

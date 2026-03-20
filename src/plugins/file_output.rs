@@ -96,7 +96,8 @@ impl DataOutputFilePlugin {
         stream: SendableRecordBatchStream,
         filename: String,
     ) -> Result<(), std::io::Error> {
-        // while let Some(filename) = BufferChunker::next_file(&self.buffer_name) {
+        use crate::metrics::counters;
+        counters::inc_uploads_in_flight();
 
         let namespace = BufferChunker::decode_file_namespace(&filename);
 
@@ -143,15 +144,24 @@ impl DataOutputFilePlugin {
         let output_dir = output_file.parent().unwrap();
         tokio::fs::create_dir_all(&output_dir).await?;
 
-        let parquet_bytes = DataOutputAwsAthenaPlugin::serialize_to_parquet(stream).await?;
+        let parquet_bytes = DataOutputAwsAthenaPlugin::serialize_to_parquet(stream).await
+            .map_err(|e| { counters::dec_uploads_in_flight(); e })?;
 
-        let fp = fs::File::create(&output_file)?;
+        let fp = fs::File::create(&output_file).map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
         let mut buf_writer = std::io::BufWriter::new(fp);
-        buf_writer.write_all(&parquet_bytes.bytes)?;
+        buf_writer.write_all(&parquet_bytes.bytes).map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
         buf_writer.flush()?;
 
-        // println!("Created output file: {}", output_file.display());
-
+        counters::add_parquet_rows(parquet_bytes.meta_data.num_rows as u64);
+        counters::add_parquet_bytes(parquet_bytes.size_bytes);
+        counters::add_upload(1);
+        counters::dec_uploads_in_flight();
         Ok(())
     }
 }

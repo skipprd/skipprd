@@ -6,7 +6,11 @@ use std::string::ToString;
 pub static CLI_MODE: Lazy<TimedRwLock<Mode>> = Lazy::new(|| {
     TimedRwLock::new(
         "cli_mode".to_string(),
-        Mode::Sync(SyncOptions { pipeline: None }),
+        Mode::Sync(SyncOptions {
+            pipeline: None,
+            output: "progress".to_string(),
+            once: false,
+        }),
     )
 });
 
@@ -35,6 +39,12 @@ pub struct SyncOptions {
     /// The pipeline to use
     #[arg(short, long)]
     pub pipeline: Option<String>,
+    /// Output mode: "progress" (interactive), "json" (structured JSON lines), or "text" (plain text)
+    #[arg(long, default_value = "progress")]
+    pub output: String,
+    /// Run a single sync pass and exit (instead of continuous daemon mode)
+    #[arg(long, default_value_t = false)]
+    pub once: bool,
 }
 
 #[derive(Parser, Clone, PartialEq)]
@@ -42,9 +52,9 @@ pub struct DisocverOptions {
     /// The pipeline to use
     #[arg(short, long)]
     pub pipeline: Option<String>,
-    /// Stream verbose logs to stdout instead of showing a progress bar
-    #[arg(long, default_value_t = false)]
-    pub verbose: bool,
+    /// Output mode: "progress" (interactive), "json" (structured JSON lines), or "text" (plain text)
+    #[arg(long, default_value = "progress")]
+    pub output: String,
 }
 
 #[derive(Parser, Clone, PartialEq)]

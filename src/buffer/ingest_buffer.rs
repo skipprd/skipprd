@@ -114,6 +114,8 @@ static COMPACTOR_COMMAND_TX: Lazy<
     std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<CompactorCommand>>>,
 > = Lazy::new(|| std::sync::Mutex::new(None));
 
+static COMPACT_FAILURES: Lazy<DashMap<String, u32>> = Lazy::new(DashMap::new);
+
 enum CompactorCommand {
     Wake,
     DrainAndStop(tokio::sync::oneshot::Sender<bool>),
@@ -602,6 +604,7 @@ impl Buffers {
         offsets_db: Arc<Offsets>,
     ) {
         let mut drain_reply: Option<tokio::sync::oneshot::Sender<bool>> = None;
+        let mut consecutive_failures: u32 = 0;
         loop {
             let force = drain_reply.is_some();
             let did_work =
@@ -612,6 +615,19 @@ impl Buffers {
                 }
                 break;
             }
+
+            if did_work {
+                consecutive_failures = 0;
+            } else if !COMPACT_FAILURES.is_empty() {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let backoff_ms = (500u64 * 2u64.saturating_pow(consecutive_failures.min(6))).min(30_000);
+                debug!(
+                    "Compactor: backoff {}ms after {} consecutive failure cycles",
+                    backoff_ms, consecutive_failures
+                );
+                tokio_sleep(TokioDuration::from_millis(backoff_ms)).await;
+            }
+
             tokio::select! {
                 cmd = rx.recv() => {
                     match cmd {
@@ -1644,9 +1660,15 @@ impl Buffers {
         });
         if let Err(e) = shared_output.sync(batch_stream, out_key.clone()).await {
             let err_str = e.to_string();
+            let failure_key = format!("{}:{}", seg_display, out_key);
+            let attempts = {
+                let mut entry = COMPACT_FAILURES.entry(failure_key.clone()).or_insert(0);
+                *entry += 1;
+                *entry
+            };
             error!(
-                "Compactor: compact failed seg={} key={:?} out_key={} error={}",
-                seg_display, idx.key, out_key, err_str
+                "Compactor: compact failed seg={} key={:?} out_key={} attempt={} error={}",
+                seg_display, idx.key, out_key, attempts, err_str
             );
             if err_str.contains("failed to fill whole buffer") || err_str.contains("UnexpectedEof")
             {
@@ -1689,6 +1711,7 @@ impl Buffers {
         }
 
         // ── Post-compaction: tombstone + cleanup ───────────────────────────
+        COMPACT_FAILURES.remove(&format!("{}:{}", seg_display, out_key));
         crate::metrics::counters::add_wal_compaction_completed(1);
 
         let tdir = Self::tombstone_dir();

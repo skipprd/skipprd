@@ -5,7 +5,7 @@ Ingest data from the source, buffer through the WAL, compact into Parquet, and u
 ## Usage
 
 ```bash
-skippr sync --pipeline <name> [--log [LEVEL]]
+skippr sync --pipeline <name> [--once] [--output <mode>] [--log [LEVEL]]
 ```
 
 ## Flags
@@ -13,6 +13,8 @@ skippr sync --pipeline <name> [--log [LEVEL]]
 | Flag | Required | Description |
 |---|---|---|
 | `--pipeline, -p` | No | Pipeline name. Falls back to `PIPELINE_NAME` env var. |
+| `--once` | No | Run a single sync pass across all pipelines and exit. Without this flag, multi-pipeline mode loops continuously. |
+| `--output` | No | Output mode: `progress` (default, interactive spinner), `json` (structured JSON lines to stdout), or `text` (plain text summaries). |
 | `--log` | No | Enable logging. Optional level: `debug`, `info`, `warn`, `error`. Defaults to `info` when flag is present. |
 
 ## What it does
@@ -37,6 +39,20 @@ SCHEMA_OUTPUT_GLUE_DATABASE_NAME=my_database \
 SKIPPR_S3_BUCKET=my-state-bucket \
 PIPELINE_NAME=events \
 skippr sync --log
+```
+
+### Batch sync with structured output
+
+```bash
+skippr sync --pipeline el_mssql --once --output json
+```
+
+This runs a single pass and emits JSON events to stdout:
+
+```json
+{"event":"sync_start","pipeline":"el_mssql","timestamp":"2026-03-18T12:00:00Z"}
+{"event":"namespace_discovered","namespace":"mssql.MyDB.dbo.customers","field_count":12,"timestamp":"..."}
+{"event":"sync_complete","pipeline":"el_mssql","namespaces_synced":5,"total_rows":15000,"elapsed_ms":4200,"timestamp":"..."}
 ```
 
 ## Key log events

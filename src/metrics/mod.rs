@@ -13,7 +13,6 @@ use serde_json::json;
 use tokio::runtime;
 
 use crate::helpers::configuration::Config;
-use crate::helpers::s3;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
 use crate::{METRICS, RUNNING};
@@ -420,22 +419,21 @@ impl Metrics {
             "exit_code": exit_code
         });
 
-        // Upload metrics to S3
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let s3_key = format!(
+        let key = format!(
             "{}/{}/{}/metrics/{}_{}.json",
             tenant, workspace, pipeline, timestamp, metrics.run_id
         );
 
-        match s3::put_json(&s3_key, &data).await {
+        let storage = crate::adapters::storage::get_storage();
+        match storage.put_json(&key, &data).await {
             Ok(_) => {
-                // Only log on exit to reduce noise
                 if exit_code.is_some() {
-                    info!("Uploaded metrics to S3: {}", s3_key);
+                    info!("Persisted metrics: {}", key);
                 }
             }
-            Err(err) => {
-                error!("Failed to upload metrics to S3: {:?}", err);
+            Err(e) => {
+                error!("Failed to persist metrics: {}", e);
                 error!("Hint: ensure AWS region is set (AWS_REGION or AWS_DEFAULT_REGION) and metrics bucket is configured.");
             }
         }
@@ -476,20 +474,16 @@ impl Metrics {
             "version": VERSION.unwrap_or("unknown"),
         });
 
-        // Upload config to S3
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let s3_key = format!(
+        let key = format!(
             "{}/{}/{}/config/{}_{}.json",
             tenant, workspace, pipeline, timestamp, metrics.run_id
         );
 
-        match s3::put_json(&s3_key, &data).await {
-            Ok(_) => {
-                info!("Uploaded config to S3: {}", s3_key);
-            }
-            Err(err) => {
-                error!("Failed to upload config to S3: {:?}", err);
-            }
+        let storage = crate::adapters::storage::get_storage();
+        match storage.put_json(&key, &data).await {
+            Ok(_) => info!("Persisted config: {}", key),
+            Err(e) => error!("Failed to persist config: {}", e),
         }
 
         Ok(())

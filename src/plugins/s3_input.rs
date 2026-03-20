@@ -519,6 +519,7 @@ impl DataSourceS3Plugin {
                     data: str_data,
                     bytes,
                     source_uri,
+                    namespace: None,
                 });
                 if current_bytes >= self.optimal_chunk_size {
                     let batch_bytes = current_bytes;

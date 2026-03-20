@@ -39,6 +39,23 @@ For local development, Skippr also supports writing Parquet to local disk:
 |---|---|---|
 | `DATA_OUTPUT_PATH` | *(required)* | Output directory for Parquet files |
 
+## Snowflake output
+
+Writes compacted Parquet to Snowflake via the REST SQL API.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SNOWFLAKE_ACCOUNT` | *(required)* | Snowflake account identifier |
+| `SNOWFLAKE_USER` | *(required)* | Snowflake login user |
+| `SNOWFLAKE_PASSWORD` | *(required)* | Snowflake login password |
+| `SNOWFLAKE_WAREHOUSE` | *(required)* | Compute warehouse name |
+| `SNOWFLAKE_DATABASE` | *(required)* | Target database |
+| `SNOWFLAKE_SCHEMA` | *(required)* | Target schema |
+| `SNOWFLAKE_ROLE` | | Optional role to assume |
+| `SNOWFLAKE_STAGE` | `@~` | Stage for file uploads |
+
+See the [Snowflake connector docs](../connectors/outputs/snowflake.md) for full details.
+
 ## Deadletter outputs
 
 Pipelines can optionally route deadletters to a separate output registry:
@@ -50,7 +67,7 @@ pipelines:
     deadletters: data_deadletters.archive
 ```
 
-`data_deadletters` uses the same output plugin shapes as `data_outputs` and supports `Athena`, `S3`, and `File`.
+`data_deadletters` uses the same output plugin shapes as `data_outputs` and supports `Athena`, `S3`, `File`, and `Snowflake`.
 
 - If `deadletters` is unset, deadletters are discarded.
 - If `deadletters` points to an invalid registry entry, startup fails.

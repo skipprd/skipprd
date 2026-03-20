@@ -35,15 +35,12 @@ fn central_registry_key() -> String {
 
 async fn load_registry() -> Option<Registry> {
     let key = central_registry_key();
-    match crate::helpers::s3::get_json(&key).await {
-        Ok(val) => serde_json::from_value::<Registry>(val).ok(),
+    let storage = crate::adapters::storage::get_storage();
+    match storage.get_json_opt(&key).await {
+        Ok(Some(val)) => serde_json::from_value::<Registry>(val).ok(),
+        Ok(None) => None,
         Err(e) => {
-            if let aws_sdk_s3::error::SdkError::ServiceError(se) = &e {
-                if se.err().is_no_such_key() {
-                    return None;
-                }
-            }
-            warn!("load_registry: failed to fetch '{}': {:?}", key, e);
+            warn!("load_registry: failed to fetch '{}': {}", key, e);
             None
         }
     }
@@ -52,14 +49,13 @@ async fn load_registry() -> Option<Registry> {
 async fn save_registry(reg: &Registry) -> Result<(), String> {
     let key = central_registry_key();
     let json_val = serde_json::to_value(reg).map_err(|e| e.to_string())?;
-    crate::helpers::s3::put_json(&key, &json_val)
-        .await
-        .map_err(|e| format!("failed to save registry to S3: {:?}", e))?;
+    let storage = crate::adapters::storage::get_storage();
+    storage.put_json(&key, &json_val).await?;
     {
         let mut guard = REGISTRY_CACHE.write().await;
         *guard = Some(reg.clone());
     }
-    info!("Updated central registry in S3: {}", key);
+    info!("Updated central registry: {}", key);
     Ok(())
 }
 

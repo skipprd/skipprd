@@ -64,7 +64,7 @@ pub async fn register_catalog(ctx: &SessionContext) {
                 ns,
                 entry.catalog_key
             );
-            if let Ok(val) = crate::helpers::s3::get_json(&entry.catalog_key).await {
+            if let Ok(Some(val)) = crate::adapters::storage::get_storage().get_json_opt(&entry.catalog_key).await {
                 let dims_str = if let Some(arr) = val.get("dimensions").and_then(|x| x.as_array()) {
                     Some(
                         arr.iter()

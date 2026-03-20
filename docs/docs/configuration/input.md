@@ -8,7 +8,7 @@ The input plugin to use for reading data.
 |---|---|
 | **Environment variable** | `DATA_SOURCE_PLUGIN_NAME` |
 | **Required** | Yes |
-| **Values** | `s3`, `file` |
+| **Values** | `S3`, `File`, `Mssql` |
 
 ## S3 source options
 
@@ -36,3 +36,11 @@ S3 access uses the standard AWS credential chain:
 | `DATA_SOURCE_PATH` | *(required)* | Path to the directory or file to ingest |
 
 Supports JSON, CSV, and Parquet input files.
+
+## MSSQL source options
+
+| Variable | Default | Description |
+|---|---|---|
+| `MSSQL_CONNECTION_STRING` | *(required)* | ADO.NET-style connection string for MSSQL |
+
+Additional MSSQL-specific options (available in YAML config): `tables`, `batch_size_rows`, `query_timeout_seconds`. See the [MSSQL connector docs](../connectors/inputs/mssql.md) for details.

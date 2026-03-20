@@ -209,6 +209,10 @@ pub struct IngestBatch {
     pub(crate) bytes: usize,
     #[allow(dead_code)]
     pub(crate) source_uri: String,
+    /// Explicit namespace override from the input plugin (e.g. table name for
+    /// MSSQL). When `None`, the pipeline name + `transform.namespace_fields`
+    /// config is used to derive the namespace from message content.
+    pub(crate) namespace: Option<String>,
 }
 
 #[derive(Clone)]
@@ -359,6 +363,8 @@ impl Ingest {
         None
     }
 
+    const MIN_FREE_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
+
     fn wait_for_data_dir_capacity() {
         let Some((high_watermark, low_watermark)) = Self::data_dir_watermarks() else {
             return;
@@ -373,32 +379,37 @@ impl Ingest {
                 return;
             };
 
+            // Primary guard: absolute free space floor
+            // Secondary guard: percentage watermark (only enforced when free < min)
+            let below_min_free = avail_bytes < Self::MIN_FREE_BYTES;
+            let should_block = below_min_free
+                || (used_pct >= high_watermark as f64 && avail_bytes < Self::MIN_FREE_BYTES * 2);
+
             if !paused {
-                if used_pct < high_watermark as f64 {
+                if !should_block {
                     return;
                 }
                 if !Buffers::has_reclaimable_wal() {
                     panic!(
-                        "DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}), but this pipeline has no reclaimable committed WAL to compact. Free disk or clean another pipeline before retrying.",
-                        used_pct,
-                        high_watermark,
+                        "DATA_DIR has insufficient free space (free {} / total {}, min free {}). This pipeline has no reclaimable committed WAL to compact. Free disk or clean another pipeline before retrying.",
                         Helpers::human_readable_size(avail_bytes),
-                        Helpers::human_readable_size(total_bytes)
+                        Helpers::human_readable_size(total_bytes),
+                        Helpers::human_readable_size(Self::MIN_FREE_BYTES)
                     );
                 }
                 paused = true;
                 DATA_DIR_INGEST_PAUSED.store(true, Ordering::SeqCst);
                 DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(0, Ordering::Relaxed);
                 warn!(
-                    "Pausing ingest: DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}). Background compaction will continue.",
-                    used_pct,
-                    high_watermark,
+                    "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Background compaction will continue.",
                     Helpers::human_readable_size(avail_bytes),
+                    Helpers::human_readable_size(Self::MIN_FREE_BYTES),
+                    used_pct,
                     Helpers::human_readable_size(total_bytes)
                 );
             }
 
-            if used_pct <= low_watermark as f64 {
+            if avail_bytes >= Self::MIN_FREE_BYTES {
                 DATA_DIR_INGEST_PAUSED.store(false, Ordering::SeqCst);
                 info!(
                     "Resuming ingest: DATA_DIR usage {:.1}% is below low watermark {}% (free {} / total {}).",
@@ -899,10 +910,19 @@ impl Ingest {
                     let mut count: u64 = 0;
 
                     for data in ingest_batches.tasks.first().unwrap().datas.iter() {
+                        let batch_ns: Option<String> = {
+                            let part = &data.offset_key.partition;
+                            if !part.is_empty() {
+                                Some(part.rsplit('.').next().unwrap_or(part).to_string())
+                            } else {
+                                None
+                            }
+                        };
                         count += self.analyse_schema.infer_json_schema(
                             &mut data.data.clone(),
                             Some(max_records),
                             &mut pipeline_metadata.metadata,
+                            batch_ns.as_deref(),
                         );
 
                         {
@@ -1241,6 +1261,11 @@ impl Ingest {
         for ingest_batch in datas.iter() {
             bytes += ingest_batch.data.len() as u64;
 
+            let batch_namespace_override: String = ingest_batch
+                .namespace
+                .clone()
+                .unwrap_or_else(|| pipeline_name_cached.clone());
+
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
             let current_line_offset =
@@ -1345,22 +1370,27 @@ impl Ingest {
                 {
                     i += 1;
 
-                    let mut namesapce_cache =
-                        PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone());
-                    let skpr_namespace = Helpers::parse_namespace_field(
-                        &record,
-                        pipeline_name_cached.clone(),
-                        &mut namesapce_cache,
-                    );
-
-
-                    if namesapce_cache
-                        != PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone())
-                    {
-                        PARSE_NAMESPACE_CACHE.with(|cache| cache.write().unwrap().clear());
-                        PARSE_NAMESPACE_CACHE
-                            .with(|cache| cache.write().unwrap().extend(namesapce_cache));
-                    }
+                    let skpr_namespace = if ingest_batch.namespace.is_some() {
+                        batch_namespace_override.clone()
+                    } else {
+                        let mut namesapce_cache =
+                            PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone());
+                        let ns = Helpers::parse_namespace_field(
+                            &record,
+                            batch_namespace_override.clone(),
+                            &mut namesapce_cache,
+                        );
+                        if namesapce_cache
+                            != PARSE_NAMESPACE_CACHE
+                                .with(|cache| cache.read().unwrap().clone())
+                        {
+                            PARSE_NAMESPACE_CACHE
+                                .with(|cache| cache.write().unwrap().clear());
+                            PARSE_NAMESPACE_CACHE
+                                .with(|cache| cache.write().unwrap().extend(namesapce_cache));
+                        }
+                        ns
+                    };
 
                     let allowed_values =
                         PARTITION_ALLOWED_VALUES_CACHE.with(|cache| cache.read().unwrap().clone());

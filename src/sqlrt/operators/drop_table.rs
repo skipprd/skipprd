@@ -18,29 +18,28 @@ pub async fn drop_table(
 
     let ns = &table_str; // namespace typically equals table
 
-    // S3 cleanup if online
     {
         let tenant = crate::helpers::configuration::Config::get_tenant();
         let workspace = crate::helpers::configuration::Config::get_workspace_name();
         let prefix_root = format!("{}/{}/{}", tenant, workspace, pipeline);
-        // Guard against unsafe deletions
         if !tenant.is_empty()
             && !workspace.is_empty()
             && !pipeline.is_empty()
             && !prefix_root.starts_with('/')
             && prefix_root.contains('/')
         {
-            // Delete stats/semantic/catalog objects
+            let storage = crate::adapters::storage::get_storage();
             if !ns.is_empty() && ns != "/" {
-                let _ = crate::helpers::s3::delete_prefix(&format!("{}/stats/{}", prefix_root, ns))
+                let _ = storage
+                    .delete_prefix(&format!("{}/stats/{}", prefix_root, ns))
                     .await;
-                let _ =
-                    crate::helpers::s3::delete_prefix(&format!("{}/semantic/{}", prefix_root, ns))
-                        .await;
-                let _ =
-                    crate::helpers::s3::delete_prefix(&format!("{}/catalog/{}", prefix_root, ns))
-                        .await;
-                // Delete parquet data under manifest-defined prefixes for this namespace
+                let _ = storage
+                    .delete_prefix(&format!("{}/semantic/{}", prefix_root, ns))
+                    .await;
+                let _ = storage
+                    .delete_prefix(&format!("{}/catalog/{}", prefix_root, ns))
+                    .await;
+                // Delete parquet data under manifest-defined prefixes (S3-only data plane)
                 if let Some(man) = crate::helpers::manifest::Manifest::read(ns).await {
                     if let Some(tables) = man.get("tables").and_then(|t| t.as_object()) {
                         if let Some(ns_obj) = tables.get(ns).and_then(|v| v.as_object()) {
@@ -69,9 +68,12 @@ pub async fn drop_table(
                     }
                 }
             }
-            // Delete pipeline data prefixes if present
-            let _ = crate::helpers::s3::delete_prefix(&format!("{}/wal/", prefix_root)).await;
-            let _ = crate::helpers::s3::delete_prefix(&format!("{}/parquet/", prefix_root)).await;
+            let _ = storage
+                .delete_prefix(&format!("{}/wal/", prefix_root))
+                .await;
+            let _ = storage
+                .delete_prefix(&format!("{}/parquet/", prefix_root))
+                .await;
         }
     }
 

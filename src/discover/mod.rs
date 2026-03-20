@@ -142,9 +142,18 @@ impl OutputMetadata {
         }
     }
 
-    /**
-     * Recusively convert Metadata to OutputMetadata
-     */
+    pub fn out_field_name(&self) -> &str {
+        &self.out_field_name
+    }
+
+    pub fn determined_type(&self) -> &SkipprDataType {
+        &self.determined_type
+    }
+
+    pub fn child_fields(&self) -> impl Iterator<Item = (&String, &OutputMetadata)> {
+        self.fields.iter()
+    }
+
     pub fn from_metadata(metadata: &Metadata) -> OutputMetadata {
         let mut output_metadata = OutputMetadata::new();
 
@@ -273,6 +282,58 @@ impl Metadata {
             determined_type_values: None,
             repetition_count: 5,
         })
+    }
+
+    pub fn new_with_type(data_type: SkipprDataType, field_name: &str) -> Self {
+        let mut m = Self::new().unwrap();
+        m.determined_type = data_type;
+        m.out_field_name = field_name.to_string();
+        m.enabled = true;
+        m
+    }
+
+    pub fn set_field(&mut self, name: &str, metadata: Metadata) {
+        self.fields.insert(name.to_string(), metadata);
+    }
+
+    pub fn field_count(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// Resolve `out_field_name` and `determined_type` for all child fields.
+    pub fn finalize_field_types(&mut self, flatten: bool) {
+        AnalyseSchema::determine_field_types(&mut self.fields, None, flatten);
+    }
+
+    /// Returns (field_name, determined_type_name, nullable) for each child field.
+    pub fn field_details(&self) -> Vec<(String, String, bool)> {
+        self.fields
+            .iter()
+            .map(|(key, m)| {
+                let name = if m.out_field_name.is_empty() {
+                    key.clone()
+                } else {
+                    m.out_field_name.clone()
+                };
+
+                let type_name = if m.determined_type == SkipprDataType::Unknown {
+                    Self::infer_type_from_counters(&m.types)
+                } else {
+                    m.determined_type.as_str().to_string()
+                };
+
+                (name, type_name, true)
+            })
+            .collect()
+    }
+
+    fn infer_type_from_counters(types: &HashMap<SkipprDataType, u32>) -> String {
+        types
+            .iter()
+            .filter(|(dt, _)| **dt != SkipprDataType::Null)
+            .max_by_key(|(_, count)| *count)
+            .map(|(dt, _)| dt.as_str().to_string())
+            .unwrap_or_else(|| "string".to_string())
     }
 
     pub fn flatten_metadata(metadata: &Metadata, flattened: &mut OutputMetadata) {
@@ -802,9 +863,9 @@ impl AnalyseSchema {
         str: &mut String,
         max_read_records: Option<u64>,
         metadata: &mut HashMap<std::string::String, Metadata>,
+        namespace_override: Option<&str>,
     ) -> u64 {
-        // self.infer_json_schema_from_iterator(ValueIter::new(reader, max_read_records))
-        let counts = self.infer_json_schema_from_iterator(str, metadata, max_read_records);
+        let counts = self.infer_json_schema_from_iterator(str, metadata, max_read_records, namespace_override);
         counts
     }
 
@@ -817,13 +878,16 @@ impl AnalyseSchema {
         str: &mut String,
         metadata: &mut HashMap<std::string::String, Metadata>,
         max_read_records: Option<u64>,
+        namespace_override: Option<&str>,
     ) -> u64 {
         let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
 
         let mut counts = 0;
 
         let mut _skpr_namespace: String = "".to_string();
-        let pipeline_name = Config::get_pipeline_name();
+        let pipeline_name = namespace_override
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| Config::get_pipeline_name());
 
         let _flatten = Config::truth_value(
             &Config::get_transform_config()
@@ -2338,7 +2402,7 @@ mod tests {
 
         let mut _fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new()); // Removed mut since it's not needed
 
-        AnalyseSchema::infer_json_schema(&_foo, &mut record_line, Some(1), &mut _fields);
+        AnalyseSchema::infer_json_schema(&_foo, &mut record_line, Some(1), &mut _fields, None);
 
         AnalyseSchema::determine_field_types(
             &mut _fields.get_mut("default").unwrap().fields,
@@ -2520,7 +2584,7 @@ mod tests {
 
         let mut _fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new()); // Removed mut since it's not needed
 
-        AnalyseSchema::infer_json_schema(&_foo, &mut record_line, Some(1), &mut _fields);
+        AnalyseSchema::infer_json_schema(&_foo, &mut record_line, Some(1), &mut _fields, None);
 
         AnalyseSchema::determine_field_types(
             &mut _fields.get_mut("default").unwrap().fields,
@@ -2740,7 +2804,7 @@ mod tests {
 
         let mut _fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new()); // Removed mut since it's not needed
 
-        AnalyseSchema::infer_json_schema(&_foo, &mut record_line, Some(1), &mut _fields);
+        AnalyseSchema::infer_json_schema(&_foo, &mut record_line, Some(1), &mut _fields, None);
 
         AnalyseSchema::determine_field_types(
             &mut _fields.get_mut("default").unwrap().fields,

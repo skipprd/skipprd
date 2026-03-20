@@ -11,12 +11,14 @@ use datafusion::execution::SendableRecordBatchStream;
 use std::sync::Arc;
 
 pub mod athena;
-// pub mod stdin_input;
-pub mod s3_input;
-// pub mod s3_inventory;
+pub mod bigquery_output;
 pub mod file_input;
-pub mod s3_output;
 pub mod file_output;
+pub mod mssql_input;
+pub mod postgres_output;
+pub mod s3_input;
+pub mod s3_output;
+pub mod snowflake_output;
 // pub mod stdout_output;
 // pub mod pcap_input;
 
@@ -62,4 +64,19 @@ pub trait DataOutputPlugin: Send + Sync {
         stream: SendableRecordBatchStream,
         filename: String,
     ) -> Result<(), std::io::Error>;
+}
+
+/// No-op output plugin used by `discover` mode to run the input pipeline
+/// without writing to any destination.
+pub struct NoopOutputPlugin;
+
+#[async_trait]
+impl DataOutputPlugin for NoopOutputPlugin {
+    async fn sync(
+        &self,
+        _stream: SendableRecordBatchStream,
+        _filename: String,
+    ) -> Result<(), std::io::Error> {
+        Ok(())
+    }
 }

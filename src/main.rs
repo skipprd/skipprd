@@ -29,7 +29,7 @@ use std::string::ToString;
 use skippr::buffer::BufferChunker;
 use skippr::helpers::configuration::{Config, OutputPluginConfig, PIPELINE_NAME};
 use skippr::helpers::logging::init_logging;
-use skippr::helpers::progress::ProgressUi;
+use skippr::helpers::sync_reporter::SyncReporter;
 use tracing::{error, info, warn};
 
 use skippr::helpers::logger::LogLevel;
@@ -37,12 +37,16 @@ use skippr::helpers::offsets::Offsets;
 
 use skippr::plugins::athena::DataOutputAwsAthenaPlugin;
 
+use skippr::plugins::mssql_input::DataSourceMssqlPlugin;
 use skippr::plugins::s3_input::DataSourceS3Plugin;
+use skippr::plugins::bigquery_output::DataOutputBigqueryPlugin;
+use skippr::plugins::postgres_output::DataOutputPostgresPlugin;
+use skippr::plugins::snowflake_output::DataOutputSnowflakePlugin;
 
 use skippr::metrics::{Metrics, MetricsStatus};
 use skippr::plugins::file_input::DataSourceLocalFilePlugin;
 use skippr::plugins::s3_output::DataOutputS3Plugin;
-use skippr::{LOGGER, METADATA, METRICS, OUTPUT_RUNNING, RUNNING};
+use skippr::{LOGGER, METADATA, METRICS, RUNNING};
 
 use datafusion::prelude::*;
 use datafusion::physical_plan::SendableRecordBatchStream;
@@ -157,79 +161,80 @@ async fn main() {
 
             Metrics::init_send_loop();
 
+            let output_mode = options.output.clone();
+            let run_once = options.once;
+
             if options.pipeline.is_some() {
-                // println!("Syncing pipeline: {}", options.pipeline.unwrap().clone());
                 PIPELINE_NAME.write().clear();
                 PIPELINE_NAME
                     .write()
                     .push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
-                sync().await;
+                sync(&output_mode).await;
             } else {
                 let pipeline_name = Config::getenv("PIPELINE_NAME", "");
                 if !pipeline_name.is_empty() {
-                    // println!("Syncing pipeline: {}", Config::getenv("PIPELINE_NAME").unwrap());
                     PIPELINE_NAME.write().clear();
                     PIPELINE_NAME.write().push_str(&pipeline_name.clone());
                     Config::init().await;
 
-                    sync().await;
+                    sync(&output_mode).await;
                 } else {
                     info!("Syncing all pipelines");
                     let pipelines = Config::get_pipelines();
-                    // loop {
-                    for pipeline_name in pipelines {
-                        Config::reset_envcache();
-                        {
-                            PIPELINE_NAME.write().clear();
-                            PIPELINE_NAME.write().push_str(&pipeline_name.clone());
+                    loop {
+                        for pipeline_name in pipelines.iter() {
+                            Config::reset_envcache();
+                            {
+                                PIPELINE_NAME.write().clear();
+                                PIPELINE_NAME.write().push_str(pipeline_name);
+                            }
+                            Config::init().await;
+
+                            if !PipelineCache::last_ran_is_elapsed() {
+                                let remaining = Config::get_sync_frequency()
+                                    - PipelineCache::get_last_ran_elapsed();
+                                info!(
+                                    "Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.",
+                                    &pipeline_name,
+                                    PipelineCache::get_last_ran_elapsed(),
+                                    remaining
+                                );
+                                continue;
+                            }
+
+                            PipelineCache::set_last_ran();
+
+                            {
+                                let mut counter_lock = METRICS.write();
+                                counter_lock.reset();
+                            }
+
+                            sync(&output_mode).await;
                         }
-                        Config::init().await;
 
-                        if !PipelineCache::last_ran_is_elapsed() {
-                            let remaining = Config::get_sync_frequency()
-                                - PipelineCache::get_last_ran_elapsed();
-                            info!(
-                                "Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.",
-                                &pipeline_name,
-                                PipelineCache::get_last_ran_elapsed(),
-                                remaining
-                            );
-                            continue;
+                        if run_once {
+                            break;
                         }
-
-                        PipelineCache::set_last_ran();
-
-                        {
-                            let mut counter_lock = METRICS.write();
-                            counter_lock.reset();
-                        }
-
-                        sync().await;
+                        sleep(Duration::from_secs(10));
                     }
-
-                    // sleep(Duration::from_secs(10));
-                    // }
                 }
-                // PIPELINE_NAME.write().unwrap().clear();
-                // PIPELINE_NAME.write().unwrap().push_str(&options.pipeline.unwrap().clone());
-                // Config::init().await;
-                // sync().await;
             }
         }
         Mode::Discover(options) => {
             Config::build_config();
 
+            let output_mode = options.output.clone();
+
             if options.pipeline.is_some() {
-                // println!("Syncing pipeline: {}", options.pipeline.unwrap().clone());
                 PIPELINE_NAME.write().clear();
                 PIPELINE_NAME
                     .write()
                     .push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
-                discover(options.verbose).await;
+                discover(&output_mode).await;
             } else {
                 error!("No pipeline name provided, you must provide a pipeline name to discover schemas");
             }
@@ -503,34 +508,32 @@ async fn schema(pipeline: &str) {
     }
 }
 
-async fn discover(log: bool) {
+async fn discover(output_mode: &str) {
     let pipeline_name = Config::get_pipeline_name();
-    let _start_time = Instant::now();
+    let start_time = Instant::now();
 
     let stdout_is_tty = std::io::stdout().is_terminal();
-    let progress = ProgressUi::new(stdout_is_tty && !log);
-    if progress.enabled() {
-        progress.add_tasks(&["Ingesting", "Finalising"]);
+    let logs_enabled = skippr::helpers::logging::cli_logs_enabled();
+    let reporter = SyncReporter::new(output_mode, stdout_is_tty, logs_enabled);
+    if reporter.enabled() {
+        reporter.add_tasks(&["Discovering"]);
     }
+    reporter.discover_start(&pipeline_name);
 
     info!(
         "Analysing data and generating Skippr metadata for pipeline: {}",
         pipeline_name
     );
 
-    // Stats tailer removed; catalogs built at end-of-run only
-
     let _data_dir = Config::get_data_dir();
 
     let pipeline_metadata = match Config::get_metadata().await {
         Ok(pipeline_metadata) => {
             info!("Found existing Skippr metadata, will update with schema discovered from sampled data");
-
             pipeline_metadata
         }
         Err(_e) => {
             info!("No existing Skippr metadata, will discover schemas");
-
             PipelineMetadata::new()
         }
     };
@@ -547,15 +550,9 @@ async fn discover(log: bool) {
 
     let offsets_db = Arc::new(offsets);
 
-    // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
-    // let output_plugin_name = Config::get_pipeline_output_plugin_name();
-    // let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
-    // let shared_output = Arc::new(TimedRwLock::new("output_plugin".to_string(), output));
-    let output_plugin_name = Config::get_pipeline_output_plugin_name();
-    let output = sync_output_plugin(&output_plugin_name, "output".to_string())
-        .await
-        .unwrap();
-    let shared_output = Arc::new(output);
+    let noop_output: Box<dyn skippr::plugins::DataOutputPlugin + Send + Sync> =
+        Box::new(skippr::plugins::NoopOutputPlugin);
+    let shared_output = Arc::new(noop_output);
 
     {
         let flatten = Config::get_transform_flatten_events();
@@ -574,294 +571,68 @@ async fn discover(log: bool) {
         }
     }
 
-    let shared_output_clone = shared_output.clone();
-    if progress.enabled() {
-        progress.start("Ingesting");
+    if reporter.enabled() {
+        reporter.start("Discovering");
     }
-    sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
-    if progress.enabled() {
-        progress.complete("Ingesting");
+    sync_input_plugin(offsets_db.clone(), shared_output).await;
+    if reporter.enabled() {
+        reporter.complete("Discovering");
     }
 
-    info!("Reached end of source data");
-    info!(
-        "Discover completed, syncing schema to output plugin {}",
-        Config::get_pipeline_config()
-            .output
-            .or(Some("".to_string()))
-            .unwrap()
+    info!("Reached end of source data, persisting discovered metadata");
+
+    let flatten = Config::truth_value(
+        &Config::get_transform_config()
+            .flatten_events
+            .unwrap_or("false".to_string()),
     );
 
-    // Stats tailer removed; stats computed by orchestrator from DataFusion at end-of-run
+    let mut updated_metadata = METADATA.load().as_ref().clone();
+    for (_namespace, metadata) in updated_metadata.metadata.iter_mut() {
+        metadata.finalize_field_types(flatten);
+    }
+    updated_metadata.enabled = true;
+    METADATA.store(Arc::new(updated_metadata.clone()));
 
-    // Late rebuild from existing S3 parquet if no new data (bounded)
-    // (legacy catalog module removed; this is now provider-driven)
-    // Stats tailer disabled
+    Config::set_metadata(&updated_metadata, true).await;
 
-    // NOTE: Catalog build is handled by the dedicated runtime service.
-
-    // Final metrics snapshot (same as periodic per-minute print)
-    // if log {
-    use std::sync::atomic::Ordering as AtomicOrdering;
-    let messages_total_counter =
-        skippr::metrics::counters::MESSAGES_TOTAL.load(AtomicOrdering::Relaxed);
-    let source_bytes_total_counter =
-        skippr::metrics::counters::SOURCE_BYTES_TOTAL.load(AtomicOrdering::Relaxed);
-    let deadletters_total_counter =
-        skippr::metrics::counters::DEADLETTERS_TOTAL.load(AtomicOrdering::Relaxed);
-    let _ingested_slow_total_counter =
-        skippr::metrics::counters::INGESTED_SLOW_TOTAL.load(AtomicOrdering::Relaxed);
-    let human_bytes = skippr::helpers::Helpers::human_readable_size(source_bytes_total_counter);
-    info!("Messages per Min: {}", 0);
-    info!("Messages Fixed per Min: {}", 0);
-    info!("Bytes Total: {}", human_bytes);
-    info!("Messages Total: {}", messages_total_counter);
-    info!("Deadletters per Min: {}", 0);
-    info!("Deadletter Total: {}", deadletters_total_counter);
-    // Runtime not directly accessible here; print 0 to keep format consistent
-    info!("Runtime: {} seconds", 0);
-    let up_total = skippr::metrics::counters::UPLOADS_TOTAL.load(AtomicOrdering::SeqCst);
-    let up_inflight = skippr::metrics::counters::UPLOADS_IN_FLIGHT.load(AtomicOrdering::SeqCst);
-    let up_lat_ns_total =
-        skippr::metrics::counters::UPLOAD_LATENCY_NS_TOTAL.load(AtomicOrdering::SeqCst);
-    let avg_up_ms = if up_total > 0 {
-        (up_lat_ns_total / up_total) as f64 / 1_000_000.0
-    } else {
-        0.0
-    };
-    let up_target =
-        skippr::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
-    let wal_target =
-        skippr::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
-    let dl_target =
-        skippr::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
-    let active = skippr::metrics::counters::ACTIVE_THREADS.load(AtomicOrdering::SeqCst);
-    let queue = skippr::metrics::counters::QUEUE_LENGTH.load(AtomicOrdering::SeqCst);
-    info!(
-        "Uploads total: {}, inflight: {}, avg latency: {:.2} ms",
-        up_total, up_inflight, avg_up_ms
-    );
-    info!(
-        "Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}",
-        up_target, wal_target, dl_target, active, queue
-    );
-    // }
-
-    // LLM enrichment is run via the catalog provider (see provider.run_llm_enrichment_all above).
-
-    // Insightful LLM summary based on Catalog Stats (not ingest counters)
-    {
-        use chrono::{TimeZone, Utc};
-        use std::collections::HashMap;
-        // Collect namespaces from registry (preferred) or metadata
-        let pipeline = Config::get_pipeline_name();
-        let mut namespaces = skippr::sqlrt::registry::list_namespaces(&pipeline).await;
-        if namespaces.is_empty() {
-            namespaces = pipeline_metadata
-                .metadata
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
-        }
-
-        // Gather per-namespace stats and descriptions
-        #[derive(Clone, Default)]
-        struct NsSummary {
-            approx_rows: u64,
-            desc: Option<String>,
-            earliest_ts: Option<i64>,
-            latest_ts: Option<i64>,
-        }
-        let mut by_ns: HashMap<String, NsSummary> = HashMap::new();
-
-        fn parse_epoch_to_secs(x: f64) -> Option<i64> {
-            let v = x as i64;
-            if v <= 0 {
-                return None;
-            }
-            if v > 1_000_000_000_000_000 {
-                // micros
-                Some(v / 1_000_000)
-            } else if v > 1_000_000_000_000 {
-                // millis
-                Some(v / 1_000)
-            } else if v > 1_000_000_000 {
-                // seconds
-                Some(v)
-            } else {
-                None
-            }
-        }
-
-        for ns in namespaces.iter() {
-            // Stats → approx rows and date range heuristic
-            if let Some(v) = Config::read_namespace_stats_async(ns).await {
-                if let Ok(stats) =
-                    serde_json::from_value::<skippr::discover::stats::NamespaceStats>(v)
-                {
-                    let mut approx_rows: u64 = 0;
-                    let mut min_ts: Option<i64> = None;
-                    let mut max_ts: Option<i64> = None;
-                    for (_fname, fs) in stats.fields.iter() {
-                        approx_rows = approx_rows.max(fs.sample_total.unwrap_or(fs.total));
-                        // Name-agnostic: infer time window only when numeric epoch-like stats are present
-                        if let Some(min_num) = fs.min_numeric {
-                            if let Some(s) = parse_epoch_to_secs(min_num) {
-                                min_ts = Some(min_ts.map(|m| m.min(s)).unwrap_or(s));
-                            }
-                        }
-                        if let Some(max_num) = fs.max_numeric {
-                            if let Some(s) = parse_epoch_to_secs(max_num) {
-                                max_ts = Some(max_ts.map(|m| m.max(s)).unwrap_or(s));
-                            }
-                        }
-                    }
-                    by_ns.insert(
-                        ns.clone(),
-                        NsSummary {
-                            approx_rows,
-                            desc: None,
-                            earliest_ts: min_ts,
-                            latest_ts: max_ts,
-                        },
-                    );
-                }
-            }
-            // Catalog → description
-            if let Some(entry) = skippr::sqlrt::registry::find_entry(&pipeline, ns).await {
-                if !entry.catalog_key.is_empty() {
-                    if let Ok(val) = skippr::helpers::s3::get_json(&entry.catalog_key).await {
-                        if let Some(s) = val.get("description").and_then(|x| x.as_str()) {
-                            by_ns.entry(ns.clone()).or_default().desc = Some(s.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        let tables = namespaces.len();
-        let approx_total: u64 = by_ns.values().map(|s| s.approx_rows).sum();
-        let earliest_any: Option<i64> = by_ns.values().filter_map(|s| s.earliest_ts).min();
-        let latest_any: Option<i64> = by_ns.values().filter_map(|s| s.latest_ts).max();
-        let period_str = match (earliest_any, latest_any) {
-            (Some(a), Some(b)) => {
-                let a_dt = Utc.timestamp_opt(a, 0).single();
-                let b_dt = Utc.timestamp_opt(b, 0).single();
-                match (a_dt, b_dt) {
-                    (Some(x), Some(y)) => format!("{} → {}", x.date_naive(), y.date_naive()),
-                    _ => String::new(),
-                }
-            }
-            (Some(a), None) => Utc
-                .timestamp_opt(a, 0)
-                .single()
-                .map(|d| d.date_naive().to_string())
-                .unwrap_or_default(),
-            _ => String::new(),
-        };
-
-        // Build a compact digest of namespaces
-        let mut digest_lines: Vec<String> = Vec::new();
-        for ns in namespaces.iter() {
-            let s = by_ns.get(ns).cloned().unwrap_or_default();
-            let d = s.desc.unwrap_or_else(|| String::from(""));
-            let line = if d.is_empty() {
-                format!("{} (≈{} rows)", ns, s.approx_rows)
-            } else {
-                format!("{}: {} (≈{} rows)", ns, d, s.approx_rows)
-            };
-            digest_lines.push(line);
-            if digest_lines.len() >= 6 {
-                break;
-            } // cap prompt size
-        }
-
-        if period_str.is_empty() {
-            println!(
-                "Warehouse spans {} table(s) with ≈{} rows in total.",
-                tables, approx_total
-            );
-        } else {
-            println!(
-                "Warehouse spans {} table(s) with ≈{} rows from {}.",
-                tables, approx_total, period_str
-            );
-        }
+    let namespaces_discovered = updated_metadata.metadata.len();
+    for (ns_name, ns_metadata) in updated_metadata.metadata.iter() {
+        let fields: Vec<serde_json::Value> = ns_metadata
+            .field_details()
+            .into_iter()
+            .map(|(name, type_name, _nullable)| {
+                serde_json::json!({
+                    "name": name,
+                    "type": type_name,
+                })
+            })
+            .collect();
+        reporter.discover_namespace(ns_name, fields);
     }
 
-    // NOTE: Embeddings sync is handled by the dedicated runtime service.
+    let elapsed_ms = start_time.elapsed().as_millis() as u64;
+    reporter.discover_complete(&pipeline_name, namespaces_discovered, elapsed_ms);
 
-    {
-        let mut counter_lock = METRICS.write();
-        counter_lock.status = MetricsStatus::Finishing;
-    }
-
-    if progress.enabled() {
-        progress.start("Finalising");
-    }
-    while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
-        sleep(Duration::from_secs(1));
-    }
-
-    {
-        OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
-    }
-
-    {
-        OUTPUT_RUNNING.write().store(false, Ordering::SeqCst);
-    }
-
-    skippr::converters::parquet_ordering::log_unmatched_order_fields();
-
-    Config::drain_glue_sync_worker();
-
-    {
-        let mut counter_lock = METRICS.write();
-        counter_lock.status = MetricsStatus::Completed;
-    }
-
-    {
-        let counter_lock = METRICS.write();
-
-        info!("Messages Fixed: {}", counter_lock.ingeted_slow_total);
-        info!("Deadletter Total: {}", counter_lock.deadletters_total);
-        info!("Ingested Total: {}", counter_lock.messages_total);
-    }
-
-    match Metrics::send_metrics(Some(0)).await {
-        Ok(_res) => (),
-        Err(e) => {
-            LOGGER
-                .write()
-                .await
-                .log(
-                    LogLevel::Error,
-                    format!("Failed to send metrics to Skippr API: {}", e),
-                )
-                .await;
-        }
-    }
-
-    if log {
-        if !LOGGER.read().await.logs.is_empty() {
-            LOGGER.write().await.flush().await.unwrap();
-        }
-    }
-
-    if progress.enabled() {
-        progress.complete("Finalising");
-        progress.finish();
+    if reporter.enabled() {
+        reporter.finish();
     }
 }
 
-async fn sync() {
+async fn sync(output_mode: &str) {
     let pipeline_name = Config::get_pipeline_name();
+    let sync_started = Instant::now();
 
     let stdout_is_tty = std::io::stdout().is_terminal();
-    let progress = ProgressUi::new(stdout_is_tty && !skippr::helpers::logging::cli_logs_enabled());
-    if progress.enabled() {
-        progress.add_tasks(&["Ingesting", "Finalising"]);
+    let reporter = SyncReporter::new(
+        output_mode,
+        stdout_is_tty,
+        skippr::helpers::logging::cli_logs_enabled(),
+    );
+    if reporter.enabled() {
+        reporter.add_tasks(&["Ingesting", "Finalising"]);
     }
+    reporter.sync_start(&pipeline_name);
 
     {
         let mut counter_lock = METRICS.write();
@@ -980,13 +751,15 @@ async fn sync() {
     // (one-by-one, via the worker), replacing the previous bulk re-send.
     {
         let flatten = Config::get_transform_flatten_events();
-        for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
+        for (namespace, _ns_metadata) in pipeline_metadata.metadata.iter() {
             match Ingest::prepare_arrow_schema_with_metadata(
-                &namespace,
+                namespace,
                 &pipeline_metadata.metadata,
                 flatten,
             ) {
-                Ok(_t) => {}
+                Ok(schema) => {
+                    reporter.namespace_discovered(namespace, schema.fields().len());
+                }
                 Err(e) => {
                     error!("Failed to prepare arrow schema: {}", e);
                     return;
@@ -995,12 +768,40 @@ async fn sync() {
         }
     }
 
-    if progress.enabled() {
-        progress.start("Ingesting");
+    if reporter.enabled() {
+        reporter.start("Ingesting");
     }
+
+    let (heartbeat_tx, mut heartbeat_rx) = tokio::sync::watch::channel(false);
+    let heartbeat_pipeline = pipeline_name.clone();
+    let heartbeat_started = sync_started;
+    let is_json_mode = matches!(&reporter, SyncReporter::Json);
+    if is_json_mode {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        let msgs = skippr::metrics::counters::MESSAGES_TOTAL.load(Relaxed);
+                        let bytes = skippr::metrics::counters::SOURCE_BYTES_TOTAL.load(Relaxed);
+                        let rows = skippr::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(Relaxed);
+                        let uploads = skippr::metrics::counters::UPLOADS_IN_FLIGHT.load(Relaxed) as u64;
+                        let elapsed = heartbeat_started.elapsed().as_millis() as u64;
+                        let r = SyncReporter::Json;
+                        r.sync_status(&heartbeat_pipeline, msgs, bytes, rows, elapsed, uploads);
+                    }
+                    _ = heartbeat_rx.changed() => break,
+                }
+            }
+        });
+    }
+
     sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
-    if progress.enabled() {
-        progress.complete("Ingesting");
+
+    if reporter.enabled() {
+        reporter.complete("Ingesting");
     }
 
     info!("Reached end of source data");
@@ -1019,8 +820,8 @@ async fn sync() {
     info!("All buffers flushed to output plugin");
 
     {
-        if progress.enabled() {
-            progress.start("Finalising");
+        if reporter.enabled() {
+            reporter.start("Finalising");
         }
         let finalising_started = std::time::Instant::now();
         info!("Finalising: draining and stopping compactor");
@@ -1049,9 +850,11 @@ async fn sync() {
     Config::drain_glue_sync_worker();
     info!("Finalising: Glue sync worker drained");
 
-    if progress.enabled() {
-        progress.complete("Finalising");
+    if reporter.enabled() {
+        reporter.complete("Finalising");
     }
+
+    let _ = heartbeat_tx.send(true);
 
     // Summary and integrity check: uploaded rows vs expected rows (normal + deadletters), quarantined parts
     {
@@ -1126,9 +929,18 @@ async fn sync() {
         );
     }
     info!("Pipeline sync complete");
-    // NOTE: Catalog/semantic/embeddings work is handled by the dedicated runtime service.
-    if progress.enabled() {
-        progress.finish();
+
+    {
+        use skippr::metrics::counters;
+        let namespaces_synced = pipeline_metadata.metadata.len();
+        let total_rows =
+            counters::PARQUET_PERSISTED_ROWS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+        let elapsed_ms = sync_started.elapsed().as_millis() as u64;
+        reporter.sync_complete(&pipeline_name, namespaces_synced, total_rows, elapsed_ms);
+    }
+
+    if reporter.enabled() {
+        reporter.finish();
     }
 }
 
@@ -1148,6 +960,21 @@ async fn build_output_plugin_from_config(
         }
         OutputPluginConfig::S3(s3_config) => {
             let plugin = DataOutputS3Plugin::new_with_config(buffer_name, Some(s3_config)).await;
+            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+        }
+        OutputPluginConfig::Snowflake(sf_config) => {
+            let plugin =
+                DataOutputSnowflakePlugin::new_with_config(buffer_name, sf_config).await;
+            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+        }
+        OutputPluginConfig::Bigquery(bq_config) => {
+            let plugin =
+                DataOutputBigqueryPlugin::new_with_config(buffer_name, bq_config).await;
+            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+        }
+        OutputPluginConfig::Postgres(pg_config) => {
+            let plugin =
+                DataOutputPostgresPlugin::new_with_config(buffer_name, pg_config).await;
             Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
         }
     }
@@ -1236,6 +1063,10 @@ pub async fn sync_input_plugin(
         }
         "S3" => {
             let mut input = DataSourceS3Plugin::new().await;
+            input.sync(offsets_clone, shared_output).await;
+        }
+        "Mssql" => {
+            let mut input = DataSourceMssqlPlugin::new().await;
             input.sync(offsets_clone, shared_output).await;
         }
         // "s3_inventory" => {

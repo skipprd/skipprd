@@ -76,7 +76,7 @@ thiserror = "1.0.58"
 object_store = { version = "0.12.4", features = ["aws"] }
 rayon = "1.8.0"
 arc-swap = "1.6"
-tokio-util = { version = "0.7", features = ["io", "io-util"], default-features = false }
+tokio-util = { version = "0.7", features = ["io", "io-util", "compat"], default-features = false }
 sha2 = "0.10"
 aws-credential-types = "1.2.0"
 ratatui = { version = "0.26" }
@@ -93,6 +93,16 @@ tungstenite = "0.21"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3.10"
 itertools = "0.12"
+tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono"] }
+bb8 = "0.9"
+bb8-tiberius = "0.15"
+jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
+rsa = "0.9.10"
+base64 = "0.22.1"
+tracing-appender = "0.2.4"
+tokio-postgres = "0.7.16"
+postgres-native-tls = "0.5.2"
+native-tls = "0.2.18"
 
 [features]
 stats_integration = []

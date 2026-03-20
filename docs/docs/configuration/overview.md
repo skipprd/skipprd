@@ -39,6 +39,7 @@ Skippr is configured entirely via environment variables (or an optional config f
 | `WAL_MAX_DELAY_SECONDS` | `60` | [Buffering](buffering.md) | Max WAL segment age before flush |
 | **Skippr state** | | | |
 | `SKIPPR_S3_BUCKET` | | [Advanced](advanced.md) | S3 bucket for metadata, offsets, WAL (when S3), deadletters |
+| `SKIPPR_STORAGE_MODE` | `s3` | [Advanced](advanced.md) | Metadata and stats persistence: `s3` (default) or `local` |
 | `DATA_DIR` | `./data` | [Advanced](advanced.md) | Local directory for WAL segments and offsets DB |
 | **Operational** | | | |
 | `SKIPPR_CHAOS_MODE` | `no` | [Advanced](advanced.md) | Enable chaos mode (random SIGKILL for testing) |

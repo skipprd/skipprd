@@ -32,15 +32,20 @@ impl Manifest {
     }
 
     pub async fn read(namespace: &str) -> Option<Value> {
-        let (bucket, key) = Self::s3_key(namespace);
-        debug!("Reading manifest from s3://{}/{}", bucket, key);
-        match crate::helpers::s3::get_json(&key).await {
-            Ok(v) => {
+        let (_bucket, key) = Self::s3_key(namespace);
+        debug!("Reading manifest for namespace '{}' key='{}'", namespace, key);
+        let storage = crate::adapters::storage::get_storage();
+        match storage.get_json_opt(&key).await {
+            Ok(Some(v)) => {
                 debug!("Manifest loaded for namespace '{}'", namespace);
                 Some(v)
             }
-            Err(_) => {
-                debug!("Manifest not found at s3://{}/{}", bucket, key);
+            Ok(None) => {
+                debug!("Manifest not found: {}", key);
+                None
+            }
+            Err(e) => {
+                debug!("Manifest read error for '{}': {}", namespace, e);
                 None
             }
         }
@@ -162,7 +167,8 @@ impl Manifest {
                 obj.insert("epoch".to_string(), json!(now_epoch));
             }
             let (_bucket, key) = Self::s3_key(namespace);
-            let _ = crate::helpers::s3::put_json(&key, &manifest).await;
+            let storage = crate::adapters::storage::get_storage();
+            let _ = storage.put_json(&key, &manifest).await;
             info!(
                 "Updated manifest for namespace '{}' (prefix={})",
                 namespace, abs_prefix

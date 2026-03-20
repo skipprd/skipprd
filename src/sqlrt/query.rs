@@ -3,7 +3,7 @@ use std::io::BufReader;
 use std::{fs, process};
 // removed unused Write import
 use crate::cli::{Mode, QueryOptions, CLI_MODE};
-use crate::discover::{Metadata, PipelineMetadata};
+use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::plugins::athena::AwsAthena;
 use crate::sqlrt::operators::alter_column::alter_column_type;
@@ -761,53 +761,84 @@ pub async fn query(sql_str: &str) {
                 .write()
                 .push_str(format!("{}", &stmt.pipeline).as_str());
             Config::init().await;
-            let _workspace = Config::get_workspace_name();
 
-            // get current metadata
-            let skippr_metadata = match Config::get_metadata().await {
+            let mut skippr_metadata = match Config::get_metadata().await {
                 Ok(metadata) => metadata,
-                Err(_e) => {
-                    println!("No existing schema for {}", stmt.pipeline);
+                Err(_e) => PipelineMetadata::new(),
+            };
+
+            let source_path = if std::path::Path::new(&stmt.source).is_absolute() {
+                stmt.source.clone()
+            } else {
+                let data_dir = Config::get_data_dir();
+                format!("{}/{}", data_dir, stmt.source)
+            };
+
+            let file = match OpenOptions::new().read(true).open(&source_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Failed to open schema file '{}': {}", source_path, e);
+                    return;
+                }
+            };
+            let reader = BufReader::new(file);
+            let schema_file: serde_json::Value = match serde_json::from_reader(reader) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("Failed to parse schema JSON: {}", e);
                     return;
                 }
             };
 
-            let mut metadata = skippr_metadata
-                .metadata
-                .get(&format!("{}", &stmt.pipeline))
-                .expect(&format!("Schema not found for table {}", stmt.pipeline));
-
-            // read schema from file
-            let data_dir = Config::get_data_dir();
-            let metadata_file = format!("{}/{}", data_dir, stmt.source);
-
-            let file = OpenOptions::new()
-                .read(true)
-                .open(&metadata_file)
-                .expect(&format!(
-                    "Failed to open source schema file {}",
-                    &metadata_file
-                ));
-
-            let reader = BufReader::new(file);
-
-            let file_content_metadata: Metadata = match serde_json::from_reader(reader) {
-                Ok(file_content_metadata) => file_content_metadata,
-                Err(err) => {
-                    std::panic!("Error loading schema: {}", err);
+            let tables = match schema_file.get("tables").and_then(|t| t.as_array()) {
+                Some(t) => t,
+                None => {
+                    eprintln!("Schema JSON missing 'tables' array");
+                    return;
                 }
             };
 
-            // update metadata
-            metadata.clone_from(&&file_content_metadata);
+            for table in tables {
+                let namespace = match table.get("skippr_namespace").and_then(|n| n.as_str()) {
+                    Some(n) => n.to_string(),
+                    None => {
+                        eprintln!("Table entry missing 'skippr_namespace'");
+                        continue;
+                    }
+                };
+                let columns = match table.get("columns").and_then(|c| c.as_array()) {
+                    Some(c) => c,
+                    None => {
+                        eprintln!("Table '{}' missing 'columns' array", namespace);
+                        continue;
+                    }
+                };
 
-            {
-                METADATA.store(Arc::new(skippr_metadata.clone()));
+                let mut ns_metadata = Metadata::new().unwrap();
+                for col in columns {
+                    let col_name = match col.get("name").and_then(|n| n.as_str()) {
+                        Some(n) => n.to_string(),
+                        None => continue,
+                    };
+                    let col_type_str = col
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("VARCHAR");
+                    let skippr_type = map_destination_type_to_skippr(col_type_str);
+                    let field_meta = Metadata::new_with_type(skippr_type, &col_name);
+                    ns_metadata.set_field(&col_name, field_meta);
+                }
+
+                skippr_metadata
+                    .metadata
+                    .insert(namespace.clone(), ns_metadata);
             }
 
+            METADATA.store(Arc::new(skippr_metadata.clone()));
             Config::set_metadata(&skippr_metadata, true).await;
 
-            println!("Schema loaded from file.");
+            let count = tables.len();
+            println!("Schema loaded: {} namespace(s) updated.", count);
         }
         Ok(Statement::SchemaDump(stmt)) => {
             PIPELINE_NAME.write().clear();
@@ -1044,6 +1075,14 @@ pub async fn query(sql_str: &str) {
                             Config::init().await;
                             register_catalog(&ctx).await;
                             let _ = show_catalog(&ctx, namespace.as_deref()).await;
+                            return;
+                        }
+                        Statement::ShowPipeline { pipeline } => {
+                            let pipeline = pipeline.replace('"', "");
+                            PIPELINE_NAME.write().clear();
+                            PIPELINE_NAME.write().push_str(&pipeline);
+                            Config::init().await;
+                            show_pipeline(&pipeline).await;
                             return;
                         }
                         _ => {}
@@ -1653,7 +1692,7 @@ async fn show_catalog(
     if !ns.is_empty() {
         let pipeline = Config::get_pipeline_name();
         if let Some(entry) = crate::sqlrt::registry::find_entry(&pipeline, &ns).await {
-            if let Ok(val) = crate::helpers::s3::get_json(&entry.catalog_key).await {
+            if let Ok(Some(val)) = crate::adapters::storage::get_storage().get_json_opt(&entry.catalog_key).await {
                 if let Some(d) = val.get("description").and_then(|x| x.as_str()) {
                     if !d.trim().is_empty() {
                         println!("Description: {}", d);
@@ -1699,4 +1738,92 @@ fn print_batches_plain(batch: &RecordBatch) {
         }
         println!("{}", parts.join(","));
     }
+}
+
+fn map_destination_type_to_skippr(type_str: &str) -> SkipprDataType {
+    match type_str.to_uppercase().as_str() {
+        "VARCHAR" | "STRING" | "TEXT" | "NVARCHAR" | "CHAR" | "NCHAR" | "NTEXT" => {
+            SkipprDataType::String
+        }
+        "NUMBER" | "INT" | "INTEGER" | "BIGINT" | "SMALLINT" | "TINYINT" => SkipprDataType::Long,
+        "DOUBLE" | "FLOAT" | "REAL" | "NUMERIC" | "DECIMAL" | "MONEY" | "SMALLMONEY" => {
+            SkipprDataType::Double
+        }
+        "BOOLEAN" | "BOOL" | "BIT" => SkipprDataType::Boolean,
+        "DATE" => SkipprDataType::Date,
+        "TIMESTAMP" | "TIMESTAMP_NTZ" | "TIMESTAMP_LTZ" | "TIMESTAMP_TZ" | "DATETIME"
+        | "DATETIME2" | "SMALLDATETIME" | "DATETIMEOFFSET" => SkipprDataType::Timestamp,
+        "VARIANT" | "OBJECT" | "ARRAY" => SkipprDataType::String,
+        other => {
+            tracing::warn!(
+                "Unrecognized destination type '{}', defaulting to String",
+                other
+            );
+            SkipprDataType::String
+        }
+    }
+}
+
+async fn show_pipeline(pipeline_name: &str) {
+    let pipeline_metadata = match Config::get_metadata().await {
+        Ok(m) => m,
+        Err(_) => {
+            let result = serde_json::json!({
+                "pipeline": pipeline_name,
+                "status": "not_found",
+                "namespaces": [],
+                "offsets": {},
+            });
+            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            return;
+        }
+    };
+
+    let status = if pipeline_metadata.enabled {
+        "active"
+    } else {
+        "disabled"
+    };
+
+    let mut namespaces = Vec::new();
+    for (ns_name, ns_metadata) in pipeline_metadata.metadata.iter() {
+        let fields: Vec<serde_json::Value> = ns_metadata
+            .field_details()
+            .into_iter()
+            .map(|(name, type_name, nullable)| {
+                serde_json::json!({
+                    "name": name,
+                    "type": type_name,
+                    "nullable": nullable,
+                })
+            })
+            .collect();
+        namespaces.push(serde_json::json!({
+            "name": ns_name,
+            "enabled": true,
+            "fields": fields,
+        }));
+    }
+
+    let metadata_location = if Config::get_storage_mode() == "local" {
+        format!("{}/metadata.json", Config::get_data_dir())
+    } else {
+        format!(
+            "s3://{}/{}/{}/{}/metadata/metadata.json",
+            Config::get_skippr_s3_bucket(),
+            Config::get_tenant(),
+            Config::get_workspace_name(),
+            pipeline_name,
+        )
+    };
+
+    let result = serde_json::json!({
+        "pipeline": pipeline_name,
+        "status": status,
+        "namespaces": namespaces,
+        "offsets": {},
+        "metadata_location": metadata_location,
+    });
+
+    println!("{}", serde_json::to_string_pretty(&result).unwrap());
 }

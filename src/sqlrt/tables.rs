@@ -250,21 +250,28 @@ pub async fn register_namespace_view(
     // Build manifest key from explicit pipeline/namespace (no global pipeline)
     let man_opt = {
         let key = crate::sqlrt::registry::manifest_key_for(pipeline, namespace);
-        match tokio::time::timeout(Duration::from_secs(12), crate::helpers::s3::get_json(&key))
+        let storage = crate::adapters::storage::get_storage();
+        match tokio::time::timeout(Duration::from_secs(12), storage.get_json_opt(&key))
             .await
         {
-            Ok(Ok(v)) => {
+            Ok(Ok(Some(v))) => {
                 debug!(
-                    "Reading manifest from s3://{}/{}",
-                    Config::get_skippr_s3_bucket(),
+                    "Reading manifest key='{}'",
                     key
                 );
                 debug!("Manifest content: {}", v);
                 Some(v)
             }
+            Ok(Ok(None)) => {
+                warn!(
+                    "register_namespace_view: manifest not found for '{}.{}'",
+                    pipeline, namespace
+                );
+                None
+            }
             Ok(Err(e)) => {
                 warn!(
-                    "register_namespace_view: failed to fetch manifest for '{}.{}': {:?}",
+                    "register_namespace_view: failed to fetch manifest for '{}.{}': {}",
                     pipeline, namespace, e
                 );
                 None
@@ -482,95 +489,65 @@ pub async fn register_dbt_models(ctx: &SessionContext) -> Result<(), DataFusionE
     // Ensure config (tenant/workspace/bucket)
     Config::init().await;
     ensure_dbt_schema(ctx)?;
-    let bucket = Config::get_skippr_s3_bucket();
     let tenant = Config::get_tenant();
     let workspace = Config::get_workspace_name();
-    // List all pipelines
     let pipelines = crate::sqlrt::registry::list_pipelines().await;
-    let client = crate::helpers::s3::get_s3_client().await;
+    let storage = crate::adapters::storage::get_storage();
     use std::collections::HashSet;
     let mut seen_models: HashSet<String> = HashSet::new();
     let mut total_registered: usize = 0;
     for pipeline in pipelines {
-        // compiled SQL can live in various target subdirs; scan target recursively
         let prefix = format!("{}/{}/{}/dbt/target/", tenant, workspace, pipeline);
-        // list objects under this prefix
-        let mut token: Option<String> = None;
-        let mut registered_for_pipeline: usize = 0;
-        loop {
-            let mut req = client
-                .list_objects_v2()
-                .bucket(&bucket)
-                .prefix(&prefix)
-                .max_keys(1000);
-            if let Some(t) = token.as_ref() {
-                req = req.continuation_token(t);
+        let keys = match storage.list_prefix(&prefix).await {
+            Ok(k) => k,
+            Err(e) => {
+                warn!("register_dbt_models: list_prefix failed for '{}': {}", prefix, e);
+                continue;
             }
-            let resp = match req.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("register_dbt_models: list_objects_v2 failed for prefix '{}' in bucket '{}': {:?}", prefix, bucket, e);
-                    break;
-                }
-            };
-            let contents = resp.contents();
-            for obj in contents {
-                if let Some(key) = obj.key() {
-                    // interested only in compiled SQL files
-                    if !key.ends_with(".sql") {
+        };
+        let mut registered_for_pipeline: usize = 0;
+        for key in &keys {
+            if !key.ends_with(".sql") || !key.contains("/compiled/") {
+                continue;
+            }
+            let model = key
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches(".sql");
+            if model.is_empty() {
+                continue;
+            }
+            if seen_models.contains(model) {
+                warn!("dbt model name collision: dbt.{} already registered; replacing with {}", model, key);
+            }
+            match storage.get_bytes(key).await {
+                Ok(bytes) => {
+                    let sql_text = String::from_utf8_lossy(&bytes).to_string();
+                    if sql_text.trim().is_empty() {
                         continue;
                     }
-                    if !key.contains("/compiled/") {
-                        continue;
-                    }
-                    // derive model name from filename
-                    let model = key
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or("")
-                        .trim_end_matches(".sql");
-                    if model.is_empty() {
-                        continue;
-                    }
-                    if seen_models.contains(model) {
-                        warn!("dbt model name collision: dbt.{} already registered; replacing with {}", model, key);
-                    }
-                    // fetch SQL
-                    match crate::helpers::s3::get_bytes(key).await {
-                        Ok(bytes) => {
-                            let sql_text = String::from_utf8_lossy(&bytes).to_string();
-                            if sql_text.trim().is_empty() {
-                                continue;
-                            }
-                            // Register or replace view using DDL to avoid provider plumbing
-                            let view_stmt =
-                                format!("CREATE OR REPLACE VIEW dbt.\"{}\" AS {}", model, sql_text);
-                            match ctx.sql(&view_stmt).await {
-                                Ok(df) => {
-                                    // execute DDL
-                                    let _ = df.collect().await;
-                                    info!("Registered dbt view: dbt.{} (from {})", model, key);
-                                    seen_models.insert(model.to_string());
-                                    registered_for_pipeline += 1;
-                                }
-                                Err(e) => {
-                                    warn!("Failed to register dbt view for model '{}' from key '{}': {}", model, key, e);
-                                }
-                            }
+                    let view_stmt =
+                        format!("CREATE OR REPLACE VIEW dbt.\"{}\" AS {}", model, sql_text);
+                    match ctx.sql(&view_stmt).await {
+                        Ok(df) => {
+                            let _ = df.collect().await;
+                            info!("Registered dbt view: dbt.{} (from {})", model, key);
+                            seen_models.insert(model.to_string());
+                            registered_for_pipeline += 1;
                         }
                         Err(e) => {
-                            warn!(
-                                "register_dbt_models: failed to fetch compiled SQL '{}': {:?}",
-                                key, e
-                            );
+                            warn!("Failed to register dbt view for model '{}' from key '{}': {}", model, key, e);
                         }
                     }
                 }
+                Err(e) => {
+                    warn!(
+                        "register_dbt_models: failed to fetch compiled SQL '{}': {}",
+                        key, e
+                    );
+                }
             }
-            if resp.next_continuation_token().is_none() {
-                break;
-            }
-            token = resp.next_continuation_token().map(|s| s.to_string());
         }
         if registered_for_pipeline > 0 {
             info!(

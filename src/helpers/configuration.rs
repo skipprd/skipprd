@@ -1,4 +1,3 @@
-use aws_sdk_s3::error::SdkError;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
@@ -22,8 +21,6 @@ use serde_json::Value;
 
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::METADATA;
-
-use crate::helpers::s3;
 
 use crate::plugins::athena::{AwsAthena, DataOutputAwsAthenaPluginConfig};
 
@@ -56,6 +53,7 @@ pub struct Skippr {
     pub workspace: Option<String>,
     pub tenant: Option<String>,
     pub skippr_s3_bucket: Option<String>,
+    pub storage_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -91,6 +89,7 @@ pub struct SemanticLayerSettings {
 pub enum InputPluginConfig {
     S3(DataSourceS3PluginConfig),
     File(DataSourceLocalFilePluginConfig),
+    Mssql(DataSourceMssqlPluginConfig),
 }
 
 impl InputPluginConfig {
@@ -108,68 +107,152 @@ impl InputPluginConfig {
                 .clone()
                 .or(Some("json".to_string()))
                 .unwrap(),
+            InputPluginConfig::Mssql(mssql_config) => mssql_config
+                .format
+                .clone()
+                .unwrap_or_else(|| "row".to_string()),
         }
     }
 
     pub fn plugin_name(&self) -> Option<String> {
         match self {
-            InputPluginConfig::S3(_s3_config) => Some("S3".to_string()),
-            InputPluginConfig::File(_file_config) => Some("File".to_string()),
+            InputPluginConfig::S3(_) => Some("S3".to_string()),
+            InputPluginConfig::File(_) => Some("File".to_string()),
+            InputPluginConfig::Mssql(_) => Some("Mssql".to_string()),
         }
     }
 
     pub fn batch_size_bytes(&self) -> Option<i64> {
         match self {
-            InputPluginConfig::S3(s3_config) => s3_config.batch_size_bytes.clone(),
-            InputPluginConfig::File(file_config) => file_config.batch_size_bytes.clone(),
+            InputPluginConfig::S3(s3_config) => s3_config.batch_size_bytes,
+            InputPluginConfig::File(file_config) => file_config.batch_size_bytes,
+            InputPluginConfig::Mssql(mssql_config) => mssql_config.batch_size_bytes,
         }
     }
 
     pub fn batch_size_seconds(&self) -> Option<i64> {
         match self {
-            InputPluginConfig::S3(s3_config) => s3_config.batch_size_seconds.clone(),
-            InputPluginConfig::File(file_config) => file_config.batch_size_seconds.clone(),
+            InputPluginConfig::S3(s3_config) => s3_config.batch_size_seconds,
+            InputPluginConfig::File(file_config) => file_config.batch_size_seconds,
+            InputPluginConfig::Mssql(mssql_config) => mssql_config.batch_size_seconds,
         }
     }
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct DataSourceMssqlPluginConfig {
+    pub connection_string: String,
+    pub tables: Option<Vec<String>>,
+    pub batch_size_rows: Option<usize>,
+    pub query_timeout_seconds: Option<u64>,
+    pub format: Option<String>,
+    pub batch_size_bytes: Option<i64>,
+    pub batch_size_seconds: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub enum OutputPluginConfig {
     Athena(DataOutputAwsAthenaPluginConfig),
+    Bigquery(DataOutputBigqueryPluginConfig),
     File(DataOutputFilePluginConfig),
+    Postgres(DataOutputPostgresPluginConfig),
     S3(DataOutputS3PluginConfig),
+    Snowflake(DataOutputSnowflakePluginConfig),
 }
 
 impl OutputPluginConfig {
     pub fn format(&self) -> String {
         match self {
-            OutputPluginConfig::Athena(athena_config) => athena_config
+            OutputPluginConfig::Athena(c) => c
                 .format
                 .clone()
                 .or(Some("json".to_string()))
                 .as_ref()
                 .unwrap()
                 .clone(),
-            OutputPluginConfig::File(file_config) => file_config
+            OutputPluginConfig::Bigquery(c) => c
+                .format
+                .clone()
+                .unwrap_or_else(|| "json".to_string()),
+            OutputPluginConfig::File(c) => c
                 .format
                 .clone()
                 .or(Some("json".to_string()))
                 .unwrap(),
-            OutputPluginConfig::S3(s3_config) => s3_config
+            OutputPluginConfig::Postgres(c) => c
+                .format
+                .clone()
+                .unwrap_or_else(|| "json".to_string()),
+            OutputPluginConfig::S3(c) => c
                 .format
                 .clone()
                 .or(Some("json".to_string()))
                 .unwrap(),
+            OutputPluginConfig::Snowflake(c) => c
+                .format
+                .clone()
+                .unwrap_or_else(|| "parquet".to_string()),
         }
     }
 
     pub fn plugin_name(&self) -> Option<String> {
         match self {
-            OutputPluginConfig::Athena(_athena_config) => Some("Athena".to_string()),
-            OutputPluginConfig::File(_file_config) => Some("File".to_string()),
-            OutputPluginConfig::S3(_s3_config) => Some("S3".to_string()),
+            OutputPluginConfig::Athena(_) => Some("Athena".to_string()),
+            OutputPluginConfig::Bigquery(_) => Some("Bigquery".to_string()),
+            OutputPluginConfig::File(_) => Some("File".to_string()),
+            OutputPluginConfig::Postgres(_) => Some("Postgres".to_string()),
+            OutputPluginConfig::S3(_) => Some("S3".to_string()),
+            OutputPluginConfig::Snowflake(_) => Some("Snowflake".to_string()),
         }
     }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DataOutputSnowflakePluginConfig {
+    pub account: String,
+    pub user: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    pub warehouse: String,
+    pub database: String,
+    pub schema: String,
+    pub role: Option<String>,
+    pub stage: Option<String>,
+    pub format: Option<String>,
+    #[serde(default)]
+    pub private_key_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DataOutputBigqueryPluginConfig {
+    pub project: String,
+    pub dataset: String,
+    pub location: Option<String>,
+    pub credentials_path: Option<String>,
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DataOutputPostgresPluginConfig {
+    #[serde(default = "default_postgres_host")]
+    pub host: String,
+    pub port: Option<u16>,
+    pub user: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    pub database: String,
+    #[serde(default = "default_postgres_schema")]
+    pub schema: String,
+    pub sslmode: Option<String>,
+    pub format: Option<String>,
+}
+
+fn default_postgres_host() -> String {
+    "localhost".to_string()
+}
+
+fn default_postgres_schema() -> String {
+    "public".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -330,6 +413,7 @@ impl Config {
                 workspace: None,
                 tenant: None,
                 skippr_s3_bucket: None,
+                storage_mode: None,
             }),
             pipelines: HashMap::new(),
             data_inputs: None,
@@ -700,6 +784,29 @@ impl Config {
 
             Config::set_evncache("SKIPPR_S3_BUCKET", &bucket.clone());
             bucket
+        }
+    }
+
+    /// Returns `"local"` or `"s3"` (default). Controls where pipeline metadata
+    /// and stats are persisted.
+    pub fn get_storage_mode() -> String {
+        if Config::get_envcache("SKIPPR_STORAGE_MODE") != "" {
+            return Config::get_envcache("SKIPPR_STORAGE_MODE");
+        } else {
+            let config = Config::get();
+
+            let default_mode = Config::getenv("SKIPPR_STORAGE_MODE", "s3");
+
+            let mode = match config.skippr {
+                Some(skippr) => match skippr.storage_mode.as_ref() {
+                    Some(m) => m.to_string(),
+                    None => default_mode,
+                },
+                None => default_mode,
+            };
+
+            Config::set_evncache("SKIPPR_STORAGE_MODE", &mode);
+            mode
         }
     }
 
@@ -1603,84 +1710,54 @@ impl Config {
         // return doc;
     }
 
-    pub async fn get_metadata() -> Result<PipelineMetadata, bool> {
-        let _data_dir = Config::get_data_dir();
+    fn inject_flatten_flag(metadata: &mut PipelineMetadata) {
+        match &Config::get_transform_config().flatten_events {
+            Some(val) => metadata.flattened = Config::truth_value(val),
+            None => metadata.flattened = false,
+        }
+    }
 
+    pub async fn get_metadata() -> Result<PipelineMetadata, bool> {
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
-        let _env = Config::get_pipeline_env();
 
-        // Always use S3 as the source of truth
-        let s3_key = format!(
+        let key = format!(
             "{}/{}/{}/metadata/metadata.json",
             tenant, workspace, pipeline
         );
         info!(
-            "get_metadata: tenant='{}' workspace='{}' pipeline='{}' s3_key='{}'",
-            tenant, workspace, pipeline, s3_key
+            "get_metadata: pipeline='{}' key='{}'",
+            pipeline, key
         );
 
-        let pipeline_metadata: Result<PipelineMetadata, bool> = match s3::get_json(&s3_key).await {
-            Ok(json_value) => {
+        let storage = crate::adapters::storage::get_storage();
+        match storage.get_json_opt(&key).await {
+            Ok(Some(json_value)) => {
                 match serde_json::from_value::<PipelineMetadata>(json_value) {
                     Ok(mut pipeline_metadata) => {
                         let num_entries = pipeline_metadata.metadata.len();
                         let keys: Vec<String> =
                             pipeline_metadata.metadata.keys().cloned().collect();
                         info!(
-                            "Loaded metadata from S3 (entries={}, keys={:?})",
+                            "Loaded metadata (entries={}, keys={:?})",
                             num_entries, keys
                         );
-                        // Inject flatten flag based on current config
-                        match &Config::get_transform_config().flatten_events {
-                            Some(val) => {
-                                pipeline_metadata.flattened = Config::truth_value(val);
-                            }
-                            None => {
-                                pipeline_metadata.flattened = false;
-                            }
-                        }
+                        Self::inject_flatten_flag(&mut pipeline_metadata);
                         Ok(pipeline_metadata)
                     }
                     Err(e) => {
-                        error!("Failed to parse metadata from S3: {}", e);
+                        error!("Failed to parse metadata: {}", e);
                         std::process::exit(1);
                     }
                 }
             }
+            Ok(None) => Err(false),
             Err(e) => {
-                // If 404 (NoSuchKey), report no metadata; otherwise fatal
-                if let SdkError::ServiceError(se) = &e {
-                    if se.err().is_no_such_key() {
-                        return Err(false);
-                    }
-                }
-                error!("Failed to fetch metadata from S3: {:?}", e);
+                error!("Failed to fetch metadata: {}", e);
                 std::process::exit(1);
             }
-        };
-
-        let pipeline_metadata: Result<PipelineMetadata, bool> = match pipeline_metadata {
-            Ok(mut metadata) => {
-                // bit of a hack to store the pipeline config that we need to maintain.
-                // useful when running SQL DDL commands locally, where the pipeline yml config is not present.
-                // For example, SCHEMA DUMP needs to know whether to output the flattened or nested schema.
-                match &Config::get_transform_config().flatten_events {
-                    Some(val) => {
-                        metadata.flattened = Config::truth_value(val);
-                        Ok(metadata)
-                    }
-                    None => {
-                        metadata.flattened = false;
-                        Ok(metadata)
-                    }
-                }
-            }
-            Err(_) => Ok(PipelineMetadata::new()),
-        };
-
-        pipeline_metadata
+        }
     }
 
     pub async fn delete_metadata() {
@@ -1688,18 +1765,15 @@ impl Config {
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
-        let s3_key = format!(
+        let key = format!(
             "{}/{}/{}/metadata/metadata.json",
             tenant, workspace, pipeline
         );
 
-        match s3::delete_object(&s3_key).await {
-            Ok(_) => {
-                info!("Deleted pipeline metadata from S3: {}", s3_key);
-            }
-            Err(err) => {
-                error!("Failed to delete metadata from S3: {:?}", err);
-            }
+        let storage = crate::adapters::storage::get_storage();
+        match storage.delete_object(&key).await {
+            Ok(_) => info!("Deleted pipeline metadata: {}", key),
+            Err(e) => error!("Failed to delete metadata: {}", e),
         }
     }
 
@@ -1708,13 +1782,13 @@ impl Config {
         static UPLOAD_LOCK: OnceLazy<tokio::sync::Mutex<()>> =
             OnceLazy::new(|| tokio::sync::Mutex::new(()));
 
+        METADATA.store(Arc::new(pipeline_metadata.clone()));
+
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
-        // No per-namespace diffing: upload the provided snapshot each time, single-writer
-        METADATA.store(Arc::new(pipeline_metadata.clone()));
-        let s3_key = format!(
+        let key = format!(
             "{}/{}/{}/metadata/metadata.json",
             tenant, workspace, pipeline
         );
@@ -1725,18 +1799,15 @@ impl Config {
                 return;
             }
         };
+
+        let storage = crate::adapters::storage::get_storage();
         let _guard = UPLOAD_LOCK.lock().await;
-        match s3::put_json(&s3_key, &json_value).await {
-            Ok(_) => {
-                info!("Updated pipeline metadata in S3: {}", s3_key);
-            }
-            Err(err) => {
-                error!("Failed to upload metadata to S3: {:?}", err);
-            }
+        match storage.put_json(&key, &json_value).await {
+            Ok(_) => info!("Updated pipeline metadata: {}", key),
+            Err(e) => error!("Failed to persist metadata: {}", e),
         }
 
         if evolved {
-            // Enforce consistency: update all namespaces, not just changed ones
             let tx = Config::ensure_glue_sync_worker();
             for ns in pipeline_metadata.metadata.keys() {
                 let _ = tx.send(ns.clone());
@@ -1801,25 +1872,10 @@ impl Config {
         }
     }
 
-    // Persist per-namespace stats to S3 under: <tenant>/<workspace>/<pipeline>/stats/<ns>.json
     pub async fn write_namespace_stats_async(
         namespace: &str,
         stats: &crate::discover::stats::NamespaceStats,
     ) {
-        let tenant = Self::get_tenant();
-        let workspace = Self::get_workspace_name();
-        let pipeline = Self::get_pipeline_name();
-        let s3_key = format!(
-            "{}/{}/{}/stats/{}.json",
-            tenant, workspace, pipeline, namespace
-        );
-        let bucket = Self::get_skippr_s3_bucket();
-        debug!(
-            "{} META: writing stats to s3://{}/{}",
-            chrono::Utc::now().to_rfc3339(),
-            bucket,
-            s3_key
-        );
         let json_value = match serde_json::to_value(stats) {
             Ok(v) => v,
             Err(e) => {
@@ -1827,9 +1883,19 @@ impl Config {
                 return;
             }
         };
-        match crate::helpers::s3::put_json(&s3_key, &json_value).await {
+
+        let tenant = Self::get_tenant();
+        let workspace = Self::get_workspace_name();
+        let pipeline = Self::get_pipeline_name();
+
+        let key = format!(
+            "{}/{}/{}/stats/{}.json",
+            tenant, workspace, pipeline, namespace
+        );
+
+        let storage = crate::adapters::storage::get_storage();
+        match storage.put_json(&key, &json_value).await {
             Ok(_) => {
-                // Debug summary of stats
                 let fields = json_value
                     .get("fields")
                     .and_then(|v| v.as_object())
@@ -1838,16 +1904,14 @@ impl Config {
                 debug!(
                     "META: wrote stats ns='{}' key='{}' fields={} sample=[{}]",
                     namespace,
-                    s3_key,
+                    key,
                     fields.len(),
                     fields.iter().take(8).cloned().collect::<Vec<_>>().join(",")
                 );
             }
-            Err(err) => {
-                error!("Failed to upload stats to S3: {:?}", err);
-            }
+            Err(e) => error!("Failed to persist stats: {}", e),
         }
-        // Update registry with stats key
+
         let _ = crate::sqlrt::registry::ensure_ns_entry(&pipeline, namespace, |current| {
             let mut e = current.unwrap_or(crate::sqlrt::registry::NamespaceEntry {
                 semantic_key: String::new(),
@@ -1855,7 +1919,7 @@ impl Config {
                 stats_key: String::new(),
                 last_updated_epoch: 0,
             });
-            e.stats_key = s3_key.clone();
+            e.stats_key = key.clone();
             e
         })
         .await;
@@ -1881,19 +1945,23 @@ impl Config {
         }
     }
 
-    // Unified read helper: S3-first, fallback to local cache, consistent naming
     pub async fn read_namespace_stats_async(namespace: &str) -> Option<serde_json::Value> {
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
-        let s3_key = format!(
+        let key = format!(
             "{}/{}/{}/stats/{}.json",
             tenant, workspace, pipeline, namespace
         );
-        if let Ok(val) = crate::helpers::s3::get_json(&s3_key).await {
-            return Some(val);
+
+        let storage = crate::adapters::storage::get_storage();
+        match storage.get_json_opt(&key).await {
+            Ok(v) => v,
+            Err(e) => {
+                debug!("read_namespace_stats_async: {}", e);
+                None
+            }
         }
-        None
     }
 
     pub fn stats_flush_seconds() -> u64 {
@@ -2270,6 +2338,7 @@ mod tests {
                 workspace: None,
                 tenant: None,
                 skippr_s3_bucket: None,
+                storage_mode: None,
             }),
             pipelines: HashMap::new(),
             data_inputs: None,
@@ -2310,6 +2379,7 @@ mod tests {
                 workspace: None,
                 tenant: None,
                 skippr_s3_bucket: None,
+                storage_mode: None,
             }),
             pipelines: HashMap::new(),
             data_inputs: None,

@@ -4,7 +4,6 @@ use std::collections::btree_map::BTreeMap;
 
 use std::hash::Hash;
 
-use crate::helpers::s3;
 use crate::METRICS;
 use serde_derive::Serialize;
 use std::fmt;
@@ -114,20 +113,16 @@ impl Logger {
             "exit_code": exit_code
         });
 
-        // Upload logs to S3
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let s3_key = format!(
+        let key = format!(
             "{}/{}/{}/logs/{}_{}.json",
             tenant, workspace, pipeline, timestamp, _run_id
         );
 
-        match s3::put_json(&s3_key, &data).await {
-            Ok(_) => {
-                info!("Uploaded logs to S3: {}", s3_key);
-            }
-            Err(err) => {
-                error!("Failed to upload logs to S3: {:?}", err);
-            }
+        let storage = crate::adapters::storage::get_storage();
+        match storage.put_json(&key, &data).await {
+            Ok(_) => info!("Persisted logs: {}", key),
+            Err(e) => error!("Failed to persist logs: {}", e),
         }
 
         Ok(())

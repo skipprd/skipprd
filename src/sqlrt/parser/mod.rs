@@ -51,6 +51,7 @@ enum SkipprShowCommand {
     STATS,
     SEMANTIC,
     CATALOG,
+    PIPELINE,
 }
 
 impl SkipprShowCommand {
@@ -60,6 +61,7 @@ impl SkipprShowCommand {
             "STATS" => Some(SkipprShowCommand::STATS),
             "SEMANTIC" => Some(SkipprShowCommand::SEMANTIC),
             "CATALOG" => Some(SkipprShowCommand::CATALOG),
+            "PIPELINE" => Some(SkipprShowCommand::PIPELINE),
             _ => None,
         }
     }
@@ -265,6 +267,10 @@ pub enum Statement {
         pipeline: String,
         namespace: Option<String>,
     },
+    /// Extension: `SHOW PIPELINE <pipeline_name>`
+    ShowPipeline {
+        pipeline: String,
+    },
 }
 
 /// SQL Parser for Skipprs's SQL dialect, which will often delegate to [`Datafusion`] or [`sqlparser`]
@@ -384,6 +390,12 @@ impl<'a> SParser<'a> {
                                     pipeline,
                                     namespace,
                                 });
+                            }
+                            Some(SkipprShowCommand::PIPELINE) => {
+                                self.parser.next_token(); // PIPELINE
+                                let name = self.parser.parse_object_name(false)?;
+                                let pipeline = name.0.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(".");
+                                return Ok(Statement::ShowPipeline { pipeline });
                             }
                             _ => {
                                 return Err(ParserError::ParserError(
@@ -601,34 +613,23 @@ impl<'a> SParser<'a> {
 
     pub fn parse_load(&mut self) -> Result<Statement, ParserError> {
         return match self.parser.peek_token().token {
-            Token::Word(w) => {
-                match SkipprKeyword::from_str(&w.value) {
-                    Some(SkipprKeyword::SCHEMA) => {
-                        Err(ParserError::ParserError(
-                            "Not implemented - LOAD SCHEMA not currently supported".to_string(),
-                        ))
+            Token::Word(w) => match SkipprKeyword::from_str(&w.value) {
+                Some(SkipprKeyword::SCHEMA) => {
+                    self.parser.next_token(); // SCHEMA
 
-                        // @todo - this functions, but we need to think about how to serialise the dump
+                    let source = self.parser.parse_literal_string()?;
 
-                        // self.parser.next_token(); // SCHEMA
-                        //
-                        // let source = self.parser.parse_literal_string()?;
-                        //
-                        // self.parser.expect_keyword(Keyword::INTO)?;
-                        //
-                        // let table_name = self.parser.parse_object_name()?;
-                        //
-                        // // println!("source: {}", source);
-                        // // println!("table_name: {}", table_name);
-                        //
-                        // Ok(Statement::SchemaLoad(SchemaLoadStatement {
-                        //     table: SchemaLoadDest::Relation(table_name),
-                        //     source,
-                        // }))
-                    }
-                    _ => Err(ParserError::ParserError("Not implemented".to_string())),
+                    self.parser.expect_keyword(Keyword::INTO)?;
+
+                    let table_name = self.parser.parse_object_name(false)?;
+
+                    Ok(Statement::SchemaLoad(SchemaLoadStatement {
+                        pipeline: SchemaLoadDest::Relation(table_name),
+                        source,
+                    }))
                 }
-            }
+                _ => Err(ParserError::ParserError("Not implemented".to_string())),
+            },
             _ => Err(ParserError::ParserError("Unknown error".to_string())),
         };
     }
