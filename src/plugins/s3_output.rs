@@ -1,7 +1,7 @@
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::{Config, OutputPluginConfig};
 use crate::ingest::partition_time::TimePartitioner;
-use crate::plugins::athena::DataOutputAwsAthenaPlugin;
+use crate::plugins::parquet_util::serialize_to_parquet;
 use crate::plugins::DataOutputPlugin;
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
@@ -103,7 +103,7 @@ impl DataOutputS3Plugin {
         let md5_digest = md5::compute(&filename);
         let final_key = format!("{}/{}.parquet", full_key, hex::encode(&md5_digest.0));
 
-        let parquet_bytes = DataOutputAwsAthenaPlugin::serialize_to_parquet(stream).await
+        let parquet_bytes = serialize_to_parquet(stream).await
             .map_err(|e| { counters::dec_uploads_in_flight(); e })?;
         let row_count = parquet_bytes.meta_data.num_rows as u64;
         let byte_count = parquet_bytes.size_bytes;

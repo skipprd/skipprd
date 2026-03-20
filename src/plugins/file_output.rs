@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 
 use crate::ingest::partition_time::TimePartitioner;
-use crate::plugins::athena::DataOutputAwsAthenaPlugin;
+use crate::plugins::parquet_util::serialize_to_parquet;
 use crate::plugins::DataOutputPlugin;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
@@ -144,7 +144,7 @@ impl DataOutputFilePlugin {
         let output_dir = output_file.parent().unwrap();
         tokio::fs::create_dir_all(&output_dir).await?;
 
-        let parquet_bytes = DataOutputAwsAthenaPlugin::serialize_to_parquet(stream).await
+        let parquet_bytes = serialize_to_parquet(stream).await
             .map_err(|e| { counters::dec_uploads_in_flight(); e })?;
 
         let fp = fs::File::create(&output_file).map_err(|e| {

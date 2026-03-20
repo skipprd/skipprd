@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use datafusion::arrow::array::*;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::execution::SendableRecordBatchStream;
@@ -13,10 +13,13 @@ use crate::helpers::configuration::{Config, DataOutputSnowflakePluginConfig, Out
 use crate::plugins::DataOutputPlugin;
 
 static ENSURED_SCHEMAS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
-static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
+static ENSURED_TABLES: Lazy<DashMap<String, Vec<(String, String)>>> = Lazy::new(DashMap::new);
 
-const ASYNC_POLL_MAX: u32 = 120;
+const ASYNC_POLL_MAX: u32 = 600;
 const ASYNC_POLL_INTERVAL_MS: u64 = 500;
+
+const INSERT_CHUNK_STRUCTURED: usize = 100;
+const INSERT_CHUNK_FLAT: usize = 1000;
 
 #[allow(dead_code)]
 pub struct DataOutputSnowflakePlugin {
@@ -239,7 +242,7 @@ impl DataOutputSnowflakePlugin {
 
         let mut payload = serde_json::json!({
             "statement": sql,
-            "timeout": 60,
+            "timeout": 300,
             "database": self.config.database,
             "schema": self.config.schema,
             "warehouse": self.config.warehouse,
@@ -358,17 +361,48 @@ impl DataOutputSnowflakePlugin {
         .into())
     }
 
-    fn arrow_type_to_snowflake(dt: &ArrowDataType) -> &'static str {
+    fn arrow_type_to_snowflake_ddl(dt: &ArrowDataType) -> String {
         match dt {
-            ArrowDataType::Boolean => "BOOLEAN",
+            ArrowDataType::Boolean => "BOOLEAN".into(),
             ArrowDataType::Int8 | ArrowDataType::Int16 | ArrowDataType::Int32
             | ArrowDataType::Int64 | ArrowDataType::UInt8 | ArrowDataType::UInt16
-            | ArrowDataType::UInt32 | ArrowDataType::UInt64 => "NUMBER(38,0)",
-            ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => "DOUBLE",
-            ArrowDataType::Date32 | ArrowDataType::Date64 => "DATE",
-            ArrowDataType::Timestamp(_, _) => "TIMESTAMP_NTZ",
-            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => "VARCHAR",
-            _ => "VARCHAR",
+            | ArrowDataType::UInt32 | ArrowDataType::UInt64 => "NUMBER(38,0)".into(),
+            ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => "DOUBLE".into(),
+            ArrowDataType::Date32 | ArrowDataType::Date64 => "DATE".into(),
+            ArrowDataType::Timestamp(_, _) => "TIMESTAMP_NTZ".into(),
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => "VARCHAR".into(),
+            ArrowDataType::Struct(fields) => {
+                let defs: Vec<String> = fields
+                    .iter()
+                    .map(|f| {
+                        format!(
+                            "{} {}",
+                            f.name().to_uppercase(),
+                            Self::arrow_type_to_snowflake_ddl(f.data_type())
+                        )
+                    })
+                    .collect();
+                format!("OBJECT({})", defs.join(", "))
+            }
+            ArrowDataType::List(f) | ArrowDataType::LargeList(f) => {
+                format!("ARRAY({})", Self::arrow_type_to_snowflake_ddl(f.data_type()))
+            }
+            ArrowDataType::Map(entries_field, _) => {
+                if let ArrowDataType::Struct(fields) = entries_field.data_type() {
+                    if fields.len() == 2 {
+                        format!(
+                            "MAP({}, {})",
+                            Self::arrow_type_to_snowflake_ddl(fields[0].data_type()),
+                            Self::arrow_type_to_snowflake_ddl(fields[1].data_type())
+                        )
+                    } else {
+                        "VARIANT".into()
+                    }
+                } else {
+                    "VARIANT".into()
+                }
+            }
+            _ => "VARCHAR".into(),
         }
     }
 
@@ -435,6 +469,53 @@ impl DataOutputSnowflakePlugin {
                 let a = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
                 format!("'{}'", a.value(row).replace('\'', "''"))
             }
+            ArrowDataType::Struct(fields) => {
+                let sa = array.as_any().downcast_ref::<StructArray>().unwrap();
+                let args: Vec<String> = fields
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, f)| {
+                        let val = Self::arrow_value_to_sql(sa.column(i).as_ref(), row);
+                        [format!("'{}'", f.name().replace('\'', "''")), val]
+                    })
+                    .collect();
+                format!("OBJECT_CONSTRUCT({})", args.join(", "))
+            }
+            ArrowDataType::List(_) => {
+                let la = array.as_any().downcast_ref::<ListArray>().unwrap();
+                let values = la.value(row);
+                let elems: Vec<String> = (0..values.len())
+                    .map(|i| Self::arrow_value_to_sql(values.as_ref(), i))
+                    .collect();
+                format!("ARRAY_CONSTRUCT({})", elems.join(", "))
+            }
+            ArrowDataType::LargeList(_) => {
+                let la = array.as_any().downcast_ref::<LargeListArray>().unwrap();
+                let values = la.value(row);
+                let elems: Vec<String> = (0..values.len())
+                    .map(|i| Self::arrow_value_to_sql(values.as_ref(), i))
+                    .collect();
+                format!("ARRAY_CONSTRUCT({})", elems.join(", "))
+            }
+            ArrowDataType::Map(_, _) => {
+                let ma = array.as_any().downcast_ref::<MapArray>().unwrap();
+                let entries = ma.value(row);
+                let sa = entries.as_any().downcast_ref::<StructArray>().unwrap();
+                let keys = sa.column(0);
+                let vals = sa.column(1);
+                let args: Vec<String> = (0..entries.len())
+                    .flat_map(|i| {
+                        let key = if let Some(s) = keys.as_any().downcast_ref::<StringArray>() {
+                            format!("'{}'", s.value(i).replace('\'', "''"))
+                        } else {
+                            format!("'{}'", i)
+                        };
+                        let val = Self::arrow_value_to_sql(vals.as_ref(), i);
+                        [key, val]
+                    })
+                    .collect();
+                format!("OBJECT_CONSTRUCT({})", args.join(", "))
+            }
             _ => {
                 let a = array.as_any().downcast_ref::<StringArray>();
                 match a {
@@ -468,13 +549,13 @@ impl DataOutputSnowflakePlugin {
     async fn ensure_table(
         &self,
         fq_table: &str,
-        col_defs: &[(String, &str)],
+        col_defs: &[(String, String)],
     ) -> Result<(), std::io::Error> {
         if col_defs.is_empty() {
             return Ok(());
         }
 
-        if !ENSURED_TABLES.insert(fq_table.to_string()) {
+        if ENSURED_TABLES.contains_key(fq_table) {
             return Ok(());
         }
 
@@ -490,7 +571,6 @@ impl DataOutputSnowflakePlugin {
         );
         info!("Snowflake DDL: {}", create_ddl);
         if let Err(e) = self.execute_sql(&create_ddl).await {
-            ENSURED_TABLES.remove(&fq_table.to_string());
             error!("Snowflake CREATE TABLE failed: {}", e);
             return Err(std::io::Error::other(format!("Snowflake CREATE TABLE: {}", e)));
         }
@@ -503,7 +583,6 @@ impl DataOutputSnowflakePlugin {
             if let Err(e) = self.execute_sql(&alter_ddl).await {
                 let msg = e.to_string();
                 if !msg.contains("already exists") {
-                    ENSURED_TABLES.remove(&fq_table.to_string());
                     error!("Snowflake ALTER TABLE ADD COLUMN failed: {}", e);
                     return Err(std::io::Error::other(format!(
                         "Snowflake ALTER TABLE: {}",
@@ -513,6 +592,7 @@ impl DataOutputSnowflakePlugin {
             }
         }
 
+        ENSURED_TABLES.insert(fq_table.to_string(), col_defs.to_vec());
         info!("Ensured table {}", fq_table);
         Ok(())
     }
@@ -529,13 +609,13 @@ impl DataOutputSnowflakePlugin {
         let table_name = Self::namespace_to_table_name(&namespace);
         let arrow_schema = stream.schema();
 
-        let col_defs: Vec<(String, &str)> = arrow_schema
+        let col_defs: Vec<(String, String)> = arrow_schema
             .fields()
             .iter()
             .map(|f| {
                 (
                     f.name().to_uppercase(),
-                    Self::arrow_type_to_snowflake(f.data_type()),
+                    Self::arrow_type_to_snowflake_ddl(f.data_type()),
                 )
             })
             .collect();
@@ -550,12 +630,24 @@ impl DataOutputSnowflakePlugin {
         self.ensure_schema().await?;
         self.ensure_table(&fq_table, &col_defs).await?;
 
-        let col_names: Vec<String> = arrow_schema
-            .fields()
+        // Use the table's stored column types for casts — schema evolution may mean the
+        // table has more nested OBJECT fields than the current batch's Arrow schema.
+        let table_col_types: std::collections::HashMap<String, String> = ENSURED_TABLES
+            .get(&fq_table)
+            .map(|entry| entry.value().iter().cloned().collect())
+            .unwrap_or_default();
+
+        let col_list: String = col_defs
             .iter()
-            .map(|f| format!("\"{}\"", f.name().to_uppercase()))
-            .collect();
-        let col_list = col_names.join(", ");
+            .map(|(name, _)| format!("\"{}\"", name))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let has_structured_cols = col_defs.iter().any(|(_, t)| {
+            t.starts_with("OBJECT(") || t.starts_with("ARRAY(") || t.starts_with("MAP(")
+        });
+
+        let chunk_size = if has_structured_cols { INSERT_CHUNK_STRUCTURED } else { INSERT_CHUNK_FLAT };
 
         let mut total_rows = 0usize;
         while let Some(batch_result) = stream.next().await {
@@ -565,20 +657,49 @@ impl DataOutputSnowflakePlugin {
                 continue;
             }
 
-            let mut value_rows = Vec::with_capacity(num_rows);
-            for row in 0..num_rows {
-                let vals: Vec<String> = (0..batch.num_columns())
-                    .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
+            let insert_sql = if has_structured_cols {
+                let select_rows: Vec<String> = (0..num_rows)
+                    .map(|row| {
+                        let vals: Vec<String> = (0..batch.num_columns())
+                            .map(|col_idx| {
+                                let raw = Self::arrow_value_to_sql(batch.column(col_idx).as_ref(), row);
+                                let col_name = &col_defs[col_idx].0;
+                                let cast_type = table_col_types
+                                    .get(col_name)
+                                    .map(String::as_str)
+                                    .unwrap_or(col_defs[col_idx].1.as_str());
+                                if raw != "NULL" && (cast_type.starts_with("OBJECT(") || cast_type.starts_with("ARRAY(") || cast_type.starts_with("MAP(")) {
+                                    format!("{}::{}", raw, cast_type)
+                                } else {
+                                    raw
+                                }
+                            })
+                            .collect();
+                        format!("SELECT {}", vals.join(", "))
+                    })
                     .collect();
-                value_rows.push(format!("({})", vals.join(", ")));
-            }
-
-            let insert_sql = format!(
-                "INSERT INTO {} ({}) VALUES {}",
-                fq_table,
-                col_list,
-                value_rows.join(", ")
-            );
+                format!(
+                    "INSERT INTO {} ({}) {}",
+                    fq_table,
+                    col_list,
+                    select_rows.join(" UNION ALL ")
+                )
+            } else {
+                let value_rows: Vec<String> = (0..num_rows)
+                    .map(|row| {
+                        let vals: Vec<String> = (0..batch.num_columns())
+                            .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
+                            .collect();
+                        format!("({})", vals.join(", "))
+                    })
+                    .collect();
+                format!(
+                    "INSERT INTO {} ({}) VALUES {}",
+                    fq_table,
+                    col_list,
+                    value_rows.join(", ")
+                )
+            };
 
             match self.execute_sql(&insert_sql).await {
                 Ok(_) => {

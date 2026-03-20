@@ -31,6 +31,7 @@ use std::io;
 use tokio::task::block_in_place;
 
 use crate::ingest::partition_time::TimePartitioner;
+use crate::plugins::parquet_util::serialize_to_parquet;
 use crate::plugins::DataOutputPlugin;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
@@ -72,12 +73,6 @@ pub struct DataOutputAwsAthenaPluginConfig {
     pub athena_workgroup_name: String,
     pub glue_database_name: String,
     pub athena_results_s3_bucket: String,
-}
-
-pub struct ParquetBytes {
-    pub bytes: bytes::Bytes,
-    pub size_bytes: u64,
-    pub meta_data: parquet::format::FileMetaData,
 }
 
 impl From<OutputPluginConfig> for DataOutputAwsAthenaPluginConfig {
@@ -733,57 +728,6 @@ impl DataOutputAwsAthenaPlugin {
         }
     }
 
-    pub(crate) async fn serialize_to_parquet(
-        mut batches: SendableRecordBatchStream,
-    ) -> Result<ParquetBytes, io::Error> {
-        let schema = batches.schema();
-
-        let mut raw_batches: Vec<arrow::array::RecordBatch> = Vec::new();
-        while let Some(batch) = batches.next().await {
-            let batch = batch?;
-            raw_batches.push(batch);
-        }
-
-        let order_fields =
-            crate::converters::parquet_ordering::resolve_effective_order(&schema);
-        let sorted_batches = crate::converters::parquet_ordering::materialize_and_sort(
-            raw_batches,
-            &schema,
-            &order_fields,
-        )?;
-
-        let row_group_size =
-            crate::converters::parquet_ordering::estimate_row_group_size(&sorted_batches, &order_fields);
-        let props = crate::converters::parquet_ordering::build_writer_properties(
-            &schema,
-            &order_fields,
-            row_group_size,
-        );
-
-        let mut bytes = Vec::new();
-        let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(props))?;
-
-        for batch in &sorted_batches {
-            writer.write(batch)?;
-        }
-
-        let writer_meta = writer.close()?;
-        if writer_meta.num_rows == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "No rows to write to parquet",
-            ));
-        }
-
-        let size_bytes = bytes.len() as u64;
-
-        Ok(ParquetBytes {
-            meta_data: writer_meta,
-            bytes: Bytes::from(bytes),
-            size_bytes,
-        })
-    }
-
     #[allow(dead_code)]
     async fn upload_object(
         _client: S3Client,
@@ -799,7 +743,7 @@ impl DataOutputAwsAthenaPlugin {
             .join("&");
 
         // Serialize to parquet asynchronously
-        let parquet = Self::serialize_to_parquet(stream).await?;
+        let parquet = serialize_to_parquet(stream).await?;
 
         // Create the upload body stream
         let _body = ByteStream::from(parquet.bytes);

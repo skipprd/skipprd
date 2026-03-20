@@ -2,6 +2,7 @@ use crate::discover::{OutputMetadata, SkipprDataType};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use std::collections::{HashMap, HashSet};
+use tracing::warn;
 
 use arrow::datatypes::TimeUnit::Millisecond;
 // use arrow::datatypes::Fields;
@@ -229,6 +230,11 @@ fn convert_skippr_to_arrow_field_types(
                             convert_skippr_to_arrow_field_types(&v.fields).unwrap(),
                         ),
                     );
+                } else {
+                    field_types.insert(
+                        v.out_field_name.to_string(),
+                        InferredType::Scalar(HashSet::from([DataType::Utf8])),
+                    );
                 }
             }
             SkipprDataType::Array => {
@@ -286,6 +292,13 @@ fn convert_skippr_to_arrow_field_types(
                         field_types.insert(
                             v.out_field_name.to_string(),
                             InferredType::Array(Box::new(inner_array_type)),
+                        );
+                    } else {
+                        field_types.insert(
+                            v.out_field_name.to_string(),
+                            InferredType::Array(Box::new(InferredType::Scalar(
+                                HashSet::from([DataType::Utf8]),
+                            ))),
                         );
                     }
                 } else {
@@ -356,7 +369,18 @@ fn convert_skippr_to_arrow_field_types(
                 DataType::Timestamp(Millisecond, None),
             )
             .expect("Error setting object scalar field date type"),
-            _ => {}
+            other => {
+                warn!(
+                    "Unhandled Skippr type {:?} for field '{}', falling back to Utf8",
+                    other, v.out_field_name
+                );
+                set_object_scalar_field_type(
+                    &mut field_types,
+                    &v.out_field_name,
+                    DataType::Utf8,
+                )
+                .expect("Error setting fallback Utf8 type");
+            }
         }
     }
 

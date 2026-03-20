@@ -15,6 +15,7 @@ pub mod bigquery_output;
 pub mod file_input;
 pub mod file_output;
 pub mod mssql_input;
+pub mod parquet_util;
 pub mod postgres_output;
 pub mod s3_input;
 pub mod s3_output;
