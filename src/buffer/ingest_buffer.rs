@@ -34,6 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::io::{BufReader, Read, Seek, Write};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -3066,8 +3067,8 @@ impl WalFile {
             .create(true)
             .open(&path)?;
         fd.sync_all()?;
+        #[cfg(unix)]
         unsafe {
-            // belt and braces
             libc::fsync(fd.as_raw_fd());
         };
 
@@ -3370,11 +3371,15 @@ impl Write for WalFile {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let fd = self.get_or_open_file().unwrap().as_raw_fd();
-        unsafe {
-            libc::fsync(fd);
-        };
-
+        #[cfg(unix)]
+        {
+            let fd = self.get_or_open_file().unwrap().as_raw_fd();
+            unsafe { libc::fsync(fd) };
+        }
+        #[cfg(not(unix))]
+        {
+            self.get_or_open_file().unwrap().sync_all()?;
+        }
         Ok(())
     }
 

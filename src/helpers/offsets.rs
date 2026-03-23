@@ -1,4 +1,5 @@
-use libc::sleep;
+use std::thread::sleep;
+use std::time::Duration;
 use sled;
 use Result;
 
@@ -274,9 +275,7 @@ impl Offsets {
             if i % pause_modus == 0 {
                 tree.flush().unwrap();
                 // after experimentation, sled does better job of GC with smaller writes. So we'll do it more often with shorter sleep
-                unsafe {
-                    sleep(1);
-                }
+                sleep(Duration::from_secs(1));
 
                 let new_size = db.size_on_disk().unwrap_or_else(|err| {
                     println!("Failed getting size of new offsets DB, Error: {:?}", err);
@@ -307,9 +306,7 @@ impl Offsets {
             }
         }
 
-        unsafe {
-            sleep(5);
-        }
+        sleep(Duration::from_secs(5));
 
         let new_size = db.size_on_disk().unwrap_or_else(|err| {
             println!("Failed getting size of new offsets DB, Error: {:?}", err);
