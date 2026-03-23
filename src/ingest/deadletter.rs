@@ -218,5 +218,5 @@ pub(crate) fn ensure_namespace_registered() {
     pm.metadata.insert(dl_ns.clone(), ns_meta);
     METADATA.store(Arc::new(pm));
 
-    Config::sync_glue_namespace(&dl_ns);
+    Config::sync_output_schema_namespace(&dl_ns);
 }

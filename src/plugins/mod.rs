@@ -65,6 +65,38 @@ pub trait DataOutputPlugin: Send + Sync {
         stream: SendableRecordBatchStream,
         filename: String,
     ) -> Result<(), std::io::Error>;
+
+    /// Pre-create or update the output schema (tables, etc.) for a namespace.
+    /// Called during schema discovery so DDL completes before data compaction.
+    /// Default is a no-op; override for plugins that require upfront DDL.
+    async fn sync_schema(
+        &self,
+        _namespace: &str,
+        _metadata: &crate::discover::OutputMetadata,
+    ) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+}
+
+/// Build a plugin instance for schema sync from an output config.
+/// Returns `None` for plugins that don't need upfront DDL.
+pub async fn build_schema_sync_plugin(
+    config: crate::helpers::configuration::OutputPluginConfig,
+) -> Option<Box<dyn DataOutputPlugin + Send + Sync>> {
+    use crate::helpers::configuration::OutputPluginConfig;
+    match config {
+        OutputPluginConfig::Athena(c) => Some(Box::new(
+            athena::DataOutputAwsAthenaPlugin::new_with_config("_schema_sync".into(), c).await,
+        )),
+        OutputPluginConfig::Snowflake(c) => Some(Box::new(
+            snowflake_output::DataOutputSnowflakePlugin::new_with_config(
+                "_schema_sync".into(),
+                c,
+            )
+            .await,
+        )),
+        _ => None,
+    }
 }
 
 /// No-op output plugin used by `discover` mode to run the input pipeline

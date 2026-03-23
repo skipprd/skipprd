@@ -155,10 +155,12 @@ pub struct DataOutputSnowflakePluginConfig {
 ### Data Flow
 
 1. Receive `SendableRecordBatchStream` from compaction (Parquet-ready Arrow batches)
-2. Write to a local temp Parquet file (reuse existing `ArrowWriter` logic)
-3. Upload Parquet file to Snowflake stage via `PUT` command
-4. Execute `COPY INTO {database}.{schema}.{table}` from the staged file
-5. Map the skippr namespace (e.g. `mssql.MyDatabase.dbo.customers`) to a destination table name. The table name derivation should use the final segment by default (e.g. `customers`) but be overridable via the mapping spec.
+2. Serialize to in-memory Parquet (sorted, Snappy-compressed via `serialize_to_parquet`)
+3. `PUT` to Snowflake stage to obtain upload credentials for backing storage
+4. Upload Parquet to stage's backing S3 (with client-side AES-256-CBC encryption when required)
+5. Execute `COPY INTO {database}.{schema}.{table} FROM '{stage}/...' FILE_FORMAT=(TYPE=PARQUET) MATCH_BY_COLUMN_NAME=CASE_INSENSITIVE`
+6. `REMOVE` the staged file after successful load
+7. Map the skippr namespace (e.g. `mssql.MyDatabase.dbo.customers`) to a destination table name. The table name derivation should use the final segment by default (e.g. `customers`) but be overridable via the mapping spec.
 
 ### Schema Management
 

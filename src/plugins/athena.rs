@@ -104,8 +104,21 @@ impl DataOutputPlugin for DataOutputAwsAthenaPlugin {
         stream: SendableRecordBatchStream,
         filename: String,
     ) -> Result<(), std::io::Error> {
-        // async fn sync(&mut self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
         self.inner_sync(stream, filename).await
+    }
+
+    async fn sync_schema(
+        &self,
+        namespace: &str,
+        metadata: &crate::discover::OutputMetadata,
+    ) -> Result<(), std::io::Error> {
+        AwsAthena::create_or_update_schema_with_config(
+            namespace,
+            metadata,
+            self.config.clone(),
+        )
+        .await;
+        Ok(())
     }
 }
 

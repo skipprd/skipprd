@@ -7905,6 +7905,7 @@ dependencies = [
 name = "skippr"
 version = "0.0.0-git"
 dependencies = [
+ "aes",
  "arc-swap",
  "array-init",
  "arrow",

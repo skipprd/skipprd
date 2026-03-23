@@ -1848,15 +1848,7 @@ impl Ingest {
         }
 
         if did_update_schema {
-            let output_uses_athena =
-                crate::helpers::configuration::Config::get_pipeline_output_plugin_name() == "Athena";
-            let deadletter_uses_athena = matches!(
-                crate::helpers::configuration::Config::get_pipeline_deadletter_plugin_name(),
-                Ok(Some(plugin_name)) if plugin_name == "Athena"
-            );
-            if output_uses_athena || deadletter_uses_athena {
-                crate::helpers::configuration::Config::sync_glue_namespace(skpr_namespace);
-            }
+            crate::helpers::configuration::Config::sync_output_schema_namespace(skpr_namespace);
         }
 
         // Bump schema version for this namespace AFTER updating schema and template

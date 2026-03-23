@@ -72,7 +72,10 @@ Each table is tracked as a closed offset. After a table has been fully ingested,
 
 ### Authentication
 
-Uses username/password auth against the Snowflake REST login endpoint.
+Supports two methods:
+
+- **Key-pair (recommended):** Set `SNOWFLAKE_PRIVATE_KEY_PATH` to a PKCS8 PEM private key. Generates a JWT — no password required.
+- **Username/password:** Set `SNOWFLAKE_PASSWORD`. Authenticates via the Snowflake REST login endpoint.
 
 ### Configuration
 
@@ -80,20 +83,21 @@ Uses username/password auth against the Snowflake REST login endpoint.
 DATA_OUTPUT_PLUGIN_NAME=Snowflake
 SNOWFLAKE_ACCOUNT=myorg-myaccount
 SNOWFLAKE_USER=skippr_loader
-SNOWFLAKE_PASSWORD=secret
+SNOWFLAKE_PRIVATE_KEY_PATH=/path/to/rsa_key.p8
 SNOWFLAKE_WAREHOUSE=COMPUTE_WH
 SNOWFLAKE_DATABASE=RAW_DATA
 SNOWFLAKE_SCHEMA=PUBLIC
-SNOWFLAKE_ROLE=LOADER_ROLE       # optional
-SNOWFLAKE_STAGE=@SKIPPR_STAGE    # optional, defaults to @~
+SNOWFLAKE_ROLE=LOADER_ROLE              # optional
+SNOWFLAKE_STAGE=@SKIPPR_STAGE           # optional, defaults to @~ (user stage)
 ```
 
 ### Data flow
 
 1. WAL compactor produces a Parquet stream.
-2. Plugin serializes stream to a temp Parquet file.
-3. `PUT file://<temp_path> <stage_path>` uploads to Snowflake stage.
-4. `COPY INTO <table> FROM <stage_path>` loads the data.
+2. Plugin serializes stream to an in-memory Parquet file (sorted, Snappy-compressed).
+3. `PUT` to Snowflake stage to obtain upload credentials, then uploads Parquet to the stage's backing storage (with client-side encryption when required).
+4. `COPY INTO <table> FROM '<stage>/...' FILE_FORMAT=(TYPE=PARQUET) MATCH_BY_COLUMN_NAME=CASE_INSENSITIVE` bulk-loads the data.
+5. Staged file is removed after successful load.
 
 ### Namespace → table name mapping
 
@@ -105,8 +109,12 @@ mssql.MyDB.dbo.customers  →  mssql_mydb_dbo_customers
 
 ### Schema management
 
-- First write: `CREATE TABLE IF NOT EXISTS` with columns mapped from skippr metadata.
-- Schema evolution: new fields trigger `ALTER TABLE ADD COLUMN`.
+Schema DDL runs proactively during pipeline initialisation via the shared schema sync worker (same mechanism as Athena):
+
+- `CREATE SCHEMA IF NOT EXISTS` ensures the target schema exists.
+- `CREATE TABLE IF NOT EXISTS` with full structured type support (OBJECT, ARRAY, MAP).
+- Schema evolution: new fields trigger `ALTER TABLE ADD COLUMN IF NOT EXISTS`.
+- DDL is serialized per table with schema-aware caching.
 
 ### Type mapping
 
@@ -118,7 +126,9 @@ mssql.MyDB.dbo.customers  →  mssql_mydb_dbo_customers
 | Boolean | `BOOLEAN` |
 | Date | `DATE` |
 | Timestamp | `TIMESTAMP_NTZ` |
-| Array / Record / Map | `VARIANT` |
+| Struct | `OBJECT(field TYPE, ...)` |
+| Array | `ARRAY(element_type)` |
+| Map | `MAP(key_type, value_type)` |
 
 ---
 

@@ -41,18 +41,19 @@ For local development, Skippr also supports writing Parquet to local disk:
 
 ## Snowflake output
 
-Writes compacted Parquet to Snowflake via the REST SQL API.
+Writes compacted Parquet to Snowflake via stage upload and `COPY INTO`.
 
 | Variable | Default | Description |
 |---|---|---|
 | `SNOWFLAKE_ACCOUNT` | *(required)* | Snowflake account identifier |
 | `SNOWFLAKE_USER` | *(required)* | Snowflake login user |
-| `SNOWFLAKE_PASSWORD` | *(required)* | Snowflake login password |
+| `SNOWFLAKE_PASSWORD` | | Snowflake login password (when not using key-pair auth) |
+| `SNOWFLAKE_PRIVATE_KEY_PATH` | | Path to PKCS8 PEM private key for key-pair auth |
 | `SNOWFLAKE_WAREHOUSE` | *(required)* | Compute warehouse name |
 | `SNOWFLAKE_DATABASE` | *(required)* | Target database |
 | `SNOWFLAKE_SCHEMA` | *(required)* | Target schema |
 | `SNOWFLAKE_ROLE` | | Optional role to assume |
-| `SNOWFLAKE_STAGE` | `@~` | Stage for file uploads |
+| `SNOWFLAKE_STAGE` | `@~` | Snowflake stage for file uploads |
 
 See the [Snowflake connector docs](../connectors/outputs/snowflake.md) for full details.
 

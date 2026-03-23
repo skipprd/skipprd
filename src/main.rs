@@ -96,6 +96,17 @@ impl DataOutputPlugin for OutputRouter {
         })?;
         plugin.sync(stream, filename).await
     }
+
+    async fn sync_schema(
+        &self,
+        namespace: &str,
+        metadata: &skippr::discover::OutputMetadata,
+    ) -> Result<(), std::io::Error> {
+        for sink in self.sinks.values() {
+            sink.sync_schema(namespace, metadata).await?;
+        }
+        Ok(())
+    }
 }
 
 // @todo, last_ran should be the updated_at timestamp for the file DATA_DIR/LASTRAN
@@ -846,9 +857,9 @@ async fn sync(output_mode: &str) {
     skippr::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
     info!("Finalising: Athena partition tasks drained");
 
-    info!("Finalising: draining Glue sync worker");
-    Config::drain_glue_sync_worker();
-    info!("Finalising: Glue sync worker drained");
+    info!("Finalising: draining schema sync worker");
+    Config::drain_schema_sync_worker();
+    info!("Finalising: schema sync worker drained");
 
     if reporter.enabled() {
         reporter.complete("Finalising");

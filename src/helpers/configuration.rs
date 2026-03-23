@@ -22,7 +22,7 @@ use serde_json::Value;
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::METADATA;
 
-use crate::plugins::athena::{AwsAthena, DataOutputAwsAthenaPluginConfig};
+use crate::plugins::athena::DataOutputAwsAthenaPluginConfig;
 
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
@@ -44,8 +44,8 @@ const DEFAULT_CONFIG: &'static str = "NULL_VALUE";
 
 pub static DATA_DIR_INIT_ONCE: OnceCell<()> = OnceCell::new();
 
-type GlueSyncWorkerState = (UnboundedSender<String>, Option<std::thread::JoinHandle<()>>);
-static GLUE_SYNC_WORKER: Lazy<std::sync::Mutex<Option<GlueSyncWorkerState>>> =
+type SchemaSyncWorkerState = (UnboundedSender<String>, Option<std::thread::JoinHandle<()>>);
+static SCHEMA_SYNC_WORKER: Lazy<std::sync::Mutex<Option<SchemaSyncWorkerState>>> =
     Lazy::new(|| std::sync::Mutex::new(None));
 
 #[derive(Debug, Deserialize, Clone)]
@@ -221,6 +221,10 @@ pub struct DataOutputSnowflakePluginConfig {
     pub format: Option<String>,
     #[serde(default)]
     pub private_key_path: Option<String>,
+    #[serde(default)]
+    pub staging_s3_bucket: Option<String>,
+    #[serde(default)]
+    pub staging_s3_prefix: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1808,7 +1812,7 @@ impl Config {
         }
 
         if evolved {
-            let tx = Config::ensure_glue_sync_worker();
+            let tx = Config::ensure_schema_sync_worker();
             for ns in pipeline_metadata.metadata.keys() {
                 let _ = tx.send(ns.clone());
             }
@@ -1987,8 +1991,8 @@ impl Config {
         Self::truth_value(&Self::getenv("CATALOG_LLM_ENABLED", "true"))
     }
 
-    fn ensure_glue_sync_worker() -> UnboundedSender<String> {
-        let mut guard = GLUE_SYNC_WORKER.lock().unwrap();
+    fn ensure_schema_sync_worker() -> UnboundedSender<String> {
+        let mut guard = SCHEMA_SYNC_WORKER.lock().unwrap();
         if let Some((tx, _)) = guard.as_ref() {
             return tx.clone();
         }
@@ -2002,13 +2006,16 @@ impl Config {
                 .build()
                 .unwrap();
             rt.block_on(async move {
+                let mut primary_plugin: Option<Box<dyn crate::plugins::DataOutputPlugin + Send + Sync>> = None;
+                let mut deadletter_plugin: Option<Box<dyn crate::plugins::DataOutputPlugin + Send + Sync>> = None;
+
                 while let Some(ns) = rx.recv().await {
                     if pending.insert(ns.clone(), ()).is_some() {
                         continue;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                    let glue_sync_timeout = std::time::Duration::from_secs(
-                        Config::getenv("GLUE_SYNC_TIMEOUT_SECONDS", "120")
+                    let sync_timeout = std::time::Duration::from_secs(
+                        Config::getenv("SCHEMA_SYNC_TIMEOUT_SECONDS", "120")
                             .parse::<u64>()
                             .unwrap_or(120),
                     );
@@ -2024,56 +2031,68 @@ impl Config {
                         let deadletter_namespace = crate::ingest::deadletter::table_name();
                         let is_deadletter_ns = ns == deadletter_namespace;
 
-                        if !is_deadletter_ns && Config::get_pipeline_output_plugin_name() == "Athena" {
-                            info!("Glue sync: updating schema for namespace {}", ns);
-                            match tokio::time::timeout(
-                                glue_sync_timeout,
-                                AwsAthena::create_or_update_schema(&ns, &out_meta),
-                            )
-                            .await
-                            {
-                                Ok(_) => {
-                                    info!("Glue sync: synced output schema for namespace {}", ns);
+                        if !is_deadletter_ns {
+                            if primary_plugin.is_none() {
+                                if let Ok(cfg) = Config::get_pipeline_output_plugin_config() {
+                                    primary_plugin = crate::plugins::build_schema_sync_plugin(cfg).await;
                                 }
-                                Err(_) => {
-                                    warn!(
-                                        "Glue sync: timed out syncing output schema for namespace {} after {:?}; skipping",
-                                        ns, glue_sync_timeout
-                                    );
+                            }
+                            if let Some(ref plugin) = primary_plugin {
+                                info!("Schema sync: updating schema for namespace {}", ns);
+                                match tokio::time::timeout(
+                                    sync_timeout,
+                                    plugin.sync_schema(&ns, &out_meta),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(_)) => {
+                                        info!("Schema sync: synced output schema for namespace {}", ns);
+                                    }
+                                    Ok(Err(e)) => {
+                                        warn!("Schema sync: failed for namespace {}: {}", ns, e);
+                                    }
+                                    Err(_) => {
+                                        warn!(
+                                            "Schema sync: timed out for namespace {} after {:?}; skipping",
+                                            ns, sync_timeout
+                                        );
+                                    }
                                 }
                             }
                         }
 
                         if is_deadletter_ns {
-                            if let Ok(Some(crate::helpers::configuration::OutputPluginConfig::Athena(config))) =
-                                Config::get_pipeline_deadletter_plugin_config()
-                            {
+                            if deadletter_plugin.is_none() {
+                                if let Ok(Some(cfg)) = Config::get_pipeline_deadletter_plugin_config() {
+                                    deadletter_plugin = crate::plugins::build_schema_sync_plugin(cfg).await;
+                                }
+                            }
+                            if let Some(ref plugin) = deadletter_plugin {
                                 let deadletter_out_meta = crate::ingest::deadletter::output_metadata();
-                                info!("Glue sync: updating deadletter schema for namespace {}", ns);
+                                info!("Schema sync: updating deadletter schema for namespace {}", ns);
                                 match tokio::time::timeout(
-                                    glue_sync_timeout,
-                                    AwsAthena::create_or_update_schema_with_config(
-                                        &ns,
-                                        &deadletter_out_meta,
-                                        config,
-                                    ),
+                                    sync_timeout,
+                                    plugin.sync_schema(&ns, &deadletter_out_meta),
                                 )
                                 .await
                                 {
-                                    Ok(_) => {
-                                        info!("Glue sync: synced deadletter schema for namespace {}", ns);
+                                    Ok(Ok(_)) => {
+                                        info!("Schema sync: synced deadletter schema for namespace {}", ns);
+                                    }
+                                    Ok(Err(e)) => {
+                                        warn!("Schema sync: deadletter failed for namespace {}: {}", ns, e);
                                     }
                                     Err(_) => {
                                         warn!(
-                                            "Glue sync: timed out syncing deadletter schema for namespace {} after {:?}; skipping",
-                                            ns, glue_sync_timeout
+                                            "Schema sync: deadletter timed out for namespace {} after {:?}; skipping",
+                                            ns, sync_timeout
                                         );
                                     }
                                 }
                             }
                         }
                     } else {
-                        debug!("Glue sync: namespace {} missing from metadata snapshot", ns);
+                        debug!("Schema sync: namespace {} missing from metadata snapshot", ns);
                     }
                     pending.remove(&ns);
                 }
@@ -2084,9 +2103,9 @@ impl Config {
     }
 
     /// Drop the sender to close the channel, then join the worker thread so all
-    /// pending Glue/Athena operations complete before the process exits.
-    pub fn drain_glue_sync_worker() {
-        let mut guard = GLUE_SYNC_WORKER.lock().unwrap();
+    /// pending schema sync operations complete before the process exits.
+    pub fn drain_schema_sync_worker() {
+        let mut guard = SCHEMA_SYNC_WORKER.lock().unwrap();
         if let Some((tx, handle)) = guard.take() {
             drop(tx);
             if let Some(h) = handle {
@@ -2095,8 +2114,8 @@ impl Config {
         }
     }
 
-    pub fn sync_glue_namespace(namespace: &str) {
-        let tx = Config::ensure_glue_sync_worker();
+    pub fn sync_output_schema_namespace(namespace: &str) {
+        let tx = Config::ensure_schema_sync_worker();
         let _ = tx.send(namespace.to_string());
     }
 
