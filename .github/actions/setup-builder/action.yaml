@@ -39,6 +39,10 @@ runs:
     - name: Enable backtraces
       shell: bash
       run: echo "RUST_BACKTRACE=1" >> $GITHUB_ENV
+    - name: Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: v1
     - name: Fixup git permissions
       # https://github.com/actions/checkout/issues/766
       shell: bash
