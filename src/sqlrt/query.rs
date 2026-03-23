@@ -743,6 +743,7 @@ pub async fn query(sql_str: &str) {
             match metadata.metadata.remove(&format!("{}", schema)) {
                 Some(_) => {
                     println!("Dropping schema: '{}' for pipeline: '{}', on next sync schema will be re-discovered", schema, &stmt.pipeline);
+                    METADATA.store(Arc::new(metadata.clone()));
                     Config::set_metadata(&metadata, true).await;
                     println!("Dropped Schema, on next sync schema will be re-discovered");
                 }

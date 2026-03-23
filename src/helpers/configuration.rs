@@ -1786,7 +1786,11 @@ impl Config {
         static UPLOAD_LOCK: OnceLazy<tokio::sync::Mutex<()>> =
             OnceLazy::new(|| tokio::sync::Mutex::new(()));
 
-        METADATA.store(Arc::new(pipeline_metadata.clone()));
+        // NOTE: callers are responsible for updating in-memory METADATA via
+        // METADATA.store() *before* calling this function.  Doing the store
+        // here caused stale async snapshots (e.g. from namespace creation) to
+        // regress already-evolved metadata, breaking serialization for records
+        // processed during the regression window.
 
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();

@@ -516,7 +516,7 @@ impl Ingest {
         loop {
             let v1 = ARROW_SCHEMA_VERSION
                 .get(skpr_namespace)
-                .map(|v| v.value().load(Ordering::Relaxed))
+                .map(|v| v.value().load(Ordering::Acquire))
                 .unwrap_or(0);
             let schema_opt = ARROW_SCHEMA
                 .get(skpr_namespace)
@@ -542,18 +542,16 @@ impl Ingest {
                 .unwrap();
             let v2 = ARROW_SCHEMA_VERSION
                 .get(skpr_namespace)
-                .map(|v| v.value().load(Ordering::Relaxed))
+                .map(|v| v.value().load(Ordering::Acquire))
                 .unwrap_or(0);
             if v1 == v2 {
-                // Use schema version for shard to align WAL partitioning
                 let hash = format!("{}", v2);
                 return SchemaHash { schema, hash };
             }
             if iters >= MAX_ITERS {
-                // fallback
                 let shard_version = ARROW_SCHEMA_VERSION
                     .get(skpr_namespace)
-                    .map(|v| v.value().load(Ordering::Relaxed))
+                    .map(|v| v.value().load(Ordering::Acquire))
                     .unwrap_or(0);
                 let hash = format!("{}", shard_version);
                 if iters > 0 {
@@ -1847,16 +1845,19 @@ impl Ingest {
             }
         }
 
-        if did_update_schema {
-            crate::helpers::configuration::Config::sync_output_schema_namespace(skpr_namespace);
-        }
-
-        // Bump schema version for this namespace AFTER updating schema and template
+        // Bump schema version IMMEDIATELY after updating ARROW_SCHEMA and the
+        // template so that load_stable_schema_hash's seqlock never pairs the
+        // new schema with the old version number.  The output schema sync is
+        // fire-and-forget and must come *after* the version bump.
         if did_update_schema {
             let entry = ARROW_SCHEMA_VERSION
                 .entry(skpr_namespace.to_string())
                 .or_insert_with(|| AtomicU64::new(0));
-            entry.fetch_add(1, Ordering::Relaxed);
+            entry.fetch_add(1, Ordering::Release);
+        }
+
+        if did_update_schema {
+            crate::helpers::configuration::Config::sync_output_schema_namespace(skpr_namespace);
         }
 
         // Mark schema as ready deterministically for this namespace
