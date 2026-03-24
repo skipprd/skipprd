@@ -1,9 +1,12 @@
 use rand::Rng;
 use std::time::{Duration, SystemTime};
 
+#[cfg(unix)]
 extern crate nix;
 
+#[cfg(unix)]
 use nix::sys::signal::{kill, Signal};
+#[cfg(unix)]
 use nix::unistd::Pid;
 use std::{io, process};
 
@@ -748,8 +751,15 @@ async fn sync(output_mode: &str) {
             move || {
                 if RUNNING.read().load(Ordering::SeqCst) {
                     warn!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
-                    let pid = process::id() as i32;
-                    let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+                    #[cfg(unix)]
+                    {
+                        let pid = process::id() as i32;
+                        let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        process::exit(137);
+                    }
                 }
             },
             periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
