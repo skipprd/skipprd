@@ -105,8 +105,18 @@ fn ensure_slow_ingest_worker() {
                 .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
                 .clone();
             let _guard = ns_lock.lock().unwrap();
-            // Evolve against global METADATA snapshot
+            // Evolve against global METADATA snapshot.  If the namespace
+            // doesn't exist yet we create it here (single-threaded) so that
+            // the read-then-write from multiple ingest threads can never
+            // regress already-evolved metadata.
             let mut md_local = METADATA.load().as_ref().clone();
+            if !md_local.metadata.contains_key(&task.namespace) {
+                info!("Discovered new namespace: {}", task.namespace);
+                md_local
+                    .metadata
+                    .insert(task.namespace.clone(), Metadata::new().unwrap());
+                METADATA.store(Arc::new(md_local.clone()));
+            }
             let result = (|| {
                 if let Some(ns_meta) = md_local.metadata.get_mut(&task.namespace) {
                     let mut updated = "no".to_string();
@@ -125,8 +135,6 @@ fn ensure_slow_ingest_worker() {
                                     &md_local.metadata,
                                     task.flatten,
                                 );
-                                // Best-effort: block here to avoid partition-creation races
-                                // Persist immediately so output plugin sees new namespaces/fields
                                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                                     let md_clone = md_local.clone();
                                     let sem = METADATA_WRITE_SEM.clone();
@@ -1375,21 +1383,9 @@ impl Ingest {
                         }
                     }
 
-                    if METADATA.load().metadata.get(&skpr_namespace).is_none() {
-                        let mut new_pm = METADATA.load().as_ref().clone();
-                        new_pm
-                            .metadata
-                            .insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                        METADATA.store(Arc::new(new_pm.clone()));
-                        info!("Discovered new namespace: {}", skpr_namespace);
-                        if let Ok(h) = runtime::Handle::try_current() {
-                            h.spawn(async move {
-                                Config::set_metadata(&new_pm, false).await;
-                            });
-                        } else {
-                            error!("No tokio runtime available to persist metadata for new namespace {}", skpr_namespace);
-                        }
-                    }
+                    // Namespace creation is deferred to the slow-ingest worker
+                    // to avoid a read-then-write race where a second thread's
+                    // stale snapshot regresses already-evolved metadata.
 
                     let source = SourceRecord::new(record);
 
