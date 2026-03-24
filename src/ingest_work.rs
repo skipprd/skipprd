@@ -1525,14 +1525,19 @@ impl Ingest {
             //     }
             // }
             let try_serialize =
-                |schema: SchemaRef, values: &Vec<&serde_json::Value>| -> Option<Vec<RecordBatch>> {
-                    let mut decoder = ArrowJsonReaderBuilder::new(schema).build_decoder().ok()?;
-                    if decoder.serialize(values).is_err() {
-                        return None;
-                    }
+                |schema: SchemaRef,
+                 values: &Vec<&serde_json::Value>|
+                 -> Result<Vec<RecordBatch>, String> {
+                    let mut decoder = ArrowJsonReaderBuilder::new(schema)
+                        .build_decoder()
+                        .map_err(|e| format!("build_decoder: {e}"))?;
+                    decoder
+                        .serialize(values)
+                        .map_err(|e| format!("serialize: {e}"))?;
                     match decoder.flush() {
-                        Ok(Some(b)) => Some(vec![b]),
-                        _ => None,
+                        Ok(Some(b)) => Ok(vec![b]),
+                        Ok(None) => Err("flush returned no batch".into()),
+                        Err(e) => Err(format!("flush: {e}")),
                     }
                 };
 
@@ -1543,9 +1548,19 @@ impl Ingest {
             }
 
             // First attempt using current snapshot schema (should succeed after serialized evolution)
-            if let Some(batches) = try_serialize(entry.schema.clone(), &values_ref) {
-                entry.record_batches = Some(batches);
-                continue;
+            match try_serialize(entry.schema.clone(), &values_ref) {
+                Ok(batches) => {
+                    entry.record_batches = Some(batches);
+                    continue;
+                }
+                Err(first_err) => {
+                    if Config::debug_enabled() {
+                        debug!(
+                            "Batch serialize failed (will retry): ns={} err={}",
+                            entry._namespace, first_err
+                        );
+                    }
+                }
             }
 
             // Fallback: route each record through the single-threaded slow-ingest queue
@@ -1647,18 +1662,22 @@ impl Ingest {
             } else {
                 fixed_records.iter().collect()
             };
-            if let Some(batches) = try_serialize(entry.schema.clone(), &values_ref2) {
-                entry.record_batches = Some(batches);
-            } else {
+            match try_serialize(entry.schema.clone(), &values_ref2) {
+                Ok(batches) => {
+                    entry.record_batches = Some(batches);
+                }
+                Err(retry_err) => {
                 let off_key_str = match entry.offsets.iter().next() {
                     Some((k, _)) => format!("{}:{}", k.namespace, k.partition),
                     None => String::new(),
                 };
+                let arrow_err_msg = format!("Arrow serialization failed after retry: {}", retry_err);
+                warn!("{} (ns={}, records={})", arrow_err_msg, skpr_namespace, records_vec.len());
                 for (idx, rec) in records_vec.iter().enumerate() {
                     dl_records.push(DeadletterRecord {
                         namespace: skpr_namespace.clone(),
                         record: rec.source.inner().to_string(),
-                        error: "Arrow serialization failed after schema evolution".to_string(),
+                        error: arrow_err_msg.clone(),
                         failure_code: "ARROW_SERIALIZE".to_string(),
                         event_time: rec._time,
                         source_uri: String::new(),
@@ -1674,10 +1693,11 @@ impl Ingest {
                 }
                 if Config::debug_enabled() {
                     debug!(
-                        "Batch serialize failed after retry: ns={} deadlettered",
-                        entry._namespace
+                        "Batch serialize failed after retry: ns={} err={} deadlettered",
+                        entry._namespace, retry_err
                     );
                 }
+            }
             }
         }
 
@@ -1727,6 +1747,18 @@ impl Ingest {
                     "Discarded {} deadletter records because no deadletter sink is configured",
                     dl_count
                 );
+                let sample_limit = std::cmp::min(dl_count, 5);
+                for (i, rec) in dl_records.iter().take(sample_limit).enumerate() {
+                    warn!(
+                        "deadletter[{}/{}]: failure_code={} error={} namespace={} record={}",
+                        i + 1,
+                        dl_count,
+                        rec.failure_code,
+                        rec.error,
+                        rec.namespace,
+                        &rec.record[..std::cmp::min(rec.record.len(), 200)],
+                    );
+                }
             }
             if !dl_offsets_committed && !dl_offsets.is_empty() {
                 for (ok, pos) in dl_offsets.drain() {
