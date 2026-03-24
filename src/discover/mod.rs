@@ -1902,7 +1902,9 @@ impl AnalyseSchema {
 
                     field.determined_type_values = values_type;
 
-                    if field.determined_type == SkipprDataType::Array && field.determined_type_values != Some(SkipprDataType::Record)
+                    if field.determined_type == SkipprDataType::Array
+                        && field.determined_type_values != Some(SkipprDataType::Record)
+                        && field.determined_type_values != Some(SkipprDataType::Array)
                     {
                         field.fields.clear();
                     }
@@ -1913,7 +1915,10 @@ impl AnalyseSchema {
 
                 if field.determined_type != SkipprDataType::Array
                     || (field.determined_type == SkipprDataType::Array
-                        && field.determined_type_values == Some(SkipprDataType::Record))
+                        && matches!(
+                            field.determined_type_values,
+                            Some(SkipprDataType::Record) | Some(SkipprDataType::Array)
+                        ))
                 {
                     AnalyseSchema::determine_field_types(
                         &mut field.fields,

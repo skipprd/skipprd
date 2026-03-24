@@ -552,6 +552,28 @@ pub fn set_value(
 
                     let mut values_valid = true;
 
+                    // For nested arrays (array-of-arrays) the parent metadata
+                    // describes the outer array; the inner element metadata
+                    // lives under parent.fields["0"].  Clone it once so we can
+                    // recurse with the correct type context.
+                    let sub_data_type = metadata
+                        .get(&field.to_string())
+                        .unwrap()
+                        .determined_type_values
+                        .as_ref()
+                        .map(|t| t.to_string())
+                        .unwrap_or_default();
+                    let mut inner_fields = if sub_data_type == "array" {
+                        let flds = &metadata.get(&field.to_string()).unwrap().fields;
+                        if !flds.is_empty() {
+                            Some(flds.as_ref().clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                     match value.as_array() {
                         Some(t) => {
                             for (i, sub_value) in t.iter().enumerate() {
@@ -560,27 +582,29 @@ pub fn set_value(
                                         std::io::ErrorKind::InvalidData,
                                         format!("Array values not match type: {}", field),
                                     )));
-
-                                    // println!("#### array values not match type: {}", field);
-                                    //
-                                    // arr_new_value.clear();
-                                    //
-                                    //
-                                    // // // evolve array field
-                                    // let foo = Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema);
-                                    //
-                                    // match foo {
-                                    //     Ok(v) => {
-                                    //         println!("#### Evolved array field: {} with value: {}", field, v.value);
-                                    //         arr_new_value = v.value.as_array().unwrap().to_vec();
-                                    //
-                                    //         return Ok(ResolvedFieldValue::new(v.field, arr_new_value.into()));
-                                    //
-                                    //     },
-                                    //     Err(e) => {
-                                    //         return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Array values not match type: {}", field))));
-                                    //     }
-                                    // }
+                                } else if let Some(ref mut inner) = inner_fields {
+                                    let foo = set_value(
+                                        "array",
+                                        "0",
+                                        sub_value,
+                                        Some(field),
+                                        Some("array"),
+                                        inner,
+                                        updated_schema,
+                                        false,
+                                        flatten,
+                                    );
+                                    let res = match foo {
+                                        Ok(v) => v,
+                                        Err(_e) => {
+                                            values_valid = false;
+                                            ResolvedFieldValue::new(
+                                                field.to_string(),
+                                                Value::Null,
+                                            )
+                                        }
+                                    };
+                                    arr_new_value.insert(i, res.value);
                                 } else {
                                     match metadata.get(&field.to_string()) {
                                         Some(_t) => (),
