@@ -1294,7 +1294,11 @@ impl Buffers {
         if !seg_dir.exists() {
             return;
         }
-        for entry in fs::read_dir(&seg_dir).unwrap_or_else(|_| fs::read_dir("/").unwrap()) {
+        let dir_iter = match fs::read_dir(&seg_dir) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        for entry in dir_iter {
             if let Ok(ent) = entry {
                 let p = ent.path();
                 if p.extension().and_then(|s| s.to_str()) != Some("seg") {

@@ -1490,9 +1490,11 @@ pub async fn query(sql_str: &str) {
                             let seg_dir = format!("{}/segment_buffer/segs", Config::get_data_dir());
                             let mut wal_batches: Vec<RecordBatch> = Vec::new();
                             if std::path::Path::new(&seg_dir).exists() {
-                                for entry in std::fs::read_dir(&seg_dir)
-                                    .unwrap_or_else(|_| std::fs::read_dir("/").unwrap())
-                                {
+                                let dir_iter = match std::fs::read_dir(&seg_dir) {
+                                    Ok(r) => r,
+                                    Err(_) => continue,
+                                };
+                                for entry in dir_iter {
                                     if let Ok(ent) = entry {
                                         let path = ent.path();
                                         if path.extension().and_then(|s| s.to_str()) != Some("seg")

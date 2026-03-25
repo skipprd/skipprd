@@ -13,7 +13,7 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use serde_json::{Map, Value};
 use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub mod configuration;
 pub mod logger;
@@ -1055,7 +1055,7 @@ impl Helpers {
                 let file_size = metadata.len();
 
                 // Add file size to its parent directory total
-                let parent_dir = path.parent().unwrap_or_else(|| Path::new("/"));
+                let parent_dir = path.parent().unwrap_or(path);
                 *dir_sizes.entry(PathBuf::from(parent_dir)).or_insert(0) += file_size;
             }
         }

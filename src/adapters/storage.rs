@@ -4,6 +4,16 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+fn is_not_found_error(e: &str) -> bool {
+    e.contains("not found")
+        || e.contains("NotFound")
+        || e.contains("NoSuchKey")
+        || e.contains("No such file")
+        || e.contains("cannot find")       // Windows: "The system cannot find the path specified"
+        || e.contains("os error 2")        // Windows ENOENT
+        || e.contains("os error 3")        // Windows ERROR_PATH_NOT_FOUND
+}
+
 /// Storage adapter interface.
 ///
 /// Implementations route to either S3 or local disk based on
@@ -27,14 +37,7 @@ pub trait StorageAdapter: Send + Sync {
     async fn get_json_opt(&self, key: &str) -> Result<Option<Value>, String> {
         match self.get_json(key).await {
             Ok(v) => Ok(Some(v)),
-            Err(e)
-                if e.contains("not found")
-                    || e.contains("NotFound")
-                    || e.contains("NoSuchKey")
-                    || e.contains("No such file") =>
-            {
-                Ok(None)
-            }
+            Err(e) if is_not_found_error(&e) => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -42,14 +45,7 @@ pub trait StorageAdapter: Send + Sync {
     async fn get_bytes_opt(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         match self.get_bytes(key).await {
             Ok(v) => Ok(Some(v)),
-            Err(e)
-                if e.contains("not found")
-                    || e.contains("NotFound")
-                    || e.contains("NoSuchKey")
-                    || e.contains("No such file") =>
-            {
-                Ok(None)
-            }
+            Err(e) if is_not_found_error(&e) => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -256,7 +252,7 @@ impl StorageAdapter for LocalDiskStorageAdapter {
                         .strip_prefix(root)
                         .unwrap_or(&path)
                         .to_string_lossy()
-                        .to_string();
+                        .replace('\\', "/");
                     if path.is_dir() {
                         walk(&path, root, prefix, out);
                     } else if rel.starts_with(prefix) {
