@@ -20,7 +20,8 @@ use glob::glob_with;
 
 use futures::stream::StreamExt;
 
-use crate::plugins::DataOutputPlugin;
+use async_trait::async_trait;
+use crate::plugins::{DataSink, DataSource};
 use serde_derive::Deserialize;
 use tracing::{debug, error};
 
@@ -88,7 +89,7 @@ impl DataSourceLocalFilePlugin {
     pub async fn sync(
         &mut self,
         offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) {
         let offsets_clone = offsets.clone();
 
@@ -444,5 +445,17 @@ impl DataSourceLocalFilePlugin {
         });
 
         rx
+    }
+}
+
+#[async_trait]
+impl DataSource for DataSourceLocalFilePlugin {
+    async fn sync(
+        &mut self,
+        offsets: Arc<Offsets>,
+        output: Arc<Box<dyn DataSink + Send + Sync>>,
+    ) -> Result<(), std::io::Error> {
+        self.sync(offsets, output).await;
+        Ok(())
     }
 }

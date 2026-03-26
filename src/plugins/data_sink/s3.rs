@@ -2,7 +2,7 @@ use crate::buffer::BufferChunker;
 use crate::helpers::configuration::{Config, OutputPluginConfig};
 use crate::ingest::partition_time::TimePartitioner;
 use crate::plugins::parquet_util::serialize_to_parquet;
-use crate::plugins::DataOutputPlugin;
+use crate::plugins::DataSink;
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
@@ -32,7 +32,7 @@ pub struct DataOutputS3Plugin {
 }
 
 #[async_trait]
-impl DataOutputPlugin for DataOutputS3Plugin {
+impl DataSink for DataOutputS3Plugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,

@@ -38,7 +38,7 @@ s3://{DATA_OUTPUT_S3_BUCKET}/{DATA_OUTPUT_S3_PREFIX}/{namespace}/
 
 Each namespace becomes a separate Glue table within the configured database.
 
-If Athena is used under `data_deadletters`, deadletters are written to the configured deadletter database using the pipeline name as the table name.
+If Athena is used as a `deadletter_sink`, deadletters are written to the configured deadletter database using the pipeline name as the table name.
 
 ## Performance tuning
 

@@ -10,13 +10,13 @@ pipelines:
     env: test
     buffer_threshold_bytes: 20000000
     buffer_threshold_seconds: 600
-    input: data_inputs.s3_bike_hire
+    data_source: data_sources.s3_bike_hire
 
-data_inputs:
+data_sources:
   s3_bike_hire:
     S3:
       batch_size_bytes: 2048000
       s3_bucket: skippr-e2e-sample-data
       s3_prefix: very-small-files
 
-data_outputs:
+data_sinks:

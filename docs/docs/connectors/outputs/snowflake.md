@@ -51,7 +51,7 @@ SNOWFLAKE_SCHEMA=PUBLIC
 Or via YAML pipeline config:
 
 ```yaml
-data_outputs:
+data_sinks:
   destination:
     Snowflake:
       account: "myorg-myaccount"

@@ -13,7 +13,7 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
 use crate::metrics::counters as metrics_hot;
-use crate::plugins::DataOutputPlugin;
+use crate::plugins::DataSink;
 use crate::METRICS;
 use arrow::array::RecordBatch;
 use arrow::ipc::reader::StreamReader;
@@ -411,7 +411,7 @@ impl Buffers {
     pub async fn flush(
         &mut self,
         offsets_db: Arc<Offsets>,
-        _shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        _shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> Result<(), ArrowError> {
         let bytes: u64 = 0;
         let mut rows: u64 = 0;
@@ -483,7 +483,7 @@ impl Buffers {
     }
 
     pub fn start_compactor_service(
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
         offsets_db: Arc<Offsets>,
     ) {
         use std::sync::atomic::Ordering as AO;
@@ -601,7 +601,7 @@ impl Buffers {
 
     async fn run_compactor_service(
         mut rx: tokio::sync::mpsc::UnboundedReceiver<CompactorCommand>,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
         offsets_db: Arc<Offsets>,
     ) {
         let mut drain_reply: Option<tokio::sync::oneshot::Sender<bool>> = None;
@@ -647,7 +647,7 @@ impl Buffers {
 
     async fn run_compaction_cycle(
         force: bool,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
         offsets_db: Arc<Offsets>,
     ) -> bool {
         use futures::stream::StreamExt;
@@ -685,7 +685,7 @@ impl Buffers {
     #[allow(dead_code)]
     async fn compact_one_partition(
         force: bool,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
         offsets_db: Arc<Offsets>,
     ) -> io::Result<bool> {
         let candidates = Self::next_compaction_candidates(1, force);
@@ -1366,7 +1366,7 @@ impl Buffers {
         source: &SegmentSource,
         meta: &SegmentFileMetadata,
         idx: &crate::buffer::segment_file::SegmentPartitionIndexEntry,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
         _offsets_db: Arc<Offsets>,
     ) -> io::Result<bool> {
         let sink_ref = idx.key.sink_ref.clone();
@@ -2300,7 +2300,7 @@ mod tests_wal_commit {
 /// Drain and compact all WAL partitions to the configured output plugin.
 /// Consumes partition queues by repeatedly compacting until empty.
 pub async fn drain_all_partitions(
-    shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+    shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     offsets: Arc<Offsets>,
 ) {
     // Flush any remaining in-memory segments to WAL before compaction
@@ -2653,7 +2653,7 @@ impl WalPartition {
     pub(crate) async fn compact_batches_to_parquet(
         &mut self,
         _offsets_db: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> u64 {
         let data_dir = Config::get_data_dir();
         let mut output_file_name = BufferChunker::encode_chunk_name(
@@ -3031,7 +3031,7 @@ struct CompactionTask {
 // Public drain used at end-of-ingest to compact any remaining WALs regardless of thresholds
 pub async fn force_drain_all(
     _offsets_db: Arc<Offsets>,
-    _shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+    _shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
 ) {
 }
 

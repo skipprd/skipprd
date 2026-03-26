@@ -8,7 +8,8 @@ use tracing::{error, info};
 use crate::helpers::configuration::{Config, DataSourceMssqlPluginConfig, InputPluginConfig};
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::DataOutputPlugin;
+use async_trait::async_trait;
+use crate::plugins::{DataSink, DataSource};
 
 pub struct DataSourceMssqlPlugin {
     pub(crate) ingest: Ingest,
@@ -164,7 +165,7 @@ impl DataSourceMssqlPlugin {
     pub async fn sync(
         &mut self,
         offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) {
         info!("MSSQL input plugin starting sync");
 
@@ -273,5 +274,17 @@ impl DataSourceMssqlPlugin {
         }
 
         info!("MSSQL input plugin sync complete");
+    }
+}
+
+#[async_trait]
+impl DataSource for DataSourceMssqlPlugin {
+    async fn sync(
+        &mut self,
+        offsets: Arc<Offsets>,
+        output: Arc<Box<dyn DataSink + Send + Sync>>,
+    ) -> Result<(), std::io::Error> {
+        self.sync(offsets, output).await;
+        Ok(())
     }
 }

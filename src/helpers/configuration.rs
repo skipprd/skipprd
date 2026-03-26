@@ -260,6 +260,28 @@ fn default_postgres_schema() -> String {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct GlueSchemaSinkConfig {
+    pub glue_database_name: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub enum SchemaSinkConfig {
+    Glue(GlueSchemaSinkConfig),
+    Snowflake(DataOutputSnowflakePluginConfig),
+    Postgres(DataOutputPostgresPluginConfig),
+    Bigquery(DataOutputBigqueryPluginConfig),
+}
+
+/// Wrapper for a data sink or deadletter sink registry entry.
+/// Contains the plugin config plus an optional schema_sink reference.
+#[derive(Debug, Deserialize, Clone)]
+pub struct DataSinkEntry {
+    #[serde(flatten)]
+    pub config: OutputPluginConfig,
+    pub schema_sink: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Pipeline {
     #[serde(rename = "type")]
     pub r#type: Option<String>,
@@ -277,10 +299,12 @@ pub struct Pipeline {
     pub sync_frequency_seconds: Option<u64>,
     pub data_dir: Option<String>,
     pub transform: Option<Transform>,
-    pub input: Option<String>,
-    pub output: Option<String>,
-    pub deadletters: Option<String>,
-    pub schema: Option<String>,
+    #[serde(alias = "input")]
+    pub data_source: Option<String>,
+    #[serde(alias = "output")]
+    pub data_sink: Option<String>,
+    #[serde(alias = "deadletters", alias = "deadletter")]
+    pub deadletter_sink: Option<String>,
     pub stats: Option<Stats>,
     pub semantic_layer: Option<SemanticLayerSettings>,
 }
@@ -290,10 +314,14 @@ pub struct Config {
     pub skippr: Option<Skippr>,
     #[serde(default)]
     pub pipelines: HashMap<String, Pipeline>,
-    pub data_inputs: Option<HashMap<String, InputPluginConfig>>,
-    pub data_outputs: Option<HashMap<String, OutputPluginConfig>>,
-    pub data_deadletters: Option<HashMap<String, OutputPluginConfig>>,
-    pub schema_outputs: Option<HashMap<String, OutputPluginConfig>>,
+    #[serde(alias = "data_inputs")]
+    pub data_sources: Option<HashMap<String, InputPluginConfig>>,
+    #[serde(alias = "data_outputs")]
+    pub data_sinks: Option<HashMap<String, DataSinkEntry>>,
+    #[serde(alias = "data_deadletters")]
+    pub deadletter_sinks: Option<HashMap<String, DataSinkEntry>>,
+    #[serde(alias = "schema_outputs")]
+    pub schema_sinks: Option<HashMap<String, SchemaSinkConfig>>,
 }
 
 pub static APP_CONFIG: Lazy<Arc<TimedRwLock<Option<Config>>>> =
@@ -420,10 +448,10 @@ impl Config {
                 storage_mode: None,
             }),
             pipelines: HashMap::new(),
-            data_inputs: None,
-            data_outputs: None,
-            data_deadletters: None,
-            schema_outputs: None,
+            data_sources: None,
+            data_sinks: None,
+            deadletter_sinks: None,
+            schema_sinks: None,
         }
     }
 
@@ -581,18 +609,18 @@ impl Config {
                 }
             };
 
-            if pipline.input.is_some() {
+            if pipline.data_source.is_some() {
                 // split dot string
                 let input_plugin_name = pipline
-                    .input
+                    .data_source
                     .as_ref()
                     .unwrap()
                     .split('.')
                     .collect::<Vec<&str>>()[1]
                     .to_string();
 
-                let res = match config.data_inputs.as_ref() {
-                    Some(data_inputs) => match data_inputs.get(&input_plugin_name) {
+                let res = match config.data_sources.as_ref() {
+                    Some(data_sources) => match data_sources.get(&input_plugin_name) {
                         Some(plugin_config) => plugin_config
                             .plugin_name()
                             .clone()
@@ -628,19 +656,20 @@ impl Config {
                 }
             };
 
-            if pipline.output.is_some() {
+            if pipline.data_sink.is_some() {
                 // split dot string
                 let output_plugin_name = pipline
-                    .output
+                    .data_sink
                     .as_ref()
                     .unwrap()
                     .split('.')
                     .collect::<Vec<&str>>()[1]
                     .to_string();
 
-                let res = match config.data_outputs.as_ref() {
-                    Some(data_outputs) => match data_outputs.get(&output_plugin_name) {
-                        Some(plugin_config) => plugin_config
+                let res = match config.data_sinks.as_ref() {
+                    Some(data_sinks) => match data_sinks.get(&output_plugin_name) {
+                        Some(entry) => entry
+                            .config
                             .plugin_name()
                             .clone()
                             .or(Some("".to_string()))
@@ -662,28 +691,28 @@ impl Config {
 
     pub fn get_pipeline_deadletters_ref() -> Option<String> {
         let pipeline = Config::get_pipeline_config();
-        pipeline.deadletters.clone()
+        pipeline.deadletter_sink.clone()
     }
 
     fn resolve_deadletter_plugin_config_for(
         config: &Config,
         pipeline: &Pipeline,
     ) -> Result<Option<OutputPluginConfig>, String> {
-        let reference = match pipeline.deadletters.as_ref() {
+        let reference = match pipeline.deadletter_sink.as_ref() {
             Some(reference) => reference,
             None => return Ok(None),
         };
-        let deadletter_name = Self::parse_registry_ref(reference, "data_deadletters")?;
+        let deadletter_name = Self::parse_registry_ref(reference, "deadletter_sinks")?;
 
         match config
-            .data_deadletters
+            .deadletter_sinks
             .as_ref()
             .and_then(|registry| registry.get(&deadletter_name))
-            .cloned()
+            .map(|entry| entry.config.clone())
         {
             Some(plugin_config) => Ok(Some(plugin_config)),
             None => Err(format!(
-                "Deadletter sink '{}' was configured but not found in data_deadletters.",
+                "Deadletter sink '{}' was configured but not found in deadletter_sinks.",
                 reference
             )),
         }
@@ -691,12 +720,12 @@ impl Config {
 
     fn deadletter_config_violations_for(config: &Config, pipeline: &Pipeline) -> Vec<String> {
         let mut violations = Vec::new();
-        if let Some(deadletters_ref) = pipeline.deadletters.as_ref() {
+        if let Some(deadletters_ref) = pipeline.deadletter_sink.as_ref() {
             if let Err(err) = Self::resolve_deadletter_plugin_config_for(config, pipeline) {
                 violations.push(err);
             }
 
-            if pipeline.output.as_ref() == Some(deadletters_ref) {
+            if pipeline.data_sink.as_ref() == Some(deadletters_ref) {
                 violations.push(
                     "Deadletter sink must not reference the same registry entry as the primary output."
                         .to_string(),
@@ -709,9 +738,9 @@ impl Config {
     pub fn get_pipeline_output_sink_ref() -> String {
         let pipeline = Config::get_pipeline_config();
         pipeline
-            .output
+            .data_sink
             .clone()
-            .unwrap_or_else(|| "data_outputs.__default__".to_string())
+            .unwrap_or_else(|| "data_sinks.__default__".to_string())
     }
 
     pub fn get_pipeline_deadletter_plugin_name() -> Result<Option<String>, String> {
@@ -738,23 +767,29 @@ impl Config {
                 }
             };
 
-            if pipline.schema.is_some() {
-                // split dot string
-                let input_plugin_name = pipline
-                    .schema
-                    .as_ref()
-                    .unwrap()
-                    .split('.')
-                    .collect::<Vec<&str>>()[1]
-                    .to_string();
+            let schema_sink_ref = pipline.data_sink.as_ref().and_then(|sink_ref| {
+                let sink_name = Self::parse_registry_ref(sink_ref, "data_sinks").ok()?;
+                config.data_sinks.as_ref()?.get(&sink_name)?.schema_sink.clone()
+            });
 
-                let res = match config.schema_outputs.as_ref() {
-                    Some(schema_outputs) => match schema_outputs.get(&input_plugin_name) {
-                        Some(plugin_config) => plugin_config
-                            .plugin_name()
-                            .clone()
-                            .or(Some("".to_string()))
-                            .unwrap(),
+            if let Some(ref schema_ref) = schema_sink_ref {
+                let schema_name = match Self::parse_registry_ref(schema_ref, "schema_sinks") {
+                    Ok(name) => name,
+                    Err(_) => {
+                        let res = Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
+                        Config::set_evncache("DATA_SCHEMA_PLUGIN_NAME", &res);
+                        return res;
+                    }
+                };
+
+                let res = match config.schema_sinks.as_ref() {
+                    Some(schema_sinks) => match schema_sinks.get(&schema_name) {
+                        Some(schema_config) => match schema_config {
+                            SchemaSinkConfig::Glue(_) => "Glue".to_string(),
+                            SchemaSinkConfig::Snowflake(_) => "Snowflake".to_string(),
+                            SchemaSinkConfig::Postgres(_) => "Postgres".to_string(),
+                            SchemaSinkConfig::Bigquery(_) => "Bigquery".to_string(),
+                        },
                         None => Config::getenv("DATA_SCHEMA_PLUGIN_NAME", ""),
                     },
                     None => Config::getenv("DATA_SCHEMA_PLUGIN_NAME", ""),
@@ -903,10 +938,9 @@ impl Config {
                     sync_frequency_seconds: None,
                     data_dir: None,
                     transform: None,
-                    input: None,
-                    output: None,
-                    deadletters: None,
-                    schema: None,
+                    data_source: None,
+                    data_sink: None,
+                    deadletter_sink: None,
                     stats: None,
                     semantic_layer: None,
                 }
@@ -1488,13 +1522,13 @@ impl Config {
     pub fn get_pipeline_input_plugin_config() -> Result<InputPluginConfig, String> {
         let pipeline_config = Config::get_pipeline_config();
         let config = Config::get();
-        let input_name = match pipeline_config.input.as_ref() {
-            Some(input) => Self::parse_registry_ref(input, "data_inputs")?,
+        let input_name = match pipeline_config.data_source.as_ref() {
+            Some(input) => Self::parse_registry_ref(input, "data_sources")?,
             None => return Err("Input not found".to_string()),
         };
 
         config
-            .data_inputs
+            .data_sources
             .as_ref()
             .and_then(|registry| registry.get(&input_name))
             .cloned()
@@ -1504,16 +1538,16 @@ impl Config {
     pub fn get_pipeline_output_plugin_config() -> Result<OutputPluginConfig, String> {
         let pipeline_config = Config::get_pipeline_config();
         let config = Config::get();
-        let output_name = match pipeline_config.output.as_ref() {
-            Some(output) => Self::parse_registry_ref(output, "data_outputs")?,
+        let output_name = match pipeline_config.data_sink.as_ref() {
+            Some(output) => Self::parse_registry_ref(output, "data_sinks")?,
             None => return Err("Output not found".to_string()),
         };
 
         config
-            .data_outputs
+            .data_sinks
             .as_ref()
             .and_then(|registry| registry.get(&output_name))
-            .cloned()
+            .map(|entry| entry.config.clone())
             .ok_or_else(|| "Output not found".to_string())
     }
 
@@ -1523,20 +1557,64 @@ impl Config {
         Self::resolve_deadletter_plugin_config_for(&config, &pipeline)
     }
 
-    pub fn get_pipeline_schema_plugin_config() -> Result<OutputPluginConfig, String> {
+    pub fn get_pipeline_schema_plugin_config() -> Result<SchemaSinkConfig, String> {
         let pipeline_config = Config::get_pipeline_config();
         let config = Config::get();
-        let schema_name = match pipeline_config.schema.as_ref() {
-            Some(schema) => Self::parse_registry_ref(schema, "schema_outputs")?,
-            None => return Err("Schema not found".to_string()),
-        };
+
+        let sink_ref = pipeline_config
+            .data_sink
+            .as_ref()
+            .ok_or_else(|| "Data sink not found".to_string())?;
+        let sink_name = Self::parse_registry_ref(sink_ref, "data_sinks")?;
+
+        let entry = config
+            .data_sinks
+            .as_ref()
+            .and_then(|registry| registry.get(&sink_name))
+            .ok_or_else(|| "Data sink entry not found".to_string())?;
+
+        let schema_ref = entry
+            .schema_sink
+            .as_ref()
+            .ok_or_else(|| "Schema sink not configured on data sink entry".to_string())?;
+        let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks")?;
 
         config
-            .schema_outputs
+            .schema_sinks
             .as_ref()
             .and_then(|registry| registry.get(&schema_name))
             .cloned()
-            .ok_or_else(|| "Schema not found".to_string())
+            .ok_or_else(|| "Schema sink not found".to_string())
+    }
+
+    pub fn get_pipeline_deadletter_schema_config() -> Result<SchemaSinkConfig, String> {
+        let pipeline_config = Config::get_pipeline_config();
+        let config = Config::get();
+
+        let sink_ref = pipeline_config
+            .deadletter_sink
+            .as_ref()
+            .ok_or_else(|| "Deadletter sink not configured".to_string())?;
+        let sink_name = Self::parse_registry_ref(sink_ref, "deadletter_sinks")?;
+
+        let entry = config
+            .deadletter_sinks
+            .as_ref()
+            .and_then(|registry| registry.get(&sink_name))
+            .ok_or_else(|| "Deadletter sink entry not found".to_string())?;
+
+        let schema_ref = entry
+            .schema_sink
+            .as_ref()
+            .ok_or_else(|| "Schema sink not configured on deadletter sink entry".to_string())?;
+        let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks")?;
+
+        config
+            .schema_sinks
+            .as_ref()
+            .and_then(|registry| registry.get(&schema_name))
+            .cloned()
+            .ok_or_else(|| "Schema sink not found".to_string())
     }
 
     // Function to access the config anywhere in the code.
@@ -2010,8 +2088,8 @@ impl Config {
                 .build()
                 .unwrap();
             rt.block_on(async move {
-                let mut primary_plugin: Option<Box<dyn crate::plugins::DataOutputPlugin + Send + Sync>> = None;
-                let mut deadletter_plugin: Option<Box<dyn crate::plugins::DataOutputPlugin + Send + Sync>> = None;
+                let mut primary_plugin: Option<Box<dyn crate::plugins::SchemaSink + Send + Sync>> = None;
+                let mut deadletter_plugin: Option<Box<dyn crate::plugins::SchemaSink + Send + Sync>> = None;
 
                 while let Some(ns) = rx.recv().await {
                     if pending.insert(ns.clone(), ()).is_some() {
@@ -2037,7 +2115,9 @@ impl Config {
 
                         if !is_deadletter_ns {
                             if primary_plugin.is_none() {
-                                if let Ok(cfg) = Config::get_pipeline_output_plugin_config() {
+                                if let Ok(cfg) = Config::get_pipeline_schema_plugin_config() {
+                                    primary_plugin = Some(crate::plugins::build_schema_sink(cfg).await);
+                                } else if let Ok(cfg) = Config::get_pipeline_output_plugin_config() {
                                     primary_plugin = crate::plugins::build_schema_sync_plugin(cfg).await;
                                 }
                             }
@@ -2067,7 +2147,9 @@ impl Config {
 
                         if is_deadletter_ns {
                             if deadletter_plugin.is_none() {
-                                if let Ok(Some(cfg)) = Config::get_pipeline_deadletter_plugin_config() {
+                                if let Ok(cfg) = Config::get_pipeline_deadletter_schema_config() {
+                                    deadletter_plugin = Some(crate::plugins::build_schema_sink(cfg).await);
+                                } else if let Ok(Some(cfg)) = Config::get_pipeline_deadletter_plugin_config() {
                                     deadletter_plugin = crate::plugins::build_schema_sync_plugin(cfg).await;
                                 }
                             }
@@ -2349,10 +2431,9 @@ mod tests {
             sync_frequency_seconds: None,
             data_dir: None,
             transform: None,
-            input: None,
-            output: Some("data_outputs.main".to_string()),
-            deadletters: None,
-            schema: None,
+            data_source: None,
+            data_sink: Some("data_sinks.main".to_string()),
+            deadletter_sink: None,
             stats: None,
             semantic_layer: None,
         };
@@ -2364,10 +2445,10 @@ mod tests {
                 storage_mode: None,
             }),
             pipelines: HashMap::new(),
-            data_inputs: None,
-            data_outputs: None,
-            data_deadletters: Some(HashMap::new()),
-            schema_outputs: None,
+            data_sources: None,
+            data_sinks: None,
+            deadletter_sinks: Some(HashMap::new()),
+            schema_sinks: None,
         };
 
         assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline)
@@ -2390,10 +2471,9 @@ mod tests {
             sync_frequency_seconds: None,
             data_dir: None,
             transform: None,
-            input: None,
-            output: Some("data_outputs.main".to_string()),
-            deadletters: Some("data_deadletters.missing".to_string()),
-            schema: None,
+            data_source: None,
+            data_sink: Some("data_sinks.main".to_string()),
+            deadletter_sink: Some("deadletter_sinks.missing".to_string()),
             stats: None,
             semantic_layer: None,
         };
@@ -2405,10 +2485,10 @@ mod tests {
                 storage_mode: None,
             }),
             pipelines: HashMap::new(),
-            data_inputs: None,
-            data_outputs: None,
-            data_deadletters: Some(HashMap::new()),
-            schema_outputs: None,
+            data_sources: None,
+            data_sinks: None,
+            deadletter_sinks: Some(HashMap::new()),
+            schema_sinks: None,
         };
 
         assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline).is_err());

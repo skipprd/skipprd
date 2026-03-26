@@ -149,7 +149,7 @@ impl PerformanceBenchmark {
         let offsets = Arc::new(Offsets::init().expect("Failed to initialize offsets"));
         let mut input_plugin = DataSourceLocalFilePlugin::new().await;
         let output_plugin = DataOutputFilePlugin::new("output".to_string()).await;
-        let boxed_output_plugin: Box<dyn crate::plugins::DataOutputPlugin + Send + Sync> =
+        let boxed_output_plugin: Box<dyn crate::plugins::DataSink + Send + Sync> =
             Box::new(output_plugin);
         let arc_output_plugin = Arc::new(boxed_output_plugin);
 

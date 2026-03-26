@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::{Config, DataOutputBigqueryPluginConfig, OutputPluginConfig};
-use crate::plugins::DataOutputPlugin;
+use crate::plugins::DataSink;
 
 static ENSURED_DATASETS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
@@ -571,7 +571,7 @@ impl DataOutputBigqueryPlugin {
 }
 
 #[async_trait]
-impl DataOutputPlugin for DataOutputBigqueryPlugin {
+impl DataSink for DataOutputBigqueryPlugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,

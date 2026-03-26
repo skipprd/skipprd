@@ -43,7 +43,7 @@
 
 ### `Discarded <n> deadletter records because no deadletter sink is configured`
 
-**Cause:** The pipeline produced deadletters but does not define a `deadletters: data_deadletters.<name>` sink.
+**Cause:** The pipeline produced deadletters but does not define a `deadletter_sink: deadletter_sinks.<name>`.
 
 **Fix:** Add a deadletter sink if you want those records retained. Otherwise this message is informational.
 

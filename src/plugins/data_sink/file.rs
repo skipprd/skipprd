@@ -6,7 +6,7 @@ use std::io::Write;
 
 use crate::ingest::partition_time::TimePartitioner;
 use crate::plugins::parquet_util::serialize_to_parquet;
-use crate::plugins::DataOutputPlugin;
+use crate::plugins::DataSink;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use serde_derive::Deserialize;
@@ -38,7 +38,7 @@ pub struct DataOutputFilePlugin {
 }
 
 #[async_trait]
-impl DataOutputPlugin for DataOutputFilePlugin {
+impl DataSink for DataOutputFilePlugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,

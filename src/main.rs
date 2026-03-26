@@ -57,7 +57,7 @@ use skippr::buffer::ingest_buffer::{wal_recover, Buffers};
 use skippr::benchmark::PerformanceBenchmark;
 use skippr::ingest_work::Ingest;
 use skippr::plugins::file_output::DataOutputFilePlugin;
-use skippr::plugins::DataOutputPlugin;
+use skippr::plugins::DataSink;
 use skippr::sqlrt::doc_parser::SqlDocParser;
 use skippr::sqlrt::docs::{get_docs_in_format, DocFormat};
 use skippr::sqlrt::query::query;
@@ -75,11 +75,11 @@ struct PipelineCache {}
 
 struct OutputRouter {
     primary_sink_ref: String,
-    sinks: HashMap<String, Arc<Box<dyn DataOutputPlugin + Send + Sync>>>,
+    sinks: HashMap<String, Arc<Box<dyn DataSink + Send + Sync>>>,
 }
 
 #[async_trait::async_trait]
-impl DataOutputPlugin for OutputRouter {
+impl DataSink for OutputRouter {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,
@@ -100,16 +100,6 @@ impl DataOutputPlugin for OutputRouter {
         plugin.sync(stream, filename).await
     }
 
-    async fn sync_schema(
-        &self,
-        namespace: &str,
-        metadata: &skippr::discover::OutputMetadata,
-    ) -> Result<(), std::io::Error> {
-        for sink in self.sinks.values() {
-            sink.sync_schema(namespace, metadata).await?;
-        }
-        Ok(())
-    }
 }
 
 // @todo, last_ran should be the updated_at timestamp for the file DATA_DIR/LASTRAN
@@ -564,7 +554,7 @@ async fn discover(output_mode: &str) {
 
     let offsets_db = Arc::new(offsets);
 
-    let noop_output: Box<dyn skippr::plugins::DataOutputPlugin + Send + Sync> =
+    let noop_output: Box<dyn skippr::plugins::DataSink + Send + Sync> =
         Box::new(skippr::plugins::NoopOutputPlugin);
     let shared_output = Arc::new(noop_output);
 
@@ -829,7 +819,7 @@ async fn sync(output_mode: &str) {
     info!(
         "Ingest completed, flushing remaining buffers to output plugin {}",
         Config::get_pipeline_config()
-            .output
+            .data_sink
             .or(Some("".to_string()))
             .unwrap()
     );
@@ -968,35 +958,35 @@ async fn sync(output_mode: &str) {
 async fn build_output_plugin_from_config(
     output_config: OutputPluginConfig,
     buffer_name: String,
-) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
+) -> Result<Box<dyn DataSink + Send + Sync>, io::Error> {
     match output_config {
         OutputPluginConfig::File(file_config) => {
             let plugin = DataOutputFilePlugin::new_with_config(buffer_name, Some(file_config)).await;
-            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         OutputPluginConfig::Athena(athena_config) => {
             let plugin =
                 DataOutputAwsAthenaPlugin::new_with_config(buffer_name, athena_config).await;
-            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         OutputPluginConfig::S3(s3_config) => {
             let plugin = DataOutputS3Plugin::new_with_config(buffer_name, Some(s3_config)).await;
-            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         OutputPluginConfig::Snowflake(sf_config) => {
             let plugin =
                 DataOutputSnowflakePlugin::new_with_config(buffer_name, sf_config).await;
-            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         OutputPluginConfig::Bigquery(bq_config) => {
             let plugin =
                 DataOutputBigqueryPlugin::new_with_config(buffer_name, bq_config).await;
-            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         OutputPluginConfig::Postgres(pg_config) => {
             let plugin =
                 DataOutputPostgresPlugin::new_with_config(buffer_name, pg_config).await;
-            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
     }
 }
@@ -1004,7 +994,7 @@ async fn build_output_plugin_from_config(
 pub async fn sync_output_plugin(
     plugin_name: &str,
     buffer_name: String,
-) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
+) -> Result<Box<dyn DataSink + Send + Sync>, io::Error> {
     info!("Output plugin: {}", plugin_name);
 
     let primary_sink_ref = Config::get_pipeline_output_sink_ref();
@@ -1016,7 +1006,7 @@ pub async fn sync_output_plugin(
                 buffer_name
             );
             Box::new(DataOutputFilePlugin::new(buffer_name.clone()).await)
-                as Box<dyn DataOutputPlugin + Send + Sync>
+                as Box<dyn DataSink + Send + Sync>
         }
         Err(err) => {
             return Err(io::Error::other(format!(
@@ -1025,7 +1015,7 @@ pub async fn sync_output_plugin(
         }
     };
 
-    let mut sinks: HashMap<String, Arc<Box<dyn DataOutputPlugin + Send + Sync>>> = HashMap::new();
+    let mut sinks: HashMap<String, Arc<Box<dyn DataSink + Send + Sync>>> = HashMap::new();
     sinks.insert(primary_sink_ref.clone(), Arc::new(primary_plugin));
 
     if let Some((deadletter_sink_ref, deadletter_plugin)) =
@@ -1037,12 +1027,12 @@ pub async fn sync_output_plugin(
     Ok(Box::new(OutputRouter {
         primary_sink_ref,
         sinks,
-    }) as Box<dyn DataOutputPlugin + Send + Sync>)
+    }) as Box<dyn DataSink + Send + Sync>)
 }
 
 pub async fn sync_deadletter_plugin(
     buffer_name: String,
-) -> Result<Option<(String, Box<dyn DataOutputPlugin + Send + Sync>)>, io::Error> {
+) -> Result<Option<(String, Box<dyn DataSink + Send + Sync>)>, io::Error> {
     let sink_ref = match Config::get_pipeline_deadletters_ref() {
         Some(sink_ref) => sink_ref,
         None => return Ok(None),
@@ -1058,54 +1048,23 @@ pub async fn sync_deadletter_plugin(
 
 pub async fn sync_input_plugin(
     offsets_clone: Arc<Offsets>,
-    shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+    shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
 ) {
-    match Config::get_pipeline_input_plugin_name().as_str() {
-        // "pcap" => {
-        //     panic!("PCAP input plugin not installed, please contact support")
-        //     // let mut input = DataSourcePcapPlugin::new().await;
-        //     // input
-        //     //     .sync(
-        //     //         offsets_clone,
-        //     //     )
-        //     //     .await;
-        // }
-        // "stdin" => {
-        //     let mut input = DataSourceStdinPlugin::new().await;
-        //     input
-        //         .sync(
-        //             offsets_clone,
-        //         )
-        //         .await;
-        // }
-        "File" => {
-            let mut input = DataSourceLocalFilePlugin::new().await;
-            input.sync(offsets_clone, shared_output).await;
-        }
-        "S3" => {
-            let mut input = DataSourceS3Plugin::new().await;
-            input.sync(offsets_clone, shared_output).await;
-        }
-        "Mssql" => {
-            let mut input = DataSourceMssqlPlugin::new().await;
-            input.sync(offsets_clone, shared_output).await;
-        }
-        // "s3_inventory" => {
-        //     if *HAS_LICENSE.read() {
-        //         let mut input = DataSourceS3InventoryPlugin::new().await;
-        //         input.sync(
-        //             offsets_clone,
-        //         )
-        //             .await;
-        //     } else {
-        //         println!("No license found for S3 Inventory input plugin. Visit https://skippr.io to get a license.");
-        //     }
-        // }
+    let plugin_name = Config::get_pipeline_input_plugin_name();
+    let mut source: Box<dyn skippr::plugins::DataSource> = match plugin_name.as_str() {
+        "File" => Box::new(DataSourceLocalFilePlugin::new().await),
+        "S3" => Box::new(DataSourceS3Plugin::new().await),
+        "Mssql" => Box::new(DataSourceMssqlPlugin::new().await),
         "" => {
             error!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
+            return;
         }
         unknown => {
             error!("Data Source Plugin {} not supported", unknown);
+            return;
         }
+    };
+    if let Err(e) = source.sync(offsets_clone, shared_output).await {
+        error!("Data source sync failed: {}", e);
     }
 }

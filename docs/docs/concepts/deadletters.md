@@ -5,9 +5,9 @@ Records that fail validation or cannot be normalized are captured as deadletters
 ## How deadletters work
 
 - Deadletters still go through Skippr's normal WAL and compaction pipeline.
-- A pipeline can optionally point at a dedicated deadletter sink from the top-level `data_deadletters` registry.
-- If `deadletters` is unset for a pipeline, deadletter records are discarded after being counted and logged.
-- If `deadletters` is set but the referenced sink is invalid, startup fails.
+- A pipeline can optionally point at a dedicated deadletter sink from the top-level `deadletter_sinks` registry.
+- If `deadletter_sink` is unset for a pipeline, deadletter records are discarded after being counted and logged.
+- If `deadletter_sink` is set but the referenced sink is invalid, startup fails.
 - Deadletter Athena tables use the `_dl_<pipeline>` name, so the deadletter schema stays isolated from the primary table even when both live in Athena.
 
 ## Config file example
@@ -15,30 +15,38 @@ Records that fail validation or cannot be normalized are captured as deadletters
 ```yaml
 pipelines:
   bike_hire:
-    input: data_inputs.source
-    output: data_outputs.analytics
-    deadletters: data_deadletters.analytics_deadletters
+    data_source: data_sources.source
+    data_sink: data_sinks.analytics
+    deadletter_sink: deadletter_sinks.analytics_deadletters
 
-data_outputs:
+data_sinks:
   analytics:
     Athena:
       athena_workgroup_name: analytics
-      glue_database_name: analytics
       s3_bucket: my-main-bucket
       athena_results_s3_bucket: my-query-results
       s3_prefix: warehouse/events
+    schema_sink: schema_sinks.glue_analytics
 
-data_deadletters:
+deadletter_sinks:
   analytics_deadletters:
     Athena:
       athena_workgroup_name: analytics
-      glue_database_name: analytics_deadletters
       s3_bucket: my-deadletter-bucket
       athena_results_s3_bucket: my-query-results
       s3_prefix: warehouse/deadletters
+    schema_sink: schema_sinks.glue_analytics_deadletters
+
+schema_sinks:
+  glue_analytics:
+    Glue:
+      glue_database_name: analytics
+  glue_analytics_deadletters:
+    Glue:
+      glue_database_name: analytics_deadletters
 ```
 
-You can also use `S3` or `File` sinks in `data_deadletters`.
+You can also use `S3` or `File` sinks in `deadletter_sinks`.
 
 ## Deadletter schema
 
@@ -72,4 +80,4 @@ LIMIT 50;
 ## Operational guidance
 
 - Prefer a dedicated Glue database or S3 prefix for deadletters.
-- Do not point `deadletters` at the same registry entry as the primary output.
+- Do not point `deadletter_sink` at the same registry entry as the primary `data_sink`.

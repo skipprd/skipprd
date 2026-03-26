@@ -1,101 +1,61 @@
-// use std::collections::HashMap;
-// use std::sync::Arc;
-// use async_trait::async_trait;
-// use crate::helpers::offsets::Offsets;
+pub mod traits;
 
-use crate::helpers::offsets::Offsets;
-use crate::helpers::timed_rwlock::TimedRwLock;
-use crate::plugins::athena::DataOutputAwsAthenaPlugin;
-use async_trait::async_trait;
-use datafusion::execution::SendableRecordBatchStream;
-use std::sync::Arc;
+pub mod data_source;
+pub mod data_sink;
+pub mod schema_sink;
+pub mod schema_source;
+pub mod util;
 
-pub mod athena;
-pub mod bigquery_output;
-pub mod file_input;
-pub mod file_output;
-pub mod mssql_input;
-pub mod parquet_util;
-pub mod postgres_output;
-pub mod s3_input;
-pub mod s3_output;
-pub mod snowflake_output;
-// pub mod stdout_output;
-// pub mod pcap_input;
+// Backward-compatible re-exports at the old module paths.
+pub use data_sink::athena;
+pub use data_sink::bigquery as bigquery_output;
+pub use data_sink::file as file_output;
+pub use data_sink::postgres as postgres_output;
+pub use data_sink::s3 as s3_output;
+pub use data_sink::snowflake as snowflake_output;
+pub use data_source::file as file_input;
+pub use data_source::mssql as mssql_input;
+pub use data_source::s3 as s3_input;
+pub use util::parquet as parquet_util;
 
-// #[async_trait]
-// trait DataSourcePlugin {
-//     async fn new() -> Self where Self: Sized;
-//     async fn sync(&mut self, offsets: Arc<Offsets>);
-// }
-//
-// #[async_trait]
-// trait DataOutputPlugin {
-//     async fn new() -> Self where Self: Sized;
-//     async fn sync(&mut self, offsets: Arc<Offsets>);
-// }
+pub use traits::{DataSink, DataSource, SchemaSink, SchemaSource};
 
-// pub fn init_input_plugin(
-//     plugin_name: &str,
-//     config: &HashMap<String, String>,
-// ) -> Box<dyn DataSourcePlugin> {
-//     match plugin_name {
-//         "stdin" => stdin_input::DataSourceStdinPlugin::new(),
-// "s3" => Box::new(s3_input::DataSourceS3Plugin::new()),
-// "s3_inventory" => Box::new(s3_inventory::DataSourceS3InventoryPlugin::new()),
-//         "file" => Box::new(file_input::DataSourceLocalFilePlugin::new()),
-//         _ => panic!("Unknown input plugin: {}", plugin_name),
-//     }
-// }
-
-#[async_trait]
-#[allow(dead_code)]
-pub(crate) trait DataInputPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>,
-    );
-}
-
-#[async_trait]
-pub trait DataOutputPlugin: Send + Sync {
-    async fn sync(
-        &self,
-        stream: SendableRecordBatchStream,
-        filename: String,
-    ) -> Result<(), std::io::Error>;
-
-    /// Pre-create or update the output schema (tables, etc.) for a namespace.
-    /// Called during schema discovery so DDL completes before data compaction.
-    /// Default is a no-op; override for plugins that require upfront DDL.
-    async fn sync_schema(
-        &self,
-        _namespace: &str,
-        _metadata: &crate::discover::OutputMetadata,
-    ) -> Result<(), std::io::Error> {
-        Ok(())
-    }
-}
-
-/// Build a plugin instance for schema sync from an output config.
+/// Build a `SchemaSink` from an `OutputPluginConfig` (legacy fallback).
 /// Returns `None` for plugins that don't need upfront DDL.
 pub async fn build_schema_sync_plugin(
     config: crate::helpers::configuration::OutputPluginConfig,
-) -> Option<Box<dyn DataOutputPlugin + Send + Sync>> {
+) -> Option<Box<dyn SchemaSink + Send + Sync>> {
     use crate::helpers::configuration::OutputPluginConfig;
     match config {
-        OutputPluginConfig::Athena(c) => Some(Box::new(
-            athena::DataOutputAwsAthenaPlugin::new_with_config("_schema_sync".into(), c).await,
-        )),
+        OutputPluginConfig::Athena(c) => {
+            let glue_config = crate::helpers::configuration::GlueSchemaSinkConfig {
+                glue_database_name: c.glue_database_name.clone(),
+            };
+            Some(Box::new(schema_sink::glue::GlueSchemaSink::new(glue_config)))
+        }
         OutputPluginConfig::Snowflake(c) => Some(Box::new(
-            snowflake_output::DataOutputSnowflakePlugin::new_with_config(
-                "_schema_sync".into(),
-                c,
-            )
-            .await,
+            schema_sink::snowflake::SnowflakeSchemaSink::new(c).await,
         )),
         _ => None,
+    }
+}
+
+/// Build a `SchemaSink` from a `SchemaSinkConfig`.
+pub async fn build_schema_sink(
+    config: crate::helpers::configuration::SchemaSinkConfig,
+) -> Box<dyn SchemaSink + Send + Sync> {
+    use crate::helpers::configuration::SchemaSinkConfig;
+    match config {
+        SchemaSinkConfig::Glue(c) => Box::new(schema_sink::glue::GlueSchemaSink::new(c)),
+        SchemaSinkConfig::Snowflake(c) => {
+            Box::new(schema_sink::snowflake::SnowflakeSchemaSink::new(c).await)
+        }
+        SchemaSinkConfig::Postgres(c) => {
+            Box::new(schema_sink::postgres::PostgresSchemaSink::new(c))
+        }
+        SchemaSinkConfig::Bigquery(c) => {
+            Box::new(schema_sink::bigquery::BigquerySchemaSink::new(c))
+        }
     }
 }
 
@@ -103,11 +63,11 @@ pub async fn build_schema_sync_plugin(
 /// without writing to any destination.
 pub struct NoopOutputPlugin;
 
-#[async_trait]
-impl DataOutputPlugin for NoopOutputPlugin {
+#[async_trait::async_trait]
+impl DataSink for NoopOutputPlugin {
     async fn sync(
         &self,
-        _stream: SendableRecordBatchStream,
+        _stream: datafusion::execution::SendableRecordBatchStream,
         _filename: String,
     ) -> Result<(), std::io::Error> {
         Ok(())

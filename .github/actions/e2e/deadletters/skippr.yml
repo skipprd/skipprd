@@ -13,32 +13,39 @@ pipelines:
     transform:
       batch_time_fields: start_ts
       batch_time_unit: minute
-    input: data_inputs.s3_deadletters_test
-    output: data_outputs.test_datalake
-    deadletters: data_deadletters.test_deadletters
+    data_source: data_sources.s3_deadletters_test
+    data_sink: data_sinks.test_datalake
+    deadletter_sink: deadletter_sinks.test_deadletters
 
-data_inputs:
+data_sources:
   s3_deadletters_test:
     S3:
       batch_size_bytes: 2048000
       s3_bucket: skippr-e2e-sample-data
       s3_prefix: deadletters/
 
-data_outputs:
+data_sinks:
   test_datalake:
     Athena:
       athena_workgroup_name: bikehire
-      glue_database_name: bikehire
       s3_bucket: skippr-e2e-sample-data-output
       athena_results_s3_bucket: skippr-e2e-sample-data-output
       s3_prefix: deadletters
+    schema_sink: schema_sinks.glue_bikehire
 
-data_deadletters:
+deadletter_sinks:
   test_deadletters:
     Athena:
       athena_workgroup_name: bikehire
-      glue_database_name: deadletters
       s3_bucket: skippr-e2e-sample-data-output
       athena_results_s3_bucket: skippr-e2e-sample-data-output
       s3_prefix: deadletters-archive
+    schema_sink: schema_sinks.glue_deadletters
 
+schema_sinks:
+  glue_bikehire:
+    Glue:
+      glue_database_name: bikehire
+  glue_deadletters:
+    Glue:
+      glue_database_name: deadletters

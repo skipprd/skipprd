@@ -67,7 +67,7 @@ use crate::serdes::xml::SerdeXml;
 
 use crate::cli::{Mode, CLI_MODE};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
-use crate::plugins::DataOutputPlugin;
+use crate::plugins::DataSink;
 use arrow::datatypes;
 use arrow::error::ArrowError;
 use arrow::json::ReaderBuilder as ArrowJsonReaderBuilder;
@@ -227,14 +227,14 @@ pub struct IngestBatch {
 pub struct IngestTask {
     pub(crate) datas: Arc<Vec<IngestBatch>>,
     offset_db: Arc<Offsets>,
-    shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+    shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
 }
 
 impl IngestTask {
     pub fn new(
         datas: Vec<IngestBatch>,
         offset_db: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> IngestTask {
         IngestTask {
             datas: Arc::new(datas),
@@ -866,7 +866,7 @@ impl Ingest {
         &self,
         ingest_batches: &Arc<IngestTasks>,
         offset_db: &Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> ThroughputMetrics {
         // If we're not running, exit after current threads finish.
         if !RUNNING.read().load(Ordering::SeqCst) {
@@ -1114,7 +1114,7 @@ impl Ingest {
         offset_db_clone: &Arc<Offsets>,
         schema_hashes: &mut DashMap<String, SchemaHash>,
         handle: runtime::Handle,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) {
         Self::wait_for_data_dir_capacity();
         let _guard = handle.enter();

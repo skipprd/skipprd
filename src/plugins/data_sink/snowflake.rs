@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 use crate::buffer::BufferChunker;
 use crate::discover::SkipprDataType;
 use crate::helpers::configuration::{Config, DataOutputSnowflakePluginConfig, OutputPluginConfig};
-use crate::plugins::DataOutputPlugin;
+use crate::plugins::DataSink;
 
 static ENSURED_SCHEMAS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
     Lazy::new(DashMap::new);
@@ -1439,7 +1439,7 @@ impl DataOutputSnowflakePlugin {
 }
 
 #[async_trait]
-impl DataOutputPlugin for DataOutputSnowflakePlugin {
+impl DataSink for DataOutputSnowflakePlugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,
@@ -1447,8 +1447,10 @@ impl DataOutputPlugin for DataOutputSnowflakePlugin {
     ) -> Result<(), std::io::Error> {
         self.inner_sync(stream, filename).await
     }
+}
 
-    async fn sync_schema(
+impl DataOutputSnowflakePlugin {
+    pub async fn sync_schema(
         &self,
         namespace: &str,
         metadata: &crate::discover::OutputMetadata,

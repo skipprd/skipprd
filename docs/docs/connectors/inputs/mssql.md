@@ -24,7 +24,7 @@ MSSQL_CONNECTION_STRING="Server=tcp:myserver.database.windows.net,1433;Database=
 Or via YAML pipeline config:
 
 ```yaml
-data_inputs:
+data_sources:
   source:
     Mssql:
       connection_string: "Server=tcp:localhost,1433;Database=MyDB;User Id=sa;Password=pass;"

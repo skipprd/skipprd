@@ -32,7 +32,7 @@ use tokio::task::block_in_place;
 
 use crate::ingest::partition_time::TimePartitioner;
 use crate::plugins::parquet_util::serialize_to_parquet;
-use crate::plugins::DataOutputPlugin;
+use crate::plugins::DataSink;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use rand::Rng;
@@ -71,6 +71,7 @@ pub struct DataOutputAwsAthenaPluginConfig {
     pub s3_prefix: String,
     // pub time_bucket: Option<String>,
     pub athena_workgroup_name: String,
+    #[serde(default)]
     pub glue_database_name: String,
     pub athena_results_s3_bucket: String,
 }
@@ -98,27 +99,13 @@ fn is_deadletter_athena_target(
 }
 
 #[async_trait]
-impl DataOutputPlugin for DataOutputAwsAthenaPlugin {
+impl DataSink for DataOutputAwsAthenaPlugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
     ) -> Result<(), std::io::Error> {
         self.inner_sync(stream, filename).await
-    }
-
-    async fn sync_schema(
-        &self,
-        namespace: &str,
-        metadata: &crate::discover::OutputMetadata,
-    ) -> Result<(), std::io::Error> {
-        AwsAthena::create_or_update_schema_with_config(
-            namespace,
-            metadata,
-            self.config.clone(),
-        )
-        .await;
-        Ok(())
     }
 }
 
@@ -138,6 +125,20 @@ pub struct DataOutputAwsAthenaPlugin {
 }
 
 impl DataOutputAwsAthenaPlugin {
+    pub async fn sync_schema(
+        &self,
+        namespace: &str,
+        metadata: &crate::discover::OutputMetadata,
+    ) -> Result<(), std::io::Error> {
+        AwsAthena::create_or_update_schema_with_config(
+            namespace,
+            metadata,
+            self.config.clone(),
+        )
+        .await;
+        Ok(())
+    }
+
     pub fn get_config() -> DataOutputAwsAthenaPluginConfig {
         match Config::get_pipeline_output_plugin_config() {
             Ok(config) => config.into(),

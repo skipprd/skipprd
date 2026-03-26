@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use crate::helpers::configuration::{Config, InputPluginConfig};
 
 use aws_sdk_s3::Client;
@@ -12,8 +13,6 @@ use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
 use std::fs;
 use std::time::Duration;
-// use aws_sdk_s3::types::Object;
-// use futures::future::join_all;
 
 use serde_derive::Deserialize;
 
@@ -21,9 +20,9 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks, ThroughputMetrics};
 
 use tokio::sync::Semaphore;
-// use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
-use crate::plugins::DataOutputPlugin;
+use crate::plugins::DataSink;
+use crate::plugins::DataSource;
 use futures::stream::{self, StreamExt};
 use std::io::BufRead as _;
 use std::sync::atomic::AtomicUsize;
@@ -158,7 +157,7 @@ impl DataSourceS3Plugin {
     pub async fn sync(
         &mut self,
         offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) {
         // Use new stream-based pipeline implementation
         self.sync_stream(offsets, shared_output).await;
@@ -167,7 +166,7 @@ impl DataSourceS3Plugin {
     async fn sync_stream(
         &mut self,
         offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) {
         let s3_bucket = self.config.s3_bucket.clone();
         let s3_bucket_filter = s3_bucket.clone();
@@ -624,7 +623,7 @@ impl DataSourceS3Plugin {
         _s3_bucket: &String,
         _keys: &Vec<Vec<String>>,
         _offsets: &Arc<Offsets>,
-        _shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        _shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
         _chunk_size_current: i64,
     ) -> ThroughputMetrics {
         // Deprecated in bounded pipeline path; keep a no-op metrics return for compatibility
@@ -634,5 +633,17 @@ impl DataSourceS3Plugin {
             queue_length: 0,
             optimal_chunk_size: self.optimal_chunk_size,
         }
+    }
+}
+
+#[async_trait]
+impl DataSource for DataSourceS3Plugin {
+    async fn sync(
+        &mut self,
+        offsets: Arc<Offsets>,
+        output: Arc<Box<dyn DataSink + Send + Sync>>,
+    ) -> Result<(), std::io::Error> {
+        self.sync(offsets, output).await;
+        Ok(())
     }
 }

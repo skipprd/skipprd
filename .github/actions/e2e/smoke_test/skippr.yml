@@ -10,21 +10,26 @@ pipelines:
     env: test
     buffer_threshold_bytes: 200000000
     buffer_threshold_seconds: 600
-    input: data_inputs.s3_bike_hire
-    output: data_outputs.test_datalake
+    data_source: data_sources.s3_bike_hire
+    data_sink: data_sinks.test_datalake
 
-data_inputs:
+data_sources:
   s3_bike_hire:
     S3:
       batch_size_bytes: 10000000
       s3_bucket: skippr-e2e-sample-data
       s3_prefix: bike-hire/
 
-data_outputs:
+data_sinks:
   test_datalake:
     Athena:
       athena_workgroup_name: bikehire
-      glue_database_name: bikehire
       s3_bucket: skippr-e2e-sample-data-output
       athena_results_s3_bucket: skippr-e2e-sample-data-output
       s3_prefix: bikehire
+    schema_sink: schema_sinks.glue_bikehire
+
+schema_sinks:
+  glue_bikehire:
+    Glue:
+      glue_database_name: bikehire

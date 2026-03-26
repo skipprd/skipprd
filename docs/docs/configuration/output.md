@@ -64,12 +64,12 @@ Pipelines can optionally route deadletters to a separate output registry:
 ```yaml
 pipelines:
   analytics:
-    output: data_outputs.main
-    deadletters: data_deadletters.archive
+    data_sink: data_sinks.main
+    deadletter_sink: deadletter_sinks.archive
 ```
 
-`data_deadletters` uses the same output plugin shapes as `data_outputs` and supports `Athena`, `S3`, `File`, and `Snowflake`.
+`deadletter_sinks` uses the same plugin shapes as `data_sinks` and supports `Athena`, `S3`, `File`, and `Snowflake`.
 
-- If `deadletters` is unset, deadletters are discarded.
-- If `deadletters` points to an invalid registry entry, startup fails.
+- If `deadletter_sink` is unset, deadletters are discarded.
+- If `deadletter_sink` points to an invalid registry entry, startup fails.
 - Deadletter Athena tables are named `_dl_<pipeline>` to keep their schema isolated from the primary table.

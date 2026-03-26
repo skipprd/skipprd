@@ -9,7 +9,7 @@ use tracing::{error, info};
 
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::{Config, DataOutputPostgresPluginConfig, OutputPluginConfig};
-use crate::plugins::DataOutputPlugin;
+use crate::plugins::DataSink;
 
 static ENSURED_SCHEMAS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
@@ -411,7 +411,7 @@ impl DataOutputPostgresPlugin {
 }
 
 #[async_trait]
-impl DataOutputPlugin for DataOutputPostgresPlugin {
+impl DataSink for DataOutputPostgresPlugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,

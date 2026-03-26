@@ -9,7 +9,7 @@ pipelines:
 #      batch_time_unit: day
 #      record_field_path: Records
 #      batch_partition_fields: eventSource
-#    input: data_inputs.cloud_trail
+#    data_source: data_sources.cloud_trail
 
   bike_hire:
     auto_approve: yes
@@ -21,14 +21,14 @@ pipelines:
       batch_time_unit: day
       time_partition_prefix: date_
       batch_partition_fields: event_type
-    input: data_inputs.s3_bike_hire
+    data_source: data_sources.s3_bike_hire
 
   very_small_files:
     env: dev
 #    sync_frequency_seconds: 10
     buffer_threshold_bytes: 100000000
     buffer_threshold_seconds: 300
-    input: data_inputs.very_small_files
+    data_source: data_sources.very_small_files
 
   metrics:
     env: dev
@@ -39,11 +39,11 @@ pipelines:
       batch_time_fields: datetime
       batch_time_unit: day
       namespace_fields: type
-    input: data_inputs.metrics
+    data_source: data_sources.metrics
 
 
 
-data_inputs:
+data_sources:
   cloud_trail:
     s3:
       batch_size_bytes: 10000000
@@ -69,4 +69,4 @@ data_inputs:
       s3_delimiter: /
 
 
-data_outputs:
+data_sinks:
