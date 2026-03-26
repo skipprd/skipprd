@@ -26,6 +26,13 @@ runs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
         fi
+    - name: Install system dependencies (macos)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        if ! command -v protoc >/dev/null 2>&1; then
+          brew install protobuf
+        fi
     - name: Setup Rust toolchain
       shell: bash
       run: |
