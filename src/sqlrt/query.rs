@@ -1005,7 +1005,7 @@ pub async fn query(sql_str: &str) {
 
                     // Delete Glue table
                     match AwsAthena::glue_delete_table(
-                        &crate::plugins::athena::DataOutputAwsAthenaPlugin::get_config(),
+                        &crate::plugins::athena::DataSinkAthenaPlugin::get_config(),
                         &table_str,
                     )
                     .await

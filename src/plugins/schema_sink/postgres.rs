@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::discover::OutputMetadata;
-use crate::helpers::configuration::DataOutputPostgresPluginConfig;
+use crate::helpers::configuration::DataSinkPostgresPluginConfig;
 use crate::plugins::traits::SchemaSink;
 
 /// Schema sink for Postgres DDL (CREATE/ALTER TABLE).
@@ -12,11 +12,11 @@ use crate::plugins::traits::SchemaSink;
 /// to manage Postgres DDL independently of data writes.
 pub struct PostgresSchemaSink {
     #[allow(dead_code)]
-    config: DataOutputPostgresPluginConfig,
+    config: DataSinkPostgresPluginConfig,
 }
 
 impl PostgresSchemaSink {
-    pub fn new(config: DataOutputPostgresPluginConfig) -> Self {
+    pub fn new(config: DataSinkPostgresPluginConfig) -> Self {
         Self { config }
     }
 }
@@ -29,7 +29,7 @@ impl SchemaSink for PostgresSchemaSink {
         _metadata: &OutputMetadata,
     ) -> Result<(), std::io::Error> {
         // TODO: Extract ensure_schema + ensure_table logic from
-        // DataOutputPostgresPlugin into this method.
+        // DataSinkPostgresPlugin into this method.
         Ok(())
     }
 }

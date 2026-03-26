@@ -8,29 +8,29 @@ use once_cell::sync::Lazy;
 use tracing::{error, info};
 
 use crate::buffer::BufferChunker;
-use crate::helpers::configuration::{Config, DataOutputPostgresPluginConfig, OutputPluginConfig};
+use crate::helpers::configuration::{Config, DataSinkPostgresPluginConfig, DataSinkPluginConfig};
 use crate::plugins::DataSink;
 
 static ENSURED_SCHEMAS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
-pub struct DataOutputPostgresPlugin {
-    config: DataOutputPostgresPluginConfig,
+pub struct DataSinkPostgresPlugin {
+    config: DataSinkPostgresPluginConfig,
     #[allow(dead_code)]
     buffer_name: String,
     client: tokio::sync::Mutex<Option<tokio_postgres::Client>>,
 }
 
-impl From<OutputPluginConfig> for DataOutputPostgresPluginConfig {
-    fn from(plugin_config: OutputPluginConfig) -> Self {
+impl From<DataSinkPluginConfig> for DataSinkPostgresPluginConfig {
+    fn from(plugin_config: DataSinkPluginConfig) -> Self {
         match plugin_config {
-            OutputPluginConfig::Postgres(config) => config,
+            DataSinkPluginConfig::Postgres(config) => config,
             _ => panic!("Invalid plugin type for Postgres"),
         }
     }
 }
 
-impl DataOutputPostgresPlugin {
+impl DataSinkPostgresPlugin {
     pub async fn new(buffer_name: String) -> Self {
         let config = Self::load_config();
         Self {
@@ -42,7 +42,7 @@ impl DataOutputPostgresPlugin {
 
     pub async fn new_with_config(
         buffer_name: String,
-        config: DataOutputPostgresPluginConfig,
+        config: DataSinkPostgresPluginConfig,
     ) -> Self {
         Self {
             config,
@@ -51,8 +51,8 @@ impl DataOutputPostgresPlugin {
         }
     }
 
-    fn load_config() -> DataOutputPostgresPluginConfig {
-        DataOutputPostgresPluginConfig {
+    fn load_config() -> DataSinkPostgresPluginConfig {
+        DataSinkPostgresPluginConfig {
             host: Config::getenv("POSTGRES_HOST", "localhost"),
             port: {
                 let v = Config::getenv("POSTGRES_PORT", "5432");
@@ -411,7 +411,7 @@ impl DataOutputPostgresPlugin {
 }
 
 #[async_trait]
-impl DataSink for DataOutputPostgresPlugin {
+impl DataSink for DataSinkPostgresPlugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,

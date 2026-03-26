@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 
 use crate::buffer::BufferChunker;
 use crate::discover::SkipprDataType;
-use crate::helpers::configuration::{Config, DataOutputSnowflakePluginConfig, OutputPluginConfig};
+use crate::helpers::configuration::{Config, DataSinkSnowflakePluginConfig, DataSinkPluginConfig};
 use crate::plugins::DataSink;
 
 static ENSURED_SCHEMAS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
@@ -48,8 +48,8 @@ struct EncryptionMaterial {
 }
 
 #[allow(dead_code)]
-pub struct DataOutputSnowflakePlugin {
-    pub(crate) config: DataOutputSnowflakePluginConfig,
+pub struct DataSinkSnowflakePlugin {
+    pub(crate) config: DataSinkSnowflakePluginConfig,
     pub(crate) buffer_name: String,
     client: reqwest::Client,
     /// Cached v2 API token (JWT for key-pair, session token for password)
@@ -61,16 +61,16 @@ pub struct DataOutputSnowflakePlugin {
 const TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(50 * 60);
 const SESSION_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(3 * 3600);
 
-impl From<OutputPluginConfig> for DataOutputSnowflakePluginConfig {
-    fn from(plugin_config: OutputPluginConfig) -> Self {
+impl From<DataSinkPluginConfig> for DataSinkSnowflakePluginConfig {
+    fn from(plugin_config: DataSinkPluginConfig) -> Self {
         match plugin_config {
-            OutputPluginConfig::Snowflake(config) => config,
+            DataSinkPluginConfig::Snowflake(config) => config,
             _ => panic!("Invalid plugin type for Snowflake"),
         }
     }
 }
 
-impl DataOutputSnowflakePlugin {
+impl DataSinkSnowflakePlugin {
     pub async fn new(buffer_name: String) -> Self {
         let config = Self::load_config();
         Self {
@@ -84,7 +84,7 @@ impl DataOutputSnowflakePlugin {
 
     pub async fn new_with_config(
         buffer_name: String,
-        mut config: DataOutputSnowflakePluginConfig,
+        mut config: DataSinkSnowflakePluginConfig,
     ) -> Self {
         if config.private_key_path.is_none() {
             let p = Config::getenv("SNOWFLAKE_PRIVATE_KEY_PATH", "");
@@ -101,8 +101,8 @@ impl DataOutputSnowflakePlugin {
         }
     }
 
-    fn load_config() -> DataOutputSnowflakePluginConfig {
-        DataOutputSnowflakePluginConfig {
+    fn load_config() -> DataSinkSnowflakePluginConfig {
+        DataSinkSnowflakePluginConfig {
             account: Config::getenv("SNOWFLAKE_ACCOUNT", ""),
             user: Config::getenv("SNOWFLAKE_USER", ""),
             password: {
@@ -1439,7 +1439,7 @@ impl DataOutputSnowflakePlugin {
 }
 
 #[async_trait]
-impl DataSink for DataOutputSnowflakePlugin {
+impl DataSink for DataSinkSnowflakePlugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,
@@ -1449,7 +1449,7 @@ impl DataSink for DataOutputSnowflakePlugin {
     }
 }
 
-impl DataOutputSnowflakePlugin {
+impl DataSinkSnowflakePlugin {
     pub async fn sync_schema(
         &self,
         namespace: &str,

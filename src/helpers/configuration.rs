@@ -22,13 +22,13 @@ use serde_json::Value;
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::METADATA;
 
-use crate::plugins::athena::DataOutputAwsAthenaPluginConfig;
+use crate::plugins::athena::DataSinkAthenaPluginConfig;
 
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
 use crate::plugins::file_input::DataSourceLocalFilePluginConfig;
-use crate::plugins::file_output::DataOutputFilePluginConfig;
-use crate::plugins::s3_output::DataOutputS3PluginConfig;
+use crate::plugins::file_output::DataSinkFilePluginConfig;
+use crate::plugins::s3_output::DataSinkS3PluginConfig;
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use toml;
@@ -86,28 +86,28 @@ pub struct SemanticLayerSettings {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub enum InputPluginConfig {
+pub enum DataSourcePluginConfig {
     S3(DataSourceS3PluginConfig),
     File(DataSourceLocalFilePluginConfig),
     Mssql(DataSourceMssqlPluginConfig),
 }
 
-impl InputPluginConfig {
+impl DataSourcePluginConfig {
     pub fn format(&self) -> String {
         match self {
-            InputPluginConfig::S3(s3_config) => s3_config
+            DataSourcePluginConfig::S3(s3_config) => s3_config
                 .format
                 .clone()
                 .or(Some("json".to_string()))
                 .as_ref()
                 .unwrap()
                 .clone(),
-            InputPluginConfig::File(file_config) => file_config
+            DataSourcePluginConfig::File(file_config) => file_config
                 .format
                 .clone()
                 .or(Some("json".to_string()))
                 .unwrap(),
-            InputPluginConfig::Mssql(mssql_config) => mssql_config
+            DataSourcePluginConfig::Mssql(mssql_config) => mssql_config
                 .format
                 .clone()
                 .unwrap_or_else(|| "row".to_string()),
@@ -116,25 +116,25 @@ impl InputPluginConfig {
 
     pub fn plugin_name(&self) -> Option<String> {
         match self {
-            InputPluginConfig::S3(_) => Some("S3".to_string()),
-            InputPluginConfig::File(_) => Some("File".to_string()),
-            InputPluginConfig::Mssql(_) => Some("Mssql".to_string()),
+            DataSourcePluginConfig::S3(_) => Some("S3".to_string()),
+            DataSourcePluginConfig::File(_) => Some("File".to_string()),
+            DataSourcePluginConfig::Mssql(_) => Some("Mssql".to_string()),
         }
     }
 
     pub fn batch_size_bytes(&self) -> Option<i64> {
         match self {
-            InputPluginConfig::S3(s3_config) => s3_config.batch_size_bytes,
-            InputPluginConfig::File(file_config) => file_config.batch_size_bytes,
-            InputPluginConfig::Mssql(mssql_config) => mssql_config.batch_size_bytes,
+            DataSourcePluginConfig::S3(s3_config) => s3_config.batch_size_bytes,
+            DataSourcePluginConfig::File(file_config) => file_config.batch_size_bytes,
+            DataSourcePluginConfig::Mssql(mssql_config) => mssql_config.batch_size_bytes,
         }
     }
 
     pub fn batch_size_seconds(&self) -> Option<i64> {
         match self {
-            InputPluginConfig::S3(s3_config) => s3_config.batch_size_seconds,
-            InputPluginConfig::File(file_config) => file_config.batch_size_seconds,
-            InputPluginConfig::Mssql(mssql_config) => mssql_config.batch_size_seconds,
+            DataSourcePluginConfig::S3(s3_config) => s3_config.batch_size_seconds,
+            DataSourcePluginConfig::File(file_config) => file_config.batch_size_seconds,
+            DataSourcePluginConfig::Mssql(mssql_config) => mssql_config.batch_size_seconds,
         }
     }
 }
@@ -151,44 +151,44 @@ pub struct DataSourceMssqlPluginConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub enum OutputPluginConfig {
-    Athena(DataOutputAwsAthenaPluginConfig),
-    Bigquery(DataOutputBigqueryPluginConfig),
-    File(DataOutputFilePluginConfig),
-    Postgres(DataOutputPostgresPluginConfig),
-    S3(DataOutputS3PluginConfig),
-    Snowflake(DataOutputSnowflakePluginConfig),
+pub enum DataSinkPluginConfig {
+    Athena(DataSinkAthenaPluginConfig),
+    Bigquery(DataSinkBigqueryPluginConfig),
+    File(DataSinkFilePluginConfig),
+    Postgres(DataSinkPostgresPluginConfig),
+    S3(DataSinkS3PluginConfig),
+    Snowflake(DataSinkSnowflakePluginConfig),
 }
 
-impl OutputPluginConfig {
+impl DataSinkPluginConfig {
     pub fn format(&self) -> String {
         match self {
-            OutputPluginConfig::Athena(c) => c
+            DataSinkPluginConfig::Athena(c) => c
                 .format
                 .clone()
                 .or(Some("json".to_string()))
                 .as_ref()
                 .unwrap()
                 .clone(),
-            OutputPluginConfig::Bigquery(c) => c
+            DataSinkPluginConfig::Bigquery(c) => c
                 .format
                 .clone()
                 .unwrap_or_else(|| "json".to_string()),
-            OutputPluginConfig::File(c) => c
+            DataSinkPluginConfig::File(c) => c
                 .format
                 .clone()
                 .or(Some("json".to_string()))
                 .unwrap(),
-            OutputPluginConfig::Postgres(c) => c
+            DataSinkPluginConfig::Postgres(c) => c
                 .format
                 .clone()
                 .unwrap_or_else(|| "json".to_string()),
-            OutputPluginConfig::S3(c) => c
+            DataSinkPluginConfig::S3(c) => c
                 .format
                 .clone()
                 .or(Some("json".to_string()))
                 .unwrap(),
-            OutputPluginConfig::Snowflake(c) => c
+            DataSinkPluginConfig::Snowflake(c) => c
                 .format
                 .clone()
                 .unwrap_or_else(|| "parquet".to_string()),
@@ -197,18 +197,18 @@ impl OutputPluginConfig {
 
     pub fn plugin_name(&self) -> Option<String> {
         match self {
-            OutputPluginConfig::Athena(_) => Some("Athena".to_string()),
-            OutputPluginConfig::Bigquery(_) => Some("Bigquery".to_string()),
-            OutputPluginConfig::File(_) => Some("File".to_string()),
-            OutputPluginConfig::Postgres(_) => Some("Postgres".to_string()),
-            OutputPluginConfig::S3(_) => Some("S3".to_string()),
-            OutputPluginConfig::Snowflake(_) => Some("Snowflake".to_string()),
+            DataSinkPluginConfig::Athena(_) => Some("Athena".to_string()),
+            DataSinkPluginConfig::Bigquery(_) => Some("Bigquery".to_string()),
+            DataSinkPluginConfig::File(_) => Some("File".to_string()),
+            DataSinkPluginConfig::Postgres(_) => Some("Postgres".to_string()),
+            DataSinkPluginConfig::S3(_) => Some("S3".to_string()),
+            DataSinkPluginConfig::Snowflake(_) => Some("Snowflake".to_string()),
         }
     }
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct DataOutputSnowflakePluginConfig {
+pub struct DataSinkSnowflakePluginConfig {
     pub account: String,
     pub user: String,
     #[serde(default)]
@@ -228,7 +228,7 @@ pub struct DataOutputSnowflakePluginConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct DataOutputBigqueryPluginConfig {
+pub struct DataSinkBigqueryPluginConfig {
     pub project: String,
     pub dataset: String,
     pub location: Option<String>,
@@ -237,7 +237,7 @@ pub struct DataOutputBigqueryPluginConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct DataOutputPostgresPluginConfig {
+pub struct DataSinkPostgresPluginConfig {
     #[serde(default = "default_postgres_host")]
     pub host: String,
     pub port: Option<u16>,
@@ -267,9 +267,9 @@ pub struct GlueSchemaSinkConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub enum SchemaSinkConfig {
     Glue(GlueSchemaSinkConfig),
-    Snowflake(DataOutputSnowflakePluginConfig),
-    Postgres(DataOutputPostgresPluginConfig),
-    Bigquery(DataOutputBigqueryPluginConfig),
+    Snowflake(DataSinkSnowflakePluginConfig),
+    Postgres(DataSinkPostgresPluginConfig),
+    Bigquery(DataSinkBigqueryPluginConfig),
 }
 
 /// Wrapper for a data sink or deadletter sink registry entry.
@@ -277,7 +277,7 @@ pub enum SchemaSinkConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkEntry {
     #[serde(flatten)]
-    pub config: OutputPluginConfig,
+    pub config: DataSinkPluginConfig,
     pub schema_sink: Option<String>,
 }
 
@@ -315,7 +315,7 @@ pub struct Config {
     #[serde(default)]
     pub pipelines: HashMap<String, Pipeline>,
     #[serde(alias = "data_inputs")]
-    pub data_sources: Option<HashMap<String, InputPluginConfig>>,
+    pub data_sources: Option<HashMap<String, DataSourcePluginConfig>>,
     #[serde(alias = "data_outputs")]
     pub data_sinks: Option<HashMap<String, DataSinkEntry>>,
     #[serde(alias = "data_deadletters")]
@@ -592,6 +592,33 @@ impl Config {
         Ok(parts[1].to_string())
     }
 
+    /// Resolve the schema sink for a `DataSinkEntry` and merge inherited
+    /// fields into its `DataSinkPluginConfig`. This is the single point where
+    /// a data sink inherits control-plane config (database name, etc.) from
+    /// its associated schema sink.
+    fn inherit_schema_sink_fields(
+        config: &Config,
+        entry: &DataSinkEntry,
+    ) -> DataSinkPluginConfig {
+        let mut plugin_config = entry.config.clone();
+        let schema_cfg = entry.schema_sink.as_ref().and_then(|schema_ref| {
+            let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks").ok()?;
+            config.schema_sinks.as_ref()?.get(&schema_name).cloned()
+        });
+        if let Some(schema_cfg) = schema_cfg {
+            match (&mut plugin_config, schema_cfg) {
+                (
+                    DataSinkPluginConfig::Athena(ref mut athena),
+                    SchemaSinkConfig::Glue(glue),
+                ) => {
+                    athena.glue_database_name = glue.glue_database_name;
+                }
+                _ => {}
+            }
+        }
+        plugin_config
+    }
+
     pub fn get_pipeline_input_plugin_name() -> String {
         if Config::get_envcache("DATA_SOURCE_PLUGIN_NAME") != "" {
             return Config::get_envcache("DATA_SOURCE_PLUGIN_NAME");
@@ -697,7 +724,7 @@ impl Config {
     fn resolve_deadletter_plugin_config_for(
         config: &Config,
         pipeline: &Pipeline,
-    ) -> Result<Option<OutputPluginConfig>, String> {
+    ) -> Result<Option<DataSinkPluginConfig>, String> {
         let reference = match pipeline.deadletter_sink.as_ref() {
             Some(reference) => reference,
             None => return Ok(None),
@@ -708,9 +735,8 @@ impl Config {
             .deadletter_sinks
             .as_ref()
             .and_then(|registry| registry.get(&deadletter_name))
-            .map(|entry| entry.config.clone())
         {
-            Some(plugin_config) => Ok(Some(plugin_config)),
+            Some(entry) => Ok(Some(Self::inherit_schema_sink_fields(config, entry))),
             None => Err(format!(
                 "Deadletter sink '{}' was configured but not found in deadletter_sinks.",
                 reference
@@ -1519,7 +1545,7 @@ impl Config {
         }
     }
 
-    pub fn get_pipeline_input_plugin_config() -> Result<InputPluginConfig, String> {
+    pub fn get_pipeline_input_plugin_config() -> Result<DataSourcePluginConfig, String> {
         let pipeline_config = Config::get_pipeline_config();
         let config = Config::get();
         let input_name = match pipeline_config.data_source.as_ref() {
@@ -1535,7 +1561,7 @@ impl Config {
             .ok_or_else(|| "Input not found".to_string())
     }
 
-    pub fn get_pipeline_output_plugin_config() -> Result<OutputPluginConfig, String> {
+    pub fn get_pipeline_output_plugin_config() -> Result<DataSinkPluginConfig, String> {
         let pipeline_config = Config::get_pipeline_config();
         let config = Config::get();
         let output_name = match pipeline_config.data_sink.as_ref() {
@@ -1543,15 +1569,16 @@ impl Config {
             None => return Err("Output not found".to_string()),
         };
 
-        config
+        let entry = config
             .data_sinks
             .as_ref()
             .and_then(|registry| registry.get(&output_name))
-            .map(|entry| entry.config.clone())
-            .ok_or_else(|| "Output not found".to_string())
+            .ok_or_else(|| "Output not found".to_string())?;
+
+        Ok(Self::inherit_schema_sink_fields(&config, entry))
     }
 
-    pub fn get_pipeline_deadletter_plugin_config() -> Result<Option<OutputPluginConfig>, String> {
+    pub fn get_pipeline_deadletter_plugin_config() -> Result<Option<DataSinkPluginConfig>, String> {
         let config = Config::get();
         let pipeline = Config::get_pipeline_config();
         Self::resolve_deadletter_plugin_config_for(&config, &pipeline)
@@ -2115,9 +2142,10 @@ impl Config {
 
                         if !is_deadletter_ns {
                             if primary_plugin.is_none() {
+                                let data_sink_cfg = Config::get_pipeline_output_plugin_config().ok();
                                 if let Ok(cfg) = Config::get_pipeline_schema_plugin_config() {
-                                    primary_plugin = Some(crate::plugins::build_schema_sink(cfg).await);
-                                } else if let Ok(cfg) = Config::get_pipeline_output_plugin_config() {
+                                    primary_plugin = Some(crate::plugins::build_schema_sink(cfg, data_sink_cfg.as_ref()).await);
+                                } else if let Some(cfg) = data_sink_cfg {
                                     primary_plugin = crate::plugins::build_schema_sync_plugin(cfg).await;
                                 }
                             }
@@ -2147,9 +2175,10 @@ impl Config {
 
                         if is_deadletter_ns {
                             if deadletter_plugin.is_none() {
+                                let dl_sink_cfg = Config::get_pipeline_deadletter_plugin_config().ok().flatten();
                                 if let Ok(cfg) = Config::get_pipeline_deadletter_schema_config() {
-                                    deadletter_plugin = Some(crate::plugins::build_schema_sink(cfg).await);
-                                } else if let Ok(Some(cfg)) = Config::get_pipeline_deadletter_plugin_config() {
+                                    deadletter_plugin = Some(crate::plugins::build_schema_sink(cfg, dl_sink_cfg.as_ref()).await);
+                                } else if let Some(cfg) = dl_sink_cfg {
                                     deadletter_plugin = crate::plugins::build_schema_sync_plugin(cfg).await;
                                 }
                             }

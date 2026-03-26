@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::Offsets;
 use crate::plugins::file_input::DataSourceLocalFilePlugin;
-use crate::plugins::file_output::DataOutputFilePlugin;
+use crate::plugins::file_output::DataSinkFilePlugin;
 
 /// Represents the results of a performance benchmark
 pub struct BenchmarkResults {
@@ -148,7 +148,7 @@ impl PerformanceBenchmark {
         // Initialize components
         let offsets = Arc::new(Offsets::init().expect("Failed to initialize offsets"));
         let mut input_plugin = DataSourceLocalFilePlugin::new().await;
-        let output_plugin = DataOutputFilePlugin::new("output".to_string()).await;
+        let output_plugin = DataSinkFilePlugin::new("output".to_string()).await;
         let boxed_output_plugin: Box<dyn crate::plugins::DataSink + Send + Sync> =
             Box::new(output_plugin);
         let arc_output_plugin = Arc::new(boxed_output_plugin);

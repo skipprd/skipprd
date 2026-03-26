@@ -1,5 +1,5 @@
 use crate::buffer::BufferChunker;
-use crate::helpers::configuration::{Config, OutputPluginConfig};
+use crate::helpers::configuration::{Config, DataSinkPluginConfig};
 use crate::ingest::partition_time::TimePartitioner;
 use crate::plugins::parquet_util::serialize_to_parquet;
 use crate::plugins::DataSink;
@@ -11,28 +11,28 @@ use serde_derive::Deserialize;
 use tracing::info;
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct DataOutputS3PluginConfig {
+pub struct DataSinkS3PluginConfig {
     pub format: Option<String>,
     pub s3_bucket: String,
     pub s3_prefix: String,
 }
 
-impl From<OutputPluginConfig> for DataOutputS3PluginConfig {
-    fn from(plugin_config: OutputPluginConfig) -> Self {
+impl From<DataSinkPluginConfig> for DataSinkS3PluginConfig {
+    fn from(plugin_config: DataSinkPluginConfig) -> Self {
         match plugin_config {
-            OutputPluginConfig::S3(s3_config) => s3_config,
+            DataSinkPluginConfig::S3(s3_config) => s3_config,
             _ => panic!("Invalid plugin type"),
         }
     }
 }
 
-pub struct DataOutputS3Plugin {
+pub struct DataSinkS3Plugin {
     s3_client: S3Client,
-    config: DataOutputS3PluginConfig,
+    config: DataSinkS3PluginConfig,
 }
 
 #[async_trait]
-impl DataSink for DataOutputS3Plugin {
+impl DataSink for DataSinkS3Plugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,
@@ -42,12 +42,12 @@ impl DataSink for DataOutputS3Plugin {
     }
 }
 
-impl DataOutputS3Plugin {
-    pub async fn new(buffer_name: String) -> DataOutputS3Plugin {
+impl DataSinkS3Plugin {
+    pub async fn new(buffer_name: String) -> DataSinkS3Plugin {
         let output_config = Config::get_pipeline_output_plugin_config()
             .ok()
             .and_then(|config| match config {
-                OutputPluginConfig::S3(s3_config) => Some(s3_config),
+                DataSinkPluginConfig::S3(s3_config) => Some(s3_config),
                 _ => None,
             });
         Self::new_with_config(buffer_name, output_config).await
@@ -55,13 +55,13 @@ impl DataOutputS3Plugin {
 
     pub async fn new_with_config(
         _buffer_name: String,
-        output_config: Option<DataOutputS3PluginConfig>,
-    ) -> DataOutputS3Plugin {
+        output_config: Option<DataSinkS3PluginConfig>,
+    ) -> DataSinkS3Plugin {
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
             .await;
         let s3_client = S3Client::new(&aws_config);
-        let config = output_config.unwrap_or(DataOutputS3PluginConfig {
+        let config = output_config.unwrap_or(DataSinkS3PluginConfig {
             format: None,
             s3_bucket: Config::getenv("DATA_OUTPUT_S3_BUCKET", ""),
             s3_prefix: Config::getenv("DATA_OUTPUT_S3_PREFIX", ""),

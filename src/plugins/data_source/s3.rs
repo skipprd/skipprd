@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use crate::helpers::configuration::{Config, InputPluginConfig};
+use crate::helpers::configuration::{Config, DataSourcePluginConfig};
 
 use aws_sdk_s3::Client;
 
@@ -68,10 +68,10 @@ pub struct DataSourceS3PluginConfig {
     pub s3_delimiter: Option<String>,
 }
 
-impl From<InputPluginConfig> for DataSourceS3PluginConfig {
-    fn from(plugin_config: InputPluginConfig) -> Self {
+impl From<DataSourcePluginConfig> for DataSourceS3PluginConfig {
+    fn from(plugin_config: DataSourcePluginConfig) -> Self {
         match plugin_config {
-            InputPluginConfig::S3(s3_config) => s3_config,
+            DataSourcePluginConfig::S3(s3_config) => s3_config,
             _ => panic!("Invalid plugin type"),
         }
     }

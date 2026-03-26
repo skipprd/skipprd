@@ -3,12 +3,12 @@ use std::io::{BufRead, BufReader};
 use std::fs::File;
 use crate::buffer::BufferChunker;
 
-pub struct DataOutputStdoutPlugin {
+pub struct DataSinkStdoutPlugin {
     buffer_name: String
 }
 
-impl DataOutputStdoutPlugin {
-    pub async fn new(buffer_name: String) -> DataOutputStdoutPlugin {
+impl DataSinkStdoutPlugin {
+    pub async fn new(buffer_name: String) -> DataSinkStdoutPlugin {
         Self {
             buffer_name: buffer_name
         }

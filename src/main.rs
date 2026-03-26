@@ -30,7 +30,7 @@ use clap::Parser;
 use std::string::ToString;
 
 use skippr::buffer::BufferChunker;
-use skippr::helpers::configuration::{Config, OutputPluginConfig, PIPELINE_NAME};
+use skippr::helpers::configuration::{Config, DataSinkPluginConfig, PIPELINE_NAME};
 use skippr::helpers::logging::init_logging;
 use skippr::helpers::sync_reporter::SyncReporter;
 use tracing::{error, info, warn};
@@ -38,17 +38,17 @@ use tracing::{error, info, warn};
 use skippr::helpers::logger::LogLevel;
 use skippr::helpers::offsets::Offsets;
 
-use skippr::plugins::athena::DataOutputAwsAthenaPlugin;
+use skippr::plugins::athena::DataSinkAthenaPlugin;
 
 use skippr::plugins::mssql_input::DataSourceMssqlPlugin;
 use skippr::plugins::s3_input::DataSourceS3Plugin;
-use skippr::plugins::bigquery_output::DataOutputBigqueryPlugin;
-use skippr::plugins::postgres_output::DataOutputPostgresPlugin;
-use skippr::plugins::snowflake_output::DataOutputSnowflakePlugin;
+use skippr::plugins::bigquery_output::DataSinkBigqueryPlugin;
+use skippr::plugins::postgres_output::DataSinkPostgresPlugin;
+use skippr::plugins::snowflake_output::DataSinkSnowflakePlugin;
 
 use skippr::metrics::{Metrics, MetricsStatus};
 use skippr::plugins::file_input::DataSourceLocalFilePlugin;
-use skippr::plugins::s3_output::DataOutputS3Plugin;
+use skippr::plugins::s3_output::DataSinkS3Plugin;
 use skippr::{LOGGER, METADATA, METRICS, RUNNING};
 
 use datafusion::prelude::*;
@@ -56,7 +56,7 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use skippr::buffer::ingest_buffer::{wal_recover, Buffers};
 use skippr::benchmark::PerformanceBenchmark;
 use skippr::ingest_work::Ingest;
-use skippr::plugins::file_output::DataOutputFilePlugin;
+use skippr::plugins::file_output::DataSinkFilePlugin;
 use skippr::plugins::DataSink;
 use skippr::sqlrt::doc_parser::SqlDocParser;
 use skippr::sqlrt::docs::{get_docs_in_format, DocFormat};
@@ -854,7 +854,7 @@ async fn sync(output_mode: &str) {
         );
     }
     info!("Finalising: waiting for Athena partition tasks to drain");
-    skippr::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
+    skippr::plugins::athena::DataSinkAthenaPlugin::await_partition_tasks_zero().await;
     info!("Finalising: Athena partition tasks drained");
 
     info!("Finalising: draining schema sync worker");
@@ -956,36 +956,36 @@ async fn sync(output_mode: &str) {
 }
 
 async fn build_output_plugin_from_config(
-    output_config: OutputPluginConfig,
+    output_config: DataSinkPluginConfig,
     buffer_name: String,
 ) -> Result<Box<dyn DataSink + Send + Sync>, io::Error> {
     match output_config {
-        OutputPluginConfig::File(file_config) => {
-            let plugin = DataOutputFilePlugin::new_with_config(buffer_name, Some(file_config)).await;
+        DataSinkPluginConfig::File(file_config) => {
+            let plugin = DataSinkFilePlugin::new_with_config(buffer_name, Some(file_config)).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
-        OutputPluginConfig::Athena(athena_config) => {
+        DataSinkPluginConfig::Athena(athena_config) => {
             let plugin =
-                DataOutputAwsAthenaPlugin::new_with_config(buffer_name, athena_config).await;
+                DataSinkAthenaPlugin::new_with_config(buffer_name, athena_config).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
-        OutputPluginConfig::S3(s3_config) => {
-            let plugin = DataOutputS3Plugin::new_with_config(buffer_name, Some(s3_config)).await;
+        DataSinkPluginConfig::S3(s3_config) => {
+            let plugin = DataSinkS3Plugin::new_with_config(buffer_name, Some(s3_config)).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
-        OutputPluginConfig::Snowflake(sf_config) => {
+        DataSinkPluginConfig::Snowflake(sf_config) => {
             let plugin =
-                DataOutputSnowflakePlugin::new_with_config(buffer_name, sf_config).await;
+                DataSinkSnowflakePlugin::new_with_config(buffer_name, sf_config).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
-        OutputPluginConfig::Bigquery(bq_config) => {
+        DataSinkPluginConfig::Bigquery(bq_config) => {
             let plugin =
-                DataOutputBigqueryPlugin::new_with_config(buffer_name, bq_config).await;
+                DataSinkBigqueryPlugin::new_with_config(buffer_name, bq_config).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
-        OutputPluginConfig::Postgres(pg_config) => {
+        DataSinkPluginConfig::Postgres(pg_config) => {
             let plugin =
-                DataOutputPostgresPlugin::new_with_config(buffer_name, pg_config).await;
+                DataSinkPostgresPlugin::new_with_config(buffer_name, pg_config).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
     }
@@ -1005,7 +1005,7 @@ pub async fn sync_output_plugin(
                 "No Data {} plugin specified, defaulting to local file",
                 buffer_name
             );
-            Box::new(DataOutputFilePlugin::new(buffer_name.clone()).await)
+            Box::new(DataSinkFilePlugin::new(buffer_name.clone()).await)
                 as Box<dyn DataSink + Send + Sync>
         }
         Err(err) => {

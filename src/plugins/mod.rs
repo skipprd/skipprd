@@ -20,33 +20,54 @@ pub use util::parquet as parquet_util;
 
 pub use traits::{DataSink, DataSource, SchemaSink, SchemaSource};
 
-/// Build a `SchemaSink` from an `OutputPluginConfig` (legacy fallback).
+/// Build a `SchemaSink` from a `DataSinkPluginConfig` (legacy fallback).
 /// Returns `None` for plugins that don't need upfront DDL.
 pub async fn build_schema_sync_plugin(
-    config: crate::helpers::configuration::OutputPluginConfig,
+    config: crate::helpers::configuration::DataSinkPluginConfig,
 ) -> Option<Box<dyn SchemaSink + Send + Sync>> {
-    use crate::helpers::configuration::OutputPluginConfig;
+    use crate::helpers::configuration::DataSinkPluginConfig;
     match config {
-        OutputPluginConfig::Athena(c) => {
+        DataSinkPluginConfig::Athena(c) => {
             let glue_config = crate::helpers::configuration::GlueSchemaSinkConfig {
                 glue_database_name: c.glue_database_name.clone(),
             };
-            Some(Box::new(schema_sink::glue::GlueSchemaSink::new(glue_config)))
+            Some(Box::new(schema_sink::glue::GlueSchemaSink::new(glue_config, Some(c))))
         }
-        OutputPluginConfig::Snowflake(c) => Some(Box::new(
+        DataSinkPluginConfig::Snowflake(c) => Some(Box::new(
             schema_sink::snowflake::SnowflakeSchemaSink::new(c).await,
         )),
         _ => None,
     }
 }
 
+/// Resolve the Athena data sink config from an `DataSinkPluginConfig`, if it
+/// is an `Athena` variant. Used to pass S3/workgroup fields to
+/// `GlueSchemaSink` so Glue tables get the correct location.
+fn extract_athena_config(
+    cfg: &crate::helpers::configuration::DataSinkPluginConfig,
+) -> Option<data_sink::athena::DataSinkAthenaPluginConfig> {
+    match cfg {
+        crate::helpers::configuration::DataSinkPluginConfig::Athena(c) => Some(c.clone()),
+        _ => None,
+    }
+}
+
 /// Build a `SchemaSink` from a `SchemaSinkConfig`.
+///
+/// `data_sink_config` is the associated data sink's `DataSinkPluginConfig`
+/// (primary or deadletter). When present and the data sink is Athena, its
+/// S3/workgroup fields are forwarded to the `GlueSchemaSink` so Glue
+/// tables reference the correct S3 location.
 pub async fn build_schema_sink(
     config: crate::helpers::configuration::SchemaSinkConfig,
+    data_sink_config: Option<&crate::helpers::configuration::DataSinkPluginConfig>,
 ) -> Box<dyn SchemaSink + Send + Sync> {
     use crate::helpers::configuration::SchemaSinkConfig;
     match config {
-        SchemaSinkConfig::Glue(c) => Box::new(schema_sink::glue::GlueSchemaSink::new(c)),
+        SchemaSinkConfig::Glue(c) => {
+            let athena_cfg = data_sink_config.and_then(extract_athena_config);
+            Box::new(schema_sink::glue::GlueSchemaSink::new(c, athena_cfg))
+        }
         SchemaSinkConfig::Snowflake(c) => {
             Box::new(schema_sink::snowflake::SnowflakeSchemaSink::new(c).await)
         }

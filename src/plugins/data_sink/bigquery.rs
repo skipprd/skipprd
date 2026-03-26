@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use tracing::{error, info, warn};
 
 use crate::buffer::BufferChunker;
-use crate::helpers::configuration::{Config, DataOutputBigqueryPluginConfig, OutputPluginConfig};
+use crate::helpers::configuration::{Config, DataSinkBigqueryPluginConfig, DataSinkPluginConfig};
 use crate::plugins::DataSink;
 
 static ENSURED_DATASETS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
@@ -17,24 +17,24 @@ static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 const JOB_POLL_MAX: u32 = 120;
 const JOB_POLL_INTERVAL_MS: u64 = 500;
 
-pub struct DataOutputBigqueryPlugin {
-    config: DataOutputBigqueryPluginConfig,
+pub struct DataSinkBigqueryPlugin {
+    config: DataSinkBigqueryPluginConfig,
     #[allow(dead_code)]
     buffer_name: String,
     client: reqwest::Client,
     token: tokio::sync::RwLock<Option<(String, std::time::Instant)>>,
 }
 
-impl From<OutputPluginConfig> for DataOutputBigqueryPluginConfig {
-    fn from(plugin_config: OutputPluginConfig) -> Self {
+impl From<DataSinkPluginConfig> for DataSinkBigqueryPluginConfig {
+    fn from(plugin_config: DataSinkPluginConfig) -> Self {
         match plugin_config {
-            OutputPluginConfig::Bigquery(config) => config,
+            DataSinkPluginConfig::Bigquery(config) => config,
             _ => panic!("Invalid plugin type for BigQuery"),
         }
     }
 }
 
-impl DataOutputBigqueryPlugin {
+impl DataSinkBigqueryPlugin {
     pub async fn new(buffer_name: String) -> Self {
         let config = Self::load_config();
         Self {
@@ -47,7 +47,7 @@ impl DataOutputBigqueryPlugin {
 
     pub async fn new_with_config(
         buffer_name: String,
-        config: DataOutputBigqueryPluginConfig,
+        config: DataSinkBigqueryPluginConfig,
     ) -> Self {
         Self {
             config,
@@ -57,8 +57,8 @@ impl DataOutputBigqueryPlugin {
         }
     }
 
-    fn load_config() -> DataOutputBigqueryPluginConfig {
-        DataOutputBigqueryPluginConfig {
+    fn load_config() -> DataSinkBigqueryPluginConfig {
+        DataSinkBigqueryPluginConfig {
             project: Config::getenv("BIGQUERY_PROJECT", ""),
             dataset: Config::getenv("BIGQUERY_DATASET", ""),
             location: {
@@ -571,7 +571,7 @@ impl DataOutputBigqueryPlugin {
 }
 
 #[async_trait]
-impl DataSink for DataOutputBigqueryPlugin {
+impl DataSink for DataSinkBigqueryPlugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,

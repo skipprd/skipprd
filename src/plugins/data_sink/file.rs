@@ -1,5 +1,5 @@
 use crate::buffer::BufferChunker;
-use crate::helpers::configuration::{Config, OutputPluginConfig};
+use crate::helpers::configuration::{Config, DataSinkPluginConfig};
 
 use std::fs;
 use std::io::Write;
@@ -14,21 +14,21 @@ use std::path::Path;
 use tracing::error;
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct DataOutputFilePluginConfig {
+pub struct DataSinkFilePluginConfig {
     pub format: Option<String>,
     pub output_dir: Option<String>,
 }
 
-impl From<OutputPluginConfig> for DataOutputFilePluginConfig {
-    fn from(plugin_config: OutputPluginConfig) -> Self {
+impl From<DataSinkPluginConfig> for DataSinkFilePluginConfig {
+    fn from(plugin_config: DataSinkPluginConfig) -> Self {
         match plugin_config {
-            OutputPluginConfig::File(file_config) => file_config,
+            DataSinkPluginConfig::File(file_config) => file_config,
             _ => panic!("Invalid plugin type"),
         }
     }
 }
 
-pub struct DataOutputFilePlugin {
+pub struct DataSinkFilePlugin {
     #[allow(dead_code)]
     output_dir: String,
     #[allow(dead_code)]
@@ -38,7 +38,7 @@ pub struct DataOutputFilePlugin {
 }
 
 #[async_trait]
-impl DataSink for DataOutputFilePlugin {
+impl DataSink for DataSinkFilePlugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,
@@ -48,12 +48,12 @@ impl DataSink for DataOutputFilePlugin {
     }
 }
 
-impl DataOutputFilePlugin {
-    pub async fn new(buffer_name: String) -> DataOutputFilePlugin {
+impl DataSinkFilePlugin {
+    pub async fn new(buffer_name: String) -> DataSinkFilePlugin {
         let output_config = Config::get_pipeline_output_plugin_config()
             .ok()
             .and_then(|config| match config {
-                OutputPluginConfig::File(file_config) => Some(file_config),
+                DataSinkPluginConfig::File(file_config) => Some(file_config),
                 _ => None,
             });
         Self::new_with_config(buffer_name, output_config).await
@@ -61,8 +61,8 @@ impl DataOutputFilePlugin {
 
     pub async fn new_with_config(
         buffer_name: String,
-        output_config: Option<DataOutputFilePluginConfig>,
-    ) -> DataOutputFilePlugin {
+        output_config: Option<DataSinkFilePluginConfig>,
+    ) -> DataSinkFilePlugin {
         let output_dir = output_config
             .as_ref()
             .and_then(|config| config.output_dir.clone())

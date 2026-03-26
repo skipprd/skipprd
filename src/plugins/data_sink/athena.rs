@@ -1,7 +1,7 @@
 use crate::buffer::BufferChunker;
 use crate::converters::skippr_hive::SkipprHive;
 use crate::discover::{OutputMetadata, PipelineMetadata};
-use crate::helpers::configuration::{Config, OutputPluginConfig};
+use crate::helpers::configuration::{Config, DataSinkPluginConfig};
 use crate::helpers::Helpers;
 use crate::metrics::counters as metrics_counters;
 use crate::METADATA;
@@ -63,7 +63,7 @@ fn get_namespace_lock(namespace: &str) -> Arc<Mutex<()>> {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
-pub struct DataOutputAwsAthenaPluginConfig {
+pub struct DataSinkAthenaPluginConfig {
     pub format: Option<String>,
     // pub batch_size_seconds: Option<i64>,
     // pub batch_size_bytes: Option<i64>,
@@ -76,17 +76,17 @@ pub struct DataOutputAwsAthenaPluginConfig {
     pub athena_results_s3_bucket: String,
 }
 
-impl From<OutputPluginConfig> for DataOutputAwsAthenaPluginConfig {
-    fn from(plugin_config: OutputPluginConfig) -> Self {
+impl From<DataSinkPluginConfig> for DataSinkAthenaPluginConfig {
+    fn from(plugin_config: DataSinkPluginConfig) -> Self {
         match plugin_config {
-            OutputPluginConfig::Athena(athena_config) => athena_config,
+            DataSinkPluginConfig::Athena(athena_config) => athena_config,
             _ => panic!("Invalid plugin type"),
         }
     }
 }
 
 fn is_deadletter_athena_target(
-    config: &DataOutputAwsAthenaPluginConfig,
+    config: &DataSinkAthenaPluginConfig,
     namespace: &str,
 ) -> bool {
     if namespace != crate::ingest::deadletter::table_name() {
@@ -94,12 +94,12 @@ fn is_deadletter_athena_target(
     }
     matches!(
         Config::get_pipeline_deadletter_plugin_config(),
-        Ok(Some(OutputPluginConfig::Athena(deadletter_config))) if deadletter_config == *config
+        Ok(Some(DataSinkPluginConfig::Athena(deadletter_config))) if deadletter_config == *config
     )
 }
 
 #[async_trait]
-impl DataSink for DataOutputAwsAthenaPlugin {
+impl DataSink for DataSinkAthenaPlugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,
@@ -109,13 +109,13 @@ impl DataSink for DataOutputAwsAthenaPlugin {
     }
 }
 
-pub struct DataOutputAwsAthenaPlugin {
+pub struct DataSinkAthenaPlugin {
     s3_client: S3Client,
     #[allow(dead_code)]
     athena_client: AthenaClient,
     #[allow(dead_code)]
     buffer_name: String,
-    config: DataOutputAwsAthenaPluginConfig,
+    config: DataSinkAthenaPluginConfig,
     // s3_bucket: String,
     // s3_prefix: String,
     // time_bucket: String,
@@ -124,7 +124,7 @@ pub struct DataOutputAwsAthenaPlugin {
     upload_sem: Arc<Semaphore>,
 }
 
-impl DataOutputAwsAthenaPlugin {
+impl DataSinkAthenaPlugin {
     pub async fn sync_schema(
         &self,
         namespace: &str,
@@ -139,10 +139,10 @@ impl DataOutputAwsAthenaPlugin {
         Ok(())
     }
 
-    pub fn get_config() -> DataOutputAwsAthenaPluginConfig {
+    pub fn get_config() -> DataSinkAthenaPluginConfig {
         match Config::get_pipeline_output_plugin_config() {
             Ok(config) => config.into(),
-            Err(_) => DataOutputAwsAthenaPluginConfig {
+            Err(_) => DataSinkAthenaPluginConfig {
                 format: None,
                 s3_bucket: Config::getenv("DATA_OUTPUT_S3_BUCKET", ""),
                 s3_prefix: Config::getenv("DATA_OUTPUT_S3_PREFIX", ""),
@@ -156,16 +156,16 @@ impl DataOutputAwsAthenaPlugin {
         }
     }
 
-    pub async fn new(buffer_name: String) -> DataOutputAwsAthenaPlugin {
-        let athena_config: DataOutputAwsAthenaPluginConfig =
-            DataOutputAwsAthenaPlugin::get_config();
+    pub async fn new(buffer_name: String) -> DataSinkAthenaPlugin {
+        let athena_config: DataSinkAthenaPluginConfig =
+            DataSinkAthenaPlugin::get_config();
         Self::new_with_config(buffer_name, athena_config).await
     }
 
     pub async fn new_with_config(
         buffer_name: String,
-        athena_config: DataOutputAwsAthenaPluginConfig,
-    ) -> DataOutputAwsAthenaPlugin {
+        athena_config: DataSinkAthenaPluginConfig,
+    ) -> DataSinkAthenaPlugin {
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
             .await;
@@ -815,7 +815,7 @@ impl AwsAthena {
     pub async fn create_or_update_schema_with_config(
         namespace: &str,
         schema: &OutputMetadata,
-        config: DataOutputAwsAthenaPluginConfig,
+        config: DataSinkAthenaPluginConfig,
     ) {
         // Serialize workgroup changes to avoid Athena InvalidRequestException on concurrent updates
         let _wg_guard = ATHENA_WG_LOCK.lock().await;
@@ -915,11 +915,11 @@ impl AwsAthena {
     }
 
     pub async fn create_or_update_schema(namespace: &str, schema: &OutputMetadata) {
-        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
+        let config: DataSinkAthenaPluginConfig = DataSinkAthenaPlugin::get_config();
         Self::create_or_update_schema_with_config(namespace, schema, config).await;
     }
 
-    pub async fn get_work_group(config: &DataOutputAwsAthenaPluginConfig) -> Result<bool, String> {
+    pub async fn get_work_group(config: &DataSinkAthenaPluginConfig) -> Result<bool, String> {
         let workgroup = config.athena_workgroup_name.clone();
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -950,7 +950,7 @@ impl AwsAthena {
         }
     }
 
-    pub async fn glue_get_database(config: &DataOutputAwsAthenaPluginConfig) -> Result<bool, String> {
+    pub async fn glue_get_database(config: &DataSinkAthenaPluginConfig) -> Result<bool, String> {
         let database_name = config.glue_database_name.clone();
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -972,7 +972,7 @@ impl AwsAthena {
     }
 
     pub async fn glue_get_table(
-        config: &DataOutputAwsAthenaPluginConfig,
+        config: &DataSinkAthenaPluginConfig,
         namespace: &str,
     ) -> Result<GetTableOutput, SdkError<GetTableError>> {
         let database_name = config.glue_database_name.clone();
@@ -992,7 +992,7 @@ impl AwsAthena {
     }
 
     pub async fn create_workgroup(
-        config: &DataOutputAwsAthenaPluginConfig,
+        config: &DataSinkAthenaPluginConfig,
     ) -> Result<bool, String> {
         let workgroup = config.athena_workgroup_name.clone();
         let bucket = config.athena_results_s3_bucket.clone();
@@ -1046,7 +1046,7 @@ impl AwsAthena {
     }
 
     pub async fn update_workgroup(
-        config: &DataOutputAwsAthenaPluginConfig,
+        config: &DataSinkAthenaPluginConfig,
     ) -> Result<bool, String> {
         let workgroup = config.athena_workgroup_name.clone();
         let bucket = config.athena_results_s3_bucket.clone();
@@ -1097,7 +1097,7 @@ impl AwsAthena {
     }
 
     pub async fn glue_create_database(
-        config: &DataOutputAwsAthenaPluginConfig,
+        config: &DataSinkAthenaPluginConfig,
     ) -> Result<bool, String> {
         let database = config.glue_database_name.clone();
         let bucket = config.s3_bucket.clone();
@@ -1438,7 +1438,7 @@ impl AwsAthena {
     }
 
     pub async fn glue_delete_table(
-        config: &DataOutputAwsAthenaPluginConfig,
+        config: &DataSinkAthenaPluginConfig,
         namespace: &str,
     ) -> Result<bool, String> {
         let database = config.glue_database_name.clone();
@@ -1465,7 +1465,7 @@ impl AwsAthena {
     }
 
     pub async fn glue_create_table(
-        config: &DataOutputAwsAthenaPluginConfig,
+        config: &DataSinkAthenaPluginConfig,
         namespace: &str,
         metadata: &OutputMetadata,
     ) -> Result<bool, String> {
@@ -1580,7 +1580,7 @@ impl AwsAthena {
     }
 
     pub async fn glue_update_table(
-        config: &DataOutputAwsAthenaPluginConfig,
+        config: &DataSinkAthenaPluginConfig,
         namespace: &str,
         metadata: &OutputMetadata,
         existing_table: GetTableOutput,
@@ -1660,7 +1660,7 @@ impl AwsAthena {
     }
 
     pub async fn glue_create_partition(
-        config: &DataOutputAwsAthenaPluginConfig,
+        config: &DataSinkAthenaPluginConfig,
         namespace: &str,
         partition_values: Vec<String>,
         key: &str,

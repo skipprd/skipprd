@@ -17,10 +17,10 @@ New input plugin that reads rows from MSSQL tables and feeds them into skippr's 
 
 ### Config
 
-Add `Mssql` variant to `InputPluginConfig` enum in `src/helpers/configuration.rs`:
+Add `Mssql` variant to `DataSourcePluginConfig` enum in `src/helpers/configuration.rs`:
 
 ```rust
-pub enum InputPluginConfig {
+pub enum DataSourcePluginConfig {
     S3(DataSourceS3PluginConfig),
     File(DataSourceLocalFilePluginConfig),
     Mssql(DataSourceMssqlPluginConfig),
@@ -110,14 +110,14 @@ New output plugin that writes compacted Parquet data to a Snowflake table. Imple
 
 ### Config
 
-Add `Snowflake` variant to `OutputPluginConfig` enum in `src/helpers/configuration.rs`:
+Add `Snowflake` variant to `DataSinkPluginConfig` enum in `src/helpers/configuration.rs`:
 
 ```rust
-pub enum OutputPluginConfig {
-    Athena(DataOutputAwsAthenaPluginConfig),
-    File(DataOutputFilePluginConfig),
-    S3(DataOutputS3PluginConfig),
-    Snowflake(DataOutputSnowflakePluginConfig),
+pub enum DataSinkPluginConfig {
+    Athena(DataSinkAthenaPluginConfig),
+    File(DataSinkFilePluginConfig),
+    S3(DataSinkS3PluginConfig),
+    Snowflake(DataSinkSnowflakePluginConfig),
 }
 ```
 
@@ -139,7 +139,7 @@ data_outputs:
 
 ```rust
 #[derive(Debug, Deserialize, Clone)]
-pub struct DataOutputSnowflakePluginConfig {
+pub struct DataSinkSnowflakePluginConfig {
     pub account: String,
     pub user: String,
     pub password: String,

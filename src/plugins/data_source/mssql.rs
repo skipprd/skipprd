@@ -5,7 +5,7 @@ use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tracing::{error, info};
 
-use crate::helpers::configuration::{Config, DataSourceMssqlPluginConfig, InputPluginConfig};
+use crate::helpers::configuration::{Config, DataSourceMssqlPluginConfig, DataSourcePluginConfig};
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use async_trait::async_trait;
@@ -16,10 +16,10 @@ pub struct DataSourceMssqlPlugin {
     pub(crate) config: DataSourceMssqlPluginConfig,
 }
 
-impl From<InputPluginConfig> for DataSourceMssqlPluginConfig {
-    fn from(plugin_config: InputPluginConfig) -> Self {
+impl From<DataSourcePluginConfig> for DataSourceMssqlPluginConfig {
+    fn from(plugin_config: DataSourcePluginConfig) -> Self {
         match plugin_config {
-            InputPluginConfig::Mssql(config) => config,
+            DataSourcePluginConfig::Mssql(config) => config,
             _ => panic!("Invalid plugin type for MSSQL"),
         }
     }

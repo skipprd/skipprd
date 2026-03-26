@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::discover::OutputMetadata;
-use crate::helpers::configuration::DataOutputBigqueryPluginConfig;
+use crate::helpers::configuration::DataSinkBigqueryPluginConfig;
 use crate::plugins::traits::SchemaSink;
 
 /// Schema sink for BigQuery DDL (ensure dataset + ensure table).
@@ -12,11 +12,11 @@ use crate::plugins::traits::SchemaSink;
 /// to manage BigQuery DDL independently of data writes.
 pub struct BigquerySchemaSink {
     #[allow(dead_code)]
-    config: DataOutputBigqueryPluginConfig,
+    config: DataSinkBigqueryPluginConfig,
 }
 
 impl BigquerySchemaSink {
-    pub fn new(config: DataOutputBigqueryPluginConfig) -> Self {
+    pub fn new(config: DataSinkBigqueryPluginConfig) -> Self {
         Self { config }
     }
 }
@@ -29,7 +29,7 @@ impl SchemaSink for BigquerySchemaSink {
         _metadata: &OutputMetadata,
     ) -> Result<(), std::io::Error> {
         // TODO: Extract ensure_dataset + ensure_table logic from
-        // DataOutputBigqueryPlugin into this method.
+        // DataSinkBigqueryPlugin into this method.
         Ok(())
     }
 }

@@ -1,19 +1,19 @@
 use async_trait::async_trait;
 
 use crate::discover::OutputMetadata;
-use crate::helpers::configuration::DataOutputSnowflakePluginConfig;
-use crate::plugins::data_sink::snowflake::DataOutputSnowflakePlugin;
+use crate::helpers::configuration::DataSinkSnowflakePluginConfig;
+use crate::plugins::data_sink::snowflake::DataSinkSnowflakePlugin;
 use crate::plugins::traits::SchemaSink;
 /// Schema sink backed by Snowflake DDL, delegating to the existing
-/// `DataOutputSnowflakePlugin::sync_schema` inherent method.
+/// `DataSinkSnowflakePlugin::sync_schema` inherent method.
 pub struct SnowflakeSchemaSink {
-    inner: DataOutputSnowflakePlugin,
+    inner: DataSinkSnowflakePlugin,
 }
 
 impl SnowflakeSchemaSink {
-    pub async fn new(config: DataOutputSnowflakePluginConfig) -> Self {
+    pub async fn new(config: DataSinkSnowflakePluginConfig) -> Self {
         let inner =
-            DataOutputSnowflakePlugin::new_with_config("_schema_sink".into(), config).await;
+            DataSinkSnowflakePlugin::new_with_config("_schema_sink".into(), config).await;
         Self { inner }
     }
 }
