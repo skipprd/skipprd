@@ -19,6 +19,7 @@ use crate::plugins::{DataSink, DataSource};
 pub struct DataSourceDynamodbPluginConfig {
     pub table_name: String,
     pub region: Option<String>,
+    pub endpoint_url: Option<String>,
     pub format: Option<String>,
     pub batch_size_bytes: Option<i64>,
     pub batch_size_seconds: Option<i64>,
@@ -57,6 +58,7 @@ impl DataSourceDynamodbPlugin {
                     DataSourceDynamodbPluginConfig {
                         table_name,
                         region,
+                        endpoint_url: None,
                         format: Some("row".to_string()),
                         batch_size_bytes: None,
                         batch_size_seconds: None,
@@ -70,7 +72,11 @@ impl DataSourceDynamodbPlugin {
             loader = loader.region(aws_types::region::Region::new(r.clone()));
         }
         let shared_config = loader.load().await;
-        let client = Client::new(&shared_config);
+        let mut client_config = aws_sdk_dynamodb::config::Builder::from(&shared_config);
+        if let Some(ref endpoint_url) = config.endpoint_url {
+            client_config = client_config.endpoint_url(endpoint_url);
+        }
+        let client = Client::from_conf(client_config.build());
 
         DataSourceDynamodbPlugin {
             ingest: Ingest::new(),

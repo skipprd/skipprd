@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: testpass
       POSTGRES_DB: skippr_test
     ports:
-      - "5432:5432"
+      - "15432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -20,7 +20,7 @@ services:
       MYSQL_ROOT_PASSWORD: testpass
       MYSQL_DATABASE: skippr_test
     ports:
-      - "3306:3306"
+      - "13306:3306"
     volumes:
       - ./tests/e2e/testdata/seed.sql:/docker-entrypoint-initdb.d/seed.sql
     healthcheck:
@@ -30,14 +30,15 @@ services:
       retries: 10
 
   mssql:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: mcr.microsoft.com/azure-sql-edge:1.0.7
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: "TestPass123!"
+      MSSQL_PID: "Developer"
     ports:
-      - "1433:1433"
+      - "11433:1433"
     healthcheck:
-      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'TestPass123!' -C -Q 'SELECT 1' || exit 1"]
+      test: ["CMD-SHELL", "/bin/bash -lc '</dev/tcp/127.0.0.1/1433'"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -48,7 +49,7 @@ services:
       SERVICES: dynamodb,kinesis,sqs,s3
       DEFAULT_REGION: us-east-1
     ports:
-      - "4566:4566"
+      - "14566:4566"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:4566/_localstack/health || exit 1"]
       interval: 5s
@@ -60,4 +61,4 @@ services:
     volumes:
       - ./tests/e2e/testdata:/usr/share/nginx/html/testdata:ro
     ports:
-      - "8080:80"
+      - "18080:80"

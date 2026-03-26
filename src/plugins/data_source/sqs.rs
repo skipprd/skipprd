@@ -18,6 +18,7 @@ use crate::RUNNING;
 pub struct DataSourceSqsPluginConfig {
     pub queue_url: String,
     pub region: Option<String>,
+    pub endpoint_url: Option<String>,
     pub mode: Option<String>,
     pub format: Option<String>,
     pub batch_size_bytes: Option<i64>,
@@ -62,6 +63,7 @@ impl DataSourceSqsPlugin {
                         Some(r)
                     }
                 },
+                endpoint_url: None,
                 mode: None,
                 format: None,
                 batch_size_bytes: Some(
@@ -82,7 +84,11 @@ impl DataSourceSqsPlugin {
             loader = loader.region(aws_types::region::Region::new(region.clone()));
         }
         let conf = loader.load().await;
-        let client = Client::new(&conf);
+        let mut client_config = aws_sdk_sqs::config::Builder::from(&conf);
+        if let Some(ref endpoint_url) = config.endpoint_url {
+            client_config = client_config.endpoint_url(endpoint_url);
+        }
+        let client = Client::from_conf(client_config.build());
 
         DataSourceSqsPlugin {
             ingest: Ingest::new(),

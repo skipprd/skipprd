@@ -59,6 +59,7 @@ pub struct DataSourceS3PluginConfig {
     pub format: Option<String>,
     pub batch_size_seconds: Option<i64>,
     pub batch_size_bytes: Option<i64>,
+    pub endpoint_url: Option<String>,
 
     pub s3_bucket: String,
     pub s3_prefix: String,
@@ -95,10 +96,6 @@ pub struct DataSourceS3Plugin {
 impl DataSourceS3Plugin {
     /// Create a new S3 input plugin
     pub async fn new() -> DataSourceS3Plugin {
-        let s3_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .load()
-            .await;
-
         let data_dir = Config::get_data_dir();
         let temp_dir = &format!("{}/source_buffer", data_dir);
 
@@ -106,8 +103,6 @@ impl DataSourceS3Plugin {
             Ok(_g) => {}
             Err(_err) => {}
         }
-
-        let s3_client = Client::new(&s3_config);
 
         let config: DataSourceS3PluginConfig = match Config::get_pipeline_input_plugin_config() {
             Ok(config) => config.into(),
@@ -123,6 +118,7 @@ impl DataSourceS3Plugin {
                         .parse::<i64>()
                         .unwrap(),
                 ),
+                endpoint_url: None,
                 s3_bucket: Config::getenv("DATA_SOURCE_S3_BUCKET", ""),
                 s3_prefix: Config::getenv("DATA_SOURCE_S3_PREFIX", ""),
                 s3_prefix_ordered_depth: Some(
@@ -134,8 +130,18 @@ impl DataSourceS3Plugin {
             },
         };
 
+        let shared_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
+        let mut s3_client_config = aws_sdk_s3::config::Builder::from(&shared_config);
+        if let Some(ref endpoint_url) = config.endpoint_url {
+            s3_client_config = s3_client_config
+                .endpoint_url(endpoint_url)
+                .force_path_style(true);
+        }
+
         DataSourceS3Plugin {
-            s3_client,
+            s3_client: Client::from_conf(s3_client_config.build()),
             ingest: Ingest::new(),
             config,
             temp_dir: temp_dir.to_string(),

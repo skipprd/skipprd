@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SEED_JSON="$SCRIPT_DIR/testdata/seed.json"
 export AWS_ACCESS_KEY_ID=test
 export AWS_SECRET_ACCESS_KEY=test
 export AWS_DEFAULT_REGION=us-east-1
-ENDPOINT="http://localstack:4566"
+ENDPOINT="http://127.0.0.1:14566"
 
 echo "Waiting for LocalStack..."
 for i in $(seq 1 30); do
@@ -13,7 +15,7 @@ done
 
 # S3
 aws --endpoint-url "$ENDPOINT" s3 mb s3://test-bucket
-aws --endpoint-url "$ENDPOINT" s3 cp ./tests/e2e/testdata/seed.json s3://test-bucket/test-data/seed.json
+aws --endpoint-url "$ENDPOINT" s3 cp "$SEED_JSON" s3://test-bucket/test-data/seed.json
 
 # DynamoDB
 aws --endpoint-url "$ENDPOINT" dynamodb create-table \
@@ -32,7 +34,7 @@ while IFS= read -r line; do
   aws --endpoint-url "$ENDPOINT" dynamodb put-item \
     --table-name test_data \
     --item "{\"id\":{\"N\":\"$id\"},\"name\":{\"S\":\"$name\"},\"value\":{\"N\":\"$value\"},\"created_at\":{\"S\":\"$created_at\"},\"category\":{\"S\":\"$category\"}}"
-done < ./tests/e2e/testdata/seed.json
+done < "$SEED_JSON"
 
 # Kinesis
 aws --endpoint-url "$ENDPOINT" kinesis create-stream --stream-name test_stream --shard-count 1
@@ -42,7 +44,7 @@ while IFS= read -r line; do
     --stream-name test_stream \
     --partition-key "pk" \
     --data "$(echo -n "$line" | base64)"
-done < ./tests/e2e/testdata/seed.json
+done < "$SEED_JSON"
 
 # SQS
 aws --endpoint-url "$ENDPOINT" sqs create-queue --queue-name test_queue
@@ -51,6 +53,6 @@ while IFS= read -r line; do
   aws --endpoint-url "$ENDPOINT" sqs send-message \
     --queue-url "$QUEUE_URL" \
     --message-body "$line"
-done < ./tests/e2e/testdata/seed.json
+done < "$SEED_JSON"
 
 echo "LocalStack seeded successfully"
