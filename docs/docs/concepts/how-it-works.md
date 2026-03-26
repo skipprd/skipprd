@@ -9,7 +9,7 @@ A pipeline moves through three phases:
 ### 1. Discover
 
 ```bash
-skippr discover --pipeline my_pipeline --log
+skippr-el discover --pipeline my_pipeline --log
 ```
 
 Connects to the configured data source, samples records, and infers the complete schema including nested fields. The schema is persisted as pipeline metadata in S3 (`SKIPPR_S3_BUCKET`).
@@ -23,7 +23,7 @@ Discovery detects:
 ### 2. Sync
 
 ```bash
-skippr sync --pipeline my_pipeline --log
+skippr-el sync --pipeline my_pipeline --log
 ```
 
 The main ingestion loop:
@@ -39,7 +39,7 @@ On shutdown (or crash recovery), the WAL is replayed to resume from the last com
 ### 3. Query
 
 ```bash
-skippr query --sql "SELECT * FROM my_pipeline LIMIT 10"
+skippr-el query --sql "SELECT * FROM my_pipeline LIMIT 10"
 ```
 
 Runs SQL against the destination tables via Athena. Also supports pipeline management commands (`ENABLE PIPELINE`, `DROP PIPELINE`, `RESET PIPELINE`, etc.) and live streaming from the WAL (`STREAM ... FROM ...`).

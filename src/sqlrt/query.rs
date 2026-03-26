@@ -583,7 +583,7 @@ pub async fn query(sql_str: &str) {
             }
 
             println!("For more detailed documentation, run:");
-            println!("  skippr sql-help");
+            println!("  skippr-el sql-help");
         }
         Ok(Statement::DatabaseDrop(stmt)) => {
             let db_name = stmt.database.clone();

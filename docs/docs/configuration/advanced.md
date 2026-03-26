@@ -40,7 +40,7 @@ When set to `s3` (default), the existing S3-based persistence is used.
 
 This setting only affects where internal state (metadata, stats) is persisted. All destination operations (schema sync, Glue catalog updates, output writes) continue to work regardless of storage mode.
 
-Use `local` when running skippr without an S3 bucket (e.g. in skippr-dbt orchestration on a developer machine).
+Use `local` when running skippr-el without an S3 bucket (e.g. in skippr-dbt orchestration on a developer machine).
 
 ### DATA_DIR
 

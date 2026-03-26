@@ -403,10 +403,10 @@ async fn main() {
                 }
 
                 println!("For more details on a specific command, use:");
-                println!("  skippr sql-help --command \"<SQL COMMAND>\"");
+                println!("  skippr-el sql-help --command \"<SQL COMMAND>\"");
                 println!();
                 println!("To generate documentation, use:");
-                println!("  skippr sql-help --output <FILE_PATH> [--format md|html|json]");
+                println!("  skippr-el sql-help --output <FILE_PATH> [--format md|html|json]");
             }
         }
         Mode::Benchmark(options) => {

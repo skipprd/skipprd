@@ -1,6 +1,6 @@
 # SQL Reference
 
-Skippr includes a built-in SQL engine for querying destination tables, managing pipelines, and managing schemas. Execute SQL via `skippr query --sql "<statement>"`.
+Skippr includes a built-in SQL engine for querying destination tables, managing pipelines, and managing schemas. Execute SQL via `skippr-el query --sql "<statement>"`.
 
 ## Query operations
 
@@ -193,7 +193,7 @@ Loads a schema definition from a JSON file into a pipeline. The source file uses
 }
 ```
 
-**Type mapping:** The `type` field maps to skippr internal types:
+**Type mapping:** The `type` field maps to Skippr internal types:
 
 | JSON type | Skippr type |
 |---|---|

@@ -25,9 +25,9 @@ The three core commands map directly to the pipeline lifecycle:
 
 | Command | Purpose |
 |---|---|
-| `skippr discover` | Connect to source, sample data, infer and persist schema |
-| `skippr sync` | Ingest data, buffer through WAL, compact and upload Parquet, register partitions |
-| `skippr query` | Run SQL against destination tables, manage pipelines and schemas |
+| `skippr-el discover` | Connect to source, sample data, infer and persist schema |
+| `skippr-el sync` | Ingest data, buffer through WAL, compact and upload Parquet, register partitions |
+| `skippr-el query` | Run SQL against destination tables, manage pipelines and schemas |
 
 ## Quick start
 

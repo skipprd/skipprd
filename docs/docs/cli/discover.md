@@ -1,11 +1,11 @@
-# skippr discover
+# skippr-el discover
 
 Connect to the data source, sample records, and infer the pipeline schema. Unlike `sync`, discover never writes to the output destination -- it only discovers schemas and persists metadata.
 
 ## Usage
 
 ```bash
-skippr discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
+skippr-el discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
 ```
 
 ## Flags
@@ -34,13 +34,13 @@ DATA_SOURCE_PLUGIN_NAME=s3 \
 DATA_SOURCE_S3_BUCKET=my-source-bucket \
 DATA_SOURCE_S3_PREFIX=events/ \
 SKIPPR_S3_BUCKET=my-state-bucket \
-skippr discover --pipeline events --log
+skippr-el discover --pipeline events --log
 ```
 
 ### Structured output for programmatic use
 
 ```bash
-skippr discover --pipeline el_mssql --output json
+skippr-el discover --pipeline el_mssql --output json
 ```
 
 This emits JSON events to stdout:
@@ -56,10 +56,10 @@ The `fields` array uses `SkipprDataType` names (`String`, `Long`, `Double`, `Boo
 
 ## Reading discovered schemas
 
-After `skippr discover` completes, use [`SHOW PIPELINE`](../sql/reference.md#show-pipeline) to retrieve the full discovered schema including field names and inferred types:
+After `skippr-el discover` completes, use [`SHOW PIPELINE`](../sql/reference.md#show-pipeline) to retrieve the full discovered schema including field names and inferred types:
 
 ```bash
-skippr query --sql "SHOW PIPELINE el_mssql" --plain
+skippr-el query --sql "SHOW PIPELINE el_mssql" --plain
 ```
 
 ## Key log events

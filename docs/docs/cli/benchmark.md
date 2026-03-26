@@ -1,11 +1,11 @@
-# skippr benchmark
+# skippr-el benchmark
 
 Generate synthetic data and measure ingestion throughput.
 
 ## Usage
 
 ```bash
-skippr benchmark --num-files <N> --records-per-file <N> --record-size <bytes> [--name <name>] [--description <text>]
+skippr-el benchmark --num-files <N> --records-per-file <N> --record-size <bytes> [--name <name>] [--description <text>]
 ```
 
 ## Flags
@@ -21,7 +21,7 @@ skippr benchmark --num-files <N> --records-per-file <N> --record-size <bytes> [-
 ## Example
 
 ```bash
-skippr benchmark --num-files 10 --records-per-file 100000 --record-size 512 --name "baseline"
+skippr-el benchmark --num-files 10 --records-per-file 100000 --record-size 512 --name "baseline"
 ```
 
 Generates 10 files with 100K records each (~512 bytes per record), ingests them, and reports throughput metrics.

@@ -48,7 +48,7 @@ cargo clippy
 Run via cargo during development:
 
 ```bash
-cargo run -- <command> [flags]
+cargo run --bin skippr-el -- <command> [flags]
 ```
 
 Global flag: `--log [LEVEL]` enables logging (default `info`; override with `debug`, `warn`, `error`).
@@ -58,7 +58,7 @@ Global flag: `--log [LEVEL]` enables logging (default `info`; override with `deb
 Connect to a source, sample data, infer schemas. Persists metadata to S3.
 
 ```bash
-cargo run -- discover --pipeline bikehire --log
+cargo run --bin skippr-el -- discover --pipeline bikehire --log
 ```
 
 Flags: `--pipeline/-p <name>`, `--verbose`
@@ -68,7 +68,7 @@ Flags: `--pipeline/-p <name>`, `--verbose`
 Run the ingestion loop: read source → WAL → compact → Parquet → S3 + Glue.
 
 ```bash
-cargo run -- sync --pipeline bikehire --log
+cargo run --bin skippr-el -- sync --pipeline bikehire --log
 ```
 
 Flags: `--pipeline/-p <name>`
@@ -78,9 +78,9 @@ Flags: `--pipeline/-p <name>`
 SQL engine (DataFusion) over Athena tables and WAL. Supports pipeline management commands.
 
 ```bash
-cargo run -- query --sql "SELECT COUNT(*) FROM bikehire"
-cargo run -- query --sql "ENABLE PIPELINE bikehire"
-cargo run -- query --sql "STREAM * FROM bikehire LIMIT 10"
+cargo run --bin skippr-el -- query --sql "SELECT COUNT(*) FROM bikehire"
+cargo run --bin skippr-el -- query --sql "ENABLE PIPELINE bikehire"
+cargo run --bin skippr-el -- query --sql "STREAM * FROM bikehire LIMIT 10"
 ```
 
 Flags: `--sql/-s "<SQL>"`, `--watch <seconds>`, `--plain`
@@ -90,7 +90,7 @@ Flags: `--sql/-s "<SQL>"`, `--watch <seconds>`, `--plain`
 Inspect a pipeline's discovered schema.
 
 ```bash
-cargo run -- schema --pipeline bikehire
+cargo run --bin skippr-el -- schema --pipeline bikehire
 ```
 
 ### sql-help
@@ -98,8 +98,8 @@ cargo run -- schema --pipeline bikehire
 List all SQL extensions or export docs.
 
 ```bash
-cargo run -- sql-help
-cargo run -- sql-help --command "RESET PIPELINE" --output docs.md --format md
+cargo run --bin skippr-el -- sql-help
+cargo run --bin skippr-el -- sql-help --command "RESET PIPELINE" --output docs.md --format md
 ```
 
 ### benchmark
@@ -107,7 +107,7 @@ cargo run -- sql-help --command "RESET PIPELINE" --output docs.md --format md
 Generate synthetic data and measure throughput.
 
 ```bash
-cargo run -- benchmark -f 100 -r 50000 -s 800 --name baseline
+cargo run --bin skippr-el -- benchmark -f 100 -r 50000 -s 800 --name baseline
 ```
 
 ## Configuration
@@ -194,7 +194,7 @@ DATA_OUTPUT_S3_PREFIX=warehouse/events \
 SCHEMA_OUTPUT_GLUE_DATABASE_NAME=my_database \
 PIPELINE_NAME=events \
 SKIPPR_S3_BUCKET=my-state-bucket \
-cargo run -- sync --pipeline events --log
+cargo run --bin skippr-el -- sync --pipeline events --log
 ```
 
 ## Data type detection

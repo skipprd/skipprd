@@ -10,10 +10,10 @@ on:
       - '*'
 
 env:
-  COMPONENT_NAME: skippr
-  CONTAINER_IMAGE: skippr:v${{ github.ref_name }}
-  CONTAINER_LATEST_IMAGE: skippr:latest
-  DOCKER_HUB_REPO: skippr
+  COMPONENT_NAME: skippr-el
+  CONTAINER_IMAGE: skippr-el:v${{ github.ref_name }}
+  CONTAINER_LATEST_IMAGE: skippr-el:latest
+  DOCKER_HUB_REPO: skippr-el
   ECR_HOST: 536671797322.dkr.ecr.us-east-1.amazonaws.com
   AWS_ECR_REGISTRY: $ECR_HOST/$COMPONENT_NAME
 #  CARGO_HOME: "${{ github.workspace }}/cargo"
@@ -219,17 +219,17 @@ jobs:
         shell: pwsh
         run: |
           cargo build --release
-          New-Item -ItemType Directory -Force -Path skippr-windows_x86
-          Copy-Item target\release\skippr.exe skippr-windows_x86\skippr.exe
-          Get-ChildItem skippr-windows_x86
+          New-Item -ItemType Directory -Force -Path skippr-el-windows_x86
+          Copy-Item target\release\skippr-el.exe skippr-el-windows_x86\skippr-el.exe
+          Get-ChildItem skippr-el-windows_x86
         env:
           RUSTFLAGS: "-C debuginfo=0"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: skippr-windows_x86
-          path: skippr-windows_x86
+          name: skippr-el-windows_x86
+          path: skippr-el-windows_x86
           retention-days: 30
 
 #  linux_x86_heaptrack:
@@ -368,7 +368,7 @@ jobs:
 #          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
 
-  publish_skippr:
+  publish_skippr_el:
     name: Publish Release
     if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
     needs:
@@ -384,15 +384,15 @@ jobs:
        uses: actions/download-artifact@v4
      - name: Compress Release Artifacts
        run: |
-         tar -czvf skippr-linux_x86.tar.gz skippr-linux_x86/
-         tar -czvf skippr-windows_x86.tar.gz skippr-windows_x86/
+         tar -czvf skippr-el-linux_x86.tar.gz skippr-el-linux_x86/
+         tar -czvf skippr-el-windows_x86.tar.gz skippr-el-windows_x86/
      - name: Release builds to GitHub
        uses: softprops/action-gh-release@v1
        with:
          files: |
            install.sh
-           ./skippr-linux_x86.tar.gz
-           ./skippr-windows_x86.tar.gz
+           ./skippr-el-linux_x86.tar.gz
+           ./skippr-el-windows_x86.tar.gz
          tag_name: ${{ github.ref_name }}
          body: ${{ github.event.head_commit.message }}
          body_path: CHANGELOG.txt
@@ -418,7 +418,7 @@ jobs:
   #     - name: Docker Login
   #       uses: docker/login-action@v2
   #       with:
-  #         username: skippr
+  #         username: skippr-el
   #         password: ${{ secrets.DOCKER_HUB_PASS }}
   #     - name: Build and push Docker image
   #       run: |
@@ -427,8 +427,8 @@ jobs:
   #         docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_IMAGE }}
   #         docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
   #         docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
-  #         docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/skippr:stable
-  #         docker push ${{ env.DOCKER_HUB_REPO }}/skippr:stable
+  #         docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/skippr-el:stable
+  #         docker push ${{ env.DOCKER_HUB_REPO }}/skippr-el:stable
 
 
 #  linux_x86_test_many:

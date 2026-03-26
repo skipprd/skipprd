@@ -17,36 +17,36 @@ runs:
     - name: Discover Schemas
       shell: bash
       run: |
-        chmod +x ./skippr-${{ inputs.architecture_name }}/skippr
+        chmod +x ./skippr-el-${{ inputs.architecture_name }}/skippr-el
         
-        cp .github/actions/e2e/heaptrack/skippr.yml ./skippr.yml
+        cp .github/actions/e2e/heaptrack/skippr-el.yml ./skippr-el.yml
         
         ls -la ./
         
-        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire
-        ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire"
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline bike_hire
+        ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "ENABLE PIPELINE bike_hire"
         
 
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_many
-#        ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire_many"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_many2
-#        ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire_many2"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_many3
-#        ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire_many3"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_many4
-#        ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire_many4"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_many5
-#        ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire_many5"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_many6
-#        ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire_many6"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_many7
-#        ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire_many7"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_many8
-#        ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire_many8"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_many9
-#        ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire_many9"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_many10
-#        ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire_many10"
+#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline bike_hire_many
+#        ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "ENABLE PIPELINE bike_hire_many"
+#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline bike_hire_many2
+#        ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "ENABLE PIPELINE bike_hire_many2"
+#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline bike_hire_many3
+#        ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "ENABLE PIPELINE bike_hire_many3"
+#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline bike_hire_many4
+#        ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "ENABLE PIPELINE bike_hire_many4"
+#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline bike_hire_many5
+#        ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "ENABLE PIPELINE bike_hire_many5"
+#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline bike_hire_many6
+#        ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "ENABLE PIPELINE bike_hire_many6"
+#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline bike_hire_many7
+#        ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "ENABLE PIPELINE bike_hire_many7"
+#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline bike_hire_many8
+#        ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "ENABLE PIPELINE bike_hire_many8"
+#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline bike_hire_many9
+#        ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "ENABLE PIPELINE bike_hire_many9"
+#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline bike_hire_many10
+#        ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "ENABLE PIPELINE bike_hire_many10"
 
 
     - name: Install Heaptrack
@@ -62,7 +62,7 @@ runs:
       shell: bash
       run: |
         if [[ "${{ inputs.architecture_name }}" == "linux_x86" || "${{ inputs.architecture_name }}" == "macos_arm64" || "${{ inputs.architecture_name }}" == "macos-x86" ]]; then
-          AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 heaptrack ./skippr-${{ inputs.architecture_name }}/skippr sync --log --pipeline bike_hire
+          AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 heaptrack ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline bike_hire
           mv heaptrack.*.zst heaptrack_output.zst
         fi
 

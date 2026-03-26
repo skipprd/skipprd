@@ -35,7 +35,7 @@ Key metrics under heavy load:
 Consider CPU affinity (`taskset`) to reduce task switching overhead if context switches become a bottleneck:
 
 ```bash
-taskset -c 0-7 skippr sync --pipeline my_pipeline
+taskset -c 0-7 skippr-el sync --pipeline my_pipeline
 ```
 
 ## strace (PID 12244)

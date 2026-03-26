@@ -20,7 +20,7 @@ skippr_data_tmp/
 /flamegraph*
 test-data/ieu_trip
 /test-data/
-skippr.yml
+skippr-el.yml
 s3_input_last_continuation_token.txt
 /schema/
 docs/releases/git

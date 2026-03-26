@@ -16,17 +16,17 @@ runs:
     - name: Run Deadletters Test
       shell: bash
       run: |
-        chmod +x ./skippr-${{ inputs.architecture_name }}/skippr
+        chmod +x ./skippr-el-${{ inputs.architecture_name }}/skippr-el
         
-        cp .github/actions/e2e/deadletters/skippr.yml ./skippr.yml        
+        cp .github/actions/e2e/deadletters/skippr-el.yml ./skippr-el.yml        
         
-        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync --log --pipeline deadletters_test
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline deadletters_test
 
 #    - name: Assert deadletters exist via Skippr SQL
 #      shell: bash
 #      run: |
 #        set -euo pipefail
-#        OUT=$(AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID='${{ inputs.aws_access_key_id }}' AWS_SECRET_ACCESS_KEY='${{ inputs.aws_secret_access_key }}' ./skippr-${{ inputs.architecture_name }}/skippr query --sql "SELECT COUNT(*) AS c FROM _dl_deadletters_test")
+#        OUT=$(AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID='${{ inputs.aws_access_key_id }}' AWS_SECRET_ACCESS_KEY='${{ inputs.aws_secret_access_key }}' ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "SELECT COUNT(*) AS c FROM _dl_deadletters_test")
 #        echo "$OUT"
 #        COUNT=$(echo "$OUT" | grep -Eo '[0-9]+' | tail -1)
 #        if [ -z "$COUNT" ] || [ "$COUNT" -lt 1 ]; then

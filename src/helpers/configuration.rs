@@ -524,10 +524,10 @@ impl Config {
         }
 
         let valid_locations = vec![
-            "./skippr.yml",
-            "./skippr.yaml",
-            "./skippr.toml",
-            "./skippr.json",
+            "./skippr-el.yml",
+            "./skippr-el.yaml",
+            "./skippr-el.toml",
+            "./skippr-el.json",
         ];
 
         let mut file_path = String::new();

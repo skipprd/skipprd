@@ -14,7 +14,7 @@ export AWS_ACCESS_KEY_ID=test
 export AWS_SECRET_ACCESS_KEY=test
 export AWS_DEFAULT_REGION=us-east-1
 
-SKIPPR_BIN="$PROJECT_ROOT/target/debug/skippr"
+SKIPPR_BIN="$PROJECT_ROOT/target/debug/skippr-el"
 VENV_DIR="$SCRIPT_DIR/.venv"
 VENV_PYTHON="$VENV_DIR/bin/python"
 VENV_PIP="$VENV_DIR/bin/pip"
@@ -35,17 +35,17 @@ bash "$SCRIPT_DIR/seed-mssql.sh"
 echo "Seeding LocalStack..."
 bash "$SCRIPT_DIR/seed-localstack.sh"
 
-echo "Building local skippr binary..."
-cargo build --bin skippr
+echo "Building local skippr-el binary..."
+cargo build --bin skippr-el
 
 echo "Running pipelines..."
 for pipeline in test_mysql test_mssql test_dynamodb test_kinesis test_sqs test_s3 test_file test_http; do
   echo "  -> $pipeline"
-  "$SKIPPR_BIN" sync --pipeline "$pipeline" --config "$SCRIPT_DIR/skippr.yml"
+  "$SKIPPR_BIN" sync --pipeline "$pipeline" --config "$SCRIPT_DIR/skippr-el.yml"
 done
 
 echo "  -> test_stdin (piped)"
-cat "$SCRIPT_DIR/testdata/seed.json" | "$SKIPPR_BIN" sync --pipeline test_stdin --config "$SCRIPT_DIR/skippr.yml"
+cat "$SCRIPT_DIR/testdata/seed.json" | "$SKIPPR_BIN" sync --pipeline test_stdin --config "$SCRIPT_DIR/skippr-el.yml"
 
 echo "Running soda checks..."
 "$VENV_SODA" scan -d skippr_test -c "$SCRIPT_DIR/soda/configuration.yml" "$SCRIPT_DIR/soda/checks.yml"

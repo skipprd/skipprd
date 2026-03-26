@@ -94,4 +94,4 @@ Optional YAML: `url`, `format`, `batch_size_bytes`, `batch_size_seconds`. Gzip-c
 |---|---|---|
 | *(none required)* | | Reads from standard input |
 
-Optional YAML: `mode` (`batch`, read until EOF — default; `stream`, continuous) and `format`. Typical use: pipe data into Skippr, e.g. `cat data.json | skippr sync --pipeline my_pipeline`. See the [Stdin connector docs](../connectors/inputs/stdin.md) for details.
+Optional YAML: `mode` (`batch`, read until EOF — default; `stream`, continuous) and `format`. Typical use: pipe data into Skippr, e.g. `cat data.json | skippr-el sync --pipeline my_pipeline`. See the [Stdin connector docs](../connectors/inputs/stdin.md) for details.

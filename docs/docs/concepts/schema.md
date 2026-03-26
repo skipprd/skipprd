@@ -2,7 +2,7 @@
 
 ## Automatic discovery
 
-When you run `skippr discover`, Skippr connects to the data source, samples records, and infers the complete schema. This includes:
+When you run `skippr-el discover`, Skippr connects to the data source, samples records, and infers the complete schema. This includes:
 
 - **Nested structures** — JSON objects become Arrow structs, preserving full nesting depth
 - **Arrays** — including arrays of primitives and arrays of structs

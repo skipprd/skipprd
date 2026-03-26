@@ -25,7 +25,7 @@ curl -sL "https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh" | S
 ## Verify
 
 ```bash
-skippr --version
+skippr-el --version
 ```
 
 ## Prerequisites

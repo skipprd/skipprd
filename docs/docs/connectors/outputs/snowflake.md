@@ -109,7 +109,7 @@ Skippr namespaces are converted to Snowflake table names by replacing all dots w
 Schema DDL runs proactively during pipeline initialisation via the shared schema sync worker (the same mechanism used by Athena):
 
 - `CREATE SCHEMA IF NOT EXISTS` ensures the target schema exists.
-- `CREATE TABLE IF NOT EXISTS` creates tables with columns mapped from the skippr schema, including structured types (OBJECT, ARRAY, MAP).
+- `CREATE TABLE IF NOT EXISTS` creates tables with columns mapped from the Skippr schema, including structured types (OBJECT, ARRAY, MAP).
 - Schema evolution: new columns are added via `ALTER TABLE ADD COLUMN IF NOT EXISTS`.
 - DDL operations are serialized per table and use schema-aware caching to avoid redundant DDL when the schema hasn't changed.
 

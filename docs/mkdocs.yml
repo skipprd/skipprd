@@ -1,6 +1,6 @@
 site_name: Skippr Docs
 repo_url: https://github.com/skipprd/skipprd
-site_description: Skippr is a data ingestion CLI that discovers schemas and writes optimised Parquet to S3 with Glue/Athena integration.
+site_description: Skippr EL is a data ingestion CLI that discovers schemas and writes optimised Parquet to S3 with Glue/Athena integration.
 theme:
   name: material
   custom_dir: overrides

@@ -39,10 +39,10 @@ fi
 # Resolve release URL — use SKIPPR_VERSION to pin, otherwise latest
 if [[ -n "${SKIPPR_VERSION:-}" ]]; then
   RELEASE_URL="https://api.github.com/repos/$OWNER/$REPO/releases/tags/$SKIPPR_VERSION"
-  echo "Installing skippr $SKIPPR_VERSION for $OS/$ARCH..."
+  echo "Installing skippr-el $SKIPPR_VERSION for $OS/$ARCH..."
 else
   RELEASE_URL="https://api.github.com/repos/$OWNER/$REPO/releases/latest"
-  echo "Installing latest skippr for $OS/$ARCH..."
+  echo "Installing latest skippr-el for $OS/$ARCH..."
 fi
 
 DOWNLOAD_URL=$(curl -sf "$RELEASE_URL" | grep "browser_download_url.*$ASSET_PATTERN" | cut -d '"' -f 4)
@@ -54,7 +54,7 @@ fi
 
 BIN_NAME=$(basename "$DOWNLOAD_URL")
 TEMP_PATH="/tmp/$BIN_NAME"
-TEMP_DIR="/tmp/skippr_install_$$"
+TEMP_DIR="/tmp/skippr_el_install_$$"
 
 echo "Downloading $BIN_NAME..."
 curl --progress-bar -fL "$DOWNLOAD_URL" -o "$TEMP_PATH"
@@ -63,14 +63,14 @@ mkdir -p "$TEMP_DIR"
 tar -xzf "$TEMP_PATH" -C "$TEMP_DIR"
 
 # Find the extracted binary
-EXTRACTED=$(find "$TEMP_DIR" -name skippr -type f | head -1)
+EXTRACTED=$(find "$TEMP_DIR" -name skippr-el -type f | head -1)
 if [[ -z "$EXTRACTED" ]]; then
-  echo >&2 "Error: skippr binary not found in archive."
+  echo >&2 "Error: skippr-el binary not found in archive."
   exit 1
 fi
 
-mv "$EXTRACTED" "$DEST/skippr"
-chmod +x "$DEST/skippr"
+mv "$EXTRACTED" "$DEST/skippr-el"
+chmod +x "$DEST/skippr-el"
 
-echo "Installed skippr to $DEST/skippr"
-"$DEST/skippr" --version 2>/dev/null || true
+echo "Installed skippr-el to $DEST/skippr-el"
+"$DEST/skippr-el" --version 2>/dev/null || true

@@ -30,7 +30,7 @@ static INGEST_RT: once_cell::sync::Lazy<runtime::Runtime> = once_cell::sync::Laz
     runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
-        .thread_name("skippr-ingest-rt")
+        .thread_name("skippr-el-ingest-rt")
         .build()
         .expect("shared ingest runtime")
 });

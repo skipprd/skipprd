@@ -1,11 +1,11 @@
-# skippr query
+# skippr-el query
 
 Run SQL against destination tables, manage pipelines and schemas.
 
 ## Usage
 
 ```bash
-skippr query --sql "<SQL>" [--watch <seconds>] [--plain] [--log [LEVEL]]
+skippr-el query --sql "<SQL>" [--watch <seconds>] [--plain] [--log [LEVEL]]
 ```
 
 ## Flags
@@ -22,37 +22,37 @@ skippr query --sql "<SQL>" [--watch <seconds>] [--plain] [--log [LEVEL]]
 Query a table:
 
 ```bash
-skippr query --sql "SELECT COUNT(*) FROM bikehire"
+skippr-el query --sql "SELECT COUNT(*) FROM bikehire"
 ```
 
 Live watch:
 
 ```bash
-skippr query --sql "SELECT COUNT(*) FROM bikehire" --watch 5
+skippr-el query --sql "SELECT COUNT(*) FROM bikehire" --watch 5
 ```
 
 Pipeline management:
 
 ```bash
-skippr query --sql "ENABLE PIPELINE bikehire"
-skippr query --sql "DISABLE PIPELINE bikehire"
-skippr query --sql "RESET PIPELINE bikehire"
-skippr query --sql "DROP PIPELINE bikehire"
+skippr-el query --sql "ENABLE PIPELINE bikehire"
+skippr-el query --sql "DISABLE PIPELINE bikehire"
+skippr-el query --sql "RESET PIPELINE bikehire"
+skippr-el query --sql "DROP PIPELINE bikehire"
 ```
 
 Schema management:
 
 ```bash
-skippr query --sql "SCHEMA DUMP bikehire TO 'schema.json'"
-skippr query --sql "LOAD SCHEMA 'schema.json' INTO bikehire"
-skippr query --sql "ALTER SCHEMA bikehire DROP COLUMN old_field"
-skippr query --sql "ALTER SCHEMA bikehire ALTER COLUMN price TYPE DECIMAL(10,2)"
+skippr-el query --sql "SCHEMA DUMP bikehire TO 'schema.json'"
+skippr-el query --sql "LOAD SCHEMA 'schema.json' INTO bikehire"
+skippr-el query --sql "ALTER SCHEMA bikehire DROP COLUMN old_field"
+skippr-el query --sql "ALTER SCHEMA bikehire ALTER COLUMN price TYPE DECIMAL(10,2)"
 ```
 
 Stream from the WAL:
 
 ```bash
-skippr query --sql "STREAM * FROM bikehire LIMIT 100"
+skippr-el query --sql "STREAM * FROM bikehire LIMIT 100"
 ```
 
 See the [SQL Reference](../sql/reference.md) for all supported statements.

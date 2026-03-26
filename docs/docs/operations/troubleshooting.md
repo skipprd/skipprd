@@ -6,7 +6,7 @@
 
 **Cause:** `ENABLE PIPELINE` or `DISABLE PIPELINE` was called before the pipeline metadata exists.
 
-**Fix:** Run `skippr discover --pipeline <name>` first to create the metadata, then enable the pipeline.
+**Fix:** Run `skippr-el discover --pipeline <name>` first to create the metadata, then enable the pipeline.
 
 ### `TABLE_NOT_FOUND`
 
@@ -68,7 +68,7 @@ No manual intervention is needed. Verify recovery by checking that `uploaded_row
 To re-ingest from scratch:
 
 ```bash
-skippr query --sql "RESET PIPELINE my_pipeline"
+skippr-el query --sql "RESET PIPELINE my_pipeline"
 ```
 
 This clears the offsets database and WAL for the pipeline. The next `sync` will start from the beginning of the source data.

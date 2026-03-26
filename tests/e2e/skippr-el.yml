@@ -1,0 +1,56 @@
+data_sources:
+  test_mysql:
+    Mysql:
+      connection_string: "mysql://root:testpass@127.0.0.1:13306/skippr_test"
+  test_mssql:
+    Mssql:
+      connection_string: "Server=127.0.0.1,11433;User Id=sa;Password=TestPass123!;TrustServerCertificate=true;Database=skippr_test"
+  test_dynamodb:
+    Dynamodb:
+      table_name: test_data
+      region: us-east-1
+      endpoint_url: "http://127.0.0.1:14566"
+  test_kinesis:
+    Kinesis:
+      stream_name: test_stream
+      region: us-east-1
+      endpoint_url: "http://127.0.0.1:14566"
+  test_sqs:
+    Sqs:
+      queue_url: "http://127.0.0.1:14566/000000000000/test_queue"
+      region: us-east-1
+      endpoint_url: "http://127.0.0.1:14566"
+  test_s3:
+    S3:
+      s3_bucket: test-bucket
+      s3_prefix: test-data/
+      endpoint_url: "http://127.0.0.1:14566"
+  test_file:
+    File:
+      path: "./tests/e2e/testdata/seed.json"
+  test_http:
+    Http:
+      url: "http://127.0.0.1:18080/testdata/seed.json"
+  test_stdin:
+    Stdin:
+      mode: batch
+
+data_sinks:
+  test_postgres:
+    Postgres:
+      host: 127.0.0.1
+      port: 15432
+      user: postgres
+      password: testpass
+      database: skippr_test
+
+pipelines:
+  test_mysql:     { data_source: data_sources.test_mysql,    data_sink: data_sinks.test_postgres }
+  test_mssql:     { data_source: data_sources.test_mssql,    data_sink: data_sinks.test_postgres }
+  test_dynamodb:  { data_source: data_sources.test_dynamodb, data_sink: data_sinks.test_postgres }
+  test_kinesis:   { data_source: data_sources.test_kinesis,  data_sink: data_sinks.test_postgres }
+  test_sqs:       { data_source: data_sources.test_sqs,      data_sink: data_sinks.test_postgres }
+  test_s3:        { data_source: data_sources.test_s3,       data_sink: data_sinks.test_postgres }
+  test_file:      { data_source: data_sources.test_file,     data_sink: data_sinks.test_postgres }
+  test_http:      { data_source: data_sources.test_http,     data_sink: data_sinks.test_postgres }
+  test_stdin:     { data_source: data_sources.test_stdin,     data_sink: data_sinks.test_postgres }
