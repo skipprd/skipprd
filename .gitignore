@@ -35,3 +35,4 @@ dbt.log
 app-dbt
 _bak
 data
+docs/site
