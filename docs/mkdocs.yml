@@ -51,10 +51,18 @@ nav:
           - S3: connectors/inputs/s3.md
           - Local File: connectors/inputs/file.md
           - MSSQL: connectors/inputs/mssql.md
+          - MySQL: connectors/inputs/mysql.md
+          - DynamoDB: connectors/inputs/dynamodb.md
+          - Kinesis: connectors/inputs/kinesis.md
+          - SQS: connectors/inputs/sqs.md
+          - HTTP: connectors/inputs/http.md
+          - Stdin: connectors/inputs/stdin.md
       - Outputs:
           - Athena (S3 + Glue): connectors/outputs/athena.md
           - Local File: connectors/outputs/file.md
           - Snowflake: connectors/outputs/snowflake.md
+          - Postgres: connectors/outputs/postgres.md
+          - Stdout: connectors/outputs/stdout.md
   - Operations:
       - Logging Event Map: operations/logging.md
       - Troubleshooting: operations/troubleshooting.md

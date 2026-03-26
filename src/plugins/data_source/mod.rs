@@ -1,3 +1,10 @@
+pub mod dynamodb;
 pub mod file;
+pub mod http;
+pub mod kinesis;
 pub mod mssql;
+pub mod mysql;
+pub mod pcap;
 pub mod s3;
+pub mod sqs;
+pub mod stdin;

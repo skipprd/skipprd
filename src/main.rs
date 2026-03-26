@@ -40,8 +40,15 @@ use skippr::helpers::offsets::Offsets;
 
 use skippr::plugins::athena::DataSinkAthenaPlugin;
 
+use skippr::plugins::dynamodb_input::DataSourceDynamodbPlugin;
+use skippr::plugins::kinesis_input::DataSourceKinesisPlugin;
 use skippr::plugins::mssql_input::DataSourceMssqlPlugin;
+use skippr::plugins::mysql_input::DataSourceMysqlPlugin;
 use skippr::plugins::s3_input::DataSourceS3Plugin;
+use skippr::plugins::sqs_input::DataSourceSqsPlugin;
+use skippr::plugins::http_input::DataSourceHttpPlugin;
+use skippr::plugins::stdin_input::DataSourceStdinPlugin;
+use skippr::plugins::stdout_output::DataSinkStdoutPlugin;
 use skippr::plugins::bigquery_output::DataSinkBigqueryPlugin;
 use skippr::plugins::postgres_output::DataSinkPostgresPlugin;
 use skippr::plugins::snowflake_output::DataSinkSnowflakePlugin;
@@ -63,7 +70,6 @@ use skippr::sqlrt::docs::{get_docs_in_format, DocFormat};
 use skippr::sqlrt::query::query;
 use std::io::IsTerminal as _;
 
-// use crate::plugins::pcap_input::DataSourcePcapPlugin;
 
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
 //     Lazy::new(|| TimedRwLock::new("display_metrics".to_string(), AtomicBool::new(false)));
@@ -988,6 +994,10 @@ async fn build_output_plugin_from_config(
                 DataSinkPostgresPlugin::new_with_config(buffer_name, pg_config).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
+        DataSinkPluginConfig::Stdout => {
+            let plugin = DataSinkStdoutPlugin::new(buffer_name).await;
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
+        }
     }
 }
 
@@ -1055,6 +1065,12 @@ pub async fn sync_input_plugin(
         "File" => Box::new(DataSourceLocalFilePlugin::new().await),
         "S3" => Box::new(DataSourceS3Plugin::new().await),
         "Mssql" => Box::new(DataSourceMssqlPlugin::new().await),
+        "Kinesis" => Box::new(DataSourceKinesisPlugin::new().await),
+        "Sqs" => Box::new(DataSourceSqsPlugin::new().await),
+        "Mysql" => Box::new(DataSourceMysqlPlugin::new().await),
+        "Dynamodb" => Box::new(DataSourceDynamodbPlugin::new().await),
+        "Http" => Box::new(DataSourceHttpPlugin::new().await),
+        "Stdin" => Box::new(DataSourceStdinPlugin::new().await),
         "" => {
             error!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
             return;

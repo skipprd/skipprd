@@ -26,13 +26,18 @@ use crate::plugins::athena::DataSinkAthenaPluginConfig;
 
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
+use crate::plugins::data_source::http::DataSourceHttpPluginConfig;
+use crate::plugins::data_source::kinesis::DataSourceKinesisPluginConfig;
+use crate::plugins::data_source::sqs::DataSourceSqsPluginConfig;
+use crate::plugins::data_source::stdin::DataSourceStdinPluginConfig;
+use crate::plugins::dynamodb_input::DataSourceDynamodbPluginConfig;
 use crate::plugins::file_input::DataSourceLocalFilePluginConfig;
 use crate::plugins::file_output::DataSinkFilePluginConfig;
+use crate::plugins::mysql_input::DataSourceMysqlPluginConfig;
 use crate::plugins::s3_output::DataSinkS3PluginConfig;
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use toml;
-// use crate::plugins::s3_inventory::{DataSourceS3InventoryPluginConfig};
 use tracing::{debug, error, info, warn};
 
 lazy_static! {
@@ -90,6 +95,12 @@ pub enum DataSourcePluginConfig {
     S3(DataSourceS3PluginConfig),
     File(DataSourceLocalFilePluginConfig),
     Mssql(DataSourceMssqlPluginConfig),
+    Mysql(DataSourceMysqlPluginConfig),
+    Dynamodb(DataSourceDynamodbPluginConfig),
+    Kinesis(DataSourceKinesisPluginConfig),
+    Sqs(DataSourceSqsPluginConfig),
+    Http(DataSourceHttpPluginConfig),
+    Stdin(DataSourceStdinPluginConfig),
 }
 
 impl DataSourcePluginConfig {
@@ -111,6 +122,33 @@ impl DataSourcePluginConfig {
                 .format
                 .clone()
                 .unwrap_or_else(|| "row".to_string()),
+            DataSourcePluginConfig::Mysql(mysql_config) => mysql_config
+                .format
+                .clone()
+                .unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Dynamodb(dynamodb_config) => dynamodb_config
+                .format
+                .clone()
+                .unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Kinesis(kinesis_config) => kinesis_config
+                .format
+                .clone()
+                .unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Sqs(sqs_config) => sqs_config
+                .format
+                .clone()
+                .unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Http(http_config) => http_config
+                .format
+                .clone()
+                .or(Some("json".to_string()))
+                .as_ref()
+                .unwrap()
+                .clone(),
+            DataSourcePluginConfig::Stdin(stdin_config) => stdin_config
+                .format
+                .clone()
+                .unwrap_or_else(|| "json".to_string()),
         }
     }
 
@@ -119,6 +157,12 @@ impl DataSourcePluginConfig {
             DataSourcePluginConfig::S3(_) => Some("S3".to_string()),
             DataSourcePluginConfig::File(_) => Some("File".to_string()),
             DataSourcePluginConfig::Mssql(_) => Some("Mssql".to_string()),
+            DataSourcePluginConfig::Mysql(_) => Some("Mysql".to_string()),
+            DataSourcePluginConfig::Dynamodb(_) => Some("Dynamodb".to_string()),
+            DataSourcePluginConfig::Kinesis(_) => Some("Kinesis".to_string()),
+            DataSourcePluginConfig::Sqs(_) => Some("Sqs".to_string()),
+            DataSourcePluginConfig::Http(_) => Some("Http".to_string()),
+            DataSourcePluginConfig::Stdin(_) => Some("Stdin".to_string()),
         }
     }
 
@@ -127,6 +171,12 @@ impl DataSourcePluginConfig {
             DataSourcePluginConfig::S3(s3_config) => s3_config.batch_size_bytes,
             DataSourcePluginConfig::File(file_config) => file_config.batch_size_bytes,
             DataSourcePluginConfig::Mssql(mssql_config) => mssql_config.batch_size_bytes,
+            DataSourcePluginConfig::Mysql(mysql_config) => mysql_config.batch_size_bytes,
+            DataSourcePluginConfig::Dynamodb(dynamodb_config) => dynamodb_config.batch_size_bytes,
+            DataSourcePluginConfig::Kinesis(kinesis_config) => kinesis_config.batch_size_bytes,
+            DataSourcePluginConfig::Sqs(sqs_config) => sqs_config.batch_size_bytes,
+            DataSourcePluginConfig::Http(http_config) => http_config.batch_size_bytes,
+            DataSourcePluginConfig::Stdin(stdin_config) => stdin_config.batch_size_bytes,
         }
     }
 
@@ -135,6 +185,12 @@ impl DataSourcePluginConfig {
             DataSourcePluginConfig::S3(s3_config) => s3_config.batch_size_seconds,
             DataSourcePluginConfig::File(file_config) => file_config.batch_size_seconds,
             DataSourcePluginConfig::Mssql(mssql_config) => mssql_config.batch_size_seconds,
+            DataSourcePluginConfig::Mysql(mysql_config) => mysql_config.batch_size_seconds,
+            DataSourcePluginConfig::Dynamodb(dynamodb_config) => dynamodb_config.batch_size_seconds,
+            DataSourcePluginConfig::Kinesis(kinesis_config) => kinesis_config.batch_size_seconds,
+            DataSourcePluginConfig::Sqs(sqs_config) => sqs_config.batch_size_seconds,
+            DataSourcePluginConfig::Http(http_config) => http_config.batch_size_seconds,
+            DataSourcePluginConfig::Stdin(stdin_config) => stdin_config.batch_size_seconds,
         }
     }
 }
@@ -158,6 +214,7 @@ pub enum DataSinkPluginConfig {
     Postgres(DataSinkPostgresPluginConfig),
     S3(DataSinkS3PluginConfig),
     Snowflake(DataSinkSnowflakePluginConfig),
+    Stdout,
 }
 
 impl DataSinkPluginConfig {
@@ -192,6 +249,7 @@ impl DataSinkPluginConfig {
                 .format
                 .clone()
                 .unwrap_or_else(|| "parquet".to_string()),
+            DataSinkPluginConfig::Stdout => "json".to_string(),
         }
     }
 
@@ -203,6 +261,7 @@ impl DataSinkPluginConfig {
             DataSinkPluginConfig::Postgres(_) => Some("Postgres".to_string()),
             DataSinkPluginConfig::S3(_) => Some("S3".to_string()),
             DataSinkPluginConfig::Snowflake(_) => Some("Snowflake".to_string()),
+            DataSinkPluginConfig::Stdout => Some("Stdout".to_string()),
         }
     }
 }

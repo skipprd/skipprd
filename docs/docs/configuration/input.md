@@ -8,7 +8,7 @@ The input plugin to use for reading data.
 |---|---|
 | **Environment variable** | `DATA_SOURCE_PLUGIN_NAME` |
 | **Required** | Yes |
-| **Values** | `S3`, `File`, `Mssql` |
+| **Values** | `S3`, `File`, `Mssql`, `Mysql`, `Dynamodb`, `Kinesis`, `Sqs`, `Http`, `Stdin` |
 
 ## S3 source options
 
@@ -44,3 +44,54 @@ Supports JSON, CSV, and Parquet input files.
 | `MSSQL_CONNECTION_STRING` | *(required)* | ADO.NET-style connection string for MSSQL |
 
 Additional MSSQL-specific options (available in YAML config): `tables`, `batch_size_rows`, `query_timeout_seconds`. See the [MSSQL connector docs](../connectors/inputs/mssql.md) for details.
+
+## MySQL source options
+
+| Variable | Default | Description |
+|---|---|---|
+| `MYSQL_CONNECTION_STRING` | *(required)* | MySQL connection string (`mysql_async`) |
+
+Additional MySQL-specific options (YAML): `tables`, `batch_size_rows`, `batch_size_bytes`, `batch_size_seconds`. See the [MySQL connector docs](../connectors/inputs/mysql.md) for details.
+
+## DynamoDB source options
+
+| Variable | Default | Description |
+|---|---|---|
+| `DYNAMODB_TABLE_NAME` | *(required)* | DynamoDB table to scan |
+| `AWS_DEFAULT_REGION` | | AWS region for DynamoDB |
+
+Optional YAML: `table_name`, `region`. See the [DynamoDB connector docs](../connectors/inputs/dynamodb.md) for details.
+
+## Kinesis source options
+
+| Variable | Default | Description |
+|---|---|---|
+| `KINESIS_STREAM_NAME` | *(required)* | Kinesis Data Stream name |
+| `AWS_DEFAULT_REGION` | | AWS region for Kinesis |
+
+Optional YAML: `stream_name`, `region`, `mode` (`batch` or `stream`). See the [Kinesis connector docs](../connectors/inputs/kinesis.md) for details.
+
+## SQS source options
+
+| Variable | Default | Description |
+|---|---|---|
+| `SQS_QUEUE_URL` | *(required)* | Full URL of the SQS queue |
+| `AWS_DEFAULT_REGION` | | AWS region for SQS |
+
+Optional YAML: `queue_url`, `region`, `mode` (`batch` or `stream`). See the [SQS connector docs](../connectors/inputs/sqs.md) for details.
+
+## HTTP source options
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATA_SOURCE_HTTP_URL` | *(required)* | URL to download via HTTP GET |
+
+Optional YAML: `url`, `format`, `batch_size_bytes`, `batch_size_seconds`. Gzip-compressed responses are supported. See the [HTTP connector docs](../connectors/inputs/http.md) for details.
+
+## Stdin source options
+
+| Variable | Default | Description |
+|---|---|---|
+| *(none required)* | | Reads from standard input |
+
+Optional YAML: `mode` (`batch`, read until EOF — default; `stream`, continuous) and `format`. Typical use: pipe data into Skippr, e.g. `cat data.json | skippr sync --pipeline my_pipeline`. See the [Stdin connector docs](../connectors/inputs/stdin.md) for details.

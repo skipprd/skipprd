@@ -1,0 +1,7 @@
+data_source skippr_test:
+  type: postgres
+  host: postgres
+  port: 5432
+  username: postgres
+  password: testpass
+  database: skippr_test

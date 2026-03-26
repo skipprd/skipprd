@@ -57,6 +57,32 @@ Writes compacted Parquet to Snowflake via stage upload and `COPY INTO`.
 
 See the [Snowflake connector docs](../connectors/outputs/snowflake.md) for full details.
 
+## Postgres output
+
+Writes batches to PostgreSQL with automatic schema and table creation.
+
+| Variable | Default | Description |
+|---|---|---|
+| `POSTGRES_HOST` | `localhost` | PostgreSQL host |
+| `POSTGRES_PORT` | `5432` | PostgreSQL port |
+| `POSTGRES_USER` | | Database user |
+| `POSTGRES_PASSWORD` | | Database password |
+| `POSTGRES_DATABASE` | | Target database name |
+| `POSTGRES_SCHEMA` | `public` | Target schema |
+| `POSTGRES_SSLMODE` | | SSL mode (e.g. `disable`, `require`, `prefer`) |
+
+YAML equivalents: `host`, `port`, `user`, `password`, `database`, `schema`, `sslmode`, `format`. See the [Postgres connector docs](../connectors/outputs/postgres.md) for full details.
+
+## Stdout output
+
+Prints line-delimited JSON to standard output for debugging and piping.
+
+| Variable | Default | Description |
+|---|---|---|
+| *(none)* | | Use `DATA_OUTPUT_PLUGIN_NAME=Stdout` or YAML `Stdout: {}` |
+
+See the [Stdout connector docs](../connectors/outputs/stdout.md) for full details.
+
 ## Deadletter outputs
 
 Pipelines can optionally route deadletters to a separate output registry:

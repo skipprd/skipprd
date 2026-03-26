@@ -13,9 +13,17 @@ pub use data_sink::file as file_output;
 pub use data_sink::postgres as postgres_output;
 pub use data_sink::s3 as s3_output;
 pub use data_sink::snowflake as snowflake_output;
+pub use data_source::dynamodb as dynamodb_input;
 pub use data_source::file as file_input;
+pub use data_source::kinesis as kinesis_input;
 pub use data_source::mssql as mssql_input;
+pub use data_source::mysql as mysql_input;
 pub use data_source::s3 as s3_input;
+pub use data_source::sqs as sqs_input;
+pub use data_source::http as http_input;
+pub use data_source::pcap as pcap_input;
+pub use data_source::stdin as stdin_input;
+pub use data_sink::stdout as stdout_output;
 pub use util::parquet as parquet_util;
 
 pub use traits::{DataSink, DataSource, SchemaSink, SchemaSource};

@@ -1,0 +1,5 @@
+checks for test_data:
+  - row_count > 0
+
+checks for dbo.test_data:
+  - row_count > 0

@@ -103,6 +103,10 @@ tokio-postgres = "0.7.16"
 postgres-native-tls = "0.5.2"
 native-tls = "0.2.18"
 aes = { version = "0.8", default-features = false }
+mysql_async = "0.34"
+aws-sdk-dynamodb = "1.51.0"
+aws-sdk-kinesis = "1.48.0"
+aws-sdk-sqs = "1.47.0"
 
 [features]
 stats_integration = []
