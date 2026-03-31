@@ -3,8 +3,9 @@ use datafusion::arrow::array::*;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
+use reqwest::Client;
 use serde_derive::Deserialize;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::DataSinkPluginConfig;
@@ -12,8 +13,7 @@ use crate::plugins::DataSink;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkDuckdbPluginConfig {
-    pub connection_string: String,
-    pub motherduck_token: Option<String>,
+    pub motherduck_token: String,
     pub database: Option<String>,
     pub table: Option<String>,
     pub format: Option<String>,
@@ -32,7 +32,10 @@ pub struct DataSinkDuckdbPlugin {
     config: DataSinkDuckdbPluginConfig,
     #[allow(dead_code)]
     buffer_name: String,
+    client: Client,
 }
+
+const MOTHERDUCK_SQL_ENDPOINT: &str = "https://api.motherduck.com/v1/sql";
 
 impl DataSinkDuckdbPlugin {
     pub async fn new_with_config(
@@ -42,6 +45,7 @@ impl DataSinkDuckdbPlugin {
         Self {
             config,
             buffer_name,
+            client: Client::new(),
         }
     }
 
@@ -105,6 +109,63 @@ impl DataSinkDuckdbPlugin {
             }
         }
     }
+
+    async fn execute_sql(&self, sql: &str) -> Result<serde_json::Value, std::io::Error> {
+        let mut payload = serde_json::json!({ "sql": sql });
+        if let Some(ref db) = self.config.database {
+            payload["database"] = serde_json::json!(db);
+        }
+
+        let resp = self
+            .client
+            .post(MOTHERDUCK_SQL_ENDPOINT)
+            .header("Authorization", format!("Bearer {}", self.config.motherduck_token))
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| std::io::Error::other(format!("MotherDuck request: {}", e)))?;
+
+        let status = resp.status();
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| std::io::Error::other(format!("MotherDuck response parse: {}", e)))?;
+
+        if !status.is_success() {
+            let msg = body["message"]
+                .as_str()
+                .or_else(|| body["error"].as_str())
+                .unwrap_or("unknown error");
+            return Err(std::io::Error::other(format!(
+                "MotherDuck API HTTP {}: {}",
+                status, msg
+            )));
+        }
+
+        Ok(body)
+    }
+
+    async fn ensure_table(
+        &self,
+        table_name: &str,
+        col_defs: &[(String, &str)],
+    ) -> Result<(), std::io::Error> {
+        if col_defs.is_empty() {
+            return Ok(());
+        }
+        let cols_sql: Vec<String> = col_defs
+            .iter()
+            .map(|(name, dk_type)| format!("\"{}\" {}", name, dk_type))
+            .collect();
+        let ddl = format!(
+            "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
+            table_name,
+            cols_sql.join(", ")
+        );
+        info!("DuckDB DDL: {}", ddl);
+        self.execute_sql(&ddl).await.map(|_| ())
+    }
 }
 
 #[async_trait]
@@ -138,7 +199,11 @@ impl DataSink for DataSinkDuckdbPlugin {
             .collect();
         let col_list = col_names.join(", ");
 
-        let mut all_value_rows: Vec<String> = Vec::new();
+        self.ensure_table(&table_name, &col_defs).await.map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
+
         let mut total_rows = 0usize;
         let mut stream = stream;
 
@@ -149,75 +214,38 @@ impl DataSink for DataSinkDuckdbPlugin {
             if num_rows == 0 {
                 continue;
             }
-            for row in 0..num_rows {
-                let vals: Vec<String> = (0..batch.num_columns())
-                    .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
+
+            for chunk_start in (0..num_rows).step_by(1000) {
+                let chunk_end = (chunk_start + 1000).min(num_rows);
+                let value_rows: Vec<String> = (chunk_start..chunk_end)
+                    .map(|row| {
+                        let vals: Vec<String> = (0..batch.num_columns())
+                            .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
+                            .collect();
+                        format!("({})", vals.join(", "))
+                    })
                     .collect();
-                all_value_rows.push(format!("({})", vals.join(", ")));
-            }
-            total_rows += num_rows;
-        }
 
-        if all_value_rows.is_empty() {
-            counters::dec_uploads_in_flight();
-            return Ok(());
-        }
-
-        let config = self.config.clone();
-        let col_defs_owned: Vec<(String, String)> = col_defs
-            .into_iter()
-            .map(|(n, t)| (n, t.to_string()))
-            .collect();
-        let col_list_owned = col_list.clone();
-        let table_name_owned = table_name.clone();
-        let final_total = total_rows;
-
-        tokio::task::spawn_blocking(move || {
-            let conn = duckdb::Connection::open(&config.connection_string)
-                .map_err(|e| std::io::Error::other(format!("DuckDB open: {}", e)))?;
-
-            if let Some(ref token) = config.motherduck_token {
-                conn.execute_batch(&format!("SET motherduck_token='{}'", token))
-                    .map_err(|e| std::io::Error::other(format!("DuckDB SET token: {}", e)))?;
-            }
-
-            if let Some(ref db) = config.database {
-                conn.execute_batch(&format!("USE {}", db))
-                    .map_err(|e| std::io::Error::other(format!("DuckDB USE: {}", e)))?;
-            }
-
-            let cols_sql: Vec<String> = col_defs_owned
-                .iter()
-                .map(|(name, dk_type)| format!("\"{}\" {}", name, dk_type))
-                .collect();
-            let create_ddl = format!(
-                "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
-                table_name_owned,
-                cols_sql.join(", ")
-            );
-            conn.execute_batch(&create_ddl)
-                .map_err(|e| std::io::Error::other(format!("DuckDB DDL: {}", e)))?;
-
-            for chunk in all_value_rows.chunks(1000) {
                 let insert_sql = format!(
                     "INSERT INTO \"{}\" ({}) VALUES {}",
-                    table_name_owned,
-                    col_list_owned,
-                    chunk.join(", ")
+                    table_name, col_list, value_rows.join(", ")
                 );
-                conn.execute_batch(&insert_sql)
-                    .map_err(|e| std::io::Error::other(format!("DuckDB INSERT: {}", e)))?;
+
+                match self.execute_sql(&insert_sql).await {
+                    Ok(_) => {
+                        let chunk_rows = chunk_end - chunk_start;
+                        total_rows += chunk_rows;
+                        counters::add_parquet_rows(chunk_rows as u64);
+                    }
+                    Err(e) => {
+                        error!("DuckDB INSERT failed: {}", e);
+                        counters::dec_uploads_in_flight();
+                        return Err(e);
+                    }
+                }
             }
+        }
 
-            Ok::<_, std::io::Error>(final_total)
-        })
-        .await
-        .map_err(|e| {
-            counters::dec_uploads_in_flight();
-            std::io::Error::other(format!("DuckDB spawn: {}", e))
-        })??;
-
-        counters::add_parquet_rows(total_rows as u64);
         counters::add_upload(1);
         counters::dec_uploads_in_flight();
         info!(

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use reqwest::Client;
 use serde_derive::Deserialize;
 use tracing::info;
 
@@ -11,8 +12,7 @@ use crate::plugins::{DataSink, DataSource};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceDuckdbPluginConfig {
-    pub connection_string: String,
-    pub motherduck_token: Option<String>,
+    pub motherduck_token: String,
     pub database: Option<String>,
     pub tables: Option<Vec<String>>,
     pub query: Option<String>,
@@ -34,7 +34,10 @@ impl From<DataSourcePluginConfig> for DataSourceDuckdbPluginConfig {
 pub struct DataSourceDuckdbPlugin {
     ingest: Ingest,
     config: DataSourceDuckdbPluginConfig,
+    client: Client,
 }
+
+const MOTHERDUCK_SQL_ENDPOINT: &str = "https://api.motherduck.com/v1/sql";
 
 impl DataSourceDuckdbPlugin {
     pub async fn new() -> Self {
@@ -42,11 +45,7 @@ impl DataSourceDuckdbPlugin {
             match Config::get_pipeline_input_plugin_config() {
                 Ok(c) => c.into(),
                 Err(_) => DataSourceDuckdbPluginConfig {
-                    connection_string: Config::getenv("DUCKDB_CONNECTION_STRING", ":memory:"),
-                    motherduck_token: {
-                        let v = Config::getenv("MOTHERDUCK_TOKEN", "");
-                        if v.is_empty() { None } else { Some(v) }
-                    },
+                    motherduck_token: Config::getenv("MOTHERDUCK_TOKEN", ""),
                     database: None,
                     tables: None,
                     query: None,
@@ -59,58 +58,53 @@ impl DataSourceDuckdbPlugin {
         Self {
             ingest: Ingest::new(),
             config,
+            client: Client::new(),
         }
     }
 
-    fn query_rows(
-        conn: &duckdb::Connection,
-        sql: &str,
-    ) -> Result<Vec<String>, std::io::Error> {
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| std::io::Error::other(format!("DuckDB prepare: {}", e)))?;
-
-        let column_count = stmt.column_count();
-        let column_names: Vec<String> = (0..column_count)
-            .map(|i| stmt.column_name(i).map_or("col".to_string(), |v| v.to_string()))
-            .collect();
-
-        let rows = stmt
-            .query_map([], |row| {
-                let mut map = serde_json::Map::new();
-                for (i, name) in column_names.iter().enumerate() {
-                    let val: serde_json::Value =
-                        if let Ok(v) = row.get::<_, String>(i) {
-                            serde_json::Value::String(v)
-                        } else if let Ok(v) = row.get::<_, i64>(i) {
-                            serde_json::Value::Number(v.into())
-                        } else if let Ok(v) = row.get::<_, i32>(i) {
-                            serde_json::Value::Number(v.into())
-                        } else if let Ok(v) = row.get::<_, f64>(i) {
-                            serde_json::json!(v)
-                        } else if let Ok(v) = row.get::<_, bool>(i) {
-                            serde_json::Value::Bool(v)
-                        } else if let Ok(v) = row.get::<_, Option<String>>(i) {
-                            match v {
-                                Some(s) => serde_json::Value::String(s),
-                                None => serde_json::Value::Null,
-                            }
-                        } else {
-                            serde_json::Value::Null
-                        };
-                    map.insert(name.clone(), val);
-                }
-                Ok(serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string()))
-            })
-            .map_err(|e| std::io::Error::other(format!("DuckDB query: {}", e)))?;
-
-        let mut results = Vec::new();
-        for row_result in rows {
-            results.push(
-                row_result.map_err(|e| std::io::Error::other(format!("DuckDB row: {}", e)))?,
-            );
+    async fn execute_sql(&self, sql: &str) -> Result<serde_json::Value, std::io::Error> {
+        let mut payload = serde_json::json!({ "sql": sql });
+        if let Some(ref db) = self.config.database {
+            payload["database"] = serde_json::json!(db);
         }
-        Ok(results)
+
+        let resp = self
+            .client
+            .post(MOTHERDUCK_SQL_ENDPOINT)
+            .header("Authorization", format!("Bearer {}", self.config.motherduck_token))
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| std::io::Error::other(format!("MotherDuck request: {}", e)))?;
+
+        let status = resp.status();
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| std::io::Error::other(format!("MotherDuck response parse: {}", e)))?;
+
+        if !status.is_success() {
+            let msg = body["message"]
+                .as_str()
+                .or_else(|| body["error"].as_str())
+                .unwrap_or("unknown error");
+            return Err(std::io::Error::other(format!(
+                "MotherDuck API HTTP {}: {}",
+                status, msg
+            )));
+        }
+
+        Ok(body)
+    }
+
+    fn rows_from_response(body: &serde_json::Value) -> Vec<String> {
+        let Some(data) = body.get("data").and_then(|d| d.as_array()) else {
+            return Vec::new();
+        };
+        data.iter()
+            .filter_map(|row| serde_json::to_string(row).ok())
+            .collect()
     }
 }
 
@@ -121,11 +115,9 @@ impl DataSource for DataSourceDuckdbPlugin {
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> Result<(), std::io::Error> {
-        let config = self.config.clone();
-
-        let queries: Vec<(String, String)> = if let Some(ref q) = config.query {
+        let queries: Vec<(String, String)> = if let Some(ref q) = self.config.query {
             vec![("query".to_string(), q.clone())]
-        } else if let Some(ref tables) = config.tables {
+        } else if let Some(ref tables) = self.config.tables {
             tables
                 .iter()
                 .map(|t| (t.clone(), format!("SELECT * FROM {}", t)))
@@ -136,35 +128,13 @@ impl DataSource for DataSourceDuckdbPlugin {
             ));
         };
 
-        let all_rows = tokio::task::spawn_blocking(move || {
-            let conn = duckdb::Connection::open(&config.connection_string)
-                .map_err(|e| std::io::Error::other(format!("DuckDB open: {}", e)))?;
-
-            if let Some(ref token) = config.motherduck_token {
-                conn.execute_batch(&format!("SET motherduck_token='{}'", token))
-                    .map_err(|e| std::io::Error::other(format!("DuckDB SET token: {}", e)))?;
-            }
-
-            if let Some(ref db) = config.database {
-                conn.execute_batch(&format!("USE {}", db))
-                    .map_err(|e| std::io::Error::other(format!("DuckDB USE: {}", e)))?;
-            }
-
-            let mut table_rows: Vec<(String, Vec<String>)> = Vec::new();
-            for (table_name, query) in &queries {
-                let rows = Self::query_rows(&conn, query)?;
-                table_rows.push((table_name.clone(), rows));
-            }
-
-            Ok::<_, std::io::Error>(table_rows)
-        })
-        .await
-        .map_err(|e| std::io::Error::other(format!("DuckDB spawn: {}", e)))??;
-
         let batch_size = self.config.batch_size_rows.unwrap_or(10_000);
-        let db_label = self.config.database.as_deref().unwrap_or("duckdb");
+        let db_label = self.config.database.as_deref().unwrap_or("motherduck");
 
-        for (table_name, rows) in all_rows {
+        for (table_name, query) in &queries {
+            let body = self.execute_sql(query).await?;
+            let rows = Self::rows_from_response(&body);
+
             let namespace = format!("duckdb.{}.{}", db_label, table_name);
             info!("DuckDB input: {} rows from {}", rows.len(), table_name);
 
@@ -181,7 +151,7 @@ impl DataSource for DataSourceDuckdbPlugin {
                     offset_key: offset_key.clone(),
                     data: json_str,
                     bytes,
-                    source_uri: format!("duckdb://{}/{}", db_label, table_name),
+                    source_uri: format!("motherduck://{}/{}", db_label, table_name),
                     namespace: Some(namespace.clone()),
                 });
 

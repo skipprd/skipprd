@@ -1,14 +1,13 @@
 # DuckDB / MotherDuck Output
 
-Writes data to DuckDB (local or MotherDuck cloud) tables via SQL INSERT.
+Writes data to MotherDuck cloud tables via the MotherDuck REST API.
 
 ## How it works
 
-1. Opens a DuckDB connection using the provided connection string.
-2. If a MotherDuck token is provided, authenticates via `SET motherduck_token`.
-3. Auto-creates tables with `CREATE TABLE IF NOT EXISTS`.
-4. Inserts rows in batches of 1000 via SQL INSERT statements.
-5. Sync operations use `spawn_blocking` since DuckDB's Rust API is synchronous.
+1. Authenticates with MotherDuck using a bearer token.
+2. Auto-creates tables with `CREATE TABLE IF NOT EXISTS` via the SQL endpoint.
+3. Inserts rows in batches of 1000 via SQL INSERT statements.
+4. All operations use `POST https://api.motherduck.com/v1/sql`.
 
 ## Configuration
 
@@ -16,8 +15,8 @@ Writes data to DuckDB (local or MotherDuck cloud) tables via SQL INSERT.
 data_sinks:
   sink:
     Duckdb:
-      connection_string: "md:my_database"
       motherduck_token: "ey..."
+      database: "my_database"
       table: events
 ```
 
@@ -25,8 +24,7 @@ data_sinks:
 
 | Variable | Default | Description |
 |---|---|---|
-| `connection_string` | | DuckDB path or `md:` for MotherDuck |
-| `motherduck_token` | | MotherDuck auth token |
-| `database` | | Database to `USE` after connecting |
+| `motherduck_token` | *(required)* | MotherDuck auth token |
+| `database` | | MotherDuck database name |
 | `table` | (from namespace) | Target table name |
 | `format` | `json` | Data format |
