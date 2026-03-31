@@ -1,7 +1,16 @@
+pub mod amqp;
 pub mod athena;
+pub mod azure_blob;
 pub mod bigquery;
+pub mod databricks;
 pub mod file;
+pub mod gcs;
 pub mod postgres;
 pub mod s3;
+pub mod sftp;
 pub mod snowflake;
 pub mod stdout;
+pub mod synapse;
+pub mod clickhouse;
+pub mod redshift;
+pub mod duckdb;

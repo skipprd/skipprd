@@ -76,7 +76,7 @@ walkdir = { version = "2.3.2", features = [] }
 bytes = "1.5.0"
 async-trait = "0.1.77"
 thiserror = "1.0.58"
-object_store = { version = "0.12.4", features = ["aws"] }
+object_store = { version = "0.12.4", features = ["aws", "azure", "gcp"] }
 rayon = "1.8.0"
 arc-swap = "1.6"
 tokio-util = { version = "0.7", features = ["io", "io-util", "compat"], default-features = false }
@@ -111,6 +111,18 @@ mysql_async = "0.34"
 aws-sdk-dynamodb = "1.51.0"
 aws-sdk-kinesis = "1.48.0"
 aws-sdk-sqs = "1.47.0"
+aws-sdk-eventbridge = "1"
+aws-sdk-sns = "1"
+aws-sdk-redshiftdata = "1"
+mongodb = "3"
+rumqttc = "0.24"
+ssh2 = "0.9"
+deltalake = { version = "0.27", features = ["datafusion"] }
+lapin = "2"
+axum = "0.7"
+rdkafka = { version = "0.36", features = ["cmake-build"] }
+clickhouse = { version = "0.13", features = ["inserter"] }
+duckdb = { version = "1.2", features = ["bundled"] }
 
 [features]
 stats_integration = []

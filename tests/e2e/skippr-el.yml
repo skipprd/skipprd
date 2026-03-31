@@ -28,12 +28,81 @@ data_sources:
   test_file:
     File:
       path: "./tests/e2e/testdata/seed.json"
-  test_http:
-    Http:
+  test_http_client:
+    HttpClient:
       url: "http://127.0.0.1:18080/testdata/seed.json"
   test_stdin:
     Stdin:
       mode: batch
+  test_mongodb:
+    Mongodb:
+      connection_string: "mongodb://127.0.0.1:17017"
+      database: skippr_test
+      collection: test_data
+  test_amqp:
+    Amqp:
+      connection_string: "amqp://guest:guest@127.0.0.1:15672"
+      queue: test_queue
+      mode: batch
+  test_mqtt:
+    Mqtt:
+      broker_url: "127.0.0.1"
+      port: 11883
+      topic: "test/data"
+      mode: batch
+  test_kafka:
+    Kafka:
+      brokers: "127.0.0.1:19092"
+      topic: test_topic
+      group_id: skippr_e2e
+      mode: batch
+  test_sftp_in:
+    Sftp:
+      host: "127.0.0.1"
+      port: 12222
+      username: testuser
+      password: testpass
+      remote_path: "/upload/seed.json"
+  test_postgres_in:
+    Postgres:
+      host: 127.0.0.1
+      port: 15432
+      user: postgres
+      password: testpass
+      database: skippr_test
+      tables: ["test_data"]
+  test_sns:
+    Sns:
+      topic_arn: "arn:aws:sns:us-east-1:000000000000:test_topic"
+      sqs_queue_url: "http://127.0.0.1:14566/000000000000/test_sns_queue"
+      region: us-east-1
+      endpoint_url: "http://127.0.0.1:14566"
+  test_eventbridge:
+    Eventbridge:
+      event_bus_name: test_bus
+      sqs_queue_url: "http://127.0.0.1:14566/000000000000/test_eb_queue"
+      region: us-east-1
+      endpoint_url: "http://127.0.0.1:14566"
+  test_websocket:
+    Websocket:
+      url: "ws://127.0.0.1:18081"
+      mode: batch
+  test_http_server:
+    HttpServer:
+      listen_address: "0.0.0.0:18082"
+      path: "/"
+  test_clickhouse:
+    Clickhouse:
+      url: "http://127.0.0.1:18123"
+      database: skippr_test
+      tables: ["events"]
+  test_delta_lake:
+    DeltaLake:
+      table_uri: "/tmp/delta-e2e-test"
+  test_duckdb:
+    Duckdb:
+      connection_string: "/tmp/duckdb-e2e-test.duckdb"
+      tables: ["test_data"]
 
 data_sinks:
   test_postgres:
@@ -43,14 +112,57 @@ data_sinks:
       user: postgres
       password: testpass
       database: skippr_test
+  test_azure_blob:
+    AzureBlob:
+      account_name: devstoreaccount1
+      account_key: "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+      container: test-container
+      prefix: test-output/
+  test_sftp_out:
+    Sftp:
+      host: "127.0.0.1"
+      port: 12222
+      username: testuser
+      password: testpass
+      remote_path: "/upload/output"
+  test_amqp_out:
+    Amqp:
+      connection_string: "amqp://guest:guest@127.0.0.1:15672"
+      exchange: test_exchange
+      routing_key: test_output
+  test_clickhouse_out:
+    Clickhouse:
+      url: "http://127.0.0.1:18123"
+      database: skippr_test
+  test_duckdb_out:
+    Duckdb:
+      connection_string: "/tmp/duckdb-e2e-sink.duckdb"
 
 pipelines:
-  test_mysql:     { data_source: data_sources.test_mysql,    data_sink: data_sinks.test_postgres }
-  test_mssql:     { data_source: data_sources.test_mssql,    data_sink: data_sinks.test_postgres }
-  test_dynamodb:  { data_source: data_sources.test_dynamodb, data_sink: data_sinks.test_postgres }
-  test_kinesis:   { data_source: data_sources.test_kinesis,  data_sink: data_sinks.test_postgres }
-  test_sqs:       { data_source: data_sources.test_sqs,      data_sink: data_sinks.test_postgres }
-  test_s3:        { data_source: data_sources.test_s3,       data_sink: data_sinks.test_postgres }
-  test_file:      { data_source: data_sources.test_file,     data_sink: data_sinks.test_postgres }
-  test_http:      { data_source: data_sources.test_http,     data_sink: data_sinks.test_postgres }
-  test_stdin:     { data_source: data_sources.test_stdin,     data_sink: data_sinks.test_postgres }
+  test_mysql:         { data_source: data_sources.test_mysql,        data_sink: data_sinks.test_postgres }
+  test_mssql:         { data_source: data_sources.test_mssql,        data_sink: data_sinks.test_postgres }
+  test_dynamodb:      { data_source: data_sources.test_dynamodb,     data_sink: data_sinks.test_postgres }
+  test_kinesis:       { data_source: data_sources.test_kinesis,      data_sink: data_sinks.test_postgres }
+  test_sqs:           { data_source: data_sources.test_sqs,          data_sink: data_sinks.test_postgres }
+  test_s3:            { data_source: data_sources.test_s3,           data_sink: data_sinks.test_postgres }
+  test_file:          { data_source: data_sources.test_file,         data_sink: data_sinks.test_postgres }
+  test_http_client:   { data_source: data_sources.test_http_client,  data_sink: data_sinks.test_postgres }
+  test_stdin:         { data_source: data_sources.test_stdin,        data_sink: data_sinks.test_postgres }
+  test_mongodb:       { data_source: data_sources.test_mongodb,      data_sink: data_sinks.test_postgres }
+  test_amqp:          { data_source: data_sources.test_amqp,         data_sink: data_sinks.test_postgres }
+  test_mqtt:          { data_source: data_sources.test_mqtt,         data_sink: data_sinks.test_postgres }
+  test_kafka:         { data_source: data_sources.test_kafka,        data_sink: data_sinks.test_postgres }
+  test_sftp_in:       { data_source: data_sources.test_sftp_in,      data_sink: data_sinks.test_postgres }
+  test_postgres_in:   { data_source: data_sources.test_postgres_in,  data_sink: data_sinks.test_postgres }
+  test_sns:           { data_source: data_sources.test_sns,          data_sink: data_sinks.test_postgres }
+  test_eventbridge:   { data_source: data_sources.test_eventbridge,  data_sink: data_sinks.test_postgres }
+  test_websocket:     { data_source: data_sources.test_websocket,    data_sink: data_sinks.test_postgres }
+  test_http_server:   { data_source: data_sources.test_http_server,  data_sink: data_sinks.test_postgres }
+  test_sink_azure:    { data_source: data_sources.test_file,         data_sink: data_sinks.test_azure_blob }
+  test_sink_sftp:     { data_source: data_sources.test_file,         data_sink: data_sinks.test_sftp_out }
+  test_sink_amqp:     { data_source: data_sources.test_file,         data_sink: data_sinks.test_amqp_out }
+  test_clickhouse:    { data_source: data_sources.test_clickhouse,   data_sink: data_sinks.test_postgres }
+  test_delta_lake:    { data_source: data_sources.test_delta_lake,   data_sink: data_sinks.test_postgres }
+  test_duckdb:        { data_source: data_sources.test_duckdb,       data_sink: data_sinks.test_postgres }
+  test_sink_ch:       { data_source: data_sources.test_file,         data_sink: data_sinks.test_clickhouse_out }
+  test_sink_duckdb:   { data_source: data_sources.test_file,         data_sink: data_sinks.test_duckdb_out }

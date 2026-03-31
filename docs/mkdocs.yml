@@ -48,21 +48,49 @@ nav:
       - Advanced: configuration/advanced.md
   - Connectors:
       - Inputs:
-          - S3: connectors/inputs/s3.md
-          - Local File: connectors/inputs/file.md
-          - MSSQL: connectors/inputs/mssql.md
-          - MySQL: connectors/inputs/mysql.md
-          - DynamoDB: connectors/inputs/dynamodb.md
-          - Kinesis: connectors/inputs/kinesis.md
-          - SQS: connectors/inputs/sqs.md
-          - HTTP: connectors/inputs/http.md
-          - Stdin: connectors/inputs/stdin.md
+          - Databases:
+              - MSSQL: connectors/inputs/mssql.md
+              - MySQL: connectors/inputs/mysql.md
+              - PostgreSQL: connectors/inputs/postgres.md
+              - Redshift: connectors/inputs/redshift.md
+              - MongoDB: connectors/inputs/mongodb.md
+              - DynamoDB: connectors/inputs/dynamodb.md
+          - Object Stores:
+              - S3: connectors/inputs/s3.md
+              - SFTP: connectors/inputs/sftp.md
+              - Local File: connectors/inputs/file.md
+          - Streaming:
+              - Kafka: connectors/inputs/kafka.md
+              - SQS: connectors/inputs/sqs.md
+              - Kinesis: connectors/inputs/kinesis.md
+              - AMQP (RabbitMQ): connectors/inputs/amqp.md
+              - SNS: connectors/inputs/sns.md
+              - EventBridge: connectors/inputs/eventbridge.md
+              - MQTT: connectors/inputs/mqtt.md
+              - WebSocket: connectors/inputs/websocket.md
+          - HTTP:
+              - HTTP Client: connectors/inputs/http_client.md
+              - HTTP Server: connectors/inputs/http_server.md
+          - Other:
+              - Socket (TCP/UDP/Unix): connectors/inputs/socket.md
+              - StatsD: connectors/inputs/statsd.md
+              - Stdin: connectors/inputs/stdin.md
       - Outputs:
-          - Athena (S3 + Glue): connectors/outputs/athena.md
-          - Local File: connectors/outputs/file.md
-          - Snowflake: connectors/outputs/snowflake.md
-          - Postgres: connectors/outputs/postgres.md
-          - Stdout: connectors/outputs/stdout.md
+          - Warehouses:
+              - Snowflake: connectors/outputs/snowflake.md
+              - Postgres: connectors/outputs/postgres.md
+              - Athena (S3 + Glue): connectors/outputs/athena.md
+              - Databricks: connectors/outputs/databricks.md
+              - Synapse: connectors/outputs/synapse.md
+          - Cloud Storage:
+              - GCS: connectors/outputs/gcs.md
+              - Azure Blob: connectors/outputs/azure_blob.md
+              - SFTP: connectors/outputs/sftp.md
+          - Messaging:
+              - AMQP (RabbitMQ): connectors/outputs/amqp.md
+          - Other:
+              - Local File: connectors/outputs/file.md
+              - Stdout: connectors/outputs/stdout.md
   - Operations:
       - Logging Event Map: operations/logging.md
       - Troubleshooting: operations/troubleshooting.md

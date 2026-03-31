@@ -46,7 +46,6 @@ use skippr::plugins::mssql_input::DataSourceMssqlPlugin;
 use skippr::plugins::mysql_input::DataSourceMysqlPlugin;
 use skippr::plugins::s3_input::DataSourceS3Plugin;
 use skippr::plugins::sqs_input::DataSourceSqsPlugin;
-use skippr::plugins::http_input::DataSourceHttpPlugin;
 use skippr::plugins::stdin_input::DataSourceStdinPlugin;
 use skippr::plugins::stdout_output::DataSinkStdoutPlugin;
 use skippr::plugins::bigquery_output::DataSinkBigqueryPlugin;
@@ -998,6 +997,42 @@ async fn build_output_plugin_from_config(
             let plugin = DataSinkStdoutPlugin::new(buffer_name).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
+        DataSinkPluginConfig::AzureBlob(c) => {
+            let plugin = skippr::plugins::azure_blob_output::DataSinkAzureBlobPlugin::new_with_config(buffer_name, Some(c)).await;
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
+        }
+        DataSinkPluginConfig::Gcs(c) => {
+            let plugin = skippr::plugins::gcs_output::DataSinkGcsPlugin::new_with_config(buffer_name, Some(c)).await;
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
+        }
+        DataSinkPluginConfig::Synapse(c) => {
+            let plugin = skippr::plugins::synapse_output::DataSinkSynapsePlugin::new_with_config(buffer_name, c).await;
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
+        }
+        DataSinkPluginConfig::Sftp(c) => {
+            let plugin = skippr::plugins::sftp_output::DataSinkSftpPlugin::new_with_config(buffer_name, c).await;
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
+        }
+        DataSinkPluginConfig::Amqp(c) => {
+            let plugin = skippr::plugins::amqp_output::DataSinkAmqpPlugin::new_with_config(buffer_name, c).await;
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
+        }
+        DataSinkPluginConfig::Databricks(c) => {
+            let plugin = skippr::plugins::databricks_output::DataSinkDatabricksPlugin::new_with_config(buffer_name, c).await;
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
+        }
+        DataSinkPluginConfig::Clickhouse(c) => {
+            let plugin = skippr::plugins::clickhouse_output::DataSinkClickhousePlugin::new_with_config(buffer_name, c).await;
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
+        }
+        DataSinkPluginConfig::Redshift(c) => {
+            let plugin = skippr::plugins::redshift_output::DataSinkRedshiftPlugin::new_with_config(buffer_name, c).await;
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
+        }
+        DataSinkPluginConfig::Duckdb(c) => {
+            let plugin = skippr::plugins::duckdb_output::DataSinkDuckdbPlugin::new_with_config(buffer_name, c).await;
+            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
+        }
     }
 }
 
@@ -1069,8 +1104,24 @@ pub async fn sync_input_plugin(
         "Sqs" => Box::new(DataSourceSqsPlugin::new().await),
         "Mysql" => Box::new(DataSourceMysqlPlugin::new().await),
         "Dynamodb" => Box::new(DataSourceDynamodbPlugin::new().await),
-        "Http" => Box::new(DataSourceHttpPlugin::new().await),
+        "HttpClient" => Box::new(skippr::plugins::http_client_input::DataSourceHttpClientPlugin::new().await),
+        "HttpServer" => Box::new(skippr::plugins::http_server_input::DataSourceHttpServerPlugin::new().await),
         "Stdin" => Box::new(DataSourceStdinPlugin::new().await),
+        "Mongodb" => Box::new(skippr::plugins::mongodb_input::DataSourceMongodbPlugin::new().await),
+        "Eventbridge" => Box::new(skippr::plugins::eventbridge_input::DataSourceEventbridgePlugin::new().await),
+        "Sns" => Box::new(skippr::plugins::sns_input::DataSourceSnsPlugin::new().await),
+        "Mqtt" => Box::new(skippr::plugins::mqtt_input::DataSourceMqttPlugin::new().await),
+        "Sftp" => Box::new(skippr::plugins::sftp_input::DataSourceSftpPlugin::new().await),
+        "Postgres" => Box::new(skippr::plugins::postgres_input::DataSourcePostgresPlugin::new().await),
+        "Redshift" => Box::new(skippr::plugins::redshift_input::DataSourceRedshiftPlugin::new().await),
+        "Amqp" => Box::new(skippr::plugins::amqp_input::DataSourceAmqpPlugin::new().await),
+        "Kafka" => Box::new(skippr::plugins::kafka_input::DataSourceKafkaPlugin::new().await),
+        "Websocket" => Box::new(skippr::plugins::websocket_input::DataSourceWebsocketPlugin::new().await),
+        "Statsd" => Box::new(skippr::plugins::statsd_input::DataSourceStatsdPlugin::new().await),
+        "Socket" => Box::new(skippr::plugins::socket_input::DataSourceSocketPlugin::new().await),
+        "Clickhouse" => Box::new(skippr::plugins::clickhouse_input::DataSourceClickhousePlugin::new().await),
+        "DeltaLake" => Box::new(skippr::plugins::delta_lake_input::DataSourceDeltaLakePlugin::new().await),
+        "Duckdb" => Box::new(skippr::plugins::duckdb_input::DataSourceDuckdbPlugin::new().await),
         "" => {
             error!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
             return;

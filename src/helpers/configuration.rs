@@ -26,10 +26,35 @@ use crate::plugins::athena::DataSinkAthenaPluginConfig;
 
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
-use crate::plugins::data_source::http::DataSourceHttpPluginConfig;
+use crate::plugins::data_source::amqp::DataSourceAmqpPluginConfig;
+use crate::plugins::data_source::eventbridge::DataSourceEventbridgePluginConfig;
+use crate::plugins::data_source::http_client::DataSourceHttpClientPluginConfig;
+use crate::plugins::data_source::http_server::DataSourceHttpServerPluginConfig;
+use crate::plugins::data_source::kafka::DataSourceKafkaPluginConfig;
 use crate::plugins::data_source::kinesis::DataSourceKinesisPluginConfig;
+use crate::plugins::data_source::mongodb::DataSourceMongodbPluginConfig;
+use crate::plugins::data_source::mqtt::DataSourceMqttPluginConfig;
+use crate::plugins::data_source::postgres::DataSourcePostgresPluginConfig;
+use crate::plugins::data_source::redshift::DataSourceRedshiftPluginConfig;
+use crate::plugins::data_source::sftp::DataSourceSftpPluginConfig;
+use crate::plugins::data_source::sns::DataSourceSnsPluginConfig;
+use crate::plugins::data_source::socket::DataSourceSocketPluginConfig;
 use crate::plugins::data_source::sqs::DataSourceSqsPluginConfig;
+use crate::plugins::data_source::statsd::DataSourceStatsdPluginConfig;
 use crate::plugins::data_source::stdin::DataSourceStdinPluginConfig;
+use crate::plugins::data_source::websocket::DataSourceWebsocketPluginConfig;
+use crate::plugins::data_sink::amqp::DataSinkAmqpPluginConfig;
+use crate::plugins::data_sink::azure_blob::DataSinkAzureBlobPluginConfig;
+use crate::plugins::data_sink::databricks::DataSinkDatabricksPluginConfig;
+use crate::plugins::data_sink::gcs::DataSinkGcsPluginConfig;
+use crate::plugins::data_sink::sftp::DataSinkSftpPluginConfig;
+use crate::plugins::data_sink::synapse::DataSinkSynapsePluginConfig;
+use crate::plugins::data_source::clickhouse::DataSourceClickhousePluginConfig;
+use crate::plugins::data_source::delta_lake::DataSourceDeltaLakePluginConfig;
+use crate::plugins::data_source::duckdb::DataSourceDuckdbPluginConfig;
+use crate::plugins::data_sink::clickhouse::DataSinkClickhousePluginConfig;
+use crate::plugins::data_sink::redshift::DataSinkRedshiftPluginConfig;
+use crate::plugins::data_sink::duckdb::DataSinkDuckdbPluginConfig;
 use crate::plugins::dynamodb_input::DataSourceDynamodbPluginConfig;
 use crate::plugins::file_input::DataSourceLocalFilePluginConfig;
 use crate::plugins::file_output::DataSinkFilePluginConfig;
@@ -99,56 +124,54 @@ pub enum DataSourcePluginConfig {
     Dynamodb(DataSourceDynamodbPluginConfig),
     Kinesis(DataSourceKinesisPluginConfig),
     Sqs(DataSourceSqsPluginConfig),
-    Http(DataSourceHttpPluginConfig),
+    HttpClient(DataSourceHttpClientPluginConfig),
+    HttpServer(DataSourceHttpServerPluginConfig),
     Stdin(DataSourceStdinPluginConfig),
+    Mongodb(DataSourceMongodbPluginConfig),
+    Eventbridge(DataSourceEventbridgePluginConfig),
+    Sns(DataSourceSnsPluginConfig),
+    Mqtt(DataSourceMqttPluginConfig),
+    Sftp(DataSourceSftpPluginConfig),
+    Postgres(DataSourcePostgresPluginConfig),
+    Redshift(DataSourceRedshiftPluginConfig),
+    Amqp(DataSourceAmqpPluginConfig),
+    Kafka(DataSourceKafkaPluginConfig),
+    Websocket(DataSourceWebsocketPluginConfig),
+    Statsd(DataSourceStatsdPluginConfig),
+    Socket(DataSourceSocketPluginConfig),
+    Clickhouse(DataSourceClickhousePluginConfig),
+    DeltaLake(DataSourceDeltaLakePluginConfig),
+    Duckdb(DataSourceDuckdbPluginConfig),
 }
 
 impl DataSourcePluginConfig {
     pub fn format(&self) -> String {
         match self {
-            DataSourcePluginConfig::S3(s3_config) => s3_config
-                .format
-                .clone()
-                .or(Some("json".to_string()))
-                .as_ref()
-                .unwrap()
-                .clone(),
-            DataSourcePluginConfig::File(file_config) => file_config
-                .format
-                .clone()
-                .or(Some("json".to_string()))
-                .unwrap(),
-            DataSourcePluginConfig::Mssql(mssql_config) => mssql_config
-                .format
-                .clone()
-                .unwrap_or_else(|| "row".to_string()),
-            DataSourcePluginConfig::Mysql(mysql_config) => mysql_config
-                .format
-                .clone()
-                .unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Dynamodb(dynamodb_config) => dynamodb_config
-                .format
-                .clone()
-                .unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Kinesis(kinesis_config) => kinesis_config
-                .format
-                .clone()
-                .unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Sqs(sqs_config) => sqs_config
-                .format
-                .clone()
-                .unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Http(http_config) => http_config
-                .format
-                .clone()
-                .or(Some("json".to_string()))
-                .as_ref()
-                .unwrap()
-                .clone(),
-            DataSourcePluginConfig::Stdin(stdin_config) => stdin_config
-                .format
-                .clone()
-                .unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::S3(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::File(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Mssql(c) => c.format.clone().unwrap_or_else(|| "row".to_string()),
+            DataSourcePluginConfig::Mysql(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Dynamodb(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Kinesis(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Sqs(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::HttpClient(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::HttpServer(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Stdin(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Mongodb(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Eventbridge(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Sns(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Mqtt(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Sftp(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Postgres(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Redshift(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Amqp(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Kafka(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Websocket(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Statsd(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Socket(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Clickhouse(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::DeltaLake(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Duckdb(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
         }
     }
 
@@ -161,36 +184,84 @@ impl DataSourcePluginConfig {
             DataSourcePluginConfig::Dynamodb(_) => Some("Dynamodb".to_string()),
             DataSourcePluginConfig::Kinesis(_) => Some("Kinesis".to_string()),
             DataSourcePluginConfig::Sqs(_) => Some("Sqs".to_string()),
-            DataSourcePluginConfig::Http(_) => Some("Http".to_string()),
+            DataSourcePluginConfig::HttpClient(_) => Some("HttpClient".to_string()),
+            DataSourcePluginConfig::HttpServer(_) => Some("HttpServer".to_string()),
             DataSourcePluginConfig::Stdin(_) => Some("Stdin".to_string()),
+            DataSourcePluginConfig::Mongodb(_) => Some("Mongodb".to_string()),
+            DataSourcePluginConfig::Eventbridge(_) => Some("Eventbridge".to_string()),
+            DataSourcePluginConfig::Sns(_) => Some("Sns".to_string()),
+            DataSourcePluginConfig::Mqtt(_) => Some("Mqtt".to_string()),
+            DataSourcePluginConfig::Sftp(_) => Some("Sftp".to_string()),
+            DataSourcePluginConfig::Postgres(_) => Some("Postgres".to_string()),
+            DataSourcePluginConfig::Redshift(_) => Some("Redshift".to_string()),
+            DataSourcePluginConfig::Amqp(_) => Some("Amqp".to_string()),
+            DataSourcePluginConfig::Kafka(_) => Some("Kafka".to_string()),
+            DataSourcePluginConfig::Websocket(_) => Some("Websocket".to_string()),
+            DataSourcePluginConfig::Statsd(_) => Some("Statsd".to_string()),
+            DataSourcePluginConfig::Socket(_) => Some("Socket".to_string()),
+            DataSourcePluginConfig::Clickhouse(_) => Some("Clickhouse".to_string()),
+            DataSourcePluginConfig::DeltaLake(_) => Some("DeltaLake".to_string()),
+            DataSourcePluginConfig::Duckdb(_) => Some("Duckdb".to_string()),
         }
     }
 
     pub fn batch_size_bytes(&self) -> Option<i64> {
         match self {
-            DataSourcePluginConfig::S3(s3_config) => s3_config.batch_size_bytes,
-            DataSourcePluginConfig::File(file_config) => file_config.batch_size_bytes,
-            DataSourcePluginConfig::Mssql(mssql_config) => mssql_config.batch_size_bytes,
-            DataSourcePluginConfig::Mysql(mysql_config) => mysql_config.batch_size_bytes,
-            DataSourcePluginConfig::Dynamodb(dynamodb_config) => dynamodb_config.batch_size_bytes,
-            DataSourcePluginConfig::Kinesis(kinesis_config) => kinesis_config.batch_size_bytes,
-            DataSourcePluginConfig::Sqs(sqs_config) => sqs_config.batch_size_bytes,
-            DataSourcePluginConfig::Http(http_config) => http_config.batch_size_bytes,
-            DataSourcePluginConfig::Stdin(stdin_config) => stdin_config.batch_size_bytes,
+            DataSourcePluginConfig::S3(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::File(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Mssql(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Mysql(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Dynamodb(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Kinesis(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Sqs(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::HttpClient(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::HttpServer(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Stdin(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Mongodb(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Eventbridge(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Sns(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Mqtt(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Sftp(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Postgres(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Redshift(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Amqp(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Kafka(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Websocket(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Statsd(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Socket(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Clickhouse(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::DeltaLake(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Duckdb(c) => c.batch_size_bytes,
         }
     }
 
     pub fn batch_size_seconds(&self) -> Option<i64> {
         match self {
-            DataSourcePluginConfig::S3(s3_config) => s3_config.batch_size_seconds,
-            DataSourcePluginConfig::File(file_config) => file_config.batch_size_seconds,
-            DataSourcePluginConfig::Mssql(mssql_config) => mssql_config.batch_size_seconds,
-            DataSourcePluginConfig::Mysql(mysql_config) => mysql_config.batch_size_seconds,
-            DataSourcePluginConfig::Dynamodb(dynamodb_config) => dynamodb_config.batch_size_seconds,
-            DataSourcePluginConfig::Kinesis(kinesis_config) => kinesis_config.batch_size_seconds,
-            DataSourcePluginConfig::Sqs(sqs_config) => sqs_config.batch_size_seconds,
-            DataSourcePluginConfig::Http(http_config) => http_config.batch_size_seconds,
-            DataSourcePluginConfig::Stdin(stdin_config) => stdin_config.batch_size_seconds,
+            DataSourcePluginConfig::S3(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::File(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Mssql(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Mysql(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Dynamodb(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Kinesis(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Sqs(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::HttpClient(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::HttpServer(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Stdin(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Mongodb(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Eventbridge(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Sns(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Mqtt(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Sftp(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Postgres(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Redshift(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Amqp(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Kafka(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Websocket(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Statsd(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Socket(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Clickhouse(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::DeltaLake(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Duckdb(c) => c.batch_size_seconds,
         }
     }
 }
@@ -215,41 +286,36 @@ pub enum DataSinkPluginConfig {
     S3(DataSinkS3PluginConfig),
     Snowflake(DataSinkSnowflakePluginConfig),
     Stdout,
+    AzureBlob(DataSinkAzureBlobPluginConfig),
+    Gcs(DataSinkGcsPluginConfig),
+    Synapse(DataSinkSynapsePluginConfig),
+    Sftp(DataSinkSftpPluginConfig),
+    Amqp(DataSinkAmqpPluginConfig),
+    Databricks(DataSinkDatabricksPluginConfig),
+    Clickhouse(DataSinkClickhousePluginConfig),
+    Redshift(DataSinkRedshiftPluginConfig),
+    Duckdb(DataSinkDuckdbPluginConfig),
 }
 
 impl DataSinkPluginConfig {
     pub fn format(&self) -> String {
         match self {
-            DataSinkPluginConfig::Athena(c) => c
-                .format
-                .clone()
-                .or(Some("json".to_string()))
-                .as_ref()
-                .unwrap()
-                .clone(),
-            DataSinkPluginConfig::Bigquery(c) => c
-                .format
-                .clone()
-                .unwrap_or_else(|| "json".to_string()),
-            DataSinkPluginConfig::File(c) => c
-                .format
-                .clone()
-                .or(Some("json".to_string()))
-                .unwrap(),
-            DataSinkPluginConfig::Postgres(c) => c
-                .format
-                .clone()
-                .unwrap_or_else(|| "json".to_string()),
-            DataSinkPluginConfig::S3(c) => c
-                .format
-                .clone()
-                .or(Some("json".to_string()))
-                .unwrap(),
-            DataSinkPluginConfig::Snowflake(c) => c
-                .format
-                .clone()
-                .unwrap_or_else(|| "parquet".to_string()),
+            DataSinkPluginConfig::Athena(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSinkPluginConfig::Bigquery(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSinkPluginConfig::File(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSinkPluginConfig::Postgres(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSinkPluginConfig::S3(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSinkPluginConfig::Snowflake(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
             DataSinkPluginConfig::Stdout => "json".to_string(),
+            DataSinkPluginConfig::AzureBlob(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
+            DataSinkPluginConfig::Gcs(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
+            DataSinkPluginConfig::Synapse(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSinkPluginConfig::Sftp(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
+            DataSinkPluginConfig::Amqp(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSinkPluginConfig::Databricks(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
+            DataSinkPluginConfig::Clickhouse(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSinkPluginConfig::Redshift(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
+            DataSinkPluginConfig::Duckdb(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
         }
     }
 
@@ -262,6 +328,15 @@ impl DataSinkPluginConfig {
             DataSinkPluginConfig::S3(_) => Some("S3".to_string()),
             DataSinkPluginConfig::Snowflake(_) => Some("Snowflake".to_string()),
             DataSinkPluginConfig::Stdout => Some("Stdout".to_string()),
+            DataSinkPluginConfig::AzureBlob(_) => Some("AzureBlob".to_string()),
+            DataSinkPluginConfig::Gcs(_) => Some("Gcs".to_string()),
+            DataSinkPluginConfig::Synapse(_) => Some("Synapse".to_string()),
+            DataSinkPluginConfig::Sftp(_) => Some("Sftp".to_string()),
+            DataSinkPluginConfig::Amqp(_) => Some("Amqp".to_string()),
+            DataSinkPluginConfig::Databricks(_) => Some("Databricks".to_string()),
+            DataSinkPluginConfig::Clickhouse(_) => Some("Clickhouse".to_string()),
+            DataSinkPluginConfig::Redshift(_) => Some("Redshift".to_string()),
+            DataSinkPluginConfig::Duckdb(_) => Some("Duckdb".to_string()),
         }
     }
 }
@@ -326,9 +401,6 @@ pub struct GlueSchemaSinkConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub enum SchemaSinkConfig {
     Glue(GlueSchemaSinkConfig),
-    Snowflake(DataSinkSnowflakePluginConfig),
-    Postgres(DataSinkPostgresPluginConfig),
-    Bigquery(DataSinkBigqueryPluginConfig),
 }
 
 /// Wrapper for a data sink or deadletter sink registry entry.
@@ -871,9 +943,6 @@ impl Config {
                     Some(schema_sinks) => match schema_sinks.get(&schema_name) {
                         Some(schema_config) => match schema_config {
                             SchemaSinkConfig::Glue(_) => "Glue".to_string(),
-                            SchemaSinkConfig::Snowflake(_) => "Snowflake".to_string(),
-                            SchemaSinkConfig::Postgres(_) => "Postgres".to_string(),
-                            SchemaSinkConfig::Bigquery(_) => "Bigquery".to_string(),
                         },
                         None => Config::getenv("DATA_SCHEMA_PLUGIN_NAME", ""),
                     },

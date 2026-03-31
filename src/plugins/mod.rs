@@ -20,10 +20,35 @@ pub use data_source::mssql as mssql_input;
 pub use data_source::mysql as mysql_input;
 pub use data_source::s3 as s3_input;
 pub use data_source::sqs as sqs_input;
-pub use data_source::http as http_input;
+pub use data_source::http_client as http_client_input;
+pub use data_source::http_server as http_server_input;
 pub use data_source::pcap as pcap_input;
 pub use data_source::stdin as stdin_input;
+pub use data_source::mongodb as mongodb_input;
+pub use data_source::eventbridge as eventbridge_input;
+pub use data_source::sns as sns_input;
+pub use data_source::mqtt as mqtt_input;
+pub use data_source::sftp as sftp_input;
+pub use data_source::postgres as postgres_input;
+pub use data_source::redshift as redshift_input;
+pub use data_source::amqp as amqp_input;
+pub use data_source::kafka as kafka_input;
+pub use data_source::websocket as websocket_input;
+pub use data_source::statsd as statsd_input;
+pub use data_source::socket as socket_input;
 pub use data_sink::stdout as stdout_output;
+pub use data_sink::azure_blob as azure_blob_output;
+pub use data_sink::gcs as gcs_output;
+pub use data_sink::synapse as synapse_output;
+pub use data_sink::sftp as sftp_output;
+pub use data_sink::amqp as amqp_output;
+pub use data_sink::databricks as databricks_output;
+pub use data_source::clickhouse as clickhouse_input;
+pub use data_source::delta_lake as delta_lake_input;
+pub use data_source::duckdb as duckdb_input;
+pub use data_sink::clickhouse as clickhouse_output;
+pub use data_sink::redshift as redshift_output;
+pub use data_sink::duckdb as duckdb_output;
 pub use util::parquet as parquet_util;
 
 pub use traits::{DataSink, DataSource, SchemaSink, SchemaSource};
@@ -41,9 +66,6 @@ pub async fn build_schema_sync_plugin(
             };
             Some(Box::new(schema_sink::glue::GlueSchemaSink::new(glue_config, Some(c))))
         }
-        DataSinkPluginConfig::Snowflake(c) => Some(Box::new(
-            schema_sink::snowflake::SnowflakeSchemaSink::new(c).await,
-        )),
         _ => None,
     }
 }
@@ -75,15 +97,6 @@ pub async fn build_schema_sink(
         SchemaSinkConfig::Glue(c) => {
             let athena_cfg = data_sink_config.and_then(extract_athena_config);
             Box::new(schema_sink::glue::GlueSchemaSink::new(c, athena_cfg))
-        }
-        SchemaSinkConfig::Snowflake(c) => {
-            Box::new(schema_sink::snowflake::SnowflakeSchemaSink::new(c).await)
-        }
-        SchemaSinkConfig::Postgres(c) => {
-            Box::new(schema_sink::postgres::PostgresSchemaSink::new(c))
-        }
-        SchemaSinkConfig::Bigquery(c) => {
-            Box::new(schema_sink::bigquery::BigquerySchemaSink::new(c))
         }
     }
 }
