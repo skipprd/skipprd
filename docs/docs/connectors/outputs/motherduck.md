@@ -1,4 +1,4 @@
-# DuckDB / MotherDuck Output
+# MotherDuck Output
 
 Writes data to MotherDuck cloud tables via the MotherDuck REST API.
 
@@ -14,7 +14,7 @@ Writes data to MotherDuck cloud tables via the MotherDuck REST API.
 ```yaml
 data_sinks:
   sink:
-    Duckdb:
+    Motherduck:
       motherduck_token: "ey..."
       database: "my_database"
       table: events

@@ -45,10 +45,10 @@ pub use data_sink::amqp as amqp_output;
 pub use data_sink::databricks as databricks_output;
 pub use data_source::clickhouse as clickhouse_input;
 pub use data_source::delta_lake as delta_lake_input;
-pub use data_source::duckdb as duckdb_input;
+pub use data_source::motherduck as motherduck_input;
 pub use data_sink::clickhouse as clickhouse_output;
 pub use data_sink::redshift as redshift_output;
-pub use data_sink::duckdb as duckdb_output;
+pub use data_sink::motherduck as motherduck_output;
 pub use util::parquet as parquet_util;
 
 pub use traits::{DataSink, DataSource, SchemaSink, SchemaSource};

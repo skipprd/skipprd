@@ -23,4 +23,4 @@ pub mod stdin;
 pub mod websocket;
 pub mod clickhouse;
 pub mod delta_lake;
-pub mod duckdb;
+pub mod motherduck;

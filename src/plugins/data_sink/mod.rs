@@ -13,4 +13,4 @@ pub mod stdout;
 pub mod synapse;
 pub mod clickhouse;
 pub mod redshift;
-pub mod duckdb;
+pub mod motherduck;

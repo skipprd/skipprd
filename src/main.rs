@@ -1029,8 +1029,8 @@ async fn build_output_plugin_from_config(
             let plugin = skippr::plugins::redshift_output::DataSinkRedshiftPlugin::new_with_config(buffer_name, c).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
-        DataSinkPluginConfig::Duckdb(c) => {
-            let plugin = skippr::plugins::duckdb_output::DataSinkDuckdbPlugin::new_with_config(buffer_name, c).await;
+        DataSinkPluginConfig::Motherduck(c) => {
+            let plugin = skippr::plugins::motherduck_output::DataSinkMotherduckPlugin::new_with_config(buffer_name, c).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
     }
@@ -1121,7 +1121,7 @@ pub async fn sync_input_plugin(
         "Socket" => Box::new(skippr::plugins::socket_input::DataSourceSocketPlugin::new().await),
         "Clickhouse" => Box::new(skippr::plugins::clickhouse_input::DataSourceClickhousePlugin::new().await),
         "DeltaLake" => Box::new(skippr::plugins::delta_lake_input::DataSourceDeltaLakePlugin::new().await),
-        "Duckdb" => Box::new(skippr::plugins::duckdb_input::DataSourceDuckdbPlugin::new().await),
+        "Motherduck" => Box::new(skippr::plugins::motherduck_input::DataSourceMotherduckPlugin::new().await),
         "" => {
             error!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
             return;

@@ -11,7 +11,7 @@ use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use crate::plugins::{DataSink, DataSource};
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct DataSourceDuckdbPluginConfig {
+pub struct DataSourceMotherduckPluginConfig {
     pub motherduck_token: String,
     pub database: Option<String>,
     pub tables: Option<Vec<String>>,
@@ -22,29 +22,29 @@ pub struct DataSourceDuckdbPluginConfig {
     pub batch_size_seconds: Option<i64>,
 }
 
-impl From<DataSourcePluginConfig> for DataSourceDuckdbPluginConfig {
+impl From<DataSourcePluginConfig> for DataSourceMotherduckPluginConfig {
     fn from(plugin_config: DataSourcePluginConfig) -> Self {
         match plugin_config {
-            DataSourcePluginConfig::Duckdb(config) => config,
-            _ => panic!("Invalid plugin type for DuckDB input"),
+            DataSourcePluginConfig::Motherduck(config) => config,
+            _ => panic!("Invalid plugin type for MotherDuck input"),
         }
     }
 }
 
-pub struct DataSourceDuckdbPlugin {
+pub struct DataSourceMotherduckPlugin {
     ingest: Ingest,
-    config: DataSourceDuckdbPluginConfig,
+    config: DataSourceMotherduckPluginConfig,
     client: Client,
 }
 
 const MOTHERDUCK_SQL_ENDPOINT: &str = "https://api.motherduck.com/v1/sql";
 
-impl DataSourceDuckdbPlugin {
+impl DataSourceMotherduckPlugin {
     pub async fn new() -> Self {
-        let config: DataSourceDuckdbPluginConfig =
+        let config: DataSourceMotherduckPluginConfig =
             match Config::get_pipeline_input_plugin_config() {
                 Ok(c) => c.into(),
-                Err(_) => DataSourceDuckdbPluginConfig {
+                Err(_) => DataSourceMotherduckPluginConfig {
                     motherduck_token: Config::getenv("MOTHERDUCK_TOKEN", ""),
                     database: None,
                     tables: None,
@@ -109,7 +109,7 @@ impl DataSourceDuckdbPlugin {
 }
 
 #[async_trait]
-impl DataSource for DataSourceDuckdbPlugin {
+impl DataSource for DataSourceMotherduckPlugin {
     async fn sync(
         &mut self,
         offsets: Arc<Offsets>,
@@ -124,7 +124,7 @@ impl DataSource for DataSourceDuckdbPlugin {
                 .collect()
         } else {
             return Err(std::io::Error::other(
-                "DuckDB: must specify either 'tables' or 'query'",
+                "MotherDuck: must specify either 'tables' or 'query'",
             ));
         };
 
@@ -135,8 +135,8 @@ impl DataSource for DataSourceDuckdbPlugin {
             let body = self.execute_sql(query).await?;
             let rows = Self::rows_from_response(&body);
 
-            let namespace = format!("duckdb.{}.{}", db_label, table_name);
-            info!("DuckDB input: {} rows from {}", rows.len(), table_name);
+            let namespace = format!("motherduck.{}.{}", db_label, table_name);
+            info!("MotherDuck input: {} rows from {}", rows.len(), table_name);
 
             let offset_key = OffsetKey {
                 namespace: namespace.clone(),

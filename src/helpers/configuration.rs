@@ -51,10 +51,10 @@ use crate::plugins::data_sink::sftp::DataSinkSftpPluginConfig;
 use crate::plugins::data_sink::synapse::DataSinkSynapsePluginConfig;
 use crate::plugins::data_source::clickhouse::DataSourceClickhousePluginConfig;
 use crate::plugins::data_source::delta_lake::DataSourceDeltaLakePluginConfig;
-use crate::plugins::data_source::duckdb::DataSourceDuckdbPluginConfig;
+use crate::plugins::data_source::motherduck::DataSourceMotherduckPluginConfig;
 use crate::plugins::data_sink::clickhouse::DataSinkClickhousePluginConfig;
 use crate::plugins::data_sink::redshift::DataSinkRedshiftPluginConfig;
-use crate::plugins::data_sink::duckdb::DataSinkDuckdbPluginConfig;
+use crate::plugins::data_sink::motherduck::DataSinkMotherduckPluginConfig;
 use crate::plugins::dynamodb_input::DataSourceDynamodbPluginConfig;
 use crate::plugins::file_input::DataSourceLocalFilePluginConfig;
 use crate::plugins::file_output::DataSinkFilePluginConfig;
@@ -141,7 +141,7 @@ pub enum DataSourcePluginConfig {
     Socket(DataSourceSocketPluginConfig),
     Clickhouse(DataSourceClickhousePluginConfig),
     DeltaLake(DataSourceDeltaLakePluginConfig),
-    Duckdb(DataSourceDuckdbPluginConfig),
+    Motherduck(DataSourceMotherduckPluginConfig),
 }
 
 impl DataSourcePluginConfig {
@@ -171,7 +171,7 @@ impl DataSourcePluginConfig {
             DataSourcePluginConfig::Socket(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
             DataSourcePluginConfig::Clickhouse(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
             DataSourcePluginConfig::DeltaLake(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Duckdb(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::Motherduck(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
         }
     }
 
@@ -201,7 +201,7 @@ impl DataSourcePluginConfig {
             DataSourcePluginConfig::Socket(_) => Some("Socket".to_string()),
             DataSourcePluginConfig::Clickhouse(_) => Some("Clickhouse".to_string()),
             DataSourcePluginConfig::DeltaLake(_) => Some("DeltaLake".to_string()),
-            DataSourcePluginConfig::Duckdb(_) => Some("Duckdb".to_string()),
+            DataSourcePluginConfig::Motherduck(_) => Some("Motherduck".to_string()),
         }
     }
 
@@ -231,7 +231,7 @@ impl DataSourcePluginConfig {
             DataSourcePluginConfig::Socket(c) => c.batch_size_bytes,
             DataSourcePluginConfig::Clickhouse(c) => c.batch_size_bytes,
             DataSourcePluginConfig::DeltaLake(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Duckdb(c) => c.batch_size_bytes,
+            DataSourcePluginConfig::Motherduck(c) => c.batch_size_bytes,
         }
     }
 
@@ -261,7 +261,7 @@ impl DataSourcePluginConfig {
             DataSourcePluginConfig::Socket(c) => c.batch_size_seconds,
             DataSourcePluginConfig::Clickhouse(c) => c.batch_size_seconds,
             DataSourcePluginConfig::DeltaLake(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Duckdb(c) => c.batch_size_seconds,
+            DataSourcePluginConfig::Motherduck(c) => c.batch_size_seconds,
         }
     }
 }
@@ -294,7 +294,7 @@ pub enum DataSinkPluginConfig {
     Databricks(DataSinkDatabricksPluginConfig),
     Clickhouse(DataSinkClickhousePluginConfig),
     Redshift(DataSinkRedshiftPluginConfig),
-    Duckdb(DataSinkDuckdbPluginConfig),
+    Motherduck(DataSinkMotherduckPluginConfig),
 }
 
 impl DataSinkPluginConfig {
@@ -315,7 +315,7 @@ impl DataSinkPluginConfig {
             DataSinkPluginConfig::Databricks(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
             DataSinkPluginConfig::Clickhouse(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
             DataSinkPluginConfig::Redshift(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
-            DataSinkPluginConfig::Duckdb(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSinkPluginConfig::Motherduck(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
         }
     }
 
@@ -336,7 +336,7 @@ impl DataSinkPluginConfig {
             DataSinkPluginConfig::Databricks(_) => Some("Databricks".to_string()),
             DataSinkPluginConfig::Clickhouse(_) => Some("Clickhouse".to_string()),
             DataSinkPluginConfig::Redshift(_) => Some("Redshift".to_string()),
-            DataSinkPluginConfig::Duckdb(_) => Some("Duckdb".to_string()),
+            DataSinkPluginConfig::Motherduck(_) => Some("Motherduck".to_string()),
         }
     }
 }

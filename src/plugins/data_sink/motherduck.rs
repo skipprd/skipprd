@@ -12,24 +12,24 @@ use crate::helpers::configuration::DataSinkPluginConfig;
 use crate::plugins::DataSink;
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct DataSinkDuckdbPluginConfig {
+pub struct DataSinkMotherduckPluginConfig {
     pub motherduck_token: String,
     pub database: Option<String>,
     pub table: Option<String>,
     pub format: Option<String>,
 }
 
-impl From<DataSinkPluginConfig> for DataSinkDuckdbPluginConfig {
+impl From<DataSinkPluginConfig> for DataSinkMotherduckPluginConfig {
     fn from(plugin_config: DataSinkPluginConfig) -> Self {
         match plugin_config {
-            DataSinkPluginConfig::Duckdb(config) => config,
-            _ => panic!("Invalid plugin type for DuckDB"),
+            DataSinkPluginConfig::Motherduck(config) => config,
+            _ => panic!("Invalid plugin type for MotherDuck"),
         }
     }
 }
 
-pub struct DataSinkDuckdbPlugin {
-    config: DataSinkDuckdbPluginConfig,
+pub struct DataSinkMotherduckPlugin {
+    config: DataSinkMotherduckPluginConfig,
     #[allow(dead_code)]
     buffer_name: String,
     client: Client,
@@ -37,10 +37,10 @@ pub struct DataSinkDuckdbPlugin {
 
 const MOTHERDUCK_SQL_ENDPOINT: &str = "https://api.motherduck.com/v1/sql";
 
-impl DataSinkDuckdbPlugin {
+impl DataSinkMotherduckPlugin {
     pub async fn new_with_config(
         buffer_name: String,
-        config: DataSinkDuckdbPluginConfig,
+        config: DataSinkMotherduckPluginConfig,
     ) -> Self {
         Self {
             config,
@@ -163,13 +163,13 @@ impl DataSinkDuckdbPlugin {
             table_name,
             cols_sql.join(", ")
         );
-        info!("DuckDB DDL: {}", ddl);
+        info!("MotherDuck DDL: {}", ddl);
         self.execute_sql(&ddl).await.map(|_| ())
     }
 }
 
 #[async_trait]
-impl DataSink for DataSinkDuckdbPlugin {
+impl DataSink for DataSinkMotherduckPlugin {
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,
@@ -238,7 +238,7 @@ impl DataSink for DataSinkDuckdbPlugin {
                         counters::add_parquet_rows(chunk_rows as u64);
                     }
                     Err(e) => {
-                        error!("DuckDB INSERT failed: {}", e);
+                        error!("MotherDuck INSERT failed: {}", e);
                         counters::dec_uploads_in_flight();
                         return Err(e);
                     }
@@ -249,7 +249,7 @@ impl DataSink for DataSinkDuckdbPlugin {
         counters::add_upload(1);
         counters::dec_uploads_in_flight();
         info!(
-            "DuckDB sync complete: {} total rows into {}",
+            "MotherDuck sync complete: {} total rows into {}",
             total_rows, table_name
         );
         Ok(())

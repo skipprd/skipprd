@@ -1,4 +1,4 @@
-# DuckDB / MotherDuck Input
+# MotherDuck Input
 
 Reads rows from MotherDuck cloud tables via the MotherDuck REST API.
 
@@ -7,14 +7,14 @@ Reads rows from MotherDuck cloud tables via the MotherDuck REST API.
 1. Authenticates with MotherDuck using a bearer token.
 2. Queries specified tables or executes a custom SQL query via `POST https://api.motherduck.com/v1/sql`.
 3. Response rows are serialized to JSON and ingested through the standard WAL pipeline.
-4. Namespace convention: `duckdb.{database}.{table_name}`.
+4. Namespace convention: `motherduck.{database}.{table_name}`.
 
 ## Configuration
 
 ```yaml
 data_sources:
   source:
-    Duckdb:
+    Motherduck:
       motherduck_token: "ey..."
       database: "my_database"
       tables: ["users", "events"]
