@@ -49,16 +49,19 @@ nav:
   - Connectors:
       - Inputs:
           - Databases:
+              - ClickHouse: connectors/inputs/clickhouse.md
+              - DuckDB: connectors/inputs/duckdb.md
+              - DynamoDB: connectors/inputs/dynamodb.md
+              - MongoDB: connectors/inputs/mongodb.md
               - MSSQL: connectors/inputs/mssql.md
               - MySQL: connectors/inputs/mysql.md
               - PostgreSQL: connectors/inputs/postgres.md
               - Redshift: connectors/inputs/redshift.md
-              - MongoDB: connectors/inputs/mongodb.md
-              - DynamoDB: connectors/inputs/dynamodb.md
           - Object Stores:
+              - Delta Lake: connectors/inputs/delta_lake.md
+              - Local File: connectors/inputs/file.md
               - S3: connectors/inputs/s3.md
               - SFTP: connectors/inputs/sftp.md
-              - Local File: connectors/inputs/file.md
           - Streaming:
               - Kafka: connectors/inputs/kafka.md
               - SQS: connectors/inputs/sqs.md
@@ -77,10 +80,13 @@ nav:
               - Stdin: connectors/inputs/stdin.md
       - Outputs:
           - Warehouses:
-              - Snowflake: connectors/outputs/snowflake.md
-              - Postgres: connectors/outputs/postgres.md
               - Athena (S3 + Glue): connectors/outputs/athena.md
+              - ClickHouse: connectors/outputs/clickhouse.md
               - Databricks: connectors/outputs/databricks.md
+              - DuckDB: connectors/outputs/duckdb.md
+              - Postgres: connectors/outputs/postgres.md
+              - Redshift: connectors/outputs/redshift.md
+              - Snowflake: connectors/outputs/snowflake.md
               - Synapse: connectors/outputs/synapse.md
           - Cloud Storage:
               - GCS: connectors/outputs/gcs.md
