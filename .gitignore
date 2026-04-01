@@ -36,3 +36,4 @@ app-dbt
 _bak
 data
 docs/site
+logs
