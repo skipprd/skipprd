@@ -62,6 +62,15 @@ runs:
       env:
         # do not produce debug symbols to keep memory usage down
         RUSTFLAGS: "-C debuginfo=0"
+    - name: Verify compiled version
+      shell: bash
+      run: |
+        VERSION=$(target/release/skippr-el --version 2>&1 | awk '{print $2}')
+        echo "skippr-el version: $VERSION"
+        if [ "$VERSION" = "0.0.0-git" ] || [ -z "$VERSION" ]; then
+          echo "::error::Version was not set during build"
+          exit 1
+        fi
     - name: Cargo Test
       shell: bash
       run: |

@@ -232,6 +232,16 @@ jobs:
         env:
           RUSTFLAGS: "-C debuginfo=0"
 
+      - name: Verify compiled version
+        shell: pwsh
+        run: |
+          $version = (.\target\release\skippr-el.exe --version 2>&1) -replace '^skippr\s+', ''
+          Write-Host "skippr-el version: $version"
+          if ($version -eq '0.0.0-git' -or [string]::IsNullOrEmpty($version)) {
+            Write-Error "Version was not set during build"
+            exit 1
+          }
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
