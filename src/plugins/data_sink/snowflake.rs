@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 use crate::buffer::BufferChunker;
 use crate::discover::SkipprDataType;
 use crate::helpers::configuration::{Config, DataSinkSnowflakePluginConfig, DataSinkPluginConfig};
-use crate::plugins::DataSink;
+use crate::plugins::{DataSink, SchemaSink};
 
 static ENSURED_SCHEMAS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
     Lazy::new(DashMap::new);
@@ -1449,8 +1449,9 @@ impl DataSink for DataSinkSnowflakePlugin {
     }
 }
 
-impl DataSinkSnowflakePlugin {
-    pub async fn sync_schema(
+#[async_trait]
+impl SchemaSink for DataSinkSnowflakePlugin {
+    async fn sync_schema(
         &self,
         namespace: &str,
         metadata: &crate::discover::OutputMetadata,

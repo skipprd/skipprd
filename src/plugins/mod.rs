@@ -66,6 +66,54 @@ pub async fn build_schema_sync_plugin(
             };
             Some(Box::new(schema_sink::glue::GlueSchemaSink::new(glue_config, Some(c))))
         }
+        DataSinkPluginConfig::Snowflake(c) => {
+            let plugin = data_sink::snowflake::DataSinkSnowflakePlugin::new_with_config(
+                String::new(),
+                c,
+            )
+            .await;
+            Some(Box::new(plugin))
+        }
+        DataSinkPluginConfig::Postgres(c) => {
+            let plugin = data_sink::postgres::DataSinkPostgresPlugin::new_with_config(
+                String::new(),
+                c,
+            )
+            .await;
+            Some(Box::new(plugin))
+        }
+        DataSinkPluginConfig::Bigquery(c) => {
+            let plugin = data_sink::bigquery::DataSinkBigqueryPlugin::new_with_config(
+                String::new(),
+                c,
+            )
+            .await;
+            Some(Box::new(plugin))
+        }
+        DataSinkPluginConfig::Clickhouse(c) => {
+            let plugin = data_sink::clickhouse::DataSinkClickhousePlugin::new_with_config(
+                String::new(),
+                c,
+            )
+            .await;
+            Some(Box::new(plugin))
+        }
+        DataSinkPluginConfig::Motherduck(c) => {
+            let plugin = data_sink::motherduck::DataSinkMotherduckPlugin::new_with_config(
+                String::new(),
+                c,
+            )
+            .await;
+            Some(Box::new(plugin))
+        }
+        DataSinkPluginConfig::Redshift(c) => {
+            let plugin = data_sink::redshift::DataSinkRedshiftPlugin::new_with_config(
+                String::new(),
+                c,
+            )
+            .await;
+            Some(Box::new(plugin))
+        }
         _ => None,
     }
 }

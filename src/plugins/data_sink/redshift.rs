@@ -14,7 +14,7 @@ use tracing::{error, info};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use crate::plugins::parquet_util::serialize_to_parquet;
-use crate::plugins::DataSink;
+use crate::plugins::{DataSink, SchemaSink};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkRedshiftPluginConfig {
@@ -271,6 +271,35 @@ impl DataSinkRedshiftPlugin {
     }
 }
 
+impl DataSinkRedshiftPlugin {
+    async fn ensure_table(
+        &self,
+        table_name: &str,
+        col_defs: &[(String, &str)],
+    ) -> Result<(), std::io::Error> {
+        if col_defs.is_empty() {
+            return Ok(());
+        }
+        let cols_sql: Vec<String> = col_defs
+            .iter()
+            .map(|(name, rs_type)| format!("\"{}\" {}", name, rs_type))
+            .collect();
+        let create_sql = format!(
+            "CREATE TABLE IF NOT EXISTS {} ({})",
+            table_name,
+            cols_sql.join(", ")
+        );
+        info!("Redshift DDL: {}", create_sql);
+        if let Err(e) = self.execute_statement(&create_sql).await {
+            let msg = e.to_string();
+            if !msg.contains("already exists") {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl DataSink for DataSinkRedshiftPlugin {
     async fn sync(
@@ -289,30 +318,21 @@ impl DataSink for DataSinkRedshiftPlugin {
             .unwrap_or_else(|| Self::namespace_to_table_name(&namespace));
 
         let arrow_schema = stream.schema();
-        let col_defs: Vec<String> = arrow_schema
+        let col_defs: Vec<(String, &str)> = arrow_schema
             .fields()
             .iter()
             .map(|f| {
-                format!(
-                    "\"{}\" {}",
+                (
                     f.name().to_lowercase(),
-                    Self::arrow_type_to_redshift(f.data_type())
+                    Self::arrow_type_to_redshift(f.data_type()),
                 )
             })
             .collect();
 
-        let create_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {} ({})",
-            table_name,
-            col_defs.join(", ")
-        );
-        if let Err(e) = self.execute_statement(&create_sql).await {
-            let msg = e.to_string();
-            if !msg.contains("already exists") {
-                counters::dec_uploads_in_flight();
-                return Err(e);
-            }
-        }
+        self.ensure_table(&table_name, &col_defs).await.map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
 
         let result = if self.config.staging_s3_bucket.is_some() {
             self.sync_via_s3(stream, &filename, &table_name).await
@@ -332,5 +352,48 @@ impl DataSink for DataSinkRedshiftPlugin {
 
         counters::dec_uploads_in_flight();
         result
+    }
+}
+
+#[async_trait]
+impl SchemaSink for DataSinkRedshiftPlugin {
+    async fn sync_schema(
+        &self,
+        namespace: &str,
+        metadata: &crate::discover::OutputMetadata,
+    ) -> Result<(), std::io::Error> {
+        use crate::converters::skippr_arrow::convert_skippr_to_arrow;
+
+        let fields: std::collections::HashMap<String, crate::discover::OutputMetadata> =
+            metadata
+                .fields
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+
+        let arrow_schema = convert_skippr_to_arrow(Box::new(fields)).map_err(|e| {
+            std::io::Error::other(format!(
+                "Arrow schema conversion for '{}': {}",
+                namespace, e
+            ))
+        })?;
+
+        let table_name = self
+            .config
+            .table
+            .clone()
+            .unwrap_or_else(|| Self::namespace_to_table_name(namespace));
+        let col_defs: Vec<(String, &str)> = arrow_schema
+            .fields()
+            .iter()
+            .map(|f| {
+                (
+                    f.name().to_lowercase(),
+                    Self::arrow_type_to_redshift(f.data_type()),
+                )
+            })
+            .collect();
+
+        self.ensure_table(&table_name, &col_defs).await
     }
 }

@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::{Config, DataSinkBigqueryPluginConfig, DataSinkPluginConfig};
-use crate::plugins::DataSink;
+use crate::plugins::{DataSink, SchemaSink};
 
 static ENSURED_DATASETS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
@@ -578,5 +578,51 @@ impl DataSink for DataSinkBigqueryPlugin {
         filename: String,
     ) -> Result<(), std::io::Error> {
         self.inner_sync(stream, filename).await
+    }
+}
+
+#[async_trait]
+impl SchemaSink for DataSinkBigqueryPlugin {
+    async fn sync_schema(
+        &self,
+        namespace: &str,
+        metadata: &crate::discover::OutputMetadata,
+    ) -> Result<(), std::io::Error> {
+        use crate::converters::skippr_arrow::convert_skippr_to_arrow;
+
+        self.ensure_dataset().await?;
+
+        let fields: std::collections::HashMap<String, crate::discover::OutputMetadata> =
+            metadata
+                .fields
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+
+        let arrow_schema = convert_skippr_to_arrow(Box::new(fields)).map_err(|e| {
+            std::io::Error::other(format!(
+                "Arrow schema conversion for '{}': {}",
+                namespace, e
+            ))
+        })?;
+
+        let table_name = Self::namespace_to_table_name(namespace);
+        let col_defs: Vec<(String, &str)> = arrow_schema
+            .fields()
+            .iter()
+            .map(|f| {
+                (
+                    f.name().to_lowercase(),
+                    Self::arrow_type_to_bigquery(f.data_type()),
+                )
+            })
+            .collect();
+
+        let fq_table = format!(
+            "`{}.{}.{}`",
+            self.config.project, self.config.dataset, table_name
+        );
+
+        self.ensure_table(&fq_table, &col_defs).await
     }
 }

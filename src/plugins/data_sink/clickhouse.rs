@@ -9,7 +9,7 @@ use tracing::{error, info};
 
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::DataSinkPluginConfig;
-use crate::plugins::DataSink;
+use crate::plugins::{DataSink, SchemaSink};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkClickhousePluginConfig {
@@ -269,5 +269,48 @@ impl DataSink for DataSinkClickhousePlugin {
             total_rows, table_name
         );
         Ok(())
+    }
+}
+
+#[async_trait]
+impl SchemaSink for DataSinkClickhousePlugin {
+    async fn sync_schema(
+        &self,
+        namespace: &str,
+        metadata: &crate::discover::OutputMetadata,
+    ) -> Result<(), std::io::Error> {
+        use crate::converters::skippr_arrow::convert_skippr_to_arrow;
+
+        let fields: std::collections::HashMap<String, crate::discover::OutputMetadata> =
+            metadata
+                .fields
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+
+        let arrow_schema = convert_skippr_to_arrow(Box::new(fields)).map_err(|e| {
+            std::io::Error::other(format!(
+                "Arrow schema conversion for '{}': {}",
+                namespace, e
+            ))
+        })?;
+
+        let table_name = self
+            .config
+            .table
+            .clone()
+            .unwrap_or_else(|| Self::namespace_to_table_name(namespace));
+        let col_defs: Vec<(String, &str)> = arrow_schema
+            .fields()
+            .iter()
+            .map(|f| {
+                (
+                    f.name().clone(),
+                    Self::arrow_type_to_clickhouse(f.data_type()),
+                )
+            })
+            .collect();
+
+        self.ensure_table(&table_name, &col_defs).await
     }
 }
