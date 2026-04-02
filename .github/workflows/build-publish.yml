@@ -405,23 +405,32 @@ jobs:
          tar -czvf skippr-el-linux_x86.tar.gz skippr-el-linux_x86/
          tar -czvf skippr-el-macos_arm64.tar.gz skippr-el-macos_arm64/
          tar -czvf skippr-el-windows_x86.tar.gz skippr-el-windows_x86/
-     - name: Release builds to GitHub
-       uses: softprops/action-gh-release@v1
-       with:
-         files: |
-           install.sh
-           ./skippr-el-linux_x86.tar.gz
-           ./skippr-el-macos_arm64.tar.gz
-           ./skippr-el-windows_x86.tar.gz
-         tag_name: ${{ github.ref_name }}
-         body: ${{ github.event.head_commit.message }}
-         body_path: CHANGELOG.txt
-         draft: false
-         prerelease: false
-         name: Release ${{ github.ref_name }}
-         token: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
-         repository: skipprd/skipprd
-         fail_on_unmatched_files: true
+     - name: Create or update GitHub Release
+       env:
+         GH_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+       run: |
+         TAG="${{ github.ref_name }}"
+         # Create release if it doesn't exist; update body if it does
+         if gh release view "$TAG" --repo skipprd/skipprd >/dev/null 2>&1; then
+           gh release edit "$TAG" \
+             --repo skipprd/skipprd \
+             --title "Release $TAG" \
+             --notes-file CHANGELOG.txt
+         else
+           gh release create "$TAG" \
+             --repo skipprd/skipprd \
+             --title "Release $TAG" \
+             --notes-file CHANGELOG.txt
+         fi
+         # Upload assets — --clobber overwrites same-name files
+         # but never deletes other assets (e.g. skippr-* from react CI)
+         gh release upload "$TAG" \
+           install.sh \
+           skippr-el-linux_x86.tar.gz \
+           skippr-el-macos_arm64.tar.gz \
+           skippr-el-windows_x86.tar.gz \
+           --repo skipprd/skipprd \
+           --clobber
 
 
 
