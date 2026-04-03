@@ -884,7 +884,8 @@ impl Ingest {
 
                     let mut count: u64 = 0;
 
-                    for data in ingest_batches.tasks.first().unwrap().datas.iter() {
+                    let first_task_datas = ingest_batches.tasks.first().map(|t| &t.datas);
+                    for data in first_task_datas.into_iter().flat_map(|d| d.iter()) {
                         let batch_ns: Option<String> = {
                             let part = &data.offset_key.partition;
                             if !part.is_empty() {
@@ -1971,6 +1972,33 @@ impl Ingest {
             .store(true, Ordering::Relaxed);
 
         Ok(_schema_ref)
+    }
+}
+
+#[cfg(test)]
+mod empty_ingest_tasks_tests {
+    use super::*;
+    use crate::cli::{DisocverOptions, Mode, CLI_MODE};
+
+    #[test]
+    fn ingest_file_empty_tasks_in_discover_mode_does_not_panic() {
+        *CLI_MODE.write() = Mode::Discover(DisocverOptions {
+            pipeline: Some("test".to_string()),
+            output: "json".to_string(),
+        });
+
+        let ingest = Ingest::new();
+        let empty_tasks = Arc::new(IngestTasks::new());
+
+        let offsets = Arc::new(
+            crate::helpers::offsets::Offsets::init()
+                .expect("offset DB init"),
+        );
+        let noop: Box<dyn crate::plugins::DataSink + Send + Sync> =
+            Box::new(crate::plugins::NoopOutputPlugin);
+        let output = Arc::new(noop);
+
+        ingest.ingest_file(&empty_tasks, &offsets, output);
     }
 }
 

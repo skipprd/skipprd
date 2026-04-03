@@ -750,3 +750,46 @@ impl<'a> SParser<'a> {
         };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn show_pipeline_unquoted_hyphen_truncates_name() {
+        let mut parser = SParser::new("SHOW PIPELINE mssql-migration").unwrap();
+        let stmt = parser.parse_statement().unwrap();
+        match stmt {
+            Statement::ShowPipeline { pipeline } => {
+                assert_eq!(pipeline, "mssql", "unquoted hyphenated name is parsed as subtraction");
+            }
+            other => panic!("expected ShowPipeline, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn show_pipeline_quoted_hyphenated_name() {
+        let mut parser = SParser::new(r#"SHOW PIPELINE "mssql-migration""#).unwrap();
+        let stmt = parser.parse_statement().unwrap();
+        match stmt {
+            Statement::ShowPipeline { pipeline } => {
+                // query.rs strips quotes with .replace('"', "") before use
+                let resolved = pipeline.replace('"', "");
+                assert_eq!(resolved, "mssql-migration");
+            }
+            other => panic!("expected ShowPipeline, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn show_pipeline_simple_name() {
+        let mut parser = SParser::new("SHOW PIPELINE mssql").unwrap();
+        let stmt = parser.parse_statement().unwrap();
+        match stmt {
+            Statement::ShowPipeline { pipeline } => {
+                assert_eq!(pipeline, "mssql");
+            }
+            other => panic!("expected ShowPipeline, got {:?}", other),
+        }
+    }
+}
