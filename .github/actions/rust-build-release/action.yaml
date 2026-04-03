@@ -42,8 +42,7 @@ runs:
     - name: Rust cache
       uses: Swatinem/rust-cache@v2
       with:
-        prefix-key: v1-release
-        key: ${{ inputs.architecture_name }}
+        shared-key: v2-release-${{ inputs.architecture_name }}
     - name: Configure version if tag commit
       shell: bash
       if: startsWith(github.ref, 'refs/tags/')
