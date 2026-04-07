@@ -18,9 +18,14 @@ impl DataSinkStdoutPlugin {
 impl DataSink for DataSinkStdoutPlugin {
     async fn sync(
         &self,
-        mut stream: SendableRecordBatchStream,
+        stream: SendableRecordBatchStream,
         _filename: String,
+        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
+        let mut stream = match cdc_ctx {
+            Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+            None => stream,
+        };
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.map_err(|e| std::io::Error::other(e.to_string()))?;
             let mut buf = Vec::new();
@@ -35,5 +40,9 @@ impl DataSink for DataSinkStdoutPlugin {
             print!("{}", output);
         }
         Ok(())
+    }
+
+    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
+        Some(&crate::plugins::cdc::sink_capabilities::STDOUT)
     }
 }

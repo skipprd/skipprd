@@ -43,8 +43,17 @@ impl DataSink for DataSinkFilePlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
+        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
+        let stream = match cdc_ctx {
+            Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+            None => stream,
+        };
         self.inner_sync(stream, filename).await
+    }
+
+    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
+        Some(&crate::plugins::cdc::sink_capabilities::FILE)
     }
 }
 
@@ -144,8 +153,10 @@ impl DataSinkFilePlugin {
         let output_dir = output_file.parent().unwrap();
         tokio::fs::create_dir_all(&output_dir).await?;
 
-        let parquet_bytes = serialize_to_parquet(stream).await
-            .map_err(|e| { counters::dec_uploads_in_flight(); e })?;
+        let parquet_bytes = serialize_to_parquet(stream).await.map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
 
         let fp = fs::File::create(&output_file).map_err(|e| {
             counters::dec_uploads_in_flight();

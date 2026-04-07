@@ -118,12 +118,14 @@ impl SkipprHive {
                         } else if v.determined_type_values == Some(SkipprDataType::Array) {
                             // Handle array of arrays by recursively processing the inner array
                             if let Some(inner_array) = v.fields.get("0") {
-                                let field_type: String = match MAPPINGS.get(v.determined_type.as_str()) {
-                                    Some(mapped_type) => mapped_type.to_string(),
-                                    None => v.determined_type.to_string(),
-                                };
+                                let field_type: String =
+                                    match MAPPINGS.get(v.determined_type.as_str()) {
+                                        Some(mapped_type) => mapped_type.to_string(),
+                                        None => v.determined_type.to_string(),
+                                    };
 
-                                let inner_dtv = inner_array.determined_type_values.as_ref().unwrap();
+                                let inner_dtv =
+                                    inner_array.determined_type_values.as_ref().unwrap();
                                 let inner_value_type: String =
                                     match MAPPINGS.get(inner_dtv.as_str()) {
                                         Some(mapped_value) => mapped_value.to_string(),

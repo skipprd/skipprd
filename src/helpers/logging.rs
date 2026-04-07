@@ -21,10 +21,7 @@ aws_smithy_client=warn,\
 aws_sig_auth=warn,\
 hyper=warn,reqwest=warn,rustls=warn,h2=warn";
 
-    let lvl = level_opt
-        .as_deref()
-        .unwrap_or("info")
-        .to_lowercase();
+    let lvl = level_opt.as_deref().unwrap_or("info").to_lowercase();
     let crate_level = match lvl.as_str() {
         "trace" => "trace",
         "debug" => "debug",

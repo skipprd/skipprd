@@ -159,15 +159,13 @@ impl DataSource for DataSourceSftpPlugin {
                     bytes,
                     source_uri: format!("sftp://{}{}", self.config.host, file_path),
                     namespace: Some(namespace),
+                    cdc_rows: None,
                 }],
                 offsets.clone(),
                 shared_output.clone(),
             ));
-            self.ingest.ingest_file(
-                &Arc::new(ingest_tasks),
-                &offsets,
-                shared_output.clone(),
-            );
+            self.ingest
+                .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
         }
 
         Ok(())

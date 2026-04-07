@@ -114,4 +114,3 @@ pub struct BenchmarkOptions {
     #[arg(short = 'd', long)]
     pub description: Option<String>,
 }
-

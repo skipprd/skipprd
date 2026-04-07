@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::helpers::configuration::{Config, DataSourcePluginConfig};
+use async_trait::async_trait;
 
 use aws_sdk_s3::Client;
 
@@ -19,7 +19,6 @@ use serde_derive::Deserialize;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks, ThroughputMetrics};
 
-use tokio::sync::Semaphore;
 use crate::helpers::Helpers;
 use crate::plugins::DataSink;
 use crate::plugins::DataSource;
@@ -28,6 +27,7 @@ use std::io::BufRead as _;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
 use tracing::{error, info};
 
 fn read_meminfo_kib(key: &str) -> Option<u64> {
@@ -525,6 +525,7 @@ impl DataSourceS3Plugin {
                     bytes,
                     source_uri,
                     namespace: None,
+                    cdc_rows: None,
                 });
                 if current_bytes >= self.optimal_chunk_size {
                     let batch_bytes = current_bytes;

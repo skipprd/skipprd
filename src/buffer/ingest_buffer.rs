@@ -149,6 +149,7 @@ struct SegmentSnapshot {
     offsets: HashMap<OffsetKey, u64>,
     batches: HashMap<PartitionKey, Vec<RecordBatch>>,
     meta: HashMap<PartitionKey, SegmentPartitionMeta>,
+    part_meta_blobs: HashMap<PartitionKey, Vec<u8>>,
 }
 
 impl SegmentSnapshot {
@@ -158,6 +159,7 @@ impl SegmentSnapshot {
         batches: HashMap<PartitionKey, Vec<RecordBatch>>,
         meta: HashMap<PartitionKey, SegmentPartitionMeta>,
         total_bytes: u64,
+        part_meta_blobs: HashMap<PartitionKey, Vec<u8>>,
     ) -> Self {
         let now = SystemTime::now();
         SegmentSnapshot {
@@ -169,6 +171,7 @@ impl SegmentSnapshot {
             offsets,
             batches,
             meta,
+            part_meta_blobs,
         }
     }
 }
@@ -189,8 +192,7 @@ struct CachedSegment {
     meta: SegmentFileMetadata,
 }
 
-static SEGMENT_CACHE: OnceLazy<DashMap<String, CachedSegment>> =
-    OnceLazy::new(DashMap::new);
+static SEGMENT_CACHE: OnceLazy<DashMap<String, CachedSegment>> = OnceLazy::new(DashMap::new);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct OffsetKeySerialize {
@@ -219,12 +221,16 @@ pub struct IngestBufferBatch {
     pub(crate) _shard: String,
     pub(crate) schema: SchemaRef,
     pub(crate) record_batches: Option<Vec<RecordBatch>>,
+    /// Per-row CDC metadata aligned 1:1 with the rows in `record_batches`.
+    /// `None` means append-mode (no CDC metadata).
+    pub(crate) cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
 }
 
 // Single global segment that aggregates batches for all partitions
 struct GlobalSegment {
-    batches: HashMap<PartitionKey, Vec<RecordBatch>>, // per partition batches
-    offsets: HashMap<OffsetKey, u64>,                 // deduped across all partitions
+    batches: HashMap<PartitionKey, Vec<RecordBatch>>,
+    offsets: HashMap<OffsetKey, u64>,
+    cdc_meta: HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
     bytes: u64,
     updated_at: SystemTime,
     flushed_at: SystemTime,
@@ -236,6 +242,7 @@ impl GlobalSegment {
         GlobalSegment {
             batches: HashMap::with_capacity(64),
             offsets: HashMap::new(),
+            cdc_meta: HashMap::new(),
             bytes: 0,
             updated_at: now,
             flushed_at: now,
@@ -246,15 +253,22 @@ impl GlobalSegment {
         key: PartitionKey,
         batches: Vec<RecordBatch>,
         offsets: &HashMap<OffsetKey, u64>,
+        cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
     ) {
         let mut add_bytes: u64 = 0;
         for b in batches.iter() {
             add_bytes = add_bytes.saturating_add(b.get_array_memory_size() as u64);
         }
         self.batches
-            .entry(key)
+            .entry(key.clone())
             .or_insert_with(|| Vec::with_capacity(64))
             .extend(batches);
+        if let Some(rows) = cdc_rows {
+            self.cdc_meta
+                .entry(key)
+                .or_insert_with(|| Vec::with_capacity(64))
+                .extend(rows);
+        }
         for (k, v) in offsets.iter() {
             self.offsets
                 .entry(k.clone())
@@ -269,14 +283,37 @@ impl GlobalSegment {
     ) -> (
         HashMap<PartitionKey, Vec<RecordBatch>>,
         HashMap<OffsetKey, u64>,
+        HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
         u64,
     ) {
         let batches = std::mem::take(&mut self.batches);
         let offsets = std::mem::take(&mut self.offsets);
+        let cdc_meta = std::mem::take(&mut self.cdc_meta);
         let bytes = std::mem::replace(&mut self.bytes, 0);
         self.updated_at = SystemTime::now();
-        (batches, offsets, bytes)
+        (batches, offsets, cdc_meta, bytes)
     }
+}
+
+fn serialize_cdc_meta_to_blobs(
+    cdc_meta: &HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
+) -> HashMap<PartitionKey, Vec<u8>> {
+    use crate::plugins::cdc::{WalPartKind, WalPartMeta};
+    let mut blobs: HashMap<PartitionKey, Vec<u8>> = HashMap::new();
+    for (key, rows) in cdc_meta.iter() {
+        if rows.is_empty() {
+            continue;
+        }
+        let meta = WalPartMeta {
+            kind: WalPartKind::Cdc,
+            row_count: rows.len() as u64,
+            rows: rows.clone(),
+        };
+        if let Ok(bytes) = bincode::serialize(&meta) {
+            blobs.insert(key.clone(), bytes);
+        }
+    }
+    blobs
 }
 
 fn schema_fingerprint(schema: &SchemaRef) -> String {
@@ -363,9 +400,8 @@ impl Buffers {
                 || last_update_elapsed >= time_threshold)
                 && seg.bytes > 0;
             if should_rotate {
-                let (batches, offsets, total_bytes) = seg.take();
+                let (batches, offsets, cdc_meta, total_bytes) = seg.take();
                 seg.flushed_at = SystemTime::now();
-                // Build per-partition meta
                 let mut meta: HashMap<PartitionKey, SegmentPartitionMeta> = HashMap::new();
                 for (k, v) in batches.iter() {
                     let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum();
@@ -377,12 +413,14 @@ impl Buffers {
                         },
                     );
                 }
+                let blobs = serialize_cdc_meta_to_blobs(&cdc_meta);
                 let snapshot = SegmentSnapshot::new(
                     Helpers::random_str(16),
                     offsets,
                     batches,
                     meta,
                     total_bytes,
+                    blobs,
                 );
                 if Config::log_wal_enabled() || Config::debug_enabled() {
                     let part_count = snapshot.meta.len();
@@ -404,6 +442,7 @@ impl Buffers {
                 key,
                 batches_vec.drain(..).collect(),
                 &ingest_buffer_batch.offsets,
+                ingest_buffer_batch.cdc_rows.take(),
             );
         }
     }
@@ -439,11 +478,12 @@ impl Buffers {
                 let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&s.batches);
                 match store
                     .write_snapshot_and_commit(
-                    &snapshot_id,
-                    &s.offsets,
-                    &s.batches,
-                    &partitions_meta,
-                )
+                        &snapshot_id,
+                        &s.offsets,
+                        &s.batches,
+                        &partitions_meta,
+                        &s.part_meta_blobs,
+                    )
                     .await
                 {
                     Ok(r) => r,
@@ -621,7 +661,8 @@ impl Buffers {
                 consecutive_failures = 0;
             } else if !COMPACT_FAILURES.is_empty() {
                 consecutive_failures = consecutive_failures.saturating_add(1);
-                let backoff_ms = (500u64 * 2u64.saturating_pow(consecutive_failures.min(6))).min(30_000);
+                let backoff_ms =
+                    (500u64 * 2u64.saturating_pow(consecutive_failures.min(6))).min(30_000);
                 debug!(
                     "Compactor: backoff {}ms after {} consecutive failure cycles",
                     backoff_ms, consecutive_failures
@@ -669,9 +710,8 @@ impl Buffers {
                 let out = shared_output.clone();
                 let off = offsets_db.clone();
                 in_flight.push(Box::pin(async move {
-                    let _ =
-                        Self::compact_segment_partition_source(&source, &meta, &idx, out, off)
-                            .await;
+                    let _ = Self::compact_segment_partition_source(&source, &meta, &idx, out, off)
+                        .await;
                 }));
             }
             while let Some(_) = in_flight.next().await {}
@@ -763,11 +803,7 @@ impl Buffers {
                     continue;
                 }
                 if Self::should_compact(idx.bytes, idx.updated_at_secs, now_secs, force) {
-                    out.push((
-                        cached.source.clone(),
-                        cached.meta.clone(),
-                        idx.clone(),
-                    ));
+                    out.push((cached.source.clone(), cached.meta.clone(), idx.clone()));
                     if out.len() >= limit {
                         break;
                     }
@@ -904,325 +940,6 @@ impl Buffers {
             u32::from_le_bytes(buf[24..28].try_into().unwrap()),
             sha,
         ))
-    }
-
-    /// One-time migration: backfill .seg.commit for valid segments; quarantine invalid; cleanup legacy .seg.tmp
-    pub fn migrate_segs_once() {
-        let base_dir = PathBuf::from(format!("{}/segment_buffer", Config::get_data_dir()));
-        let seg_dir = base_dir.join("segs");
-        let marker = base_dir.join("SEGS_MIGRATED");
-        if !seg_dir.exists() {
-            return;
-        }
-        if marker.exists() {
-            return;
-        }
-
-        // Helper: validate by opening and reading each PART stream within bounds
-        fn validate_seg_file_streams(path: &PathBuf) -> bool {
-            use std::io::Read as IoRead;
-            let segf = SegmentFile { path: path.clone() };
-            let meta = match segf.read_metadata() {
-                Ok(m) => m,
-                Err(_) => return false,
-            };
-            let file_len = match OpenOptions::new()
-                .read(true)
-                .open(path)
-                .and_then(|f| f.metadata())
-            {
-                Ok(m) => m.len(),
-                Err(_) => return false,
-            };
-            for idx in meta.index.iter() {
-                if idx.len == 0 || idx.start >= file_len {
-                    return false;
-                }
-                let safe_len = std::cmp::min(idx.len, file_len.saturating_sub(idx.start));
-                if let Ok(mut f) = OpenOptions::new().read(true).open(path) {
-                    if f.seek(io::SeekFrom::Start(idx.start)).is_err() {
-                        return false;
-                    }
-                    let reader = io::BufReader::new(f);
-                    let mut take = reader.take(safe_len);
-                    match StreamReader::try_new(&mut take, None) {
-                        Ok(mut sr) => {
-                            while let Some(r) = sr.next() {
-                                if r.is_err() {
-                                    return false;
-                                }
-                            }
-                        }
-                        Err(_) => return false,
-                    }
-                } else {
-                    return false;
-                }
-            }
-            true
-        }
-
-        // Backfill commits for .seg without commit (and rename to content-addressed)
-        if let Ok(rd) = fs::read_dir(&seg_dir) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.extension().and_then(|s| s.to_str()) != Some("seg") {
-                    continue;
-                }
-                let commit = p.with_extension("seg.commit");
-                if commit.exists() {
-                    continue;
-                }
-                if validate_seg_file_streams(&p) {
-                    // Compute checksum by reading entire file, then write commit for existing path
-                    if let Ok(mut f) = OpenOptions::new().read(true).open(&p) {
-                        use sha2::Digest;
-                        let mut hasher = sha2::Sha256::new();
-                        let mut buf = vec![0u8; 1 << 20];
-                        loop {
-                            match f.read(&mut buf) {
-                                Ok(0) => break,
-                                Ok(n) => {
-                                    hasher.update(&buf[..n]);
-                                }
-                                Err(_) => {
-                                    break;
-                                }
-                            }
-                        }
-                        let digest = hasher.finalize();
-                        let mut sha: [u8; 32] = [0u8; 32];
-                        sha.copy_from_slice(&digest[..]);
-                        let size = f.metadata().map(|m| m.len()).unwrap_or(0);
-                        let _ = Buffers::write_seg_commit(&p, &sha, 0, size);
-                        info!(
-                            "Migration: backfilled commit seg={} size={} sha={}",
-                            p.to_string_lossy(),
-                            size,
-                            hex::encode(sha)
-                        );
-                    }
-                } else {
-                    // Quarantine invalid seg
-                    let qdir = base_dir.join("quarantine");
-                    let _ = fs::create_dir_all(&qdir);
-                    let dest = qdir.join(p.file_name().unwrap_or_default());
-                    if let Err(e) = fs::rename(&p, &dest) {
-                        error!(
-                            "Migration: failed to quarantine invalid seg {}: {}",
-                            p.to_string_lossy(),
-                            e
-                        );
-                    } else {
-                        warn!(
-                            "Migration: quarantined invalid seg {} -> {}",
-                            p.to_string_lossy(),
-                            dest.to_string_lossy()
-                        );
-                    }
-                }
-            }
-        }
-
-        // Attempt salvage from legacy .seg.tmp (best-effort)
-        if let Ok(rd) = fs::read_dir(&seg_dir) {
-            for e in rd.flatten() {
-                let p = e.path();
-                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                if !name.ends_with(".seg.tmp") {
-                    continue;
-                }
-                // Open and parse header
-                let mut f = match OpenOptions::new().read(true).open(&p) {
-                    Ok(f) => f,
-                    Err(_) => {
-                        let _ = fs::remove_file(&p);
-                        continue;
-                    }
-                };
-                let meta_len = match f.metadata() {
-                    Ok(m) => m.len(),
-                    Err(_) => {
-                        let _ = fs::remove_file(&p);
-                        continue;
-                    }
-                };
-                if meta_len == 0 {
-                    let _ = fs::remove_file(&p);
-                    continue;
-                }
-                // Validate MAGIC
-                let mut magic = [0u8; 4];
-                if f.read_exact(&mut magic).is_err() || &magic != b"SEGF" {
-                    let _ = fs::remove_file(&p);
-                    continue;
-                }
-                // VERSION
-                let mut verb = [0u8; 4];
-                if f.read_exact(&mut verb).is_err() {
-                    let _ = fs::remove_file(&p);
-                    continue;
-                }
-                // created_at
-                let mut cab = [0u8; 8];
-                if f.read_exact(&mut cab).is_err() {
-                    let _ = fs::remove_file(&p);
-                    continue;
-                }
-                // offsets blob
-                let mut olb = [0u8; 8];
-                if f.read_exact(&mut olb).is_err() {
-                    let _ = fs::remove_file(&p);
-                    continue;
-                }
-                let off_len = u64::from_le_bytes(olb);
-                let mut offsets_blob = vec![0u8; off_len as usize];
-                if f.read_exact(&mut offsets_blob).is_err() {
-                    let _ = fs::remove_file(&p);
-                    continue;
-                }
-                let offsets_map: std::collections::HashMap<OffsetKey, u64> =
-                    bincode::deserialize(&offsets_blob).unwrap_or_default();
-                info!(
-                    "Migration: attempting salvage of tmp seg={} offsets={}",
-                    p.to_string_lossy(),
-                    offsets_map.len()
-                );
-                // Iterate PARTs and collect valid RecordBatches
-                use std::collections::HashMap as StdHashMap;
-                let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
-                let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
-                loop {
-                    let mut tag = [0u8; 4];
-                    match f.read_exact(&mut tag) {
-                        Ok(_) => {}
-                        Err(_) => break,
-                    };
-                    if &tag != b"PART" {
-                        break;
-                    }
-                    let mut klenb = [0u8; 8];
-                    if f.read_exact(&mut klenb).is_err() {
-                        break;
-                    }
-                    let klen = u64::from_le_bytes(klenb);
-                    let mut kblob = vec![0u8; klen as usize];
-                    if f.read_exact(&mut kblob).is_err() {
-                        break;
-                    }
-                    let key: PartitionKey = match bincode::deserialize(&kblob) {
-                        Ok(k) => k,
-                        Err(_) => break,
-                    };
-                    let mut pb = [0u8; 8];
-                    if f.read_exact(&mut pb).is_err() {
-                        break;
-                    }
-                    let part_bytes = u64::from_le_bytes(pb);
-                    let mut ub = [0u8; 8];
-                    if f.read_exact(&mut ub).is_err() {
-                        break;
-                    }
-                    let upd_secs = u64::from_le_bytes(ub);
-                    let mut dlb = [0u8; 8];
-                    if f.read_exact(&mut dlb).is_err() {
-                        break;
-                    }
-                    let data_len = u64::from_le_bytes(dlb);
-                    let start = f.stream_position().unwrap_or(0);
-                    if start.saturating_add(data_len) > meta_len {
-                        break;
-                    }
-                    // Read Arrow stream into batches
-                    let mut fpart = match OpenOptions::new().read(true).open(&p) {
-                        Ok(ff) => ff,
-                        Err(_) => break,
-                    };
-                    if fpart.seek(io::SeekFrom::Start(start)).is_err() {
-                        break;
-                    }
-                    let reader = io::BufReader::new(fpart);
-                    use std::io::Read as IoRead;
-                    let mut take = reader.take(data_len);
-                    match StreamReader::try_new(&mut take, None) {
-                        Ok(sr) => {
-                            let mut out_vec: Vec<RecordBatch> = Vec::new();
-                            for item in sr {
-                                match item {
-                                    Ok(b) => out_vec.push(b),
-                                    Err(_) => {
-                                        out_vec.clear();
-                                        break;
-                                    }
-                                }
-                            }
-                            if !out_vec.is_empty() {
-                                parts_meta.insert(
-                                    key.clone(),
-                                    (
-                                        part_bytes,
-                                        SystemTime::UNIX_EPOCH
-                                            + std::time::Duration::from_secs(upd_secs),
-                                    ),
-                                );
-                                batches.insert(key, out_vec);
-                            }
-                        }
-                        Err(_) => {}
-                    }
-                    // Advance over data_len
-                    if f.seek(io::SeekFrom::Start(start + data_len)).is_err() {
-                        break;
-                    }
-                }
-                if !batches.is_empty() {
-                    // Write a recovered segment from batches
-                    let sid = format!("salv-{}", Helpers::random_str(8));
-                    let segf = SegmentFile::new(&seg_dir, &sid).unwrap();
-                    if let Ok((meta, _rows, sha)) =
-                        segf.write_snapshot(&offsets_map, &batches, &parts_meta)
-                    {
-                        if let Err(e) = Buffers::write_seg_commit(
-                            &segf.path,
-                            &sha,
-                            meta.num_partitions,
-                            meta.total_bytes,
-                        ) {
-                            error!(
-                                "Migration: salvage commit write failed seg={} err={}",
-                                segf.path.to_string_lossy(),
-                                e
-                            );
-                        } else {
-                            info!(
-                                "Migration: salvaged tmp={} -> seg={} parts={} bytes={} sha={}",
-                                p.to_string_lossy(),
-                                segf.path.to_string_lossy(),
-                                meta.num_partitions,
-                                meta.total_bytes,
-                                hex::encode(sha)
-                            );
-                        }
-                    }
-                }
-                // Remove tmp regardless
-                match fs::remove_file(&p) {
-                    Ok(_) => info!("Migration: removed tmp {}", p.to_string_lossy()),
-                    Err(e) => warn!(
-                        "Migration: failed to remove tmp {} err={}",
-                        p.to_string_lossy(),
-                        e
-                    ),
-                }
-            }
-        }
-
-        let (scanned, removed, errors) = Self::cleanup_orphan_seg_commits(200_000);
-        info!(
-            "Migration: orphan commit cleanup scanned={} removed={} errors={}",
-            scanned, removed, errors
-        );
-        let _ = fs::write(&marker, b"ok");
     }
 
     /// Best-effort cleanup for `.seg.commit` files that no longer have a sibling `.seg`.
@@ -1430,7 +1147,11 @@ impl Buffers {
         if Config::debug_enabled() || Config::log_wal_enabled() {
             debug!(
                 "Compactor: bounds seg={} file_len={} start={} idx_len={} safe_len={} end_hint={}",
-                seg_display, file_len, idx.start, idx.len, safe_len,
+                seg_display,
+                file_len,
+                idx.start,
+                idx.len,
+                safe_len,
                 idx.start.saturating_add(safe_len)
             );
         }
@@ -1451,7 +1172,9 @@ impl Buffers {
                         let mut cursor2 = io::Cursor::new(&data[start..]);
                         StreamReader::try_new(&mut cursor2, None)
                             .map(|sr| sr.schema())
-                            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?
+                            .map_err(|e| {
+                                io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e))
+                            })?
                     }
                 }
             }
@@ -1465,15 +1188,22 @@ impl Buffers {
                     Ok(sr) => sr.schema(),
                     Err(e) => {
                         let es = e.to_string();
-                        if es.contains("failed to fill whole buffer") || es.contains("UnexpectedEof") {
+                        if es.contains("failed to fill whole buffer")
+                            || es.contains("UnexpectedEof")
+                        {
                             let mut file2 = OpenOptions::new().read(true).open(seg_path)?;
                             file2.seek(io::SeekFrom::Start(start_pos))?;
                             let reader2 = io::BufReader::new(file2);
                             StreamReader::try_new(reader2, None)
                                 .map(|sr| sr.schema())
-                                .map_err(|e2| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e2)))?
+                                .map_err(|e2| {
+                                    io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e2))
+                                })?
                         } else {
-                            return Err(io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)));
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("arrow: {}", e),
+                            ));
                         }
                     }
                 }
@@ -1499,7 +1229,10 @@ impl Buffers {
                                     }
                                     Err(e) => {
                                         let _ = tx
-                                            .send(Err(DataFusionError::ArrowError(Box::new(e), None)))
+                                            .send(Err(DataFusionError::ArrowError(
+                                                Box::new(e),
+                                                None,
+                                            )))
                                             .await;
                                         break;
                                     }
@@ -1543,19 +1276,32 @@ impl Buffers {
                                                 if es.contains("failed to fill whole buffer")
                                                     || es.contains("UnexpectedEof")
                                                 {
-                                                    match OpenOptions::new().read(true).open(&seg_path_clone) {
+                                                    match OpenOptions::new()
+                                                        .read(true)
+                                                        .open(&seg_path_clone)
+                                                    {
                                                         Ok(mut f2) => {
-                                                            if let Err(e) = f2.seek(io::SeekFrom::Start(start_pos)) {
-                                                                let _ = tx.send(Err(DataFusionError::IoError(e)));
+                                                            if let Err(e) = f2.seek(
+                                                                io::SeekFrom::Start(start_pos),
+                                                            ) {
+                                                                let _ = tx.send(Err(
+                                                                    DataFusionError::IoError(e),
+                                                                ));
                                                                 break;
                                                             }
                                                             let reader2 = io::BufReader::new(f2);
-                                                            match StreamReader::try_new(reader2, None) {
+                                                            match StreamReader::try_new(
+                                                                reader2, None,
+                                                            ) {
                                                                 Ok(sr2) => {
                                                                     for item2 in sr2 {
                                                                         match item2 {
                                                                             Ok(batch) => {
-                                                                                if tx.send(Ok(batch)).await.is_err() {
+                                                                                if tx
+                                                                                    .send(Ok(batch))
+                                                                                    .await
+                                                                                    .is_err()
+                                                                                {
                                                                                     break;
                                                                                 }
                                                                             }
@@ -1572,11 +1318,18 @@ impl Buffers {
                                                             }
                                                         }
                                                         Err(eopen) => {
-                                                            let _ = tx.send(Err(DataFusionError::IoError(eopen)));
+                                                            let _ = tx.send(Err(
+                                                                DataFusionError::IoError(eopen),
+                                                            ));
                                                         }
                                                     }
                                                 } else {
-                                                    let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e), None))).await;
+                                                    let _ = tx
+                                                        .send(Err(DataFusionError::ArrowError(
+                                                            Box::new(e),
+                                                            None,
+                                                        )))
+                                                        .await;
                                                 }
                                                 break;
                                             }
@@ -1586,11 +1339,16 @@ impl Buffers {
                                 }
                                 Err(e) => {
                                     let es = e.to_string();
-                                    if es.contains("failed to fill whole buffer") || es.contains("UnexpectedEof") {
+                                    if es.contains("failed to fill whole buffer")
+                                        || es.contains("UnexpectedEof")
+                                    {
                                         match OpenOptions::new().read(true).open(&seg_path_clone) {
                                             Ok(mut f2) => {
-                                                if let Err(e) = f2.seek(io::SeekFrom::Start(start_pos)) {
-                                                    let _ = tx.send(Err(DataFusionError::IoError(e)));
+                                                if let Err(e) =
+                                                    f2.seek(io::SeekFrom::Start(start_pos))
+                                                {
+                                                    let _ =
+                                                        tx.send(Err(DataFusionError::IoError(e)));
                                                     return;
                                                 }
                                                 let reader2 = io::BufReader::new(f2);
@@ -1599,7 +1357,11 @@ impl Buffers {
                                                         for item in sr2 {
                                                             match item {
                                                                 Ok(batch) => {
-                                                                    if tx.send(Ok(batch)).await.is_err() {
+                                                                    if tx
+                                                                        .send(Ok(batch))
+                                                                        .await
+                                                                        .is_err()
+                                                                    {
                                                                         break;
                                                                     }
                                                                 }
@@ -1611,16 +1373,27 @@ impl Buffers {
                                                         }
                                                     }
                                                     Err(e2) => {
-                                                        let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e2), None))).await;
+                                                        let _ = tx
+                                                            .send(Err(DataFusionError::ArrowError(
+                                                                Box::new(e2),
+                                                                None,
+                                                            )))
+                                                            .await;
                                                     }
                                                 }
                                             }
                                             Err(eopen) => {
-                                                let _ = tx.send(Err(DataFusionError::IoError(eopen)));
+                                                let _ =
+                                                    tx.send(Err(DataFusionError::IoError(eopen)));
                                             }
                                         }
                                     } else {
-                                        let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e), None))).await;
+                                        let _ = tx
+                                            .send(Err(DataFusionError::ArrowError(
+                                                Box::new(e),
+                                                None,
+                                            )))
+                                            .await;
                                     }
                                 }
                             }
@@ -1659,11 +1432,51 @@ impl Buffers {
             }
         }
 
+        // Read CDC metadata for this partition from the segment, if present
+        let cdc_ctx: Option<crate::plugins::cdc::SyncContext> = {
+            use crate::plugins::cdc::{SyncContext, WalPartKind, WalPartMeta};
+            let blobs_result: io::Result<std::collections::HashMap<PartitionKey, Vec<u8>>> =
+                match source {
+                    SegmentSource::Disk(seg_path) => match std::fs::File::open(seg_path) {
+                        Ok(mut f) => SegmentFile::read_part_meta_blobs_from_reader(&mut f),
+                        Err(e) => Err(e),
+                    },
+                    SegmentSource::S3 { data, .. } => {
+                        let mut cursor = io::Cursor::new(data.as_ref());
+                        SegmentFile::read_part_meta_blobs_from_reader(&mut cursor)
+                    }
+                };
+            match blobs_result {
+                Ok(blobs) => blobs.get(&idx.key).and_then(|blob| {
+                    if blob.is_empty() {
+                        return None;
+                    }
+                    bincode::deserialize::<WalPartMeta>(blob)
+                        .ok()
+                        .and_then(|pm| {
+                            if pm.kind == WalPartKind::Cdc && !pm.rows.is_empty() {
+                                let contract = crate::plugins::cdc::get_global_cdc_contract();
+                                Some(SyncContext {
+                                    part_meta: pm,
+                                    contract,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                }),
+                Err(_) => None,
+            }
+        };
+
         let batch_stream: SendableRecordBatchStream = Box::pin(SegRecordBatchStream {
             schema: schema.clone(),
             rx,
         });
-        if let Err(e) = shared_output.sync(batch_stream, out_key.clone()).await {
+        if let Err(e) = shared_output
+            .sync(batch_stream, out_key.clone(), cdc_ctx.as_ref())
+            .await
+        {
             let err_str = e.to_string();
             let failure_key = format!("{}:{}", seg_display, out_key);
             let attempts = {
@@ -1733,30 +1546,28 @@ impl Buffers {
 
         if all_tombstoned {
             let segment_deleted = match source {
-                SegmentSource::Disk(seg_path) => {
-                    match fs::remove_file(seg_path) {
-                        Ok(_) => {
-                            let commit_path = seg_path.with_extension("seg.commit");
-                            if let Err(e) = fs::remove_file(&commit_path) {
-                                if e.kind() != io::ErrorKind::NotFound {
-                                    warn!(
-                                        "Failed to remove commit marker {}: {}",
-                                        commit_path.to_string_lossy(),
-                                        e
-                                    );
-                                }
+                SegmentSource::Disk(seg_path) => match fs::remove_file(seg_path) {
+                    Ok(_) => {
+                        let commit_path = seg_path.with_extension("seg.commit");
+                        if let Err(e) = fs::remove_file(&commit_path) {
+                            if e.kind() != io::ErrorKind::NotFound {
+                                warn!(
+                                    "Failed to remove commit marker {}: {}",
+                                    commit_path.to_string_lossy(),
+                                    e
+                                );
                             }
-                            true
                         }
-                        Err(e) => {
-                            warn!(
-                                "Failed to remove fully-compacted segment {}: {}",
-                                seg_display, e
-                            );
-                            false
-                        }
+                        true
                     }
-                }
+                    Err(e) => {
+                        warn!(
+                            "Failed to remove fully-compacted segment {}: {}",
+                            seg_display, e
+                        );
+                        false
+                    }
+                },
                 SegmentSource::S3 { key, bucket, .. } => {
                     let client = crate::helpers::s3::get_s3_client().await;
                     let commit_key = format!("{}.commit", key);
@@ -1796,7 +1607,6 @@ impl Buffers {
         }
         Ok(true)
     }
-
 }
 
 pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
@@ -1874,10 +1684,7 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
                     offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
                     committed_offsets = committed_offsets.saturating_add(1);
                 }
-                Buffers::segment_cache_register(
-                    SegmentSource::Disk(file_path),
-                    meta,
-                );
+                Buffers::segment_cache_register(SegmentSource::Disk(file_path), meta);
             }
             Err(e) => {
                 warn!(
@@ -2084,16 +1891,6 @@ impl WalIndexMetrics {
     }
 }
 
-#[derive(Default, Clone)]
-pub struct WalPartitionIndex {/* deprecated */}
-
-impl WalPartitionIndex {
-    #[allow(dead_code)]
-    fn new() -> Self {
-        WalPartitionIndex {}
-    }
-}
-
 pub async fn wal_recover(offsets_db: Arc<Offsets>) -> io::Result<()> {
     if is_s3_wal() {
         return wal_recover_s3(offsets_db).await;
@@ -2196,11 +1993,11 @@ mod tests_wal_commit {
         let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
+        let empty_blobs: StdHashMap<PartitionKey, Vec<u8>> = StdHashMap::new();
         let (meta, _rows, sha) = segf
-            .write_snapshot(&offsets, &batches, &parts_meta)
+            .write_snapshot(&offsets, &batches, &parts_meta, &empty_blobs)
             .unwrap();
-        Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes)
-            .unwrap();
+        Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes).unwrap();
         let (ver, _ts, size, pcount, got_sha) = Buffers::read_seg_commit(&segf.path).unwrap();
         assert_eq!(ver, 1);
         assert_eq!(size, meta.total_bytes);
@@ -2226,12 +2023,12 @@ mod tests_wal_commit {
         let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
+        let empty_blobs: StdHashMap<PartitionKey, Vec<u8>> = StdHashMap::new();
         let (meta, _rows, sha) = segf
-            .write_snapshot(&offsets, &batches, &parts_meta)
+            .write_snapshot(&offsets, &batches, &parts_meta, &empty_blobs)
             .unwrap();
         assert!(!commit_exists(&segf.path));
-        Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes)
-            .unwrap();
+        Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes).unwrap();
         assert!(commit_exists(&segf.path));
     }
 
@@ -2258,8 +2055,9 @@ mod tests_wal_commit {
         batches.insert(key.clone(), vec![make_batch()]);
         let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
+        let empty_blobs: StdHashMap<PartitionKey, Vec<u8>> = StdHashMap::new();
         let (meta1, _r1, sha1) = segf1
-            .write_snapshot(&offsets_map, &batches, &parts_meta)
+            .write_snapshot(&offsets_map, &batches, &parts_meta, &empty_blobs)
             .unwrap();
         let off = Arc::new(Offsets::init().unwrap());
         assert!(off.get(&ok).is_none());
@@ -2390,11 +2188,12 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
             let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&s.batches);
             match store
                 .write_snapshot_and_commit(
-                &snapshot_id,
-                &s.offsets,
-                &s.batches,
-                &partitions_meta,
-            )
+                    &snapshot_id,
+                    &s.offsets,
+                    &s.batches,
+                    &partitions_meta,
+                    &s.part_meta_blobs,
+                )
                 .await
             {
                 Ok(r) => r,
@@ -2424,14 +2223,14 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
     }
 
     // Then flush live segment once (force), if it has data
-    let (to_flush_batches, to_flush_offsets) = {
+    let (to_flush_batches, to_flush_offsets, to_flush_cdc) = {
         let mut guard = SEGMENT_LIVE.lock().unwrap();
         if guard.batches.is_empty() {
-            (HashMap::new(), HashMap::new())
+            (HashMap::new(), HashMap::new(), HashMap::new())
         } else {
             guard.flushed_at = SystemTime::now();
-            let (b, o, _bytes) = guard.take();
-            (b, o)
+            let (b, o, c, _bytes) = guard.take();
+            (b, o, c)
         }
     };
 
@@ -2443,12 +2242,14 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
             partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now()));
         }
         let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&to_flush_batches);
+        let flush_blobs = serialize_cdc_meta_to_blobs(&to_flush_cdc);
         let write_result = match store
             .write_snapshot_and_commit(
                 &snapshot_id,
                 &to_flush_offsets,
                 &to_flush_batches,
                 &partitions_meta,
+                &flush_blobs,
             )
             .await
         {
@@ -2881,7 +2682,7 @@ impl WalPartition {
         // (No re-upload here; WALs were uploaded earlier in flush prior to offset commit.)
 
         match shared_output
-            .sync(batch_stream, output_file_name.clone())
+            .sync(batch_stream, output_file_name.clone(), None)
             .await
         {
             Ok(()) => {

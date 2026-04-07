@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::discover::OutputMetadata;
 use crate::helpers::offsets::Offsets;
+use crate::plugins::cdc::{CheckpointEnvelope, SinkCapability, SourceCapability, SyncContext};
 
 /// Reads records from an external system and feeds them into the pipeline.
 #[async_trait]
@@ -13,6 +14,23 @@ pub trait DataSource: Send + Sync {
         offsets: Arc<Offsets>,
         output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> Result<(), std::io::Error>;
+
+    /// Return the compile-time capability descriptor for this source.
+    /// Default returns `None` for backward compatibility with existing
+    /// connectors that have not yet declared capabilities.
+    fn capability(&self) -> Option<&'static SourceCapability> {
+        None
+    }
+
+    /// For exact-once snapshot-then-log sources: capture a durable resume
+    /// anchor from the source log before starting a snapshot. Returns the
+    /// anchor as an opaque checkpoint envelope that will be persisted through
+    /// the WAL.
+    ///
+    /// Default returns `None` (source does not support anchored bootstrap).
+    fn capture_bootstrap_anchor(&self) -> Option<CheckpointEnvelope> {
+        None
+    }
 }
 
 /// Writes record batches to a destination (S3, disk, database, etc.).
@@ -26,7 +44,15 @@ pub trait DataSink: Send + Sync {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
+        cdc_ctx: Option<&SyncContext>,
     ) -> Result<(), std::io::Error>;
+
+    /// Return the compile-time capability descriptor for this sink.
+    /// Default returns `None` for backward compatibility with existing
+    /// connectors that have not yet declared capabilities.
+    fn capability(&self) -> Option<&'static SinkCapability> {
+        None
+    }
 }
 
 /// Creates or updates schema definitions at a destination (Glue catalog,
@@ -81,8 +107,5 @@ pub trait SchemaSink: Send + Sync {
 /// ```
 #[async_trait]
 pub trait SchemaSource: Send + Sync {
-    async fn read_schema(
-        &self,
-        namespace: &str,
-    ) -> Result<Option<OutputMetadata>, std::io::Error>;
+    async fn read_schema(&self, namespace: &str) -> Result<Option<OutputMetadata>, std::io::Error>;
 }

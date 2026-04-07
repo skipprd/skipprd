@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use aws_credential_types::provider::ProvideCredentials;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use datafusion::arrow::array::*;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::execution::SendableRecordBatchStream;
@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 
 use crate::buffer::BufferChunker;
 use crate::discover::SkipprDataType;
-use crate::helpers::configuration::{Config, DataSinkSnowflakePluginConfig, DataSinkPluginConfig};
+use crate::helpers::configuration::{Config, DataSinkPluginConfig, DataSinkSnowflakePluginConfig};
 use crate::plugins::{DataSink, SchemaSink};
 
 static ENSURED_SCHEMAS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
@@ -21,6 +21,7 @@ static ENSURED_SCHEMAS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
 static TABLE_DDL_GUARDS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
     Lazy::new(DashMap::new);
 static ENSURED_TABLES: Lazy<DashMap<String, Vec<(String, String)>>> = Lazy::new(DashMap::new);
+static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
 const ASYNC_POLL_MAX: u32 = 600;
 const ASYNC_POLL_INTERVAL_MS: u64 = 500;
@@ -107,14 +108,22 @@ impl DataSinkSnowflakePlugin {
             user: Config::getenv("SNOWFLAKE_USER", ""),
             password: {
                 let v = Config::getenv("SNOWFLAKE_PASSWORD", "");
-                if v.is_empty() { None } else { Some(v) }
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
             },
             warehouse: Config::getenv("SNOWFLAKE_WAREHOUSE", ""),
             database: Config::getenv("SNOWFLAKE_DATABASE", ""),
             schema: Config::getenv("SNOWFLAKE_SCHEMA", ""),
             role: {
                 let r = Config::getenv("SNOWFLAKE_ROLE", "");
-                if r.is_empty() { None } else { Some(r) }
+                if r.is_empty() {
+                    None
+                } else {
+                    Some(r)
+                }
             },
             stage: {
                 let s = Config::getenv("SNOWFLAKE_STAGE", "@~");
@@ -123,11 +132,19 @@ impl DataSinkSnowflakePlugin {
             format: None,
             private_key_path: {
                 let p = Config::getenv("SNOWFLAKE_PRIVATE_KEY_PATH", "");
-                if p.is_empty() { None } else { Some(p) }
+                if p.is_empty() {
+                    None
+                } else {
+                    Some(p)
+                }
             },
             staging_s3_bucket: {
                 let v = Config::getenv("SNOWFLAKE_STAGING_S3_BUCKET", "");
-                if v.is_empty() { None } else { Some(v) }
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
             },
             staging_s3_prefix: {
                 let v = Config::getenv("SNOWFLAKE_STAGING_S3_PREFIX", "skippr-staging");
@@ -183,7 +200,9 @@ impl DataSinkSnowflakePlugin {
         Ok(token)
     }
 
-    async fn authenticate_password(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    async fn authenticate_password(
+        &self,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let password = self.config.password.as_deref().unwrap_or_default();
         let url = format!(
             "https://{}.snowflakecomputing.com/session/v1/login-request",
@@ -219,10 +238,13 @@ impl DataSinkSnowflakePlugin {
         Ok(token)
     }
 
-    async fn authenticate_keypair(&self, key_path: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    async fn authenticate_keypair(
+        &self,
+        key_path: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         use base64::{engine::general_purpose::STANDARD, Engine};
         use rsa::pkcs8::DecodePrivateKey;
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         let pem_content = std::fs::read_to_string(key_path)
             .map_err(|e| format!("failed to read private key at {}: {}", key_path, e))?;
@@ -265,10 +287,7 @@ impl DataSinkSnowflakePlugin {
         Ok(jwt)
     }
 
-    fn auth_headers(
-        &self,
-        token: &str,
-    ) -> (String, &'static str) {
+    fn auth_headers(&self, token: &str) -> (String, &'static str) {
         if self.config.private_key_path.is_some() {
             (format!("Bearer {}", token), "KEYPAIR_JWT")
         } else {
@@ -427,10 +446,7 @@ impl DataSinkSnowflakePlugin {
                 .await?;
 
             let body: serde_json::Value = resp.json().await?;
-            let code = body
-                .get("code")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
+            let code = body.get("code").and_then(|c| c.as_str()).unwrap_or("");
 
             match code {
                 "090001" | "000000" | "" => return Ok(body),
@@ -447,9 +463,7 @@ impl DataSinkSnowflakePlugin {
                 _ => {
                     let msg = body["message"].as_str().unwrap_or("unknown error");
                     error!("Snowflake SQL error code={} message={}", code, msg);
-                    return Err(
-                        format!("Snowflake SQL error ({}): {}", code, msg).into(),
-                    );
+                    return Err(format!("Snowflake SQL error ({}): {}", code, msg).into());
                 }
             }
         }
@@ -508,7 +522,10 @@ impl DataSinkSnowflakePlugin {
             .await?;
 
         let body: serde_json::Value = resp.json().await?;
-        let success = body.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+        let success = body
+            .get("success")
+            .and_then(|s| s.as_bool())
+            .unwrap_or(false);
         if !success {
             let msg = body
                 .get("message")
@@ -517,9 +534,7 @@ impl DataSinkSnowflakePlugin {
             return Err(format!("PUT initiation failed: {}", msg).into());
         }
 
-        let data = body
-            .get("data")
-            .ok_or("Missing 'data' in PUT response")?;
+        let data = body.get("data").ok_or("Missing 'data' in PUT response")?;
         let stage_info = data
             .get("stageInfo")
             .ok_or("Missing 'stageInfo' in PUT response")?;
@@ -567,9 +582,7 @@ impl DataSinkSnowflakePlugin {
         })
     }
 
-    fn parse_encryption_material(
-        raw: Option<&serde_json::Value>,
-    ) -> Option<EncryptionMaterial> {
+    fn parse_encryption_material(raw: Option<&serde_json::Value>) -> Option<EncryptionMaterial> {
         let val = raw?;
         // Can be an array of objects — take the first non-null element
         let obj = if val.is_array() {
@@ -696,9 +709,9 @@ impl DataSinkSnowflakePlugin {
             }
         }
 
-        req.send().await.map_err(|e| {
-            format!("S3 upload to Snowflake stage failed: {}", e)
-        })?;
+        req.send()
+            .await
+            .map_err(|e| format!("S3 upload to Snowflake stage failed: {}", e))?;
 
         Ok(())
     }
@@ -710,7 +723,7 @@ impl DataSinkSnowflakePlugin {
         data: &[u8],
         query_stage_master_key: &str,
     ) -> Result<(Vec<u8>, String, String), std::io::Error> {
-        use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
+        use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
         use base64::{engine::general_purpose::STANDARD, Engine};
 
         let master_key = STANDARD
@@ -730,7 +743,9 @@ impl DataSinkSnowflakePlugin {
                 let mut out = Vec::with_capacity($plaintext.len());
                 for chunk in $plaintext.chunks(16) {
                     let mut block = [0u8; 16];
-                    for i in 0..16 { block[i] = chunk[i] ^ prev[i]; }
+                    for i in 0..16 {
+                        block[i] = chunk[i] ^ prev[i];
+                    }
                     let mut ga = GenericArray::from(block);
                     cipher.encrypt_block(&mut ga);
                     prev.copy_from_slice(&ga);
@@ -766,20 +781,42 @@ impl DataSinkSnowflakePlugin {
 
         let (encrypted_data, encrypted_file_key) = match key_len {
             16 => (
-                cbc_encrypt!(aes::Aes128::new(GenericArray::from_slice(&file_key)), padded_data, iv),
-                ecb_encrypt!(aes::Aes128::new(GenericArray::from_slice(&master_key)), padded_key),
+                cbc_encrypt!(
+                    aes::Aes128::new(GenericArray::from_slice(&file_key)),
+                    padded_data,
+                    iv
+                ),
+                ecb_encrypt!(
+                    aes::Aes128::new(GenericArray::from_slice(&master_key)),
+                    padded_key
+                ),
             ),
             24 => (
-                cbc_encrypt!(aes::Aes192::new(GenericArray::from_slice(&file_key)), padded_data, iv),
-                ecb_encrypt!(aes::Aes192::new(GenericArray::from_slice(&master_key)), padded_key),
+                cbc_encrypt!(
+                    aes::Aes192::new(GenericArray::from_slice(&file_key)),
+                    padded_data,
+                    iv
+                ),
+                ecb_encrypt!(
+                    aes::Aes192::new(GenericArray::from_slice(&master_key)),
+                    padded_key
+                ),
             ),
             32 => (
-                cbc_encrypt!(aes::Aes256::new(GenericArray::from_slice(&file_key)), padded_data, iv),
-                ecb_encrypt!(aes::Aes256::new(GenericArray::from_slice(&master_key)), padded_key),
+                cbc_encrypt!(
+                    aes::Aes256::new(GenericArray::from_slice(&file_key)),
+                    padded_data,
+                    iv
+                ),
+                ecb_encrypt!(
+                    aes::Aes256::new(GenericArray::from_slice(&master_key)),
+                    padded_key
+                ),
             ),
             n => {
                 return Err(std::io::Error::other(format!(
-                    "Unsupported master key length: {} bytes", n
+                    "Unsupported master key length: {} bytes",
+                    n
                 )));
             }
         };
@@ -804,14 +841,23 @@ impl DataSinkSnowflakePlugin {
     fn arrow_type_to_snowflake_ddl(dt: &ArrowDataType) -> String {
         match dt {
             ArrowDataType::Boolean => "BOOLEAN".into(),
-            ArrowDataType::Int8 | ArrowDataType::Int16 | ArrowDataType::Int32
-            | ArrowDataType::Int64 | ArrowDataType::UInt8 | ArrowDataType::UInt16
-            | ArrowDataType::UInt32 | ArrowDataType::UInt64 => "NUMBER(38,0)".into(),
-            ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => "DOUBLE".into(),
+            ArrowDataType::Int8
+            | ArrowDataType::Int16
+            | ArrowDataType::Int32
+            | ArrowDataType::Int64
+            | ArrowDataType::UInt8
+            | ArrowDataType::UInt16
+            | ArrowDataType::UInt32
+            | ArrowDataType::UInt64 => "NUMBER(38,0)".into(),
+            ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => {
+                "DOUBLE".into()
+            }
             ArrowDataType::Date32 | ArrowDataType::Date64 => "DATE".into(),
             ArrowDataType::Timestamp(_, _) => "TIMESTAMP_NTZ".into(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => "VARCHAR".into(),
-            ArrowDataType::Struct(_) | ArrowDataType::List(_) | ArrowDataType::LargeList(_)
+            ArrowDataType::Struct(_)
+            | ArrowDataType::List(_)
+            | ArrowDataType::LargeList(_)
             | ArrowDataType::Map(_, _) => "VARIANT".into(),
             _ => "VARCHAR".into(),
         }
@@ -826,23 +872,102 @@ impl DataSinkSnowflakePlugin {
                 let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
                 if a.value(row) { "TRUE" } else { "FALSE" }.to_string()
             }
-            ArrowDataType::Int8 => format!("{}", array.as_any().downcast_ref::<Int8Array>().unwrap().value(row)),
-            ArrowDataType::Int16 => format!("{}", array.as_any().downcast_ref::<Int16Array>().unwrap().value(row)),
-            ArrowDataType::Int32 => format!("{}", array.as_any().downcast_ref::<Int32Array>().unwrap().value(row)),
-            ArrowDataType::Int64 => format!("{}", array.as_any().downcast_ref::<Int64Array>().unwrap().value(row)),
-            ArrowDataType::UInt8 => format!("{}", array.as_any().downcast_ref::<UInt8Array>().unwrap().value(row)),
-            ArrowDataType::UInt16 => format!("{}", array.as_any().downcast_ref::<UInt16Array>().unwrap().value(row)),
-            ArrowDataType::UInt32 => format!("{}", array.as_any().downcast_ref::<UInt32Array>().unwrap().value(row)),
-            ArrowDataType::UInt64 => format!("{}", array.as_any().downcast_ref::<UInt64Array>().unwrap().value(row)),
-            ArrowDataType::Float32 => format!("{}", array.as_any().downcast_ref::<Float32Array>().unwrap().value(row)),
-            ArrowDataType::Float64 => format!("{}", array.as_any().downcast_ref::<Float64Array>().unwrap().value(row)),
+            ArrowDataType::Int8 => format!(
+                "{}",
+                array
+                    .as_any()
+                    .downcast_ref::<Int8Array>()
+                    .unwrap()
+                    .value(row)
+            ),
+            ArrowDataType::Int16 => format!(
+                "{}",
+                array
+                    .as_any()
+                    .downcast_ref::<Int16Array>()
+                    .unwrap()
+                    .value(row)
+            ),
+            ArrowDataType::Int32 => format!(
+                "{}",
+                array
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap()
+                    .value(row)
+            ),
+            ArrowDataType::Int64 => format!(
+                "{}",
+                array
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .value(row)
+            ),
+            ArrowDataType::UInt8 => format!(
+                "{}",
+                array
+                    .as_any()
+                    .downcast_ref::<UInt8Array>()
+                    .unwrap()
+                    .value(row)
+            ),
+            ArrowDataType::UInt16 => format!(
+                "{}",
+                array
+                    .as_any()
+                    .downcast_ref::<UInt16Array>()
+                    .unwrap()
+                    .value(row)
+            ),
+            ArrowDataType::UInt32 => format!(
+                "{}",
+                array
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
+                    .unwrap()
+                    .value(row)
+            ),
+            ArrowDataType::UInt64 => format!(
+                "{}",
+                array
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap()
+                    .value(row)
+            ),
+            ArrowDataType::Float32 => format!(
+                "{}",
+                array
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .unwrap()
+                    .value(row)
+            ),
+            ArrowDataType::Float64 => format!(
+                "{}",
+                array
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .value(row)
+            ),
             ArrowDataType::Date32 => {
-                let days = array.as_any().downcast_ref::<Date32Array>().unwrap().value(row);
-                let date = chrono::NaiveDate::from_num_days_from_ce_opt(days + 719_163).unwrap_or_default();
+                let days = array
+                    .as_any()
+                    .downcast_ref::<Date32Array>()
+                    .unwrap()
+                    .value(row);
+                let date = chrono::NaiveDate::from_num_days_from_ce_opt(days + 719_163)
+                    .unwrap_or_default();
                 format!("'{}'", date.format("%Y-%m-%d"))
             }
             ArrowDataType::Date64 => {
-                let ms = array.as_any().downcast_ref::<Date64Array>().unwrap().value(row);
+                let ms = array
+                    .as_any()
+                    .downcast_ref::<Date64Array>()
+                    .unwrap()
+                    .value(row);
                 let secs = ms / 1000;
                 let dt = chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default();
                 format!("'{}'", dt.format("%Y-%m-%d"))
@@ -850,23 +975,41 @@ impl DataSinkSnowflakePlugin {
             ArrowDataType::Timestamp(unit, _) => {
                 let ts = match unit {
                     datafusion::arrow::datatypes::TimeUnit::Second => {
-                        let a = array.as_any().downcast_ref::<TimestampSecondArray>().unwrap();
+                        let a = array
+                            .as_any()
+                            .downcast_ref::<TimestampSecondArray>()
+                            .unwrap();
                         chrono::DateTime::from_timestamp(a.value(row), 0)
                     }
                     datafusion::arrow::datatypes::TimeUnit::Millisecond => {
-                        let a = array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap();
+                        let a = array
+                            .as_any()
+                            .downcast_ref::<TimestampMillisecondArray>()
+                            .unwrap();
                         let v = a.value(row);
                         chrono::DateTime::from_timestamp(v / 1000, ((v % 1000) * 1_000_000) as u32)
                     }
                     datafusion::arrow::datatypes::TimeUnit::Microsecond => {
-                        let a = array.as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
+                        let a = array
+                            .as_any()
+                            .downcast_ref::<TimestampMicrosecondArray>()
+                            .unwrap();
                         let v = a.value(row);
-                        chrono::DateTime::from_timestamp(v / 1_000_000, ((v % 1_000_000) * 1000) as u32)
+                        chrono::DateTime::from_timestamp(
+                            v / 1_000_000,
+                            ((v % 1_000_000) * 1000) as u32,
+                        )
                     }
                     datafusion::arrow::datatypes::TimeUnit::Nanosecond => {
-                        let a = array.as_any().downcast_ref::<TimestampNanosecondArray>().unwrap();
+                        let a = array
+                            .as_any()
+                            .downcast_ref::<TimestampNanosecondArray>()
+                            .unwrap();
                         let v = a.value(row);
-                        chrono::DateTime::from_timestamp(v / 1_000_000_000, (v % 1_000_000_000) as u32)
+                        chrono::DateTime::from_timestamp(
+                            v / 1_000_000_000,
+                            (v % 1_000_000_000) as u32,
+                        )
                     }
                 };
                 let dt = ts.unwrap_or_default();
@@ -1009,10 +1152,13 @@ impl DataSinkSnowflakePlugin {
                 cols_sql.join(", ")
             );
             info!("Snowflake DDL: {}", create_ddl);
-            self.execute_sql(&create_ddl).await.map(|_| ()).map_err(|e| {
-                error!("Snowflake CREATE TABLE failed: {}", e);
-                std::io::Error::other(format!("Snowflake CREATE TABLE: {}", e))
-            })?;
+            self.execute_sql(&create_ddl)
+                .await
+                .map(|_| ())
+                .map_err(|e| {
+                    error!("Snowflake CREATE TABLE failed: {}", e);
+                    std::io::Error::other(format!("Snowflake CREATE TABLE: {}", e))
+                })?;
 
             for (col_name, sf_type) in col_defs {
                 let alter_ddl = format!(
@@ -1131,18 +1277,12 @@ impl DataSinkSnowflakePlugin {
             fq_table, stage, table_name, parquet_filename
         );
 
-        info!(
-            "Snowflake COPY INTO {} ({} rows)",
-            fq_table, row_count
-        );
+        info!("Snowflake COPY INTO {} ({} rows)", fq_table, row_count);
 
         let copy_result = self.execute_sql(&copy_sql).await;
 
         // Best-effort cleanup of the staged file
-        let remove_sql = format!(
-            "REMOVE {}/{}/{}",
-            stage, table_name, parquet_filename
-        );
+        let remove_sql = format!("REMOVE {}/{}/{}", stage, table_name, parquet_filename);
         let _ = self.execute_sql(&remove_sql).await;
 
         match copy_result {
@@ -1351,8 +1491,8 @@ impl DataSinkSnowflakePlugin {
 
         let mut total_rows = 0usize;
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result
-                .map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+            let batch =
+                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
             let num_rows = batch.num_rows();
             if num_rows == 0 {
                 continue;
@@ -1363,10 +1503,8 @@ impl DataSinkSnowflakePlugin {
                     .map(|row| {
                         let vals: Vec<String> = (0..batch.num_columns())
                             .map(|col_idx| {
-                                let raw = Self::arrow_value_to_sql(
-                                    batch.column(col_idx).as_ref(),
-                                    row,
-                                );
+                                let raw =
+                                    Self::arrow_value_to_sql(batch.column(col_idx).as_ref(), row);
                                 let col_name = &col_defs[col_idx].0;
                                 let cast_type = table_col_types
                                     .get(col_name)
@@ -1396,9 +1534,7 @@ impl DataSinkSnowflakePlugin {
                 let value_rows: Vec<String> = (0..num_rows)
                     .map(|row| {
                         let vals: Vec<String> = (0..batch.num_columns())
-                            .map(|col| {
-                                Self::arrow_value_to_sql(batch.column(col).as_ref(), row)
-                            })
+                            .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
                             .collect();
                         format!("({})", vals.join(", "))
                     })
@@ -1436,6 +1572,228 @@ impl DataSinkSnowflakePlugin {
         );
         Ok(())
     }
+
+    async fn sync_cdc(
+        &self,
+        mut stream: SendableRecordBatchStream,
+        filename: String,
+        ctx: &crate::plugins::cdc::SyncContext,
+    ) -> Result<(), std::io::Error> {
+        use crate::metrics::counters;
+        use crate::plugins::cdc::MutationKind;
+        use crate::plugins::data_sink::cdc_apply::{
+            ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
+            tombstone_table_name, upsert_if_newer_sql, SqlDialect,
+        };
+
+        let contract = match ctx.contract.as_ref() {
+            Some(c) if !c.business_key_columns.is_empty() => c,
+            _ => {
+                info!(target: "snowflake", "CDC context without contract or business keys; falling back to append");
+                return self.inner_sync(stream, filename).await;
+            }
+        };
+
+        counters::inc_uploads_in_flight();
+
+        let namespace = BufferChunker::decode_file_namespace(&filename);
+        let table_name = Self::namespace_to_table_name(&namespace);
+        let arrow_schema = stream.schema();
+
+        let col_defs: Vec<(String, String)> = arrow_schema
+            .fields()
+            .iter()
+            .map(|f| {
+                (
+                    f.name().to_uppercase(),
+                    Self::arrow_type_to_snowflake_ddl(f.data_type()),
+                )
+            })
+            .collect();
+
+        let fq_table = format!(
+            "\"{}\".\"{}\".\"{}\"",
+            self.config.database,
+            self.config.schema,
+            table_name.to_uppercase()
+        );
+
+        self.ensure_schema().await.map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
+        self.ensure_table(&fq_table, &col_defs).await.map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
+
+        if CDC_DDL_ENSURED.insert(fq_table.clone()) {
+            let order_col_ddl = ddl_add_order_token_column(SqlDialect::Snowflake, &fq_table);
+            if let Err(e) = self.execute_sql(&order_col_ddl).await {
+                CDC_DDL_ENSURED.remove(&fq_table);
+                counters::dec_uploads_in_flight();
+                return Err(std::io::Error::other(format!("Snowflake CDC DDL: {}", e)));
+            }
+
+            let tombstone_tbl = tombstone_table_name(&fq_table);
+            let bk_type_pairs: Vec<(String, String)> = contract
+                .business_key_columns
+                .iter()
+                .map(|bk| {
+                    let sf_type = col_defs
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(bk))
+                        .map(|(_, t)| t.clone())
+                        .unwrap_or_else(|| "VARCHAR".to_string());
+                    (bk.clone(), sf_type)
+                })
+                .collect();
+            let tombstone_ddl =
+                ddl_create_tombstone_table(SqlDialect::Snowflake, &tombstone_tbl, &bk_type_pairs);
+            if let Err(e) = self.execute_sql(&tombstone_ddl).await {
+                CDC_DDL_ENSURED.remove(&fq_table);
+                counters::dec_uploads_in_flight();
+                return Err(std::io::Error::other(format!("Snowflake CDC DDL: {}", e)));
+            }
+
+            info!(target: "snowflake", "CDC DDL applied for {}", fq_table);
+        }
+
+        let tombstone_table = tombstone_table_name(&fq_table);
+
+        let bk_names_quoted: Vec<String> = contract
+            .business_key_columns
+            .iter()
+            .map(|bk| format!("\"{}\"", bk))
+            .collect();
+
+        let bk_types: Vec<String> = contract
+            .business_key_columns
+            .iter()
+            .map(|bk| {
+                col_defs
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(bk))
+                    .map(|(_, t)| t.clone())
+                    .unwrap_or_else(|| "VARCHAR".to_string())
+            })
+            .collect();
+
+        let col_names_quoted: Vec<String> = arrow_schema
+            .fields()
+            .iter()
+            .map(|f| format!("\"{}\"", f.name().to_uppercase()))
+            .collect();
+
+        let mut row_offset = 0usize;
+        let mut total_rows = 0usize;
+
+        while let Some(batch_result) = stream.next().await {
+            let batch =
+                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+            let num_rows = batch.num_rows();
+            if num_rows == 0 {
+                continue;
+            }
+
+            for row in 0..num_rows {
+                let meta_idx = row_offset + row;
+                let row_meta = ctx.part_meta.rows.get(meta_idx).ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "CDC row metadata missing at index {} (have {})",
+                        meta_idx,
+                        ctx.part_meta.rows.len()
+                    ))
+                })?;
+
+                let order_token_hex: String = row_meta
+                    .order_token
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect();
+
+                match row_meta.mutation {
+                    MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
+                        let mut all_names = col_names_quoted.clone();
+                        all_names.push("\"_skippr_order_token\"".to_string());
+
+                        let mut all_values: Vec<String> = (0..batch.num_columns())
+                            .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
+                            .collect();
+                        all_values.push(format!("HEX_DECODE_BINARY('{}')", order_token_hex));
+
+                        let sql = upsert_if_newer_sql(
+                            SqlDialect::Snowflake,
+                            &fq_table,
+                            &tombstone_table,
+                            &all_names,
+                            &all_values,
+                            &bk_names_quoted,
+                            &order_token_hex,
+                        );
+
+                        if let Err(e) = self.execute_sql(&sql).await {
+                            error!("CDC upsert failed for {}: {}", fq_table, e);
+                            counters::dec_uploads_in_flight();
+                            return Err(std::io::Error::other(format!(
+                                "Snowflake CDC upsert: {}",
+                                e
+                            )));
+                        }
+                    }
+                    MutationKind::Delete => {
+                        let bk_values: Vec<String> = contract
+                            .business_key_columns
+                            .iter()
+                            .map(|bk| {
+                                let col_idx = arrow_schema
+                                    .fields()
+                                    .iter()
+                                    .position(|f| f.name().eq_ignore_ascii_case(bk))
+                                    .unwrap_or(0);
+                                Self::arrow_value_to_sql(batch.column(col_idx).as_ref(), row)
+                            })
+                            .collect();
+
+                        let sql = delete_if_newer_sql(
+                            SqlDialect::Snowflake,
+                            &fq_table,
+                            &tombstone_table,
+                            &bk_names_quoted,
+                            &bk_values,
+                            &bk_types,
+                            &order_token_hex,
+                        );
+
+                        if let Err(e) = self.execute_sql(&sql).await {
+                            error!("CDC delete failed for {}: {}", fq_table, e);
+                            counters::dec_uploads_in_flight();
+                            return Err(std::io::Error::other(format!(
+                                "Snowflake CDC delete: {}",
+                                e
+                            )));
+                        }
+                    }
+                }
+            }
+
+            row_offset += num_rows;
+            total_rows += num_rows;
+            counters::add_parquet_rows(num_rows as u64);
+            info!(
+                "CDC applied {} rows to {} (total: {})",
+                num_rows, table_name, total_rows
+            );
+        }
+
+        counters::add_upload(1);
+        counters::dec_uploads_in_flight();
+        info!(
+            "Snowflake CDC sync complete: {} total rows into {}",
+            total_rows, table_name
+        );
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1444,8 +1802,16 @@ impl DataSink for DataSinkSnowflakePlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
+        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
-        self.inner_sync(stream, filename).await
+        match cdc_ctx {
+            Some(ctx) => self.sync_cdc(stream, filename, ctx).await,
+            None => self.inner_sync(stream, filename).await,
+        }
+    }
+
+    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
+        Some(&crate::plugins::cdc::sink_capabilities::SNOWFLAKE)
     }
 }
 
@@ -1460,12 +1826,11 @@ impl SchemaSink for DataSinkSnowflakePlugin {
 
         self.ensure_schema().await?;
 
-        let fields: std::collections::HashMap<String, crate::discover::OutputMetadata> =
-            metadata
-                .fields
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+        let fields: std::collections::HashMap<String, crate::discover::OutputMetadata> = metadata
+            .fields
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
         let arrow_schema = convert_skippr_to_arrow(Box::new(fields)).map_err(|e| {
             std::io::Error::other(format!(

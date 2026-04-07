@@ -237,6 +237,7 @@ impl SegmentObject {
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
         parts_meta: &HashMap<PartitionKey, (u64, SystemTime)>,
+        part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
     ) -> io::Result<(
         SegmentFileMetadata,
         u64,      /*rows*/
@@ -250,7 +251,7 @@ impl SegmentObject {
             S3MultipartWriter::begin(client.clone(), bucket.clone(), seg_key.clone()).await?;
 
         writer.write_bytes(b"SEGF")?;
-        writer.write_bytes(&2u32.to_le_bytes())?;
+        writer.write_bytes(&3u32.to_le_bytes())?;
         let created_at_secs = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -288,6 +289,13 @@ impl SegmentObject {
                 .as_secs();
             writer.write_bytes(&p_bytes.to_le_bytes())?;
             writer.write_bytes(&updated_secs.to_le_bytes())?;
+
+            let meta_blob = part_meta_blobs.get(key).cloned().unwrap_or_default();
+            let meta_len = meta_blob.len() as u64;
+            writer.write_bytes(&meta_len.to_le_bytes())?;
+            if meta_len > 0 {
+                writer.write_bytes(&meta_blob)?;
+            }
 
             let mut data_buf: Vec<u8> = Vec::new();
             {

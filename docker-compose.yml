@@ -8,6 +8,25 @@ services:
       POSTGRES_DB: skippr_test
     ports:
       - "15432:5432"
+    command: >
+      postgres
+      -c wal_level=logical
+      -c max_replication_slots=4
+      -c max_wal_senders=4
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  postgres-target:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: skippr_test
+    ports:
+      - "15433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -21,6 +40,14 @@ services:
       MYSQL_DATABASE: skippr_test
     ports:
       - "13306:3306"
+    command: >
+      --server-id=1
+      --log-bin=mysql-bin
+      --binlog-format=ROW
+      --binlog-row-image=FULL
+      --mysql-native-password=ON
+      --gtid-mode=ON
+      --enforce-gtid-consistency=ON
     volumes:
       - ./tests/e2e/testdata/seed.sql:/docker-entrypoint-initdb.d/seed.sql
     healthcheck:
@@ -67,10 +94,20 @@ services:
     image: mongo:7
     ports:
       - "17017:27017"
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 5s
-      timeout: 5s
+      test: >
+        mongosh --eval "
+          try {
+            rs.status().ok
+          } catch(e) {
+            rs.initiate({_id:'rs0', members:[{_id:0, host:'localhost:27017'}]});
+            sleep(2000);
+            rs.status().ok
+          }
+        " --quiet
+      interval: 10s
+      timeout: 10s
       retries: 10
 
   rabbitmq:

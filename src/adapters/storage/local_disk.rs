@@ -106,7 +106,12 @@ impl StorageAdapter for LocalDiskStorageAdapter {
                 }
             }
         }
-        walk(&std::path::PathBuf::from(&self.root), &self.root, prefix, &mut out);
+        walk(
+            &std::path::PathBuf::from(&self.root),
+            &self.root,
+            prefix,
+            &mut out,
+        );
         out.sort();
         Ok(out)
     }

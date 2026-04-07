@@ -1,9 +1,9 @@
 use crate::buffer::segment_file::{PartitionKey, SegmentFile, SegmentFileMetadata};
 use crate::buffer::segment_object::SegmentObject;
 use crate::helpers::configuration::Config;
-use async_trait::async_trait;
 use arrow::array::RecordBatch;
 use arrow::ipc::reader::StreamReader;
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -15,7 +15,9 @@ use url::Url;
 
 /// Where a segment was written -- compiler-enforced, no Options.
 pub enum SegmentWriteLocation {
-    Disk { path: PathBuf },
+    Disk {
+        path: PathBuf,
+    },
     S3 {
         key: String,
         bucket: String,
@@ -60,6 +62,7 @@ pub trait WalStore {
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
         partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/)>,
+        part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
     ) -> io::Result<SegmentWriteResult>;
 }
 
@@ -86,18 +89,19 @@ impl WalStore for S3WalStore {
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
         partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/)>,
+        part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
     ) -> io::Result<SegmentWriteResult> {
         let client = crate::helpers::s3::get_s3_client().await;
-        let (meta, total_rows, sha256, bucket, key, data) =
-            SegmentObject::stream_snapshot_to_s3(
-                &client,
-                &self.prefix_url,
-                snapshot_id,
-                offsets,
-                batches,
-                partitions_meta,
-            )
-            .await?;
+        let (meta, total_rows, sha256, bucket, key, data) = SegmentObject::stream_snapshot_to_s3(
+            &client,
+            &self.prefix_url,
+            snapshot_id,
+            offsets,
+            batches,
+            partitions_meta,
+            part_meta_blobs,
+        )
+        .await?;
         Ok(SegmentWriteResult {
             meta,
             total_rows,
@@ -118,11 +122,12 @@ impl WalStore for DiskWalStore {
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
         partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/)>,
+        part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
     ) -> io::Result<SegmentWriteResult> {
         let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
         let seg_file = SegmentFile::new(&seg_dir, snapshot_id)?;
         let (meta, total_rows, sha256) =
-            seg_file.write_snapshot(offsets, batches, partitions_meta)?;
+            seg_file.write_snapshot(offsets, batches, partitions_meta, part_meta_blobs)?;
         let header =
             SegmentFile::build_commit_header_bytes(meta.num_partitions, meta.total_bytes, &sha256);
         let commit_path = seg_file.path.with_extension("seg.commit");

@@ -9,7 +9,7 @@ fn update_retry_ema_x100() -> u64 {
     let total = crate::metrics::counters::S3_WAL_RETRIES_TOTAL.load(Ordering::Relaxed);
     let last = LAST_WAL_RETRIES.swap(total, Ordering::SeqCst);
     let delta = total.saturating_sub(last); // retries during this tick
-                                           // EMA_x100 = 0.8 * prev + 0.2 * (delta * 100)
+                                            // EMA_x100 = 0.8 * prev + 0.2 * (delta * 100)
     let prev = crate::metrics::counters::S3_WAL_RETRY_EMA_X100.load(Ordering::Relaxed);
     let ema = ((prev.saturating_mul(80))
         .saturating_add(delta.saturating_mul(100).saturating_mul(20)))
@@ -233,7 +233,8 @@ pub fn drain_tick(num_cpus: usize, has_backlog: bool) {
         crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(upload_next, Ordering::Relaxed);
     }
     if wal_next != wal_cur {
-        crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(wal_next, Ordering::Relaxed);
+        crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
+            .store(wal_next, Ordering::Relaxed);
     }
 
     if (upload_next != upload_cur || wal_next != wal_cur) && Config::log_wal_enabled() {

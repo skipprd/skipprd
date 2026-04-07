@@ -102,34 +102,34 @@ impl DataSourceKinesisPlugin {
     }
 
     pub async fn new() -> Self {
-        let config: DataSourceKinesisPluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(input_config) => input_config.into(),
-                Err(_) => DataSourceKinesisPluginConfig {
-                    stream_name: Config::getenv("KINESIS_STREAM_NAME", ""),
-                    region: {
-                        let r = Config::getenv("AWS_DEFAULT_REGION", "");
-                        if r.is_empty() {
-                            None
-                        } else {
-                            Some(r)
-                        }
-                    },
-                    endpoint_url: None,
-                    mode: None,
-                    format: None,
-                    batch_size_bytes: Some(
-                        Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
-                            .parse::<i64>()
-                            .unwrap_or(1_024_000),
-                    ),
-                    batch_size_seconds: Some(
-                        Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "600")
-                            .parse::<i64>()
-                            .unwrap_or(600),
-                    ),
+        let config: DataSourceKinesisPluginConfig = match Config::get_pipeline_input_plugin_config()
+        {
+            Ok(input_config) => input_config.into(),
+            Err(_) => DataSourceKinesisPluginConfig {
+                stream_name: Config::getenv("KINESIS_STREAM_NAME", ""),
+                region: {
+                    let r = Config::getenv("AWS_DEFAULT_REGION", "");
+                    if r.is_empty() {
+                        None
+                    } else {
+                        Some(r)
+                    }
                 },
-            };
+                endpoint_url: None,
+                mode: None,
+                format: None,
+                batch_size_bytes: Some(
+                    Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
+                        .parse::<i64>()
+                        .unwrap_or(1_024_000),
+                ),
+                batch_size_seconds: Some(
+                    Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "600")
+                        .parse::<i64>()
+                        .unwrap_or(600),
+                ),
+            },
+        };
 
         let mut loader = aws_config::defaults(BehaviorVersion::latest());
         if let Some(ref region) = config.region {
@@ -172,11 +172,7 @@ impl DataSourceKinesisPlugin {
             *last_seq = Some(last);
         }
         let mut tasks = IngestTasks::new();
-        tasks.add(IngestTask::new(
-            batch,
-            offsets.clone(),
-            output.clone(),
-        ));
+        tasks.add(IngestTask::new(batch, offsets.clone(), output.clone()));
         self.ingest
             .ingest_file(&Arc::new(tasks), offsets, output.clone());
         let stream = self.config.stream_name.clone();
@@ -195,11 +191,7 @@ impl DataSourceKinesisPlugin {
         let mut token: Option<String> = None;
         loop {
             let out = if let Some(ref t) = token {
-                self.client
-                    .list_shards()
-                    .next_token(t)
-                    .send()
-                    .await
+                self.client.list_shards().next_token(t).send().await
             } else {
                 self.client
                     .list_shards()
@@ -230,12 +222,7 @@ impl DataSourceKinesisPlugin {
             return;
         }
 
-        let stream_mode = self
-            .config
-            .mode
-            .as_deref()
-            .unwrap_or("batch")
-            == "stream";
+        let stream_mode = self.config.mode.as_deref().unwrap_or("batch") == "stream";
         let batch_limit = self.config.batch_size_bytes.unwrap_or(1_024_000).max(1) as usize;
         let ns_display = format!("kinesis.{}", stream_name);
 
@@ -255,14 +242,7 @@ impl DataSourceKinesisPlugin {
         let mut iterators: HashMap<String, String> = HashMap::new();
         for sid in &shard_ids {
             let ckpt = Self::read_checkpoint(&stream_name, sid).await;
-            match Self::new_shard_iterator(
-                &self.client,
-                &stream_name,
-                sid,
-                ckpt.as_deref(),
-            )
-            .await
-            {
+            match Self::new_shard_iterator(&self.client, &stream_name, sid, ckpt.as_deref()).await {
                 Ok(it) => {
                     iterators.insert(sid.clone(), it);
                 }
@@ -296,13 +276,7 @@ impl DataSourceKinesisPlugin {
                     continue;
                 };
 
-                let resp = match self
-                    .client
-                    .get_records()
-                    .shard_iterator(&iter)
-                    .send()
-                    .await
-                {
+                let resp = match self.client.get_records().shard_iterator(&iter).send().await {
                     Ok(r) => r,
                     Err(e) => {
                         error!("Kinesis get_records {}: {}", sid, e);
@@ -359,6 +333,7 @@ impl DataSourceKinesisPlugin {
                         bytes,
                         source_uri: format!("kinesis://{stream_name}/{sid}"),
                         namespace: Some(ns_display.clone()),
+                        cdc_rows: None,
                     });
                     *bbytes += bytes;
                     *last_seq = Some(seq);

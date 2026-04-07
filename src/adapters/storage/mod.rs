@@ -1,12 +1,12 @@
-mod local_disk;
-mod s3;
 #[cfg(test)]
 mod in_memory;
+mod local_disk;
+mod s3;
 
-pub use local_disk::LocalDiskStorageAdapter;
-pub use s3::S3StorageAdapter;
 #[cfg(test)]
 pub use in_memory::InMemoryStorageAdapter;
+pub use local_disk::LocalDiskStorageAdapter;
+pub use s3::S3StorageAdapter;
 
 use async_trait::async_trait;
 use once_cell::sync::OnceCell;

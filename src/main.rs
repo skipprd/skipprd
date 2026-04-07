@@ -12,8 +12,8 @@ use std::{io, process};
 
 use std::sync::Arc;
 
-use std::fs;
 use std::collections::HashMap;
+use std::fs;
 
 use std::sync::atomic::Ordering;
 use std::thread::sleep;
@@ -40,27 +40,27 @@ use skippr::helpers::offsets::Offsets;
 
 use skippr::plugins::athena::DataSinkAthenaPlugin;
 
+use skippr::plugins::bigquery_output::DataSinkBigqueryPlugin;
 use skippr::plugins::dynamodb_input::DataSourceDynamodbPlugin;
 use skippr::plugins::kinesis_input::DataSourceKinesisPlugin;
 use skippr::plugins::mssql_input::DataSourceMssqlPlugin;
 use skippr::plugins::mysql_input::DataSourceMysqlPlugin;
+use skippr::plugins::postgres_output::DataSinkPostgresPlugin;
 use skippr::plugins::s3_input::DataSourceS3Plugin;
+use skippr::plugins::snowflake_output::DataSinkSnowflakePlugin;
 use skippr::plugins::sqs_input::DataSourceSqsPlugin;
 use skippr::plugins::stdin_input::DataSourceStdinPlugin;
 use skippr::plugins::stdout_output::DataSinkStdoutPlugin;
-use skippr::plugins::bigquery_output::DataSinkBigqueryPlugin;
-use skippr::plugins::postgres_output::DataSinkPostgresPlugin;
-use skippr::plugins::snowflake_output::DataSinkSnowflakePlugin;
 
 use skippr::metrics::{Metrics, MetricsStatus};
 use skippr::plugins::file_input::DataSourceLocalFilePlugin;
 use skippr::plugins::s3_output::DataSinkS3Plugin;
 use skippr::{LOGGER, METADATA, METRICS, RUNNING};
 
-use datafusion::prelude::*;
 use datafusion::physical_plan::SendableRecordBatchStream;
-use skippr::buffer::ingest_buffer::{wal_recover, Buffers};
+use datafusion::prelude::*;
 use skippr::benchmark::PerformanceBenchmark;
+use skippr::buffer::ingest_buffer::{wal_recover, Buffers};
 use skippr::ingest_work::Ingest;
 use skippr::plugins::file_output::DataSinkFilePlugin;
 use skippr::plugins::DataSink;
@@ -68,7 +68,6 @@ use skippr::sqlrt::doc_parser::SqlDocParser;
 use skippr::sqlrt::docs::{get_docs_in_format, DocFormat};
 use skippr::sqlrt::query::query;
 use std::io::IsTerminal as _;
-
 
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
 //     Lazy::new(|| TimedRwLock::new("display_metrics".to_string(), AtomicBool::new(false)));
@@ -89,6 +88,7 @@ impl DataSink for OutputRouter {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
+        cdc_ctx: Option<&skippr::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         let sink_ref = BufferChunker::decode_file_sink_ref(&filename);
         let target_sink_ref = if sink_ref.is_empty() {
@@ -102,9 +102,8 @@ impl DataSink for OutputRouter {
                 target_sink_ref
             ))
         })?;
-        plugin.sync(stream, filename).await
+        plugin.sync(stream, filename, cdc_ctx).await
     }
-
 }
 
 // @todo, last_ran should be the updated_at timestamp for the file DATA_DIR/LASTRAN
@@ -718,9 +717,6 @@ async fn sync(output_mode: &str) {
 
     let _offsets_clone = offsets_db.clone();
 
-    // One-time migration: backfill .seg.commit and cleanup legacy segs before WAL recovery
-    Buffers::migrate_segs_once();
-
     wal_recover(offsets_db.clone())
         .await
         .expect("Failed to recover WAL index");
@@ -734,6 +730,51 @@ async fn sync(output_mode: &str) {
         .await
         .unwrap();
     let shared_output = Arc::new(output);
+
+    // CDC compatibility validation at startup
+    {
+        use skippr::plugins::cdc::{
+            derive_and_validate, set_global_cdc_contract, CompatibilityResult,
+        };
+        let pipeline = Config::get_pipeline_config();
+        if let Some(ref cdc_cfg) = pipeline.cdc {
+            let input_name = Config::get_pipeline_input_plugin_name();
+            let src_cap = source_capability_for_plugin(&input_name);
+            let sink_cap = sink_capability_for_plugin(&output_plugin_name);
+            if let (Some(src), Some(snk)) = (src_cap, sink_cap) {
+                match derive_and_validate(src, snk, "default", &cdc_cfg.business_key_columns) {
+                    CompatibilityResult::Compatible(guarantee) => {
+                        info!(
+                            "CDC validation passed: source={} sink={} enforced_guarantee={:?}",
+                            src.name, snk.name, guarantee
+                        );
+                        let contract = build_cdc_contract(cdc_cfg, "default", guarantee);
+                        set_global_cdc_contract(Some(contract));
+                    }
+                    CompatibilityResult::Incompatible(reasons) => {
+                        for r in &reasons {
+                            error!("CDC incompatibility: {}", r);
+                        }
+                        panic!(
+                            "CDC validation failed: source={} sink={} — {} reason(s)",
+                            src.name,
+                            snk.name,
+                            reasons.len()
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    "CDC config present but source '{}' or sink '{}' has not declared capabilities; \
+                     validation skipped. The pipeline will run in append mode.",
+                    input_name, output_plugin_name
+                );
+                set_global_cdc_contract(None);
+            }
+        } else {
+            set_global_cdc_contract(None);
+        }
+    }
 
     Buffers::start_compactor_service(shared_output.clone(), offsets_db.clone());
 
@@ -970,8 +1011,7 @@ async fn build_output_plugin_from_config(
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Athena(athena_config) => {
-            let plugin =
-                DataSinkAthenaPlugin::new_with_config(buffer_name, athena_config).await;
+            let plugin = DataSinkAthenaPlugin::new_with_config(buffer_name, athena_config).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::S3(s3_config) => {
@@ -979,18 +1019,15 @@ async fn build_output_plugin_from_config(
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Snowflake(sf_config) => {
-            let plugin =
-                DataSinkSnowflakePlugin::new_with_config(buffer_name, sf_config).await;
+            let plugin = DataSinkSnowflakePlugin::new_with_config(buffer_name, sf_config).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Bigquery(bq_config) => {
-            let plugin =
-                DataSinkBigqueryPlugin::new_with_config(buffer_name, bq_config).await;
+            let plugin = DataSinkBigqueryPlugin::new_with_config(buffer_name, bq_config).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Postgres(pg_config) => {
-            let plugin =
-                DataSinkPostgresPlugin::new_with_config(buffer_name, pg_config).await;
+            let plugin = DataSinkPostgresPlugin::new_with_config(buffer_name, pg_config).await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Stdout => {
@@ -998,39 +1035,75 @@ async fn build_output_plugin_from_config(
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::AzureBlob(c) => {
-            let plugin = skippr::plugins::azure_blob_output::DataSinkAzureBlobPlugin::new_with_config(buffer_name, Some(c)).await;
+            let plugin =
+                skippr::plugins::azure_blob_output::DataSinkAzureBlobPlugin::new_with_config(
+                    buffer_name,
+                    Some(c),
+                )
+                .await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Gcs(c) => {
-            let plugin = skippr::plugins::gcs_output::DataSinkGcsPlugin::new_with_config(buffer_name, Some(c)).await;
+            let plugin = skippr::plugins::gcs_output::DataSinkGcsPlugin::new_with_config(
+                buffer_name,
+                Some(c),
+            )
+            .await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Synapse(c) => {
-            let plugin = skippr::plugins::synapse_output::DataSinkSynapsePlugin::new_with_config(buffer_name, c).await;
+            let plugin = skippr::plugins::synapse_output::DataSinkSynapsePlugin::new_with_config(
+                buffer_name,
+                c,
+            )
+            .await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Sftp(c) => {
-            let plugin = skippr::plugins::sftp_output::DataSinkSftpPlugin::new_with_config(buffer_name, c).await;
+            let plugin =
+                skippr::plugins::sftp_output::DataSinkSftpPlugin::new_with_config(buffer_name, c)
+                    .await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Amqp(c) => {
-            let plugin = skippr::plugins::amqp_output::DataSinkAmqpPlugin::new_with_config(buffer_name, c).await;
+            let plugin =
+                skippr::plugins::amqp_output::DataSinkAmqpPlugin::new_with_config(buffer_name, c)
+                    .await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Databricks(c) => {
-            let plugin = skippr::plugins::databricks_output::DataSinkDatabricksPlugin::new_with_config(buffer_name, c).await;
+            let plugin =
+                skippr::plugins::databricks_output::DataSinkDatabricksPlugin::new_with_config(
+                    buffer_name,
+                    c,
+                )
+                .await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Clickhouse(c) => {
-            let plugin = skippr::plugins::clickhouse_output::DataSinkClickhousePlugin::new_with_config(buffer_name, c).await;
+            let plugin =
+                skippr::plugins::clickhouse_output::DataSinkClickhousePlugin::new_with_config(
+                    buffer_name,
+                    c,
+                )
+                .await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Redshift(c) => {
-            let plugin = skippr::plugins::redshift_output::DataSinkRedshiftPlugin::new_with_config(buffer_name, c).await;
+            let plugin = skippr::plugins::redshift_output::DataSinkRedshiftPlugin::new_with_config(
+                buffer_name,
+                c,
+            )
+            .await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
         DataSinkPluginConfig::Motherduck(c) => {
-            let plugin = skippr::plugins::motherduck_output::DataSinkMotherduckPlugin::new_with_config(buffer_name, c).await;
+            let plugin =
+                skippr::plugins::motherduck_output::DataSinkMotherduckPlugin::new_with_config(
+                    buffer_name,
+                    c,
+                )
+                .await;
             Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
         }
     }
@@ -1044,7 +1117,9 @@ pub async fn sync_output_plugin(
 
     let primary_sink_ref = Config::get_pipeline_output_sink_ref();
     let primary_plugin = match Config::get_pipeline_output_plugin_config() {
-        Ok(output_config) => build_output_plugin_from_config(output_config, buffer_name.clone()).await?,
+        Ok(output_config) => {
+            build_output_plugin_from_config(output_config, buffer_name.clone()).await?
+        }
         Err(_) if plugin_name.is_empty() => {
             info!(
                 "No Data {} plugin specified, defaulting to local file",
@@ -1091,6 +1166,75 @@ pub async fn sync_deadletter_plugin(
     Ok(Some((sink_ref, plugin)))
 }
 
+fn build_cdc_contract(
+    cfg: &skippr::helpers::configuration::CdcPipelineConfig,
+    namespace: &str,
+    effective_guarantee: skippr::plugins::cdc::EffectiveGuarantee,
+) -> skippr::plugins::cdc::NamespaceContract {
+    skippr::plugins::cdc::NamespaceContract {
+        namespace: namespace.to_string(),
+        business_key_columns: cfg.business_key_columns.clone(),
+        effective_guarantee,
+    }
+}
+
+fn source_capability_for_plugin(
+    name: &str,
+) -> Option<&'static skippr::plugins::cdc::SourceCapability> {
+    use skippr::plugins::cdc::source_capabilities;
+    match name {
+        "Postgres" => Some(&source_capabilities::POSTGRES),
+        "Mysql" => Some(&source_capabilities::MYSQL),
+        "Mongodb" => Some(&source_capabilities::MONGODB),
+        "Dynamodb" => Some(&source_capabilities::DYNAMODB),
+        "Kafka" => Some(&source_capabilities::KAFKA),
+        "S3" => Some(&source_capabilities::S3),
+        "Kinesis" => Some(&source_capabilities::KINESIS),
+        "Sqs" => Some(&source_capabilities::SQS),
+        "File" => Some(&source_capabilities::FILE),
+        "Mssql" => Some(&source_capabilities::MSSQL),
+        "HttpClient" => Some(&source_capabilities::HTTP_CLIENT),
+        "HttpServer" => Some(&source_capabilities::HTTP_SERVER),
+        "Stdin" => Some(&source_capabilities::STDIN),
+        "Eventbridge" => Some(&source_capabilities::EVENTBRIDGE),
+        "Sns" => Some(&source_capabilities::SNS),
+        "Mqtt" => Some(&source_capabilities::MQTT),
+        "Sftp" => Some(&source_capabilities::SFTP),
+        "Redshift" => Some(&source_capabilities::REDSHIFT),
+        "Amqp" => Some(&source_capabilities::AMQP),
+        "Websocket" => Some(&source_capabilities::WEBSOCKET),
+        "Statsd" => Some(&source_capabilities::STATSD),
+        "Socket" => Some(&source_capabilities::SOCKET),
+        "Clickhouse" => Some(&source_capabilities::CLICKHOUSE),
+        "DeltaLake" => Some(&source_capabilities::DELTA_LAKE),
+        "Motherduck" => Some(&source_capabilities::MOTHERDUCK),
+        _ => None,
+    }
+}
+
+fn sink_capability_for_plugin(name: &str) -> Option<&'static skippr::plugins::cdc::SinkCapability> {
+    use skippr::plugins::cdc::sink_capabilities;
+    match name {
+        "Postgres" => Some(&sink_capabilities::POSTGRES),
+        "Snowflake" => Some(&sink_capabilities::SNOWFLAKE),
+        "Bigquery" | "BigQuery" => Some(&sink_capabilities::BIGQUERY),
+        "Redshift" => Some(&sink_capabilities::REDSHIFT),
+        "Clickhouse" | "ClickHouse" => Some(&sink_capabilities::CLICKHOUSE),
+        "Motherduck" | "MotherDuck" => Some(&sink_capabilities::MOTHERDUCK),
+        "Synapse" => Some(&sink_capabilities::SYNAPSE),
+        "Databricks" => Some(&sink_capabilities::DATABRICKS),
+        "S3" => Some(&sink_capabilities::S3),
+        "Gcs" | "GCS" => Some(&sink_capabilities::GCS),
+        "AzureBlob" | "Azure" => Some(&sink_capabilities::AZURE_BLOB),
+        "File" => Some(&sink_capabilities::FILE),
+        "Sftp" | "SFTP" => Some(&sink_capabilities::SFTP),
+        "Athena" => Some(&sink_capabilities::ATHENA),
+        "Stdout" => Some(&sink_capabilities::STDOUT),
+        "Amqp" | "AMQP" => Some(&sink_capabilities::AMQP),
+        _ => None,
+    }
+}
+
 pub async fn sync_input_plugin(
     offsets_clone: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
@@ -1104,24 +1248,42 @@ pub async fn sync_input_plugin(
         "Sqs" => Box::new(DataSourceSqsPlugin::new().await),
         "Mysql" => Box::new(DataSourceMysqlPlugin::new().await),
         "Dynamodb" => Box::new(DataSourceDynamodbPlugin::new().await),
-        "HttpClient" => Box::new(skippr::plugins::http_client_input::DataSourceHttpClientPlugin::new().await),
-        "HttpServer" => Box::new(skippr::plugins::http_server_input::DataSourceHttpServerPlugin::new().await),
+        "HttpClient" => {
+            Box::new(skippr::plugins::http_client_input::DataSourceHttpClientPlugin::new().await)
+        }
+        "HttpServer" => {
+            Box::new(skippr::plugins::http_server_input::DataSourceHttpServerPlugin::new().await)
+        }
         "Stdin" => Box::new(DataSourceStdinPlugin::new().await),
         "Mongodb" => Box::new(skippr::plugins::mongodb_input::DataSourceMongodbPlugin::new().await),
-        "Eventbridge" => Box::new(skippr::plugins::eventbridge_input::DataSourceEventbridgePlugin::new().await),
+        "Eventbridge" => {
+            Box::new(skippr::plugins::eventbridge_input::DataSourceEventbridgePlugin::new().await)
+        }
         "Sns" => Box::new(skippr::plugins::sns_input::DataSourceSnsPlugin::new().await),
         "Mqtt" => Box::new(skippr::plugins::mqtt_input::DataSourceMqttPlugin::new().await),
         "Sftp" => Box::new(skippr::plugins::sftp_input::DataSourceSftpPlugin::new().await),
-        "Postgres" => Box::new(skippr::plugins::postgres_input::DataSourcePostgresPlugin::new().await),
-        "Redshift" => Box::new(skippr::plugins::redshift_input::DataSourceRedshiftPlugin::new().await),
+        "Postgres" => {
+            Box::new(skippr::plugins::postgres_input::DataSourcePostgresPlugin::new().await)
+        }
+        "Redshift" => {
+            Box::new(skippr::plugins::redshift_input::DataSourceRedshiftPlugin::new().await)
+        }
         "Amqp" => Box::new(skippr::plugins::amqp_input::DataSourceAmqpPlugin::new().await),
         "Kafka" => Box::new(skippr::plugins::kafka_input::DataSourceKafkaPlugin::new().await),
-        "Websocket" => Box::new(skippr::plugins::websocket_input::DataSourceWebsocketPlugin::new().await),
+        "Websocket" => {
+            Box::new(skippr::plugins::websocket_input::DataSourceWebsocketPlugin::new().await)
+        }
         "Statsd" => Box::new(skippr::plugins::statsd_input::DataSourceStatsdPlugin::new().await),
         "Socket" => Box::new(skippr::plugins::socket_input::DataSourceSocketPlugin::new().await),
-        "Clickhouse" => Box::new(skippr::plugins::clickhouse_input::DataSourceClickhousePlugin::new().await),
-        "DeltaLake" => Box::new(skippr::plugins::delta_lake_input::DataSourceDeltaLakePlugin::new().await),
-        "Motherduck" => Box::new(skippr::plugins::motherduck_input::DataSourceMotherduckPlugin::new().await),
+        "Clickhouse" => {
+            Box::new(skippr::plugins::clickhouse_input::DataSourceClickhousePlugin::new().await)
+        }
+        "DeltaLake" => {
+            Box::new(skippr::plugins::delta_lake_input::DataSourceDeltaLakePlugin::new().await)
+        }
+        "Motherduck" => {
+            Box::new(skippr::plugins::motherduck_input::DataSourceMotherduckPlugin::new().await)
+        }
         "" => {
             error!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
             return;

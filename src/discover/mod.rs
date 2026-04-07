@@ -865,7 +865,12 @@ impl AnalyseSchema {
         metadata: &mut HashMap<std::string::String, Metadata>,
         namespace_override: Option<&str>,
     ) -> u64 {
-        let counts = self.infer_json_schema_from_iterator(str, metadata, max_read_records, namespace_override);
+        let counts = self.infer_json_schema_from_iterator(
+            str,
+            metadata,
+            max_read_records,
+            namespace_override,
+        );
         counts
     }
 
@@ -959,10 +964,7 @@ impl AnalyseSchema {
 
                     self.analyse_payload(
                         &mut record,
-                        &mut metadata
-                            .get_mut(&_skpr_namespace)
-                            .unwrap()
-                            .fields,
+                        &mut metadata.get_mut(&_skpr_namespace).unwrap().fields,
                     );
                 }
             };
@@ -1745,13 +1747,7 @@ impl AnalyseSchema {
         data_type: &SkipprDataType,
         value: &mut String,
     ) {
-        if metadata
-            .get(field)
-            .unwrap()
-            .types
-            .get(data_type)
-            .is_none()
-        {
+        if metadata.get(field).unwrap().types.get(data_type).is_none() {
             metadata
                 .get_mut(field)
                 .unwrap()
@@ -1860,11 +1856,15 @@ impl AnalyseSchema {
             }
 
             if field.determined_type != SkipprDataType::Unknown
-                && matches!(field.determined_type, SkipprDataType::Map | SkipprDataType::Array | SkipprDataType::Record)
+                && matches!(
+                    field.determined_type,
+                    SkipprDataType::Map | SkipprDataType::Array | SkipprDataType::Record
+                )
                 && field.fields.len() > 0
             {
                 if field.determined_type_values.is_none()
-                    && (field.determined_type == SkipprDataType::Array || field.determined_type == SkipprDataType::Map)
+                    && (field.determined_type == SkipprDataType::Array
+                        || field.determined_type == SkipprDataType::Map)
                 {
                     // field.determined_type_values = "".to_string();
 
@@ -1982,10 +1982,16 @@ mod check_string_or_int_tests {
     fn test_32_bit_signed_int() {
         let dummy = AnalyseSchema { i: 0 };
         let mut value = "2147483647".to_string(); // max i32
-        assert_eq!(dummy.check_string_or_int(&mut value), SkipprDataType::Integer);
+        assert_eq!(
+            dummy.check_string_or_int(&mut value),
+            SkipprDataType::Integer
+        );
 
         let mut value = "-2147483648".to_string(); // min i32
-        assert_eq!(dummy.check_string_or_int(&mut value), SkipprDataType::Integer);
+        assert_eq!(
+            dummy.check_string_or_int(&mut value),
+            SkipprDataType::Integer
+        );
     }
 
     #[test]
@@ -2002,7 +2008,10 @@ mod check_string_or_int_tests {
     fn test_non_integer() {
         let dummy = AnalyseSchema { i: 0 };
         let mut value = "Hello".to_string();
-        assert_eq!(dummy.check_string_or_int(&mut value), SkipprDataType::String);
+        assert_eq!(
+            dummy.check_string_or_int(&mut value),
+            SkipprDataType::String
+        );
     }
 }
 
@@ -3342,9 +3351,7 @@ mod tests_roundtrip {
         discover_ingest(field, value, None, None, metadata, &mut updated);
     }
 
-    fn build_output(
-        metadata: &HashMap<String, Metadata>,
-    ) -> Box<HashMap<String, OutputMetadata>> {
+    fn build_output(metadata: &HashMap<String, Metadata>) -> Box<HashMap<String, OutputMetadata>> {
         let mut out = HashMap::new();
         for (k, v) in metadata.iter() {
             if v.enabled {
@@ -3369,11 +3376,20 @@ mod tests_roundtrip {
     fn flat_string_to_integer_evolution() {
         let mut metadata: HashMap<String, Metadata> = HashMap::new();
         discover_field("x", &json!("hello"), &mut metadata);
-        assert_eq!(metadata.get("x").unwrap().determined_type, SkipprDataType::String);
+        assert_eq!(
+            metadata.get("x").unwrap().determined_type,
+            SkipprDataType::String
+        );
 
         let mut updated = "no".to_string();
         let r = Evolution::evolve_field(
-            &"x".to_string(), &json!(42), None, None, &mut metadata, &mut updated, false,
+            &"x".to_string(),
+            &json!(42),
+            None,
+            None,
+            &mut metadata,
+            &mut updated,
+            false,
         );
         assert!(r.is_ok());
         assert!(!metadata.get("x").unwrap().evolution.is_empty());
@@ -3390,12 +3406,20 @@ mod tests_roundtrip {
 
         let mut updated = "no".to_string();
         let r = Evolution::evolve_field(
-            &"data".to_string(), &json!({"name": "alice", "age": 30}),
-            None, None, &mut metadata, &mut updated, false,
+            &"data".to_string(),
+            &json!({"name": "alice", "age": 30}),
+            None,
+            None,
+            &mut metadata,
+            &mut updated,
+            false,
         );
         assert!(r.is_ok());
         assert!(metadata.contains_key("data_record"));
-        assert_eq!(metadata.get("data_record").unwrap().determined_type, SkipprDataType::Record);
+        assert_eq!(
+            metadata.get("data_record").unwrap().determined_type,
+            SkipprDataType::Record
+        );
 
         let arrow = convert_skippr_to_arrow(build_output(&metadata));
         assert!(arrow.is_ok());
@@ -3405,18 +3429,31 @@ mod tests_roundtrip {
     fn nested_child_type_change() {
         let mut metadata: HashMap<String, Metadata> = HashMap::new();
         discover_field("outer", &json!({"inner": "hello"}), &mut metadata);
-        assert_eq!(metadata.get("outer").unwrap().determined_type, SkipprDataType::Record);
         assert_eq!(
-            metadata.get("outer").unwrap().fields.get("inner").unwrap().determined_type,
+            metadata.get("outer").unwrap().determined_type,
+            SkipprDataType::Record
+        );
+        assert_eq!(
+            metadata
+                .get("outer")
+                .unwrap()
+                .fields
+                .get("inner")
+                .unwrap()
+                .determined_type,
             SkipprDataType::String
         );
 
         let mut updated = "no".to_string();
         if let Some(outer_mut) = metadata.get_mut("outer") {
             let _ = Evolution::evolve_field(
-                &"inner".to_string(), &json!(3.14),
-                Some("outer"), Some("record"),
-                &mut outer_mut.fields, &mut updated, false,
+                &"inner".to_string(),
+                &json!(3.14),
+                Some("outer"),
+                Some("record"),
+                &mut outer_mut.fields,
+                &mut updated,
+                false,
             );
         }
 
@@ -3428,7 +3465,10 @@ mod tests_roundtrip {
     fn array_discovery_and_arrow() {
         let mut metadata: HashMap<String, Metadata> = HashMap::new();
         discover_field("tags", &json!(["red", "green", "blue"]), &mut metadata);
-        assert_eq!(metadata.get("tags").unwrap().determined_type, SkipprDataType::Array);
+        assert_eq!(
+            metadata.get("tags").unwrap().determined_type,
+            SkipprDataType::Array
+        );
 
         let arrow = convert_skippr_to_arrow(build_output(&metadata));
         assert!(arrow.is_ok());
@@ -3441,12 +3481,24 @@ mod tests_roundtrip {
 
         let mut updated = "no".to_string();
         let r1 = Evolution::evolve_field(
-            &"val".to_string(), &json!(42i64), None, None, &mut metadata, &mut updated, false,
+            &"val".to_string(),
+            &json!(42i64),
+            None,
+            None,
+            &mut metadata,
+            &mut updated,
+            false,
         );
         assert!(r1.is_ok());
 
         let r2 = Evolution::evolve_field(
-            &"val".to_string(), &json!(3.14), None, None, &mut metadata, &mut updated, false,
+            &"val".to_string(),
+            &json!(3.14),
+            None,
+            None,
+            &mut metadata,
+            &mut updated,
+            false,
         );
         assert!(r2.is_ok());
 
@@ -3479,8 +3531,13 @@ mod tests_roundtrip {
 
         let mut updated = "no".to_string();
         let _ = Evolution::evolve_field(
-            &"meta".to_string(), &json!({"key": "value", "count": 5}),
-            None, None, &mut metadata, &mut updated, false,
+            &"meta".to_string(),
+            &json!({"key": "value", "count": 5}),
+            None,
+            None,
+            &mut metadata,
+            &mut updated,
+            false,
         );
 
         let arrow = convert_skippr_to_arrow(build_output(&metadata));
@@ -3518,12 +3575,11 @@ mod tests_discover_proptest {
             prop_oneof![
                 prop::collection::vec(inner.clone(), 0..5)
                     .prop_map(|v| serde_json::Value::Array(v)),
-                prop::collection::hash_map("[a-z]{1,6}", inner, 0..5)
-                    .prop_map(|m| {
-                        let obj: serde_json::Map<std::string::String, serde_json::Value> =
-                            m.into_iter().collect();
-                        serde_json::Value::Object(obj)
-                    }),
+                prop::collection::hash_map("[a-z]{1,6}", inner, 0..5).prop_map(|m| {
+                    let obj: serde_json::Map<std::string::String, serde_json::Value> =
+                        m.into_iter().collect();
+                    serde_json::Value::Object(obj)
+                }),
             ]
         })
         .boxed()

@@ -95,9 +95,7 @@ impl DataSource for DataSourceWebsocketPlugin {
                 Ok(Some(Ok(msg))) => {
                     let data = match msg {
                         tungstenite::Message::Text(t) => t,
-                        tungstenite::Message::Binary(b) => {
-                            String::from_utf8_lossy(&b).into_owned()
-                        }
+                        tungstenite::Message::Binary(b) => String::from_utf8_lossy(&b).into_owned(),
                         tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_) => continue,
                         tungstenite::Message::Close(_) => break,
                         _ => continue,
@@ -120,6 +118,7 @@ impl DataSource for DataSourceWebsocketPlugin {
                             bytes,
                             source_uri: self.config.url.clone(),
                             namespace: Some(namespace.clone()),
+                            cdc_rows: None,
                         }],
                         offsets.clone(),
                         shared_output.clone(),

@@ -1,6 +1,6 @@
+use sled;
 use std::thread::sleep;
 use std::time::Duration;
-use sled;
 use Result;
 
 use crate::helpers::configuration::Config;
@@ -693,6 +693,27 @@ impl Offsets {
                 // Some(true)
             }
         })
+    }
+
+    /// Store an opaque CDC checkpoint blob keyed by a source-defined string.
+    /// Used by CDC sources to persist resume state (LSN, binlog position,
+    /// resume token, sequence number) across restarts.
+    pub fn store_checkpoint(&self, key: &str, value: &[u8]) {
+        let sled_key = format!("cdc_checkpoint:{}", key);
+        if let Err(e) = self.tree.insert(sled_key.as_bytes(), value) {
+            error!("Failed to store CDC checkpoint '{}': {}", key, e);
+        }
+    }
+
+    /// Load a previously stored CDC checkpoint blob.  Returns `None` if no
+    /// checkpoint has been stored for this key.
+    pub fn load_checkpoint(&self, key: &str) -> Option<Vec<u8>> {
+        let sled_key = format!("cdc_checkpoint:{}", key);
+        self.tree
+            .get(sled_key.as_bytes())
+            .ok()
+            .flatten()
+            .map(|v| v.to_vec())
     }
 }
 

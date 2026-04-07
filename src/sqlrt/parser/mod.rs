@@ -394,7 +394,12 @@ impl<'a> SParser<'a> {
                             Some(SkipprShowCommand::PIPELINE) => {
                                 self.parser.next_token(); // PIPELINE
                                 let name = self.parser.parse_object_name(false)?;
-                                let pipeline = name.0.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(".");
+                                let pipeline = name
+                                    .0
+                                    .iter()
+                                    .map(|i| i.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(".");
                                 return Ok(Statement::ShowPipeline { pipeline });
                             }
                             _ => {
@@ -761,7 +766,10 @@ mod tests {
         let stmt = parser.parse_statement().unwrap();
         match stmt {
             Statement::ShowPipeline { pipeline } => {
-                assert_eq!(pipeline, "mssql", "unquoted hyphenated name is parsed as subtraction");
+                assert_eq!(
+                    pipeline, "mssql",
+                    "unquoted hyphenated name is parsed as subtraction"
+                );
             }
             other => panic!("expected ShowPipeline, got {:?}", other),
         }

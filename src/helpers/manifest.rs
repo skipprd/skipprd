@@ -19,7 +19,10 @@ impl Manifest {
         let pipeline = Config::get_pipeline_name();
         let bucket = Config::get_skippr_s3_bucket();
         let filename = format!("{}.json", namespace);
-        let key = format!("{}/{}/{}/manifest/{}", tenant, workspace, pipeline, filename);
+        let key = format!(
+            "{}/{}/{}/manifest/{}",
+            tenant, workspace, pipeline, filename
+        );
         (bucket, key)
     }
 
@@ -28,12 +31,18 @@ impl Manifest {
         let tenant = Config::get_tenant();
         let workspace = Config::get_workspace_name();
         let filename = format!("{}.json", namespace);
-        format!("{}/{}/{}/manifest/{}", tenant, workspace, pipeline, filename)
+        format!(
+            "{}/{}/{}/manifest/{}",
+            tenant, workspace, pipeline, filename
+        )
     }
 
     pub async fn read(namespace: &str) -> Option<Value> {
         let (_bucket, key) = Self::s3_key(namespace);
-        debug!("Reading manifest for namespace '{}' key='{}'", namespace, key);
+        debug!(
+            "Reading manifest for namespace '{}' key='{}'",
+            namespace, key
+        );
         let storage = crate::adapters::storage::get_storage();
         match storage.get_json_opt(&key).await {
             Ok(Some(v)) => {
@@ -97,8 +106,10 @@ impl Manifest {
             let entries = cache.entry(namespace.to_string()).or_default();
             if let Some(tables) = manifest.get("tables").and_then(|t| t.as_object()) {
                 if let Some(ns_obj) = tables.get(namespace).and_then(|v| v.as_object()) {
-                    let existing_db =
-                        ns_obj.get("database").and_then(|d| d.as_str()).unwrap_or("");
+                    let existing_db = ns_obj
+                        .get("database")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("");
                     if let Some(arr) = ns_obj.get("prefixes").and_then(|a| a.as_array()) {
                         for p in arr {
                             if let Some(s) = p.as_str() {

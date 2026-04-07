@@ -1078,6 +1078,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-dynamodbstreams"
+version = "1.90.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e03b9e9ac22a1d956aee07873316b715ff1fb9d7282aa48f0b9d30ac367f999"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.62.5",
+ "aws-smithy-json",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand 2.3.0",
+ "http 0.2.12",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-eventbridge"
 version = "1.96.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8414,6 +8436,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgwire-replication"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb5dafc8338ae6dd3949b367c9afd1d4004300ae2dc84af5b883303e424822e7"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "hmac",
+ "rand 0.9.2",
+ "rustls 0.23.35",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-util",
+ "tracing",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "phf"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10573,6 +10616,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-athena",
  "aws-sdk-dynamodb",
+ "aws-sdk-dynamodbstreams",
  "aws-sdk-eventbridge",
  "aws-sdk-glue",
  "aws-sdk-kinesis",
@@ -10629,6 +10673,7 @@ dependencies = [
  "once_cell",
  "parquet 56.2.0",
  "periodic",
+ "pgwire-replication",
  "phf 0.11.3",
  "postgres-native-tls",
  "predicates",

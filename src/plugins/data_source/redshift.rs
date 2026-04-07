@@ -212,11 +212,9 @@ impl DataSource for DataSourceRedshiftPlugin {
                         offset_key: offset_key.clone(),
                         data: json_str,
                         bytes,
-                        source_uri: format!(
-                            "redshift://{}/{}",
-                            self.config.database, table_name
-                        ),
+                        source_uri: format!("redshift://{}/{}", self.config.database, table_name),
                         namespace: Some(namespace.clone()),
+                        cdc_rows: None,
                     }
                 })
                 .collect();
@@ -228,11 +226,8 @@ impl DataSource for DataSourceRedshiftPlugin {
                     offsets.clone(),
                     shared_output.clone(),
                 ));
-                self.ingest.ingest_file(
-                    &Arc::new(ingest_tasks),
-                    &offsets,
-                    shared_output.clone(),
-                );
+                self.ingest
+                    .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
             }
         }
 

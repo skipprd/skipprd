@@ -71,7 +71,10 @@ impl DataSourceMotherduckPlugin {
         let resp = self
             .client
             .post(MOTHERDUCK_SQL_ENDPOINT)
-            .header("Authorization", format!("Bearer {}", self.config.motherduck_token))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.config.motherduck_token),
+            )
             .header("Content-Type", "application/json")
             .json(&payload)
             .send()
@@ -153,6 +156,7 @@ impl DataSource for DataSourceMotherduckPlugin {
                     bytes,
                     source_uri: format!("motherduck://{}/{}", db_label, table_name),
                     namespace: Some(namespace.clone()),
+                    cdc_rows: None,
                 });
 
                 if current_batch.len() >= batch_size {
@@ -177,11 +181,8 @@ impl DataSource for DataSourceMotherduckPlugin {
                     offsets.clone(),
                     shared_output.clone(),
                 ));
-                self.ingest.ingest_file(
-                    &Arc::new(ingest_tasks),
-                    &offsets,
-                    shared_output.clone(),
-                );
+                self.ingest
+                    .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
             }
         }
 

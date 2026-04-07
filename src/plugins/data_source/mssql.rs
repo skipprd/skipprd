@@ -8,8 +8,8 @@ use tracing::{error, info};
 use crate::helpers::configuration::{Config, DataSourceMssqlPluginConfig, DataSourcePluginConfig};
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use async_trait::async_trait;
 use crate::plugins::{DataSink, DataSource};
+use async_trait::async_trait;
 
 pub struct DataSourceMssqlPlugin {
     pub(crate) ingest: Ingest,
@@ -27,23 +27,21 @@ impl From<DataSourcePluginConfig> for DataSourceMssqlPluginConfig {
 
 impl DataSourceMssqlPlugin {
     pub async fn new() -> Self {
-        let config: DataSourceMssqlPluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(input_config) => input_config.into(),
-                Err(_) => {
-                    let connection_string =
-                        Config::getenv("MSSQL_CONNECTION_STRING", "");
-                    DataSourceMssqlPluginConfig {
-                        connection_string,
-                        tables: None,
-                        batch_size_rows: None,
-                        query_timeout_seconds: None,
-                        format: Some("row".to_string()),
-                        batch_size_bytes: None,
-                        batch_size_seconds: None,
-                    }
+        let config: DataSourceMssqlPluginConfig = match Config::get_pipeline_input_plugin_config() {
+            Ok(input_config) => input_config.into(),
+            Err(_) => {
+                let connection_string = Config::getenv("MSSQL_CONNECTION_STRING", "");
+                DataSourceMssqlPluginConfig {
+                    connection_string,
+                    tables: None,
+                    batch_size_rows: None,
+                    query_timeout_seconds: None,
+                    format: Some("row".to_string()),
+                    batch_size_bytes: None,
+                    batch_size_seconds: None,
                 }
-            };
+            }
+        };
 
         DataSourceMssqlPlugin {
             ingest: Ingest::new(),
@@ -90,9 +88,7 @@ impl DataSourceMssqlPlugin {
             Ok(stream) => match stream.into_first_result().await {
                 Ok(rows) => {
                     if let Some(row) = rows.first() {
-                        row.get::<&str, _>(0)
-                            .unwrap_or("unknown")
-                            .to_string()
+                        row.get::<&str, _>(0).unwrap_or("unknown").to_string()
                     } else {
                         "unknown".to_string()
                     }
@@ -249,6 +245,7 @@ impl DataSourceMssqlPlugin {
                     bytes,
                     source_uri: format!("mssql://{}/{}", db_name, table_fq),
                     namespace: Some(table.to_string()),
+                    cdc_rows: None,
                 });
 
                 if current_batch.len() >= batch_size {

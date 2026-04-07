@@ -34,7 +34,7 @@ pub fn create_default_nested_message(metadata: &HashMap<String, Metadata>) -> Va
         if meta_data.enabled {
             if meta_data.fields.is_empty() {
                 message[meta_data.out_field_name.clone()] = Value::Null;
-            } else             if meta_data.determined_type == SkipprDataType::Array {
+            } else if meta_data.determined_type == SkipprDataType::Array {
                 if meta_data.determined_type_values == Some(SkipprDataType::Record) {
                     // message[meta_data.out_field_name.clone()] = create_default_nested_message(&meta_data.fields);
                     let fields = create_default_nested_message(&meta_data.fields);
@@ -889,7 +889,10 @@ fn process_array_field(
             };
 
             if parent_meta.enabled {
-                let values_type = parent_meta.determined_type_values.as_ref().unwrap_or(&SkipprDataType::Unknown);
+                let values_type = parent_meta
+                    .determined_type_values
+                    .as_ref()
+                    .unwrap_or(&SkipprDataType::Unknown);
                 if is_record_values {
                     let sub_field = "0";
                     let _new_val = match fast_set_value_optimized(
@@ -2231,18 +2234,19 @@ mod tests_data_loss_regression {
         let metadata = create_array_metadata(SkipprDataType::Integer);
 
         let value = json!(["not_an_int", 42, "also_not_int"]);
-        let result = process_array_field(
-            "arr",
-            &value,
-            &metadata,
-            false,
-        );
+        let result = process_array_field("arr", &value, &metadata, false);
         assert!(result.is_ok(), "array processing should not error");
         let resolved = result.unwrap();
         if let serde_json::Value::Array(arr) = &resolved.value {
             assert_eq!(arr.len(), 3);
-            assert!(arr[0].is_null(), "failed element should become null (data loss path)");
-            assert!(arr[2].is_null(), "failed element should become null (data loss path)");
+            assert!(
+                arr[0].is_null(),
+                "failed element should become null (data loss path)"
+            );
+            assert!(
+                arr[2].is_null(),
+                "failed element should become null (data loss path)"
+            );
         } else {
             panic!("expected array output");
         }
@@ -2252,12 +2256,7 @@ mod tests_data_loss_regression {
     fn map_key_not_in_metadata_returns_error() {
         let metadata = HashMap::new();
         let value = json!({"unknown_key": "value"});
-        let result = process_map_field(
-            "missing_map",
-            &value,
-            &metadata,
-            false,
-        );
+        let result = process_map_field("missing_map", &value, &metadata, false);
         assert!(result.is_err(), "map with unknown key should error");
     }
 
@@ -2274,7 +2273,10 @@ mod tests_data_loss_regression {
         );
         assert!(result.is_err(), "unknown data type should error");
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Unknown data type"), "error should mention unknown type");
+        assert!(
+            err_msg.contains("Unknown data type"),
+            "error should mention unknown type"
+        );
     }
 
     #[test]

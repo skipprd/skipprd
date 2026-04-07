@@ -54,11 +54,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 // use dashmap::{DashMap};
 
+use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord};
 use crate::discover::evolution::{infer_specs_for_record, EvolutionProposal};
 use crate::ingest::fast_ingest::{
     create_default_nested_message, fast_path_ingest, DEFAULT_NESTED_MESSAGE,
 };
-use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord};
 use crate::serdes::csv::SerderCsv;
 
 use crate::ingest::record_types::{NormalizedRecord, SourceRecord};
@@ -143,7 +143,10 @@ fn ensure_slow_ingest_worker() {
                                         Config::set_metadata(&md_clone, false).await;
                                     });
                                 } else {
-                                    error!("No tokio runtime to persist metadata for namespace {}", task.namespace);
+                                    error!(
+                                        "No tokio runtime to persist metadata for namespace {}",
+                                        task.namespace
+                                    );
                                 }
                             }
                             Ok(v)
@@ -221,6 +224,10 @@ pub struct IngestBatch {
     /// MSSQL). When `None`, the pipeline name + `transform.namespace_fields`
     /// config is used to derive the namespace from message content.
     pub(crate) namespace: Option<String>,
+    /// Per-row CDC metadata. When `Some`, each element aligns 1:1 with the
+    /// rows parsed from `data`. Sources that don't produce CDC leave this as
+    /// `None` (append semantics).
+    pub(crate) cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
 }
 
 #[derive(Clone)]
@@ -726,15 +733,16 @@ impl Ingest {
 
                         let queued_handle = shared_handle.clone();
                         thread_pool_clone.execute(move || {
-                            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                Ingest::process_batch(
-                                    &datas_clone,
-                                    &offset_db_clone,
-                                    &mut schema_hashes,
-                                    queued_handle,
-                                    shared_output_clone,
-                                );
-                            }));
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    Ingest::process_batch(
+                                        &datas_clone,
+                                        &offset_db_clone,
+                                        &mut schema_hashes,
+                                        queued_handle,
+                                        shared_output_clone,
+                                    );
+                                }));
                             if result.is_err() {
                                 error!("Queued ingest task panicked; forcing completion signal");
                             }
@@ -1190,50 +1198,67 @@ impl Ingest {
         let mut buf: HashMap<(String, String, String, Option<i64>, String), IngestBufferBatch> =
             HashMap::with_capacity(32);
         // Temporary storage for raw JSON records prior to Arrow batch building
-        let mut raw_values: HashMap<(String, String, String, Option<i64>, String), Vec<IngestRecord>> =
-            HashMap::with_capacity(32);
+        let mut raw_values: HashMap<
+            (String, String, String, Option<i64>, String),
+            Vec<IngestRecord>,
+        > = HashMap::with_capacity(32);
+        // Per-partition CDC row metadata accumulated alongside raw_values
+        let mut cdc_row_buf: HashMap<
+            (String, String, String, Option<i64>, String),
+            Vec<crate::plugins::cdc::WalRowMeta>,
+        > = HashMap::new();
 
         let pipeline_name_cached = Config::get_pipeline_name();
         // Helper to enqueue a single record into current buffers using latest stable schema
-        let mut enqueue_record = |ns: &String,
-                                  part: &String,
-                                  time_b: &Option<i64>,
-                                  source: SourceRecord,
-                                  normalized: NormalizedRecord,
-                                  ok: &OffsetKey,
-                                  pos: u64| {
-            let md_snapshot = METADATA.load();
-            let schema_hash = Ingest::load_stable_schema_hash(ns, &md_snapshot.metadata, flatten);
-            drop(md_snapshot);
-            let key = (
-                primary_sink_ref.clone(),
-                ns.clone(),
-                part.clone(),
-                time_b.clone(),
-                schema_hash.hash,
-            );
-            let buf_entry = buf.entry(key.clone()).or_insert_with(|| IngestBufferBatch {
-                offsets: HashMap::new(),
-                sink_ref: primary_sink_ref.clone(),
-                _namespace: ns.clone(),
-                _partition: part.clone(),
-                _time: time_b.clone(),
-                _shard: "".to_string(),
-                schema: schema_hash.schema,
-                record_batches: None,
-            });
-            buf_entry.offsets.insert(ok.clone(), pos);
-            raw_values
-                .entry(key)
-                .or_insert_with(|| Vec::with_capacity(1024))
-                .push(IngestRecord {
-                    source,
-                    normalized,
+        let mut enqueue_record =
+            |ns: &String,
+             part: &String,
+             time_b: &Option<i64>,
+             source: SourceRecord,
+             normalized: NormalizedRecord,
+             ok: &OffsetKey,
+             pos: u64,
+             cdc_meta: Option<crate::plugins::cdc::WalRowMeta>| {
+                let md_snapshot = METADATA.load();
+                let schema_hash =
+                    Ingest::load_stable_schema_hash(ns, &md_snapshot.metadata, flatten);
+                drop(md_snapshot);
+                let key = (
+                    primary_sink_ref.clone(),
+                    ns.clone(),
+                    part.clone(),
+                    time_b.clone(),
+                    schema_hash.hash,
+                );
+                let buf_entry = buf.entry(key.clone()).or_insert_with(|| IngestBufferBatch {
+                    offsets: HashMap::new(),
+                    sink_ref: primary_sink_ref.clone(),
                     _namespace: ns.clone(),
                     _partition: part.clone(),
                     _time: time_b.clone(),
+                    _shard: "".to_string(),
+                    schema: schema_hash.schema,
+                    record_batches: None,
+                    cdc_rows: None,
                 });
-        };
+                buf_entry.offsets.insert(ok.clone(), pos);
+                if let Some(meta) = cdc_meta {
+                    cdc_row_buf
+                        .entry(key.clone())
+                        .or_insert_with(|| Vec::with_capacity(64))
+                        .push(meta);
+                }
+                raw_values
+                    .entry(key)
+                    .or_insert_with(|| Vec::with_capacity(1024))
+                    .push(IngestRecord {
+                        source,
+                        normalized,
+                        _namespace: ns.clone(),
+                        _partition: part.clone(),
+                        _time: time_b.clone(),
+                    });
+            };
         for ingest_batch in datas.iter() {
             bytes += ingest_batch.data.len() as u64;
 
@@ -1265,6 +1290,7 @@ impl Ingest {
             }
 
             batch_line = 0;
+            let mut cdc_row_idx: usize = 0;
 
             let mut unwrapped_records: Vec<Value> = Vec::with_capacity(records.len());
 
@@ -1299,7 +1325,11 @@ impl Ingest {
                                     failure_code: "INPUT_FORMAT".to_string(),
                                     event_time: None,
                                     source_uri: ingest_batch.source_uri.clone(),
-                                    offset_key: format!("{}:{}", ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition),
+                                    offset_key: format!(
+                                        "{}:{}",
+                                        ingest_batch.offset_key.namespace,
+                                        ingest_batch.offset_key.partition
+                                    ),
                                     offset_pos: batch_line,
                                 });
                             }
@@ -1310,6 +1340,7 @@ impl Ingest {
 
             for record in unwrapped_records {
                 batch_line += 1;
+                cdc_row_idx += 1;
 
                 if record.is_null()
                     || (record.is_object() && record.as_object().unwrap().is_empty())
@@ -1327,7 +1358,10 @@ impl Ingest {
                         failure_code: "EMPTY_RECORD".to_string(),
                         event_time: None,
                         source_uri: ingest_batch.source_uri.clone(),
-                        offset_key: format!("{}:{}", ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition),
+                        offset_key: format!(
+                            "{}:{}",
+                            ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition
+                        ),
                         offset_pos: batch_line,
                     });
 
@@ -1357,11 +1391,9 @@ impl Ingest {
                             &mut namesapce_cache,
                         );
                         if namesapce_cache
-                            != PARSE_NAMESPACE_CACHE
-                                .with(|cache| cache.read().unwrap().clone())
+                            != PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone())
                         {
-                            PARSE_NAMESPACE_CACHE
-                                .with(|cache| cache.write().unwrap().clear());
+                            PARSE_NAMESPACE_CACHE.with(|cache| cache.write().unwrap().clear());
                             PARSE_NAMESPACE_CACHE
                                 .with(|cache| cache.write().unwrap().extend(namesapce_cache));
                         }
@@ -1424,7 +1456,11 @@ impl Ingest {
                                         failure_code: "EVOLUTION_SLOW_PATH".to_string(),
                                         event_time: skpr_time,
                                         source_uri: ingest_batch.source_uri.clone(),
-                                        offset_key: format!("{}:{}", ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition),
+                                        offset_key: format!(
+                                            "{}:{}",
+                                            ingest_batch.offset_key.namespace,
+                                            ingest_batch.offset_key.partition
+                                        ),
                                         offset_pos: batch_line,
                                     });
                                     Value::Null
@@ -1445,6 +1481,10 @@ impl Ingest {
                     }
 
                     let normalized = NormalizedRecord::new(record_value);
+                    let row_cdc_meta = ingest_batch
+                        .cdc_rows
+                        .as_ref()
+                        .and_then(|rows| rows.get(cdc_row_idx - 1).cloned());
                     enqueue_record(
                         &skpr_namespace,
                         &skpr_partition,
@@ -1453,6 +1493,7 @@ impl Ingest {
                         normalized,
                         &ingest_batch.offset_key,
                         batch_line,
+                        row_cdc_meta,
                     );
 
                     _j += 1;
@@ -1525,22 +1566,21 @@ impl Ingest {
             //         }
             //     }
             // }
-            let try_serialize =
-                |schema: SchemaRef,
-                 values: &Vec<&serde_json::Value>|
-                 -> Result<Vec<RecordBatch>, String> {
-                    let mut decoder = ArrowJsonReaderBuilder::new(schema)
-                        .build_decoder()
-                        .map_err(|e| format!("build_decoder: {e}"))?;
-                    decoder
-                        .serialize(values)
-                        .map_err(|e| format!("serialize: {e}"))?;
-                    match decoder.flush() {
-                        Ok(Some(b)) => Ok(vec![b]),
-                        Ok(None) => Err("flush returned no batch".into()),
-                        Err(e) => Err(format!("flush: {e}")),
-                    }
-                };
+            let try_serialize = |schema: SchemaRef,
+                                 values: &Vec<&serde_json::Value>|
+             -> Result<Vec<RecordBatch>, String> {
+                let mut decoder = ArrowJsonReaderBuilder::new(schema)
+                    .build_decoder()
+                    .map_err(|e| format!("build_decoder: {e}"))?;
+                decoder
+                    .serialize(values)
+                    .map_err(|e| format!("serialize: {e}"))?;
+                match decoder.flush() {
+                    Ok(Some(b)) => Ok(vec![b]),
+                    Ok(None) => Err("flush returned no batch".into()),
+                    Err(e) => Err(format!("flush: {e}")),
+                }
+            };
 
             let values_ref: Vec<&serde_json::Value> =
                 records_vec.iter().map(|r| r.normalized.inner()).collect();
@@ -1668,37 +1708,51 @@ impl Ingest {
                     entry.record_batches = Some(batches);
                 }
                 Err(retry_err) => {
-                let off_key_str = match entry.offsets.iter().next() {
-                    Some((k, _)) => format!("{}:{}", k.namespace, k.partition),
-                    None => String::new(),
-                };
-                let arrow_err_msg = format!("Arrow serialization failed after retry: {}", retry_err);
-                warn!("{} (ns={}, records={})", arrow_err_msg, skpr_namespace, records_vec.len());
-                for (idx, rec) in records_vec.iter().enumerate() {
-                    dl_records.push(DeadletterRecord {
-                        namespace: skpr_namespace.clone(),
-                        record: rec.source.inner().to_string(),
-                        error: arrow_err_msg.clone(),
-                        failure_code: "ARROW_SERIALIZE".to_string(),
-                        event_time: rec._time,
-                        source_uri: String::new(),
-                        offset_key: off_key_str.clone(),
-                        offset_pos: idx as u64,
-                    });
-                }
-                for (ok, pos) in entry.offsets.iter() {
-                    dl_offsets
-                        .entry(ok.clone())
-                        .and_modify(|p| *p = (*p).max(*pos))
-                        .or_insert(*pos);
-                }
-                if Config::debug_enabled() {
-                    debug!(
-                        "Batch serialize failed after retry: ns={} err={} deadlettered",
-                        entry._namespace, retry_err
+                    let off_key_str = match entry.offsets.iter().next() {
+                        Some((k, _)) => format!("{}:{}", k.namespace, k.partition),
+                        None => String::new(),
+                    };
+                    let arrow_err_msg =
+                        format!("Arrow serialization failed after retry: {}", retry_err);
+                    warn!(
+                        "{} (ns={}, records={})",
+                        arrow_err_msg,
+                        skpr_namespace,
+                        records_vec.len()
                     );
+                    for (idx, rec) in records_vec.iter().enumerate() {
+                        dl_records.push(DeadletterRecord {
+                            namespace: skpr_namespace.clone(),
+                            record: rec.source.inner().to_string(),
+                            error: arrow_err_msg.clone(),
+                            failure_code: "ARROW_SERIALIZE".to_string(),
+                            event_time: rec._time,
+                            source_uri: String::new(),
+                            offset_key: off_key_str.clone(),
+                            offset_pos: idx as u64,
+                        });
+                    }
+                    for (ok, pos) in entry.offsets.iter() {
+                        dl_offsets
+                            .entry(ok.clone())
+                            .and_modify(|p| *p = (*p).max(*pos))
+                            .or_insert(*pos);
+                    }
+                    if Config::debug_enabled() {
+                        debug!(
+                            "Batch serialize failed after retry: ns={} err={} deadlettered",
+                            entry._namespace, retry_err
+                        );
+                    }
                 }
             }
+        }
+
+        for (k, entry) in buf.iter_mut() {
+            if let Some(rows) = cdc_row_buf.remove(k) {
+                if !rows.is_empty() {
+                    entry.cdc_rows = Some(rows);
+                }
             }
         }
 
@@ -1738,6 +1792,7 @@ impl Ingest {
                             _shard: String::new(),
                             schema: dl_schema,
                             record_batches: Some(vec![batch]),
+                            cdc_rows: None,
                         },
                     );
                     dl_offsets_committed = true;
@@ -1990,10 +2045,7 @@ mod empty_ingest_tasks_tests {
         let ingest = Ingest::new();
         let empty_tasks = Arc::new(IngestTasks::new());
 
-        let offsets = Arc::new(
-            crate::helpers::offsets::Offsets::init()
-                .expect("offset DB init"),
-        );
+        let offsets = Arc::new(crate::helpers::offsets::Offsets::init().expect("offset DB init"));
         let noop: Box<dyn crate::plugins::DataSink + Send + Sync> =
             Box::new(crate::plugins::NoopOutputPlugin);
         let output = Arc::new(noop);
@@ -2013,12 +2065,18 @@ mod data_dir_watermark_tests {
 
     #[test]
     fn invalid_low_watermark_is_adjusted_below_high() {
-        assert_eq!(Ingest::normalize_data_dir_watermarks(90, 95), Some((90, 85)));
+        assert_eq!(
+            Ingest::normalize_data_dir_watermarks(90, 95),
+            Some((90, 85))
+        );
     }
 
     #[test]
     fn valid_watermarks_are_preserved() {
-        assert_eq!(Ingest::normalize_data_dir_watermarks(92, 80), Some((92, 80)));
+        assert_eq!(
+            Ingest::normalize_data_dir_watermarks(92, 80),
+            Some((92, 80))
+        );
     }
 }
 

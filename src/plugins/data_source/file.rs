@@ -20,8 +20,8 @@ use glob::glob_with;
 
 use futures::stream::StreamExt;
 
-use async_trait::async_trait;
 use crate::plugins::{DataSink, DataSource};
+use async_trait::async_trait;
 use serde_derive::Deserialize;
 use tracing::{debug, error};
 
@@ -220,6 +220,7 @@ impl DataSourceLocalFilePlugin {
                                         bytes: _batch_bytes as usize,
                                         source_uri: "".to_string(),
                                         namespace: None,
+                                        cdc_rows: None,
                                     });
 
                                     if !current_batch.is_empty() {
@@ -260,6 +261,7 @@ impl DataSourceLocalFilePlugin {
                                                 bytes: _batch_bytes as usize,
                                                 source_uri: "".to_string(),
                                                 namespace: None,
+                                                cdc_rows: None,
                                             });
                                         }
 
@@ -303,6 +305,7 @@ impl DataSourceLocalFilePlugin {
                                                 bytes: _batch_bytes as usize,
                                                 source_uri: "".to_string(),
                                                 namespace: None,
+                                                cdc_rows: None,
                                             });
                                         }
 
@@ -355,6 +358,7 @@ impl DataSourceLocalFilePlugin {
                                                     bytes: _batch_bytes as usize,
                                                     source_uri: "".to_string(),
                                                     namespace: None,
+                                                    cdc_rows: None,
                                                 });
 
                                                 tx.unbounded_send(vec![current_batch.clone()])
@@ -403,6 +407,7 @@ impl DataSourceLocalFilePlugin {
                                                 bytes: _batch_bytes as usize,
                                                 source_uri: "".to_string(),
                                                 namespace: None,
+                                                cdc_rows: None,
                                             };
                                             let current_batch: Vec<IngestBatch> = vec![batch];
                                             tx.unbounded_send(vec![current_batch]).unwrap();
@@ -418,6 +423,7 @@ impl DataSourceLocalFilePlugin {
                                             bytes: _batch_bytes as usize,
                                             source_uri: "".to_string(),
                                             namespace: None,
+                                            cdc_rows: None,
                                         };
                                         let current_batch: Vec<IngestBatch> = vec![batch];
                                         tx.unbounded_send(vec![current_batch]).unwrap();

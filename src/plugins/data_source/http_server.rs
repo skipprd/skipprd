@@ -146,6 +146,7 @@ impl DataSource for DataSourceHttpServerPlugin {
                             bytes,
                             source_uri: format!("http_server://{}{}", addr, path),
                             namespace: Some("http_server".to_string()),
+                            cdc_rows: None,
                         }],
                         offsets.clone(),
                         shared_output.clone(),

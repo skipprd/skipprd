@@ -483,7 +483,8 @@ pub fn set_value(
             } else if data_type == "array" {
                 let flatten = Config::get_transform_flatten_events();
 
-                if metadata.get(field).unwrap().determined_type_values == Some(SkipprDataType::Record)
+                if metadata.get(field).unwrap().determined_type_values
+                    == Some(SkipprDataType::Record)
                     && value.is_array()
                 {
                     let mut arr_new_value: Vec<Value> = Vec::new();
@@ -598,10 +599,7 @@ pub fn set_value(
                                         Ok(v) => v,
                                         Err(_e) => {
                                             values_valid = false;
-                                            ResolvedFieldValue::new(
-                                                field.to_string(),
-                                                Value::Null,
-                                            )
+                                            ResolvedFieldValue::new(field.to_string(), Value::Null)
                                         }
                                     };
                                     arr_new_value.insert(i, res.value);

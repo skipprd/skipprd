@@ -122,10 +122,7 @@ pub fn materialize_and_sort(
 /// Uses average row width and leading-column run lengths to pick a row count
 /// that keeps row groups between ~16 MiB and ~64 MiB uncompressed, clamped
 /// to 25k..500k rows.
-pub fn estimate_row_group_size(
-    batches: &[RecordBatch],
-    order_fields: &[String],
-) -> usize {
+pub fn estimate_row_group_size(batches: &[RecordBatch], order_fields: &[String]) -> usize {
     const MIN_ROWS: usize = 25_000;
     const MAX_ROWS: usize = 500_000;
     const TARGET_BYTES_LOW: usize = 16 * 1024 * 1024;
@@ -270,7 +267,11 @@ mod tests {
     #[test]
     fn test_resolve_effective_order_filters_missing() {
         let schema = sample_schema();
-        let order = vec!["id".to_string(), "missing_col".to_string(), "name".to_string()];
+        let order = vec![
+            "id".to_string(),
+            "missing_col".to_string(),
+            "name".to_string(),
+        ];
         let schema_fields: HashSet<&str> =
             schema.fields().iter().map(|f| f.name().as_str()).collect();
         let effective: Vec<String> = order
@@ -378,7 +379,8 @@ mod tests {
     #[test]
     fn test_build_writer_properties_sets_sorting_metadata() {
         let schema = sample_schema();
-        let props = build_writer_properties(&schema, &["id".to_string(), "name".to_string()], 100_000);
+        let props =
+            build_writer_properties(&schema, &["id".to_string(), "name".to_string()], 100_000);
         let sorting = props.sorting_columns().unwrap();
         assert_eq!(sorting.len(), 2);
         assert_eq!(sorting[0].column_idx, 0); // id is index 0

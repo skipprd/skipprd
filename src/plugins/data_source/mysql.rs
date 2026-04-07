@@ -1,15 +1,18 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use mysql_async::prelude::*;
-use mysql_async::{Pool, Row, Value as MysqlValue};
+use mysql_async::{BinlogStreamRequest, Pool, Row, Value as MysqlValue};
 use serde_derive::Deserialize;
 use serde_json::{json, Map, Value};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::helpers::configuration::{Config, DataSourcePluginConfig};
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use crate::plugins::cdc::{source_capabilities, MutationKind, SourceCapability, WalRowMeta};
 use crate::plugins::{DataSink, DataSource};
 
 #[derive(Debug, Deserialize, Clone)]
@@ -19,6 +22,8 @@ pub struct DataSourceMysqlPluginConfig {
     pub format: Option<String>,
     pub batch_size_bytes: Option<i64>,
     pub batch_size_seconds: Option<i64>,
+    pub cdc_enabled: Option<bool>,
+    pub server_id: Option<u32>,
 }
 
 impl From<DataSourcePluginConfig> for DataSourceMysqlPluginConfig {
@@ -37,21 +42,21 @@ pub struct DataSourceMysqlPlugin {
 
 impl DataSourceMysqlPlugin {
     pub async fn new() -> Self {
-        let config: DataSourceMysqlPluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(input_config) => input_config.into(),
-                Err(_) => {
-                    let connection_string =
-                        Config::getenv("MYSQL_CONNECTION_STRING", "");
-                    DataSourceMysqlPluginConfig {
-                        connection_string,
-                        tables: None,
-                        format: Some("row".to_string()),
-                        batch_size_bytes: None,
-                        batch_size_seconds: None,
-                    }
+        let config: DataSourceMysqlPluginConfig = match Config::get_pipeline_input_plugin_config() {
+            Ok(input_config) => input_config.into(),
+            Err(_) => {
+                let connection_string = Config::getenv("MYSQL_CONNECTION_STRING", "");
+                DataSourceMysqlPluginConfig {
+                    connection_string,
+                    tables: None,
+                    format: Some("row".to_string()),
+                    batch_size_bytes: None,
+                    batch_size_seconds: None,
+                    cdc_enabled: None,
+                    server_id: None,
                 }
-            };
+            }
+        };
 
         DataSourceMysqlPlugin {
             ingest: Ingest::new(),
@@ -67,15 +72,15 @@ impl DataSourceMysqlPlugin {
         Ok((pool, conn))
     }
 
-    async fn discover_tables(conn: &mut mysql_async::Conn) -> Result<Vec<String>, mysql_async::Error> {
+    async fn discover_tables(
+        conn: &mut mysql_async::Conn,
+    ) -> Result<Vec<String>, mysql_async::Error> {
         let sql = "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES \
                    WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_SCHEMA, TABLE_NAME";
         let rows: Vec<Row> = conn.query(sql).await?;
         let mut tables = Vec::new();
         for row in rows {
-            let schema: String = row
-                .get(0)
-                .unwrap_or_else(|| "".to_string());
+            let schema: String = row.get(0).unwrap_or_else(|| "".to_string());
             let table: String = row.get(1).unwrap_or_else(|| "".to_string());
             if !table.is_empty() {
                 tables.push(format!("{}.{}", schema, table));
@@ -107,12 +112,10 @@ impl DataSourceMysqlPlugin {
             MysqlValue::UInt(u) => json!(u),
             MysqlValue::Float(f) => json!(f),
             MysqlValue::Double(d) => json!(d),
-            MysqlValue::Date(y, mo, d, h, mi, s, micro) => {
-                Value::String(format!(
-                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
-                    y, mo, d, h, mi, s, micro
-                ))
-            }
+            MysqlValue::Date(y, mo, d, h, mi, s, micro) => Value::String(format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
+                y, mo, d, h, mi, s, micro
+            )),
             MysqlValue::Time(neg, days, h, mi, s, micro) => {
                 let sign = if *neg { "-" } else { "" };
                 Value::String(format!(
@@ -136,10 +139,368 @@ impl DataSourceMysqlPlugin {
         serde_json::to_string(&Value::Object(map)).unwrap_or_default()
     }
 
-    pub async fn sync(
+    fn is_cdc_enabled(&self) -> bool {
+        self.config.cdc_enabled.unwrap_or(false)
+    }
+
+    /// Capture current binlog file and position from the primary.
+    async fn get_binlog_position(
+        conn: &mut mysql_async::Conn,
+    ) -> Result<(String, u64), std::io::Error> {
+        let row: Option<Row> = conn
+            .query_first("SHOW BINARY LOG STATUS")
+            .await
+            .map_err(|e| std::io::Error::other(format!("SHOW BINARY LOG STATUS: {}", e)))?;
+        let row = row.ok_or_else(|| {
+            std::io::Error::other(
+                "SHOW BINARY LOG STATUS returned no rows; is binary logging enabled?",
+            )
+        })?;
+        let file: String = row.get(0).unwrap_or_default();
+        let position: u64 = row.get(1).unwrap_or(0);
+        Ok((file, position))
+    }
+
+    /// Fetch column names for all user tables, keyed by `schema.table`.
+    /// Ordered by ORDINAL_POSITION so indices match binlog row columns.
+    async fn fetch_column_names(
+        conn: &mut mysql_async::Conn,
+    ) -> Result<HashMap<String, Vec<String>>, std::io::Error> {
+        let sql = "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME \
+                   FROM INFORMATION_SCHEMA.COLUMNS \
+                   WHERE TABLE_SCHEMA NOT IN \
+                     ('information_schema','performance_schema','mysql','sys') \
+                   ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION";
+        let rows: Vec<Row> = conn
+            .query(sql)
+            .await
+            .map_err(|e| std::io::Error::other(format!("Column names query: {}", e)))?;
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for row in &rows {
+            let schema: String = row.get(0).unwrap_or_default();
+            let table: String = row.get(1).unwrap_or_default();
+            let column: String = row.get(2).unwrap_or_default();
+            map.entry(format!("{}.{}", schema, table))
+                .or_default()
+                .push(column);
+        }
+        Ok(map)
+    }
+
+    /// Build a lexicographically-sortable order token from binlog
+    /// timestamp (seconds since epoch, upper 32 bits) and log position
+    /// (lower 32 bits).
+    fn binlog_order_token(timestamp: u32, position: u64) -> Vec<u8> {
+        let combined = ((timestamp as u64) << 32) | (position & 0xFFFF_FFFF);
+        combined.to_be_bytes().to_vec()
+    }
+
+    // -----------------------------------------------------------------------
+    // CDC sync via binlog replication
+    // -----------------------------------------------------------------------
+
+    async fn sync_cdc(
         &mut self,
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+    ) -> Result<(), std::io::Error> {
+        info!("MySQL CDC: starting binlog replication");
+
+        let server_id = self.config.server_id.unwrap_or(1);
+
+        let (pool, mut conn) = Self::connect_pool(&self.config)
+            .await
+            .map_err(|e| std::io::Error::other(format!("MySQL connect: {}", e)))?;
+
+        let db_name = Self::get_database_name(&mut conn).await;
+
+        // Check for stored checkpoint to enable resume
+        let checkpoint_key = format!("mysql:{}:binlog", db_name);
+        let stored_checkpoint = offsets.load_checkpoint(&checkpoint_key);
+        let resume_mode = stored_checkpoint.is_some();
+
+        let (binlog_file, binlog_pos) = if let Some(ref ckpt) = stored_checkpoint {
+            let ckpt_str = String::from_utf8_lossy(ckpt);
+            let parts: Vec<&str> = ckpt_str.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                let file = parts[0].to_string();
+                let pos: u64 = parts[1].parse().unwrap_or(0);
+                info!(
+                    "MySQL CDC: resuming from stored binlog position {}:{}",
+                    file, pos
+                );
+                (file, pos)
+            } else {
+                Self::get_binlog_position(&mut conn).await?
+            }
+        } else {
+            // 1. Capture binlog position before snapshot
+            let (file, pos) = Self::get_binlog_position(&mut conn).await?;
+            info!("MySQL CDC: captured binlog position {}:{}", file, pos);
+            (file, pos)
+        };
+
+        // 2. Pre-fetch column names for binlog row → JSON conversion
+        let column_map = Self::fetch_column_names(&mut conn).await?;
+
+        // 3. Discover tables
+        let tables = if resume_mode {
+            info!("MySQL CDC: skipping snapshot (resuming from stored binlog position)");
+            Vec::new()
+        } else {
+            match &self.config.tables {
+                Some(t) => t.clone(),
+                None => Self::discover_tables(&mut conn)
+                    .await
+                    .map_err(|e| std::io::Error::other(format!("Discover tables: {}", e)))?,
+            }
+        };
+
+        // 4. Initial snapshot anchored to binlog position
+        let anchor_token = Self::binlog_order_token(0, binlog_pos);
+        let anchor_event_id = format!("{}:{}", binlog_file, binlog_pos).into_bytes();
+
+        const SNAPSHOT_BATCH_ROWS: usize = 10_000;
+
+        for table_fq in &tables {
+            let parts: Vec<&str> = table_fq.splitn(2, '.').collect();
+            let (schema, table) = if parts.len() == 2 {
+                (parts[0], parts[1])
+            } else {
+                (db_name.as_str(), parts[0])
+            };
+
+            let offset_key = OffsetKey {
+                namespace: format!("mysql:{}.{}.{}", db_name, schema, table),
+                partition: table_fq.clone(),
+            };
+
+            if offsets.validate(&offset_key, OffsetTypes::Closed, 1) == Some(true) {
+                info!("CDC snapshot: skipping already-ingested {}", table_fq);
+                continue;
+            }
+
+            info!("CDC snapshot: reading {}", table_fq);
+
+            let q_schema = Self::escape_ident(schema);
+            let q_table = Self::escape_ident(table);
+            let query_sql = format!("SELECT * FROM {}.{}", q_schema, q_table);
+
+            let rows: Vec<Row> = match conn.query(query_sql.as_str()).await {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("Failed to query table {}: {}", table_fq, e);
+                    continue;
+                }
+            };
+
+            info!("CDC snapshot: {} rows from {}", rows.len(), table_fq);
+
+            let mut current_batch: Vec<IngestBatch> = Vec::new();
+            let mut ingest_tasks = IngestTasks::new();
+
+            for row in &rows {
+                let json_str = Self::row_to_json(row);
+                let bytes = json_str.len();
+
+                current_batch.push(IngestBatch {
+                    offset_key: offset_key.clone(),
+                    data: json_str,
+                    bytes,
+                    source_uri: format!("mysql://{}/{}", db_name, table_fq),
+                    namespace: Some(table.to_string()),
+                    cdc_rows: Some(vec![WalRowMeta {
+                        mutation: MutationKind::Snapshot,
+                        event_id: anchor_event_id.clone(),
+                        order_token: anchor_token.clone(),
+                    }]),
+                });
+
+                if current_batch.len() >= SNAPSHOT_BATCH_ROWS {
+                    let batch = std::mem::take(&mut current_batch);
+                    ingest_tasks.add(IngestTask::new(
+                        batch,
+                        offsets.clone(),
+                        shared_output.clone(),
+                    ));
+                }
+            }
+
+            if !current_batch.is_empty() {
+                ingest_tasks.add(IngestTask::new(
+                    current_batch,
+                    offsets.clone(),
+                    shared_output.clone(),
+                ));
+            }
+
+            self.ingest
+                .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+        }
+
+        info!("MySQL CDC: snapshot complete, switching to binlog stream");
+
+        // 5. Open binlog stream from captured position.
+        //    get_binlog_stream() consumes the Conn, so acquire a fresh one.
+        let conn2 = pool
+            .get_conn()
+            .await
+            .map_err(|e| std::io::Error::other(format!("MySQL binlog connect: {}", e)))?;
+
+        let request = BinlogStreamRequest::new(server_id)
+            .with_filename(binlog_file.as_bytes())
+            .with_pos(binlog_pos);
+
+        let mut binlog_stream = conn2
+            .get_binlog_stream(request)
+            .await
+            .map_err(|e| std::io::Error::other(format!("Binlog stream open: {}", e)))?;
+
+        // MySQL binlog row-event type codes (protocol-stable).
+        const WRITE_ROWS_V1: u8 = 23;
+        const UPDATE_ROWS_V1: u8 = 24;
+        const DELETE_ROWS_V1: u8 = 25;
+        const WRITE_ROWS_V2: u8 = 30;
+        const UPDATE_ROWS_V2: u8 = 31;
+        const DELETE_ROWS_V2: u8 = 32;
+
+        // 6. Process binlog events
+        while let Some(event_result) = binlog_stream.next().await {
+            let event = match event_result {
+                Ok(e) => e,
+                Err(e) => {
+                    error!("MySQL CDC: binlog event error: {}", e);
+                    continue;
+                }
+            };
+
+            let header = event.header();
+            let timestamp = header.timestamp();
+            let log_pos = header.log_pos();
+            let evt_raw = header.event_type_raw();
+
+            let mutation = match evt_raw {
+                WRITE_ROWS_V1 | WRITE_ROWS_V2 => MutationKind::Insert,
+                UPDATE_ROWS_V1 | UPDATE_ROWS_V2 => MutationKind::Update,
+                DELETE_ROWS_V1 | DELETE_ROWS_V2 => MutationKind::Delete,
+                _ => continue, // TableMapEvents, queries, etc. — skip
+            };
+
+            let event_data = match event.read_data() {
+                Ok(Some(d)) => d,
+                Ok(None) => continue,
+                Err(e) => {
+                    error!("MySQL CDC: failed to parse binlog event: {}", e);
+                    continue;
+                }
+            };
+
+            // Extract the RowsEvent payload (all row-event variants collapse
+            // into EventData::RowsEvent in mysql_common).
+            let rows_data = match event_data {
+                mysql_async::binlog::events::EventData::RowsEvent(r) => r,
+                _ => continue,
+            };
+
+            let table_id = rows_data.table_id();
+            let tme = match binlog_stream.get_tme(table_id) {
+                Some(t) => t,
+                None => {
+                    warn!(
+                        "MySQL CDC: no cached TableMapEvent for table_id {}",
+                        table_id
+                    );
+                    continue;
+                }
+            };
+
+            let tme_db = tme.database_name().to_string();
+            let tme_table = tme.table_name().to_string();
+            let fq_table = format!("{}.{}", tme_db, tme_table);
+
+            let columns = column_map.get(&fq_table);
+            let order_token = Self::binlog_order_token(timestamp, log_pos as u64);
+            let event_id = format!("{}:{}", binlog_file, log_pos).into_bytes();
+
+            let offset_key = OffsetKey {
+                namespace: format!("mysql:{}.{}.{}", db_name, tme_db, tme_table),
+                partition: fq_table.clone(),
+            };
+
+            for row_result in rows_data.rows(tme) {
+                let (before, after) = match row_result {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        error!("MySQL CDC: row parse error: {}", e);
+                        continue;
+                    }
+                };
+
+                // INSERT/UPDATE use the after-image; DELETE uses before-image.
+                let values = match mutation {
+                    MutationKind::Delete => before,
+                    _ => after,
+                };
+                let Some(values) = values else { continue };
+
+                let mut map = Map::new();
+                for i in 0..values.len() {
+                    let col_name = columns
+                        .and_then(|cols| cols.get(i))
+                        .cloned()
+                        .unwrap_or_else(|| format!("col_{}", i));
+                    let json_val = values
+                        .as_ref(i)
+                        .and_then(|bv| MysqlValue::try_from(bv.clone()).ok())
+                        .map(|v| Self::mysql_value_to_json(&v))
+                        .unwrap_or(Value::Null);
+                    map.insert(col_name, json_val);
+                }
+                let json_str = serde_json::to_string(&Value::Object(map)).unwrap_or_default();
+                let bytes = json_str.len();
+
+                let batch = IngestBatch {
+                    offset_key: offset_key.clone(),
+                    data: json_str,
+                    bytes,
+                    source_uri: format!("mysql://{}/{}", db_name, fq_table),
+                    namespace: Some(tme_table.clone()),
+                    cdc_rows: Some(vec![WalRowMeta {
+                        mutation,
+                        event_id: event_id.clone(),
+                        order_token: order_token.clone(),
+                    }]),
+                };
+
+                let mut ingest_tasks = IngestTasks::new();
+                ingest_tasks.add(IngestTask::new(
+                    vec![batch],
+                    offsets.clone(),
+                    shared_output.clone(),
+                ));
+                self.ingest
+                    .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+            }
+
+            offsets.store_checkpoint(
+                &checkpoint_key,
+                format!("{}:{}", binlog_file, log_pos).as_bytes(),
+            );
+        }
+
+        info!("MySQL CDC: binlog stream ended");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Non-CDC (legacy) sync
+    // -----------------------------------------------------------------------
+
+    async fn sync_query(
+        &mut self,
+        offsets: Arc<Offsets>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        cdc_tag: bool,
     ) {
         info!("MySQL input plugin starting sync");
 
@@ -208,9 +569,20 @@ impl DataSourceMysqlPlugin {
             let mut current_batch: Vec<IngestBatch> = Vec::new();
             let mut ingest_tasks = IngestTasks::new();
 
-            for row in &rows {
+            for (row_idx, row) in rows.iter().enumerate() {
                 let json_str = Self::row_to_json(row);
                 let bytes = json_str.len();
+
+                let cdc_rows = if cdc_tag {
+                    let event_id = format!("{}:{}", table_fq, row_idx).into_bytes();
+                    Some(vec![WalRowMeta {
+                        mutation: MutationKind::Snapshot,
+                        event_id: event_id.clone(),
+                        order_token: event_id,
+                    }])
+                } else {
+                    None
+                };
 
                 current_batch.push(IngestBatch {
                     offset_key: offset_key.clone(),
@@ -218,6 +590,7 @@ impl DataSourceMysqlPlugin {
                     bytes,
                     source_uri: format!("mysql://{}/{}", db_name, table_fq),
                     namespace: Some(table.to_string()),
+                    cdc_rows,
                 });
 
                 if current_batch.len() >= batch_size {
@@ -253,7 +626,58 @@ impl DataSource for DataSourceMysqlPlugin {
         offsets: Arc<Offsets>,
         output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> Result<(), std::io::Error> {
-        self.sync(offsets, output).await;
-        Ok(())
+        if self.is_cdc_enabled() {
+            self.sync_cdc(offsets, output).await
+        } else {
+            self.sync_query(offsets, output, false).await;
+            Ok(())
+        }
+    }
+
+    fn capability(&self) -> Option<&'static SourceCapability> {
+        if self.is_cdc_enabled() {
+            Some(&source_capabilities::MYSQL)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_binlog_order_token_lexicographic_ordering() {
+        let earlier = DataSourceMysqlPlugin::binlog_order_token(1, 100);
+        let later = DataSourceMysqlPlugin::binlog_order_token(2, 50);
+        assert!(
+            earlier < later,
+            "timestamp=1,pos=100 must sort before timestamp=2,pos=50"
+        );
+    }
+
+    #[test]
+    fn test_binlog_order_token_same_timestamp_orders_by_position() {
+        let a = DataSourceMysqlPlugin::binlog_order_token(100, 200);
+        let b = DataSourceMysqlPlugin::binlog_order_token(100, 300);
+        assert!(a < b, "same timestamp: lower position must sort first");
+    }
+
+    #[test]
+    fn test_binlog_order_token_is_8_bytes() {
+        let token = DataSourceMysqlPlugin::binlog_order_token(42, 99);
+        assert_eq!(
+            token.len(),
+            8,
+            "order token must be 8 bytes (u64 big-endian)"
+        );
+    }
+
+    #[test]
+    fn test_binlog_order_token_encodes_big_endian() {
+        let token = DataSourceMysqlPlugin::binlog_order_token(1, 0);
+        let expected: u64 = 1u64 << 32;
+        assert_eq!(token, expected.to_be_bytes().to_vec());
     }
 }

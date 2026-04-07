@@ -21,16 +21,17 @@ pub async fn serialize_to_parquet(
         raw_batches.push(batch);
     }
 
-    let order_fields =
-        crate::converters::parquet_ordering::resolve_effective_order(&schema);
+    let order_fields = crate::converters::parquet_ordering::resolve_effective_order(&schema);
     let sorted_batches = crate::converters::parquet_ordering::materialize_and_sort(
         raw_batches,
         &schema,
         &order_fields,
     )?;
 
-    let row_group_size =
-        crate::converters::parquet_ordering::estimate_row_group_size(&sorted_batches, &order_fields);
+    let row_group_size = crate::converters::parquet_ordering::estimate_row_group_size(
+        &sorted_batches,
+        &order_fields,
+    );
     let props = crate::converters::parquet_ordering::build_writer_properties(
         &schema,
         &order_fields,

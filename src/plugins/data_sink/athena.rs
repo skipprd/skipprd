@@ -85,10 +85,7 @@ impl From<DataSinkPluginConfig> for DataSinkAthenaPluginConfig {
     }
 }
 
-fn is_deadletter_athena_target(
-    config: &DataSinkAthenaPluginConfig,
-    namespace: &str,
-) -> bool {
+fn is_deadletter_athena_target(config: &DataSinkAthenaPluginConfig, namespace: &str) -> bool {
     if namespace != crate::ingest::deadletter::table_name() {
         return false;
     }
@@ -104,8 +101,17 @@ impl DataSink for DataSinkAthenaPlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
+        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
+        let stream = match cdc_ctx {
+            Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+            None => stream,
+        };
         self.inner_sync(stream, filename).await
+    }
+
+    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
+        Some(&crate::plugins::cdc::sink_capabilities::ATHENA)
     }
 }
 
@@ -130,12 +136,8 @@ impl DataSinkAthenaPlugin {
         namespace: &str,
         metadata: &crate::discover::OutputMetadata,
     ) -> Result<(), std::io::Error> {
-        AwsAthena::create_or_update_schema_with_config(
-            namespace,
-            metadata,
-            self.config.clone(),
-        )
-        .await;
+        AwsAthena::create_or_update_schema_with_config(namespace, metadata, self.config.clone())
+            .await;
         Ok(())
     }
 
@@ -157,8 +159,7 @@ impl DataSinkAthenaPlugin {
     }
 
     pub async fn new(buffer_name: String) -> DataSinkAthenaPlugin {
-        let athena_config: DataSinkAthenaPluginConfig =
-            DataSinkAthenaPlugin::get_config();
+        let athena_config: DataSinkAthenaPluginConfig = DataSinkAthenaPlugin::get_config();
         Self::new_with_config(buffer_name, athena_config).await
     }
 
@@ -316,10 +317,7 @@ impl DataSinkAthenaPlugin {
                     match result {
                         Ok(_) => {}
                         Err(e) => {
-                            warn!(
-                                "Glue partition creation failed for '{}': {}",
-                                key_clone, e
-                            );
+                            warn!("Glue partition creation failed for '{}': {}", key_clone, e);
                         }
                     }
                     PARTITION_TASKS_IN_FLIGHT.fetch_sub(1, AO::Relaxed);
@@ -620,16 +618,17 @@ impl DataSinkAthenaPlugin {
         }
 
         // Resolve ordering and sort if configured
-        let order_fields =
-            crate::converters::parquet_ordering::resolve_effective_order(&schema);
+        let order_fields = crate::converters::parquet_ordering::resolve_effective_order(&schema);
         let sorted_batches = crate::converters::parquet_ordering::materialize_and_sort(
             raw_batches,
             &schema,
             &order_fields,
         )?;
 
-        let row_group_size =
-            crate::converters::parquet_ordering::estimate_row_group_size(&sorted_batches, &order_fields);
+        let row_group_size = crate::converters::parquet_ordering::estimate_row_group_size(
+            &sorted_batches,
+            &order_fields,
+        );
         let props = crate::converters::parquet_ordering::build_writer_properties(
             &schema,
             &order_fields,
@@ -863,11 +862,12 @@ impl AwsAthena {
 
         match AwsAthena::glue_get_table(&config, namespace).await {
             Ok(table) => {
-                let deadletter_table_needs_rebuild = is_deadletter_athena_target(&config, namespace)
-                    && table
-                        .table()
-                        .and_then(|t| t.partition_keys.as_ref())
-                        .is_some_and(|keys| !keys.is_empty());
+                let deadletter_table_needs_rebuild =
+                    is_deadletter_athena_target(&config, namespace)
+                        && table
+                            .table()
+                            .and_then(|t| t.partition_keys.as_ref())
+                            .is_some_and(|keys| !keys.is_empty());
                 if deadletter_table_needs_rebuild {
                     info!(
                         "Rebuilding deadletter Glue table '{}' in database '{}' without partitions",
@@ -991,9 +991,7 @@ impl AwsAthena {
             .await
     }
 
-    pub async fn create_workgroup(
-        config: &DataSinkAthenaPluginConfig,
-    ) -> Result<bool, String> {
+    pub async fn create_workgroup(config: &DataSinkAthenaPluginConfig) -> Result<bool, String> {
         let workgroup = config.athena_workgroup_name.clone();
         let bucket = config.athena_results_s3_bucket.clone();
         let path = config.s3_prefix.clone();
@@ -1045,9 +1043,7 @@ impl AwsAthena {
         }
     }
 
-    pub async fn update_workgroup(
-        config: &DataSinkAthenaPluginConfig,
-    ) -> Result<bool, String> {
+    pub async fn update_workgroup(config: &DataSinkAthenaPluginConfig) -> Result<bool, String> {
         let workgroup = config.athena_workgroup_name.clone();
         let bucket = config.athena_results_s3_bucket.clone();
         let path = config.s3_prefix.clone();
@@ -1096,9 +1092,7 @@ impl AwsAthena {
         }
     }
 
-    pub async fn glue_create_database(
-        config: &DataSinkAthenaPluginConfig,
-    ) -> Result<bool, String> {
+    pub async fn glue_create_database(config: &DataSinkAthenaPluginConfig) -> Result<bool, String> {
         let database = config.glue_database_name.clone();
         let bucket = config.s3_bucket.clone();
         let path = config.s3_prefix.clone();

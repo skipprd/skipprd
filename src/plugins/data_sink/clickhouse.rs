@@ -7,9 +7,14 @@ use reqwest::Client;
 use serde_derive::Deserialize;
 use tracing::{error, info};
 
+use dashmap::DashSet;
+use once_cell::sync::Lazy;
+
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use crate::plugins::{DataSink, SchemaSink};
+
+static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkClickhousePluginConfig {
@@ -86,16 +91,56 @@ impl DataSinkClickhousePlugin {
                         let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
                         serde_json::Value::Bool(a.value(row))
                     }
-                    ArrowDataType::Int8 => serde_json::json!(array.as_any().downcast_ref::<Int8Array>().unwrap().value(row)),
-                    ArrowDataType::Int16 => serde_json::json!(array.as_any().downcast_ref::<Int16Array>().unwrap().value(row)),
-                    ArrowDataType::Int32 => serde_json::json!(array.as_any().downcast_ref::<Int32Array>().unwrap().value(row)),
-                    ArrowDataType::Int64 => serde_json::json!(array.as_any().downcast_ref::<Int64Array>().unwrap().value(row)),
-                    ArrowDataType::UInt8 => serde_json::json!(array.as_any().downcast_ref::<UInt8Array>().unwrap().value(row)),
-                    ArrowDataType::UInt16 => serde_json::json!(array.as_any().downcast_ref::<UInt16Array>().unwrap().value(row)),
-                    ArrowDataType::UInt32 => serde_json::json!(array.as_any().downcast_ref::<UInt32Array>().unwrap().value(row)),
-                    ArrowDataType::UInt64 => serde_json::json!(array.as_any().downcast_ref::<UInt64Array>().unwrap().value(row)),
-                    ArrowDataType::Float32 => serde_json::json!(array.as_any().downcast_ref::<Float32Array>().unwrap().value(row)),
-                    ArrowDataType::Float64 => serde_json::json!(array.as_any().downcast_ref::<Float64Array>().unwrap().value(row)),
+                    ArrowDataType::Int8 => serde_json::json!(array
+                        .as_any()
+                        .downcast_ref::<Int8Array>()
+                        .unwrap()
+                        .value(row)),
+                    ArrowDataType::Int16 => serde_json::json!(array
+                        .as_any()
+                        .downcast_ref::<Int16Array>()
+                        .unwrap()
+                        .value(row)),
+                    ArrowDataType::Int32 => serde_json::json!(array
+                        .as_any()
+                        .downcast_ref::<Int32Array>()
+                        .unwrap()
+                        .value(row)),
+                    ArrowDataType::Int64 => serde_json::json!(array
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .value(row)),
+                    ArrowDataType::UInt8 => serde_json::json!(array
+                        .as_any()
+                        .downcast_ref::<UInt8Array>()
+                        .unwrap()
+                        .value(row)),
+                    ArrowDataType::UInt16 => serde_json::json!(array
+                        .as_any()
+                        .downcast_ref::<UInt16Array>()
+                        .unwrap()
+                        .value(row)),
+                    ArrowDataType::UInt32 => serde_json::json!(array
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .unwrap()
+                        .value(row)),
+                    ArrowDataType::UInt64 => serde_json::json!(array
+                        .as_any()
+                        .downcast_ref::<UInt64Array>()
+                        .unwrap()
+                        .value(row)),
+                    ArrowDataType::Float32 => serde_json::json!(array
+                        .as_any()
+                        .downcast_ref::<Float32Array>()
+                        .unwrap()
+                        .value(row)),
+                    ArrowDataType::Float64 => serde_json::json!(array
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .value(row)),
                     ArrowDataType::Utf8 => {
                         let a = array.as_any().downcast_ref::<StringArray>().unwrap();
                         serde_json::Value::String(a.value(row).to_string())
@@ -195,6 +240,332 @@ impl DataSinkClickhousePlugin {
         }
         Ok(())
     }
+
+    async fn execute_sql(&self, sql: &str) -> Result<(), std::io::Error> {
+        for stmt in sql.split(";\n") {
+            let stmt = stmt.trim().trim_end_matches(';').trim();
+            if stmt.is_empty() {
+                continue;
+            }
+            self.execute_ddl(stmt).await?;
+        }
+        Ok(())
+    }
+
+    fn arrow_value_to_sql(array: &dyn Array, row: usize) -> String {
+        if array.is_null(row) {
+            return "NULL".to_string();
+        }
+        if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
+            return format!("'{}'", a.value(row).replace('\'', "\\'"));
+        }
+        if let Some(a) = array.as_any().downcast_ref::<LargeStringArray>() {
+            return format!("'{}'", a.value(row).replace('\'', "\\'"));
+        }
+        if let Some(a) = array.as_any().downcast_ref::<Int64Array>() {
+            return a.value(row).to_string();
+        }
+        if let Some(a) = array.as_any().downcast_ref::<Int32Array>() {
+            return a.value(row).to_string();
+        }
+        if let Some(a) = array.as_any().downcast_ref::<Int16Array>() {
+            return a.value(row).to_string();
+        }
+        if let Some(a) = array.as_any().downcast_ref::<Int8Array>() {
+            return a.value(row).to_string();
+        }
+        if let Some(a) = array.as_any().downcast_ref::<UInt64Array>() {
+            return a.value(row).to_string();
+        }
+        if let Some(a) = array.as_any().downcast_ref::<UInt32Array>() {
+            return a.value(row).to_string();
+        }
+        if let Some(a) = array.as_any().downcast_ref::<Float64Array>() {
+            return a.value(row).to_string();
+        }
+        if let Some(a) = array.as_any().downcast_ref::<Float32Array>() {
+            return a.value(row).to_string();
+        }
+        if let Some(a) = array.as_any().downcast_ref::<BooleanArray>() {
+            return if a.value(row) { "1" } else { "0" }.to_string();
+        }
+        format!(
+            "'{}'",
+            arrow::util::display::array_value_to_string(array, row)
+                .unwrap_or_else(|_| "NULL".to_string())
+                .replace('\'', "\\'")
+        )
+    }
+
+    async fn sync_cdc(
+        &self,
+        mut stream: SendableRecordBatchStream,
+        filename: String,
+        ctx: &crate::plugins::cdc::SyncContext,
+    ) -> Result<(), std::io::Error> {
+        use crate::metrics::counters;
+        use crate::plugins::cdc::MutationKind;
+        use crate::plugins::data_sink::cdc_apply::{
+            ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
+            tombstone_table_name, upsert_if_newer_sql, SqlDialect,
+        };
+
+        let contract = match ctx.contract.as_ref() {
+            Some(c) if !c.business_key_columns.is_empty() => c,
+            _ => {
+                info!(target: "clickhouse", "CDC context without contract or business keys; falling back to append");
+                counters::inc_uploads_in_flight();
+                let namespace = BufferChunker::decode_file_namespace(&filename);
+                let table_name = self
+                    .config
+                    .table
+                    .clone()
+                    .unwrap_or_else(|| Self::namespace_to_table_name(&namespace));
+                let arrow_schema = stream.schema();
+                let col_defs: Vec<(String, &str)> = arrow_schema
+                    .fields()
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.name().clone(),
+                            Self::arrow_type_to_clickhouse(f.data_type()),
+                        )
+                    })
+                    .collect();
+                self.ensure_table(&table_name, &col_defs)
+                    .await
+                    .map_err(|e| {
+                        counters::dec_uploads_in_flight();
+                        e
+                    })?;
+                let mut total_rows = 0usize;
+                let mut stream = stream;
+                while let Some(batch_result) = stream.next().await {
+                    let batch = batch_result
+                        .map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+                    let num_rows = batch.num_rows();
+                    if num_rows == 0 {
+                        continue;
+                    }
+                    let json_rows: Vec<String> = (0..num_rows)
+                        .map(|row| Self::row_to_json(&batch, row))
+                        .collect();
+                    self.insert_json_rows(&table_name, &json_rows)
+                        .await
+                        .map_err(|e| {
+                            counters::dec_uploads_in_flight();
+                            e
+                        })?;
+                    total_rows += num_rows;
+                    counters::add_parquet_rows(num_rows as u64);
+                }
+                counters::add_upload(1);
+                counters::dec_uploads_in_flight();
+                info!(
+                    "ClickHouse CDC fallback append: {} rows into {}",
+                    total_rows, table_name
+                );
+                return Ok(());
+            }
+        };
+
+        counters::inc_uploads_in_flight();
+
+        let namespace = BufferChunker::decode_file_namespace(&filename);
+        let table_name = self
+            .config
+            .table
+            .clone()
+            .unwrap_or_else(|| Self::namespace_to_table_name(&namespace));
+        let arrow_schema = stream.schema();
+
+        let col_defs: Vec<(String, &str)> = arrow_schema
+            .fields()
+            .iter()
+            .map(|f| {
+                (
+                    f.name().clone(),
+                    Self::arrow_type_to_clickhouse(f.data_type()),
+                )
+            })
+            .collect();
+
+        let fq_table = format!("\"{}\"", table_name);
+
+        self.ensure_table(&table_name, &col_defs)
+            .await
+            .map_err(|e| {
+                counters::dec_uploads_in_flight();
+                e
+            })?;
+
+        if CDC_DDL_ENSURED.insert(fq_table.clone()) {
+            let order_col_ddl = ddl_add_order_token_column(SqlDialect::ClickHouse, &fq_table);
+            if let Err(e) = self.execute_ddl(&order_col_ddl).await {
+                let msg = e.to_string();
+                if !msg.contains("already exists") && !msg.contains("duplicate column") {
+                    CDC_DDL_ENSURED.remove(&fq_table);
+                    counters::dec_uploads_in_flight();
+                    return Err(e);
+                }
+            }
+
+            let tombstone_tbl = tombstone_table_name(&fq_table);
+            let bk_type_pairs: Vec<(String, String)> = contract
+                .business_key_columns
+                .iter()
+                .map(|bk| {
+                    let ch_type = col_defs
+                        .iter()
+                        .find(|(name, _)| name == bk)
+                        .map(|(_, t)| (*t).to_string())
+                        .unwrap_or_else(|| "String".to_string());
+                    (bk.clone(), ch_type)
+                })
+                .collect();
+            let tombstone_ddl =
+                ddl_create_tombstone_table(SqlDialect::ClickHouse, &tombstone_tbl, &bk_type_pairs);
+            if let Err(e) = self.execute_ddl(&tombstone_ddl).await {
+                let msg = e.to_string();
+                if !msg.contains("already exists") {
+                    CDC_DDL_ENSURED.remove(&fq_table);
+                    counters::dec_uploads_in_flight();
+                    return Err(e);
+                }
+            }
+
+            info!(target: "clickhouse", "CDC DDL applied for {}", fq_table);
+        }
+
+        let tombstone_table = tombstone_table_name(&fq_table);
+
+        let bk_names_quoted: Vec<String> = contract
+            .business_key_columns
+            .iter()
+            .map(|bk| format!("\"{}\"", bk))
+            .collect();
+
+        let bk_types: Vec<String> = contract
+            .business_key_columns
+            .iter()
+            .map(|bk| {
+                col_defs
+                    .iter()
+                    .find(|(name, _)| name == bk)
+                    .map(|(_, t)| (*t).to_string())
+                    .unwrap_or_else(|| "String".to_string())
+            })
+            .collect();
+
+        let col_names_quoted: Vec<String> = arrow_schema
+            .fields()
+            .iter()
+            .map(|f| format!("\"{}\"", f.name()))
+            .collect();
+
+        let mut row_offset = 0usize;
+        let mut total_rows = 0usize;
+
+        while let Some(batch_result) = stream.next().await {
+            let batch =
+                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+            let num_rows = batch.num_rows();
+            if num_rows == 0 {
+                continue;
+            }
+
+            for row in 0..num_rows {
+                let meta_idx = row_offset + row;
+                let row_meta = ctx.part_meta.rows.get(meta_idx).ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "CDC row metadata missing at index {} (have {})",
+                        meta_idx,
+                        ctx.part_meta.rows.len()
+                    ))
+                })?;
+
+                let order_token_hex: String = row_meta
+                    .order_token
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect();
+
+                match row_meta.mutation {
+                    MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
+                        let mut all_names = col_names_quoted.clone();
+                        all_names.push("\"_skippr_order_token\"".to_string());
+
+                        let mut all_values: Vec<String> = (0..batch.num_columns())
+                            .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
+                            .collect();
+                        all_values.push(format!("'{}'", order_token_hex));
+
+                        let sql = upsert_if_newer_sql(
+                            SqlDialect::ClickHouse,
+                            &fq_table,
+                            &tombstone_table,
+                            &all_names,
+                            &all_values,
+                            &bk_names_quoted,
+                            &order_token_hex,
+                        );
+
+                        self.execute_sql(&sql).await.map_err(|e| {
+                            error!("CDC upsert failed for {}: {}", fq_table, e);
+                            counters::dec_uploads_in_flight();
+                            e
+                        })?;
+                    }
+                    MutationKind::Delete => {
+                        let bk_values: Vec<String> = contract
+                            .business_key_columns
+                            .iter()
+                            .map(|bk| {
+                                let col_idx = arrow_schema
+                                    .fields()
+                                    .iter()
+                                    .position(|f| f.name() == bk)
+                                    .unwrap_or(0);
+                                Self::arrow_value_to_sql(batch.column(col_idx).as_ref(), row)
+                            })
+                            .collect();
+
+                        let sql = delete_if_newer_sql(
+                            SqlDialect::ClickHouse,
+                            &fq_table,
+                            &tombstone_table,
+                            &bk_names_quoted,
+                            &bk_values,
+                            &bk_types,
+                            &order_token_hex,
+                        );
+
+                        self.execute_sql(&sql).await.map_err(|e| {
+                            error!("CDC delete failed for {}: {}", fq_table, e);
+                            counters::dec_uploads_in_flight();
+                            e
+                        })?;
+                    }
+                }
+            }
+
+            row_offset += num_rows;
+            total_rows += num_rows;
+            counters::add_parquet_rows(num_rows as u64);
+            info!(
+                "CDC applied {} rows to {} (total: {})",
+                num_rows, table_name, total_rows
+            );
+        }
+
+        counters::add_upload(1);
+        counters::dec_uploads_in_flight();
+        info!(
+            "ClickHouse CDC sync complete: {} total rows into {}",
+            total_rows, table_name
+        );
+        Ok(())
+    }
 }
 
 fn urlencoding(s: &str) -> String {
@@ -207,7 +578,11 @@ impl DataSink for DataSinkClickhousePlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
+        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
+        if let Some(ctx) = cdc_ctx {
+            return self.sync_cdc(stream, filename, ctx).await;
+        }
         use crate::metrics::counters;
         counters::inc_uploads_in_flight();
 
@@ -222,20 +597,27 @@ impl DataSink for DataSinkClickhousePlugin {
         let col_defs: Vec<(String, &str)> = arrow_schema
             .fields()
             .iter()
-            .map(|f| (f.name().clone(), Self::arrow_type_to_clickhouse(f.data_type())))
+            .map(|f| {
+                (
+                    f.name().clone(),
+                    Self::arrow_type_to_clickhouse(f.data_type()),
+                )
+            })
             .collect();
 
-        self.ensure_table(&table_name, &col_defs).await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
+        self.ensure_table(&table_name, &col_defs)
+            .await
+            .map_err(|e| {
+                counters::dec_uploads_in_flight();
+                e
+            })?;
 
         let mut total_rows = 0usize;
         let mut stream = stream;
 
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result
-                .map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+            let batch =
+                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
             let num_rows = batch.num_rows();
             if num_rows == 0 {
                 continue;
@@ -270,6 +652,10 @@ impl DataSink for DataSinkClickhousePlugin {
         );
         Ok(())
     }
+
+    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
+        Some(&crate::plugins::cdc::sink_capabilities::CLICKHOUSE)
+    }
 }
 
 #[async_trait]
@@ -281,12 +667,11 @@ impl SchemaSink for DataSinkClickhousePlugin {
     ) -> Result<(), std::io::Error> {
         use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 
-        let fields: std::collections::HashMap<String, crate::discover::OutputMetadata> =
-            metadata
-                .fields
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+        let fields: std::collections::HashMap<String, crate::discover::OutputMetadata> = metadata
+            .fields
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
         let arrow_schema = convert_skippr_to_arrow(Box::new(fields)).map_err(|e| {
             std::io::Error::other(format!(

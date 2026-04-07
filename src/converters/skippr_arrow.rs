@@ -296,9 +296,9 @@ fn convert_skippr_to_arrow_field_types(
                     } else {
                         field_types.insert(
                             v.out_field_name.to_string(),
-                            InferredType::Array(Box::new(InferredType::Scalar(
-                                HashSet::from([DataType::Utf8]),
-                            ))),
+                            InferredType::Array(Box::new(InferredType::Scalar(HashSet::from([
+                                DataType::Utf8,
+                            ])))),
                         );
                     }
                 } else {
@@ -374,12 +374,8 @@ fn convert_skippr_to_arrow_field_types(
                     "Unhandled Skippr type {:?} for field '{}', falling back to Utf8",
                     other, v.out_field_name
                 );
-                set_object_scalar_field_type(
-                    &mut field_types,
-                    &v.out_field_name,
-                    DataType::Utf8,
-                )
-                .expect("Error setting fallback Utf8 type");
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Utf8)
+                    .expect("Error setting fallback Utf8 type");
             }
         }
     }

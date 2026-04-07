@@ -1,6 +1,8 @@
 use crate::helpers::offsets::OffsetKey;
 use arrow::array::RecordBatch;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+use bincode;
+use serde_derive::{Deserialize, Serialize};
 #[cfg(test)]
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -8,8 +10,6 @@ use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use std::{fs, io};
-use bincode;
-use serde_derive::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct PartitionKey {
@@ -23,7 +23,9 @@ pub struct PartitionKey {
 const MAGIC: &[u8; 4] = b"SEGF";
 const PART: &[u8; 4] = b"PART";
 const FOOT: &[u8; 4] = b"FOOT";
-const VERSION: u32 = 2;
+/// Segment format version. Includes an optional `part_meta_blob` per PART
+/// for CDC row-aligned metadata (mutation kind, event_id, order_token).
+const VERSION: u32 = 3;
 const COMMIT_HEADER_VERSION: u32 = 1;
 
 #[derive(Clone, Debug)]
@@ -144,7 +146,15 @@ impl SegmentFile {
             let mut upd_buf = [0u8; 8];
             reader.read_exact(&mut upd_buf)?;
             let upd_secs = u64::from_le_bytes(upd_buf);
-            // VERSION=2: read explicit data_len and skip forward by that length
+
+            // Skip part_meta_blob sidecar
+            let mut meta_len_buf = [0u8; 8];
+            reader.read_exact(&mut meta_len_buf)?;
+            let meta_len = u64::from_le_bytes(meta_len_buf);
+            if meta_len > 0 {
+                reader.seek(io::SeekFrom::Current(meta_len as i64))?;
+            }
+
             let mut len_buf = [0u8; 8];
             reader.read_exact(&mut len_buf)?;
             let data_len = u64::from_le_bytes(len_buf);
@@ -157,7 +167,6 @@ impl SegmentFile {
                 start,
                 len: data_len,
             });
-            // Seek over the Arrow stream to the next PART header
             reader.seek(io::SeekFrom::Current(data_len as i64))?;
         }
 
@@ -177,6 +186,13 @@ impl SegmentFile {
         Ok(SegmentFile { path: p_final })
     }
 
+    /// Layout per PART:
+    ///   PART | key_len | key_blob | part_bytes | updated_secs
+    ///   | part_meta_len | part_meta_blob | data_len | Arrow IPC
+    ///
+    /// `part_meta_blobs` maps each `PartitionKey` to its serialized
+    /// `WalPartMeta`. Partitions not present in the map get a zero-length
+    /// meta blob (append-mode semantics).
     pub fn write_snapshot(
         &self,
         offsets: &std::collections::HashMap<OffsetKey, u64>,
@@ -185,7 +201,12 @@ impl SegmentFile {
             PartitionKey,
             (u64 /*bytes*/, SystemTime /*updated*/),
         >,
-    ) -> io::Result<(SegmentFileMetadata, u64 /*rows*/, [u8; 32] /*sha256*/)> {
+        part_meta_blobs: &std::collections::HashMap<PartitionKey, Vec<u8>>,
+    ) -> io::Result<(
+        SegmentFileMetadata,
+        u64,      /*rows*/
+        [u8; 32], /*sha256*/
+    )> {
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -232,6 +253,14 @@ impl SegmentFile {
                 .as_secs();
             file.write_all(&p_bytes.to_le_bytes())?;
             file.write_all(&updated_secs.to_le_bytes())?;
+
+            // write part_meta_blob sidecar
+            let meta_blob = part_meta_blobs.get(key).cloned().unwrap_or_default();
+            let meta_len = meta_blob.len() as u64;
+            file.write_all(&meta_len.to_le_bytes())?;
+            if meta_len > 0 {
+                file.write_all(&meta_blob)?;
+            }
 
             let data_len_pos = file.stream_position()?;
             file.write_all(&0u64.to_le_bytes())?;
@@ -309,6 +338,75 @@ impl SegmentFile {
         Ok((meta, total_rows, sha_bytes))
     }
 
+    /// Read per-partition CDC metadata blobs from a segment.
+    pub fn read_part_meta_blobs_from_reader<R: Read + Seek>(
+        reader: &mut R,
+    ) -> io::Result<std::collections::HashMap<PartitionKey, Vec<u8>>> {
+        let mut result: std::collections::HashMap<PartitionKey, Vec<u8>> =
+            std::collections::HashMap::new();
+
+        let mut magic = [0u8; 4];
+        reader.read_exact(&mut magic)?;
+        if &magic != MAGIC {
+            return Ok(result);
+        }
+        let mut ver = [0u8; 4];
+        reader.read_exact(&mut ver)?;
+        let version = u32::from_le_bytes(ver);
+        if version != VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("read_part_meta_blobs: refused version={}", version),
+            ));
+        }
+
+        // Skip created_at + offsets blob
+        reader.seek(io::SeekFrom::Current(8))?;
+        let mut off_len_buf = [0u8; 8];
+        reader.read_exact(&mut off_len_buf)?;
+        let offsets_len = u64::from_le_bytes(off_len_buf);
+        reader.seek(io::SeekFrom::Current(offsets_len as i64))?;
+
+        loop {
+            let mut tag = [0u8; 4];
+            match reader.read_exact(&mut tag) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
+            }
+            if &tag != PART {
+                break;
+            }
+            let mut key_len_buf = [0u8; 8];
+            reader.read_exact(&mut key_len_buf)?;
+            let key_len = u64::from_le_bytes(key_len_buf);
+            let mut key_blob = vec![0u8; key_len as usize];
+            reader.read_exact(&mut key_blob)?;
+            let key: PartitionKey = bincode::deserialize(&key_blob).unwrap();
+
+            // Skip part_bytes + updated_secs
+            reader.seek(io::SeekFrom::Current(16))?;
+
+            // Read part_meta_blob
+            let mut meta_len_buf = [0u8; 8];
+            reader.read_exact(&mut meta_len_buf)?;
+            let meta_len = u64::from_le_bytes(meta_len_buf);
+            if meta_len > 0 {
+                let mut meta_blob = vec![0u8; meta_len as usize];
+                reader.read_exact(&mut meta_blob)?;
+                result.insert(key, meta_blob);
+            }
+
+            // Skip data_len + Arrow data
+            let mut len_buf = [0u8; 8];
+            reader.read_exact(&mut len_buf)?;
+            let data_len = u64::from_le_bytes(len_buf);
+            reader.seek(io::SeekFrom::Current(data_len as i64))?;
+        }
+
+        Ok(result)
+    }
+
     pub fn read_metadata(&self) -> io::Result<SegmentFileMetadata> {
         let mut file = OpenOptions::new().read(true).open(&self.path)?;
         let mut magic = [0u8; 4];
@@ -372,12 +470,19 @@ impl SegmentFile {
             let mut upd_buf = [0u8; 8];
             file.read_exact(&mut upd_buf)?;
             let upd_secs = u64::from_le_bytes(upd_buf);
-            // VERSION=2: read explicit data_len and skip forward by that length
+
+            // Skip part_meta_blob sidecar
+            let mut meta_len_buf = [0u8; 8];
+            file.read_exact(&mut meta_len_buf)?;
+            let meta_len = u64::from_le_bytes(meta_len_buf);
+            if meta_len > 0 {
+                file.seek(io::SeekFrom::Current(meta_len as i64))?;
+            }
+
             let mut len_buf = [0u8; 8];
             file.read_exact(&mut len_buf)?;
             let data_len = u64::from_le_bytes(len_buf);
             let start = file.stream_position()?;
-            // Validate: don't go beyond file
             let file_len = file.metadata()?.len();
             if start.saturating_add(data_len) > file_len {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
@@ -448,8 +553,10 @@ mod tests_wal_writer {
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let offsets: HashMap<crate::helpers::offsets::OffsetKey, u64> = HashMap::new();
 
-        let (meta, _rows, sha) =
-            seg.write_snapshot(&offsets, &batches, &parts_meta).unwrap();
+        let empty_blobs: HashMap<PartitionKey, Vec<u8>> = HashMap::new();
+        let (meta, _rows, sha) = seg
+            .write_snapshot(&offsets, &batches, &parts_meta, &empty_blobs)
+            .unwrap();
         let parts_count = meta.num_partitions;
         assert_eq!(parts_count, 1);
 
@@ -486,5 +593,114 @@ mod tests_wal_writer {
         }
         let digest = hasher.finalize();
         assert_eq!(&digest[..], &sha);
+    }
+
+    #[test]
+    fn test_write_snapshot_with_meta_blob() {
+        use crate::plugins::cdc::{MutationKind, WalPartKind, WalPartMeta, WalRowMeta};
+
+        let dir = temp_dir();
+        let seg = SegmentFile::new(&dir, "t_cdc").unwrap();
+        let key = PartitionKey {
+            sink_ref: "data_outputs.test".to_string(),
+            namespace: "ns".to_string(),
+            partition: "".to_string(),
+            time: Some(0),
+            shard: "shard".to_string(),
+        };
+        let batch = make_batch();
+        let mut batches: HashMap<PartitionKey, Vec<RecordBatch>> = HashMap::new();
+        batches.insert(key.clone(), vec![batch]);
+        let mut parts_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
+        parts_meta.insert(key.clone(), (0, SystemTime::now()));
+        let offsets: HashMap<crate::helpers::offsets::OffsetKey, u64> = HashMap::new();
+
+        let wal_part_meta = WalPartMeta {
+            kind: WalPartKind::Cdc,
+            row_count: 3,
+            rows: vec![
+                WalRowMeta {
+                    mutation: MutationKind::Insert,
+                    event_id: vec![1],
+                    order_token: vec![0, 0, 0, 1],
+                },
+                WalRowMeta {
+                    mutation: MutationKind::Update,
+                    event_id: vec![2],
+                    order_token: vec![0, 0, 0, 2],
+                },
+                WalRowMeta {
+                    mutation: MutationKind::Delete,
+                    event_id: vec![3],
+                    order_token: vec![0, 0, 0, 3],
+                },
+            ],
+        };
+        let meta_blob = bincode::serialize(&wal_part_meta).unwrap();
+        let mut part_meta_blobs: HashMap<PartitionKey, Vec<u8>> = HashMap::new();
+        part_meta_blobs.insert(key.clone(), meta_blob.clone());
+
+        let (meta, _rows, _sha) = seg
+            .write_snapshot(&offsets, &batches, &parts_meta, &part_meta_blobs)
+            .unwrap();
+        assert_eq!(meta.num_partitions, 1);
+
+        let read_meta = seg.read_metadata().unwrap();
+        assert_eq!(read_meta.num_partitions, 1);
+        assert_eq!(read_meta.index.len(), 1);
+
+        let mut f = File::open(&seg.path).unwrap();
+        let blobs = SegmentFile::read_part_meta_blobs_from_reader(&mut f).unwrap();
+        assert_eq!(blobs.len(), 1);
+        let got_blob = blobs.get(&key).unwrap();
+        let decoded: WalPartMeta = bincode::deserialize(got_blob).unwrap();
+        assert_eq!(decoded.kind, WalPartKind::Cdc);
+        assert_eq!(decoded.row_count, 3);
+        assert_eq!(decoded.rows[0].mutation, MutationKind::Insert);
+        assert_eq!(decoded.rows[2].mutation, MutationKind::Delete);
+    }
+
+    #[test]
+    fn test_from_bytes_reader() {
+        use crate::plugins::cdc::{MutationKind, WalPartKind, WalPartMeta, WalRowMeta};
+
+        let dir = temp_dir();
+        let seg = SegmentFile::new(&dir, "t_bytes").unwrap();
+        let key = PartitionKey {
+            sink_ref: "out".to_string(),
+            namespace: "tbl".to_string(),
+            partition: "".to_string(),
+            time: None,
+            shard: "".to_string(),
+        };
+        let batch = make_batch();
+        let mut batches: HashMap<PartitionKey, Vec<RecordBatch>> = HashMap::new();
+        batches.insert(key.clone(), vec![batch]);
+        let mut parts_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
+        parts_meta.insert(key.clone(), (100, SystemTime::now()));
+        let offsets: HashMap<crate::helpers::offsets::OffsetKey, u64> = HashMap::new();
+
+        let wal_meta = WalPartMeta {
+            kind: WalPartKind::Cdc,
+            row_count: 3,
+            rows: (0..3)
+                .map(|i| WalRowMeta {
+                    mutation: MutationKind::Snapshot,
+                    event_id: vec![i],
+                    order_token: vec![0, 0, 0, i],
+                })
+                .collect(),
+        };
+        let meta_blob = bincode::serialize(&wal_meta).unwrap();
+        let mut blobs: HashMap<PartitionKey, Vec<u8>> = HashMap::new();
+        blobs.insert(key.clone(), meta_blob);
+
+        seg.write_snapshot(&offsets, &batches, &parts_meta, &blobs)
+            .unwrap();
+
+        let bytes = fs::read(&seg.path).unwrap();
+        let meta = SegmentFile::read_metadata_from_bytes(&bytes).unwrap();
+        assert_eq!(meta.num_partitions, 1);
+        assert_eq!(meta.index[0].key, key);
     }
 }

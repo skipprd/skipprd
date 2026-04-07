@@ -31,10 +31,7 @@ impl GlueSchemaSink {
             s3_prefix: Config::getenv("DATA_OUTPUT_S3_PREFIX", ""),
             athena_workgroup_name: Config::getenv("DATA_OUTPUT_ATHENA_WORKGROUP_NAME", ""),
             glue_database_name: String::new(),
-            athena_results_s3_bucket: Config::getenv(
-                "DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET",
-                "",
-            ),
+            athena_results_s3_bucket: Config::getenv("DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET", ""),
         });
         let config = DataSinkAthenaPluginConfig {
             glue_database_name: glue_config.glue_database_name,

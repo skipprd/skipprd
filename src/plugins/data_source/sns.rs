@@ -135,6 +135,7 @@ impl DataSource for DataSourceSnsPlugin {
                     bytes,
                     source_uri: format!("sns://{}", topic_name),
                     namespace: Some(namespace.clone()),
+                    cdc_rows: None,
                 });
             }
 
@@ -145,11 +146,8 @@ impl DataSource for DataSourceSnsPlugin {
                     offsets.clone(),
                     shared_output.clone(),
                 ));
-                self.ingest.ingest_file(
-                    &Arc::new(ingest_tasks),
-                    &offsets,
-                    shared_output.clone(),
-                );
+                self.ingest
+                    .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
             }
 
             for msg in &messages {

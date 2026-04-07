@@ -137,6 +137,7 @@ impl DataSource for DataSourceEventbridgePlugin {
                     bytes,
                     source_uri: format!("eventbridge://{}", self.config.event_bus_name),
                     namespace: Some(namespace.clone()),
+                    cdc_rows: None,
                 });
             }
 
@@ -147,11 +148,8 @@ impl DataSource for DataSourceEventbridgePlugin {
                     offsets.clone(),
                     shared_output.clone(),
                 ));
-                self.ingest.ingest_file(
-                    &Arc::new(ingest_tasks),
-                    &offsets,
-                    shared_output.clone(),
-                );
+                self.ingest
+                    .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
             }
 
             for msg in &messages {

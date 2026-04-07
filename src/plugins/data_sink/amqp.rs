@@ -37,6 +37,7 @@ impl DataSink for DataSinkAmqpPlugin {
         &self,
         stream: SendableRecordBatchStream,
         _filename: String,
+        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         use crate::metrics::counters;
         counters::inc_uploads_in_flight();
@@ -74,6 +75,7 @@ impl DataSink for DataSinkAmqpPlugin {
 
         let routing_key = self.config.routing_key.as_deref().unwrap_or("");
         let mut msg_count: u64 = 0;
+        let mut row_offset: usize = 0;
 
         let mut batch_stream = stream;
         while let Some(batch_result) = batch_stream.next().await {
@@ -88,8 +90,33 @@ impl DataSink for DataSinkAmqpPlugin {
                         .unwrap_or_else(|_| "null".to_string());
                     map.insert(field.name().clone(), serde_json::Value::String(val));
                 }
-                let json = serde_json::to_vec(&map)
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+                if let Some(ctx) = cdc_ctx {
+                    if let Some(row_meta) = ctx.part_meta.rows.get(row_offset + row_idx) {
+                        let mutation_str = match row_meta.mutation {
+                            crate::plugins::cdc::MutationKind::Snapshot => "snapshot",
+                            crate::plugins::cdc::MutationKind::Insert => "insert",
+                            crate::plugins::cdc::MutationKind::Update => "update",
+                            crate::plugins::cdc::MutationKind::Delete => "delete",
+                        };
+                        map.insert(
+                            "_skippr_mutation".to_string(),
+                            serde_json::Value::String(mutation_str.to_string()),
+                        );
+                        let token_hex: String = row_meta
+                            .order_token
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect();
+                        map.insert(
+                            "_skippr_order_token".to_string(),
+                            serde_json::Value::String(token_hex),
+                        );
+                    }
+                }
+
+                let json =
+                    serde_json::to_vec(&map).map_err(|e| std::io::Error::other(e.to_string()))?;
 
                 channel
                     .basic_publish(
@@ -97,13 +124,13 @@ impl DataSink for DataSinkAmqpPlugin {
                         routing_key,
                         BasicPublishOptions::default(),
                         &json,
-                        BasicProperties::default()
-                            .with_content_type("application/json".into()),
+                        BasicProperties::default().with_content_type("application/json".into()),
                     )
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
                 msg_count += 1;
             }
+            row_offset += batch.num_rows();
         }
 
         info!(
@@ -113,13 +140,14 @@ impl DataSink for DataSinkAmqpPlugin {
         counters::dec_uploads_in_flight();
         Ok(())
     }
+
+    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
+        Some(&crate::plugins::cdc::sink_capabilities::AMQP)
+    }
 }
 
 impl DataSinkAmqpPlugin {
-    pub async fn new_with_config(
-        _buffer_name: String,
-        config: DataSinkAmqpPluginConfig,
-    ) -> Self {
+    pub async fn new_with_config(_buffer_name: String, config: DataSinkAmqpPluginConfig) -> Self {
         Self { config }
     }
 }

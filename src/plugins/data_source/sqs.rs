@@ -108,11 +108,7 @@ impl DataSourceSqsPlugin {
         }
         let batch = std::mem::take(pending);
         let mut tasks = IngestTasks::new();
-        tasks.add(IngestTask::new(
-            batch,
-            offsets.clone(),
-            output.clone(),
-        ));
+        tasks.add(IngestTask::new(batch, offsets.clone(), output.clone()));
         self.ingest
             .ingest_file(&Arc::new(tasks), offsets, output.clone());
     }
@@ -128,12 +124,7 @@ impl DataSourceSqsPlugin {
             return;
         }
 
-        let stream_mode = self
-            .config
-            .mode
-            .as_deref()
-            .unwrap_or("batch")
-            == "stream";
+        let stream_mode = self.config.mode.as_deref().unwrap_or("batch") == "stream";
         let batch_limit = self.config.batch_size_bytes.unwrap_or(1_024_000).max(1) as usize;
         let qname = queue_name_from_url(&queue_url);
         let ns_display = format!("sqs.{qname}");
@@ -196,10 +187,7 @@ impl DataSourceSqsPlugin {
                 };
                 let body = msg.body().unwrap_or("").to_string();
                 let bytes = body.len();
-                let msg_id = msg
-                    .message_id()
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
+                let msg_id = msg.message_id().map(|s| s.to_string()).unwrap_or_default();
 
                 let offset_key = OffsetKey {
                     namespace: offset_ns.clone(),
@@ -212,6 +200,7 @@ impl DataSourceSqsPlugin {
                     bytes,
                     source_uri: queue_url.clone(),
                     namespace: Some(ns_display.clone()),
+                    cdc_rows: None,
                 });
                 pending_bytes += bytes;
                 to_delete.push((msg_id, receipt));
@@ -220,7 +209,8 @@ impl DataSourceSqsPlugin {
                     self.flush_pending(&mut pending, &offsets, &shared_output);
                     pending_bytes = 0;
                     if !to_delete.is_empty() {
-                        if let Err(e) = Self::delete_batch(&self.client, &queue_url, &to_delete).await
+                        if let Err(e) =
+                            Self::delete_batch(&self.client, &queue_url, &to_delete).await
                         {
                             error!("SQS delete_message_batch: {}", e);
                         }

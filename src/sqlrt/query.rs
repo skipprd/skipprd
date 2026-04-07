@@ -1032,7 +1032,6 @@ pub async fn query(sql_str: &str) {
             // Build a context and register available pipeline table from current data dir
             let session_config = SessionConfig::new();
 
-
             let ctx = SessionContext::new_with_config(session_config);
 
             // UDFs omitted in this build
@@ -1318,11 +1317,7 @@ pub async fn query(sql_str: &str) {
                 whitelist: &std::collections::HashSet<String>,
             ) {
                 if let StdStatement::Query(q) = stmt {
-                    let StdQuery {
-                        body,
-                        order_by,
-                        ..
-                    } = q.as_mut();
+                    let StdQuery { body, order_by, .. } = q.as_mut();
                     {
                         match &mut **body {
                             SetExpr::Select(sel) => {
@@ -1515,8 +1510,7 @@ pub async fn query(sql_str: &str) {
                                                         .seek(std::io::SeekFrom::Start(idx.start))
                                                         .is_ok()
                                                     {
-                                                        let reader =
-                                                            std::io::BufReader::new(file);
+                                                        let reader = std::io::BufReader::new(file);
                                                         let mut take = reader.take(idx.len);
                                                         if let Ok(sr) =
                                                             StreamReader::try_new(&mut take, None)
@@ -1695,7 +1689,10 @@ async fn show_catalog(
     if !ns.is_empty() {
         let pipeline = Config::get_pipeline_name();
         if let Some(entry) = crate::sqlrt::registry::find_entry(&pipeline, &ns).await {
-            if let Ok(Some(val)) = crate::adapters::storage::get_storage().get_json_opt(&entry.catalog_key).await {
+            if let Ok(Some(val)) = crate::adapters::storage::get_storage()
+                .get_json_opt(&entry.catalog_key)
+                .await
+            {
                 if let Some(d) = val.get("description").and_then(|x| x.as_str()) {
                     if !d.trim().is_empty() {
                         println!("Description: {}", d);

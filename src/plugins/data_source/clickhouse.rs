@@ -147,6 +147,7 @@ impl DataSource for DataSourceClickhousePlugin {
                     bytes,
                     source_uri: format!("clickhouse://{}/{}", db, table_name),
                     namespace: Some(namespace.clone()),
+                    cdc_rows: None,
                 });
 
                 if current_batch.len() >= batch_size {
@@ -171,11 +172,8 @@ impl DataSource for DataSourceClickhousePlugin {
                     offsets.clone(),
                     shared_output.clone(),
                 ));
-                self.ingest.ingest_file(
-                    &Arc::new(ingest_tasks),
-                    &offsets,
-                    shared_output.clone(),
-                );
+                self.ingest
+                    .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
             }
         }
 

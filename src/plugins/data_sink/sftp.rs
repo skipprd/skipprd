@@ -40,7 +40,12 @@ impl DataSink for DataSinkSftpPlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
+        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
+        let stream = match cdc_ctx {
+            Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+            None => stream,
+        };
         use crate::metrics::counters;
         counters::inc_uploads_in_flight();
 
@@ -86,13 +91,14 @@ impl DataSink for DataSinkSftpPlugin {
         counters::dec_uploads_in_flight();
         Ok(())
     }
+
+    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
+        Some(&crate::plugins::cdc::sink_capabilities::SFTP)
+    }
 }
 
 impl DataSinkSftpPlugin {
-    pub async fn new_with_config(
-        _buffer_name: String,
-        config: DataSinkSftpPluginConfig,
-    ) -> Self {
+    pub async fn new_with_config(_buffer_name: String, config: DataSinkSftpPluginConfig) -> Self {
         Self { config }
     }
 }

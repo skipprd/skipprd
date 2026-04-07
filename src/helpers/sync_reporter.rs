@@ -170,7 +170,10 @@ impl SyncReporter {
                 emit_json(&ev);
             }
             SyncReporter::Text => {
-                println!("Batch ingested: {} rows={} bytes={}", namespace, rows, bytes);
+                println!(
+                    "Batch ingested: {} rows={} bytes={}",
+                    namespace, rows, bytes
+                );
             }
             SyncReporter::Progress(_) => {}
         }
@@ -200,10 +203,7 @@ impl SyncReporter {
                 emit_json(&ev);
             }
             SyncReporter::Text => {
-                println!(
-                    "Output synced: {} rows_written={}",
-                    namespace, rows_written
-                );
+                println!("Output synced: {} rows_written={}", namespace, rows_written);
             }
             SyncReporter::Progress(_) => {}
         }
@@ -262,12 +262,7 @@ impl SyncReporter {
         }
     }
 
-    pub fn discover_complete(
-        &self,
-        pipeline: &str,
-        namespaces_discovered: usize,
-        elapsed_ms: u64,
-    ) {
+    pub fn discover_complete(&self, pipeline: &str, namespaces_discovered: usize, elapsed_ms: u64) {
         match self {
             SyncReporter::Json => {
                 let mut ev = SyncEvent::new("discover_complete");

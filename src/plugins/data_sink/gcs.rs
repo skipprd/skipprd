@@ -39,12 +39,22 @@ impl DataSink for DataSinkGcsPlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
+        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
+        let stream = match cdc_ctx {
+            Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+            None => stream,
+        };
         use crate::metrics::counters;
         counters::inc_uploads_in_flight();
 
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let prefix = self.config.prefix.as_deref().unwrap_or("").trim_matches('/');
+        let prefix = self
+            .config
+            .prefix
+            .as_deref()
+            .unwrap_or("")
+            .trim_matches('/');
 
         let mut full_key = if namespace.is_empty() {
             prefix.to_string()
@@ -66,9 +76,10 @@ impl DataSink for DataSinkGcsPlugin {
         let md5_digest = md5::compute(&filename);
         let final_key = format!("{}/{}.parquet", full_key, hex::encode(md5_digest.0));
 
-        let parquet_bytes = serialize_to_parquet(stream)
-            .await
-            .map_err(|e| { counters::dec_uploads_in_flight(); e })?;
+        let parquet_bytes = serialize_to_parquet(stream).await.map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
 
         let path = ObjectPath::from(final_key.clone());
         self.store
@@ -82,6 +93,10 @@ impl DataSink for DataSinkGcsPlugin {
         counters::dec_uploads_in_flight();
         info!("GCS: uploaded gs://{}/{}", self.config.bucket, final_key);
         Ok(())
+    }
+
+    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
+        Some(&crate::plugins::cdc::sink_capabilities::GCS)
     }
 }
 

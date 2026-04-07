@@ -135,6 +135,7 @@ impl DataSource for DataSourceMqttPlugin {
                                 self.config.broker_url, self.config.topic
                             ),
                             namespace: Some(namespace.clone()),
+                            cdc_rows: None,
                         }],
                         offsets.clone(),
                         shared_output.clone(),

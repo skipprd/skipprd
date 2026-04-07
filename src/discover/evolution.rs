@@ -618,11 +618,12 @@ pub fn apply_specs_to_namespace(
                 },
                 None => &mut ns_meta.fields,
             };
-            let evolved_name = if s.required_type == SkipprDataType::Array && s.values_type.is_some() {
-                format!("{}_array_{}", s.field, s.values_type.as_ref().unwrap())
-            } else {
-                format!("{}_{}", s.field, s.required_type)
-            };
+            let evolved_name =
+                if s.required_type == SkipprDataType::Array && s.values_type.is_some() {
+                    format!("{}_array_{}", s.field, s.values_type.as_ref().unwrap())
+                } else {
+                    format!("{}_{}", s.field, s.required_type)
+                };
             if !target.contains_key(&evolved_name) {
                 let mut md = Metadata::new().unwrap();
                 md.determined_type = if s.required_type == SkipprDataType::Array {
@@ -1186,7 +1187,10 @@ mod tests_evolve_field {
             expected_data_type
         );
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
+        assert_eq!(
+            metadata.get(&field).unwrap().determined_type,
+            SkipprDataType::String
+        );
     }
 
     #[test]
@@ -1229,7 +1233,10 @@ mod tests_evolve_field {
             expected_data_type
         );
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
+        assert_eq!(
+            metadata.get(&field).unwrap().determined_type,
+            SkipprDataType::String
+        );
     }
 
     #[test]
@@ -1272,7 +1279,10 @@ mod tests_evolve_field {
             expected_data_type
         );
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
+        assert_eq!(
+            metadata.get(&field).unwrap().determined_type,
+            SkipprDataType::String
+        );
     }
 
     #[test]
@@ -1311,7 +1321,10 @@ mod tests_evolve_field {
         // The field is actually created, so check that it exists
         assert!(metadata.get(&expected_new_field).is_some());
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
+        assert_eq!(
+            metadata.get(&field).unwrap().determined_type,
+            SkipprDataType::String
+        );
     }
 
     #[test]
@@ -1353,7 +1366,10 @@ mod tests_evolve_field {
         // Assert the new evolved fields Metadata exists with the correct type
         assert!(metadata.get(&expected_new_field).is_some());
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
+        assert_eq!(
+            metadata.get(&field).unwrap().determined_type,
+            SkipprDataType::String
+        );
     }
 
     #[test]
@@ -1401,10 +1417,16 @@ mod tests_evolve_field {
 
         // Get the evolved field's metadata
         let evolved_field_metadata = metadata.get(&evolution.new_field).unwrap();
-        assert_eq!(evolved_field_metadata.determined_type, SkipprDataType::Record);
+        assert_eq!(
+            evolved_field_metadata.determined_type,
+            SkipprDataType::Record
+        );
 
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
+        assert_eq!(
+            metadata.get(&field).unwrap().determined_type,
+            SkipprDataType::String
+        );
     }
 
     #[test]
@@ -1453,7 +1475,10 @@ mod tests_evolve_field {
             expected_data_type
         );
         // Assert old field is unchanged
-        assert_eq!(metadata.get(&field).unwrap().determined_type, SkipprDataType::String);
+        assert_eq!(
+            metadata.get(&field).unwrap().determined_type,
+            SkipprDataType::String
+        );
     }
 
     // #[test]
@@ -1550,17 +1575,29 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn string_to_record() {
-        assert_evolves_ok(SkipprDataType::String, SkipprDataType::Record, json!({"a": 1}));
+        assert_evolves_ok(
+            SkipprDataType::String,
+            SkipprDataType::Record,
+            json!({"a": 1}),
+        );
     }
 
     #[test]
     fn string_to_timestamp() {
-        assert_evolves_ok(SkipprDataType::String, SkipprDataType::Timestamp, json!(1700000000i64));
+        assert_evolves_ok(
+            SkipprDataType::String,
+            SkipprDataType::Timestamp,
+            json!(1700000000i64),
+        );
     }
 
     #[test]
     fn string_to_timestamp_milli() {
-        assert_evolves_ok(SkipprDataType::String, SkipprDataType::TimestampMilli, json!(1700000000123i64));
+        assert_evolves_ok(
+            SkipprDataType::String,
+            SkipprDataType::TimestampMilli,
+            json!(1700000000123i64),
+        );
     }
 
     #[test]
@@ -1578,7 +1615,11 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn integer_to_long() {
-        assert_evolves_ok(SkipprDataType::Integer, SkipprDataType::Long, json!(2_147_483_648i64));
+        assert_evolves_ok(
+            SkipprDataType::Integer,
+            SkipprDataType::Long,
+            json!(2_147_483_648i64),
+        );
     }
 
     #[test]
@@ -1588,27 +1629,47 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn integer_to_string() {
-        assert_no_panic(SkipprDataType::Integer, SkipprDataType::String, json!("hello"));
+        assert_no_panic(
+            SkipprDataType::Integer,
+            SkipprDataType::String,
+            json!("hello"),
+        );
     }
 
     #[test]
     fn integer_to_boolean() {
-        assert_no_panic(SkipprDataType::Integer, SkipprDataType::Boolean, json!(true));
+        assert_no_panic(
+            SkipprDataType::Integer,
+            SkipprDataType::Boolean,
+            json!(true),
+        );
     }
 
     #[test]
     fn integer_to_timestamp() {
-        assert_evolves_ok(SkipprDataType::Integer, SkipprDataType::Timestamp, json!(1700000000i64));
+        assert_evolves_ok(
+            SkipprDataType::Integer,
+            SkipprDataType::Timestamp,
+            json!(1700000000i64),
+        );
     }
 
     #[test]
     fn integer_to_timestamp_milli() {
-        assert_evolves_ok(SkipprDataType::Integer, SkipprDataType::TimestampMilli, json!(1700000000123i64));
+        assert_evolves_ok(
+            SkipprDataType::Integer,
+            SkipprDataType::TimestampMilli,
+            json!(1700000000123i64),
+        );
     }
 
     #[test]
     fn integer_to_record() {
-        assert_no_panic(SkipprDataType::Integer, SkipprDataType::Record, json!({"a": 1}));
+        assert_no_panic(
+            SkipprDataType::Integer,
+            SkipprDataType::Record,
+            json!({"a": 1}),
+        );
     }
 
     // ── long → X ────────────────────────────────────────────
@@ -1630,12 +1691,20 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn long_to_timestamp() {
-        assert_evolves_ok(SkipprDataType::Long, SkipprDataType::Timestamp, json!(1700000000i64));
+        assert_evolves_ok(
+            SkipprDataType::Long,
+            SkipprDataType::Timestamp,
+            json!(1700000000i64),
+        );
     }
 
     #[test]
     fn long_to_timestamp_milli() {
-        assert_evolves_ok(SkipprDataType::Long, SkipprDataType::TimestampMilli, json!(1700000000123i64));
+        assert_evolves_ok(
+            SkipprDataType::Long,
+            SkipprDataType::TimestampMilli,
+            json!(1700000000123i64),
+        );
     }
 
     #[test]
@@ -1647,7 +1716,11 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn double_to_string() {
-        assert_no_panic(SkipprDataType::Double, SkipprDataType::String, json!("hello"));
+        assert_no_panic(
+            SkipprDataType::Double,
+            SkipprDataType::String,
+            json!("hello"),
+        );
     }
 
     #[test]
@@ -1667,14 +1740,22 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn double_to_timestamp() {
-        assert_evolves_ok(SkipprDataType::Double, SkipprDataType::Timestamp, json!(1700000000i64));
+        assert_evolves_ok(
+            SkipprDataType::Double,
+            SkipprDataType::Timestamp,
+            json!(1700000000i64),
+        );
     }
 
     // ── boolean → X ─────────────────────────────────────────
 
     #[test]
     fn boolean_to_string() {
-        assert_no_panic(SkipprDataType::Boolean, SkipprDataType::String, json!("hello"));
+        assert_no_panic(
+            SkipprDataType::Boolean,
+            SkipprDataType::String,
+            json!("hello"),
+        );
     }
 
     #[test]
@@ -1696,7 +1777,11 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn record_to_string() {
-        assert_no_panic(SkipprDataType::Record, SkipprDataType::String, json!("fallback"));
+        assert_no_panic(
+            SkipprDataType::Record,
+            SkipprDataType::String,
+            json!("fallback"),
+        );
     }
 
     #[test]
@@ -1708,22 +1793,38 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn timestamp_to_string() {
-        assert_no_panic(SkipprDataType::Timestamp, SkipprDataType::String, json!("hello"));
+        assert_no_panic(
+            SkipprDataType::Timestamp,
+            SkipprDataType::String,
+            json!("hello"),
+        );
     }
 
     #[test]
     fn timestamp_to_long() {
-        assert_evolves_ok(SkipprDataType::Timestamp, SkipprDataType::Long, json!(42i64));
+        assert_evolves_ok(
+            SkipprDataType::Timestamp,
+            SkipprDataType::Long,
+            json!(42i64),
+        );
     }
 
     #[test]
     fn timestamp_to_double() {
-        assert_evolves_ok(SkipprDataType::Timestamp, SkipprDataType::Double, json!(3.14));
+        assert_evolves_ok(
+            SkipprDataType::Timestamp,
+            SkipprDataType::Double,
+            json!(3.14),
+        );
     }
 
     #[test]
     fn timestamp_to_timestamp_milli() {
-        assert_evolves_ok(SkipprDataType::Timestamp, SkipprDataType::TimestampMilli, json!(1700000000123i64));
+        assert_evolves_ok(
+            SkipprDataType::Timestamp,
+            SkipprDataType::TimestampMilli,
+            json!(1700000000123i64),
+        );
     }
 
     // ── null → X ────────────────────────────────────────────
@@ -1745,7 +1846,11 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn null_to_record() {
-        assert_no_panic(SkipprDataType::Null, SkipprDataType::Record, json!({"a": 1}));
+        assert_no_panic(
+            SkipprDataType::Null,
+            SkipprDataType::Record,
+            json!({"a": 1}),
+        );
     }
 
     // ── edge cases ──────────────────────────────────────────
@@ -1870,7 +1975,11 @@ mod tests_evolution_depth_matrix {
         f.determined_type = SkipprDataType::String;
         f.evolution.insert(
             "leaf_long".to_string(),
-            Evolution { type_string: SkipprDataType::Long, new_field: "leaf_long".to_string(), sovled: true },
+            Evolution {
+                type_string: SkipprDataType::Long,
+                new_field: "leaf_long".to_string(),
+                sovled: true,
+            },
         );
         root.insert("leaf".to_string(), f);
         let r = Evolution::apply_evolution_factory("leaf", &json!(42i64), &mut root, false);
@@ -1885,12 +1994,21 @@ mod tests_evolution_depth_matrix {
         outer.determined_type = SkipprDataType::String;
         outer.evolution.insert(
             "outer_record".to_string(),
-            Evolution { type_string: SkipprDataType::Record, new_field: "outer_record".to_string(), sovled: true },
+            Evolution {
+                type_string: SkipprDataType::Record,
+                new_field: "outer_record".to_string(),
+                sovled: true,
+            },
         );
         root.insert("outer".to_string(), outer);
-        root.insert("outer_record".to_string(), make_record_with_child_evolution("leaf", SkipprDataType::String, SkipprDataType::Long));
+        root.insert(
+            "outer_record".to_string(),
+            make_record_with_child_evolution("leaf", SkipprDataType::String, SkipprDataType::Long),
+        );
 
-        let r0 = Evolution::apply_evolution_factory("outer", &json!({"leaf": 42}), &mut root, false).unwrap();
+        let r0 =
+            Evolution::apply_evolution_factory("outer", &json!({"leaf": 42}), &mut root, false)
+                .unwrap();
         assert_eq!(r0.field, "outer_record");
 
         let r1 = evolve_at_depth(&mut root, &["outer_record", "leaf"], &json!(42i64)).unwrap();
@@ -1905,7 +2023,11 @@ mod tests_evolution_depth_matrix {
         a.determined_type = SkipprDataType::String;
         a.evolution.insert(
             "a_record".to_string(),
-            Evolution { type_string: SkipprDataType::Record, new_field: "a_record".to_string(), sovled: true },
+            Evolution {
+                type_string: SkipprDataType::Record,
+                new_field: "a_record".to_string(),
+                sovled: true,
+            },
         );
         root.insert("a".to_string(), a);
 
@@ -1915,13 +2037,22 @@ mod tests_evolution_depth_matrix {
         b.determined_type = SkipprDataType::String;
         b.evolution.insert(
             "b_record".to_string(),
-            Evolution { type_string: SkipprDataType::Record, new_field: "b_record".to_string(), sovled: true },
+            Evolution {
+                type_string: SkipprDataType::Record,
+                new_field: "b_record".to_string(),
+                sovled: true,
+            },
         );
         a_rec.fields.insert("b".to_string(), b);
-        a_rec.fields.insert("b_record".to_string(), make_record_with_child_evolution("c", SkipprDataType::String, SkipprDataType::Double));
+        a_rec.fields.insert(
+            "b_record".to_string(),
+            make_record_with_child_evolution("c", SkipprDataType::String, SkipprDataType::Double),
+        );
         root.insert("a_record".to_string(), a_rec);
 
-        let r0 = Evolution::apply_evolution_factory("a", &json!({"b": {"c": 1.5}}), &mut root, false).unwrap();
+        let r0 =
+            Evolution::apply_evolution_factory("a", &json!({"b": {"c": 1.5}}), &mut root, false)
+                .unwrap();
         assert_eq!(r0.field, "a_record");
 
         let r1 = evolve_at_depth(&mut root, &["a_record", "b"], &json!({"c": 1.5})).unwrap();
@@ -1937,23 +2068,47 @@ mod tests_evolution_depth_matrix {
 
         let mut d0 = md();
         d0.determined_type = SkipprDataType::String;
-        d0.evolution.insert("d0_record".into(), Evolution { type_string: SkipprDataType::Record, new_field: "d0_record".into(), sovled: true });
+        d0.evolution.insert(
+            "d0_record".into(),
+            Evolution {
+                type_string: SkipprDataType::Record,
+                new_field: "d0_record".into(),
+                sovled: true,
+            },
+        );
         root.insert("d0".into(), d0);
 
         let mut d0_rec = md();
         d0_rec.determined_type = SkipprDataType::Record;
         let mut d1 = md();
         d1.determined_type = SkipprDataType::String;
-        d1.evolution.insert("d1_record".into(), Evolution { type_string: SkipprDataType::Record, new_field: "d1_record".into(), sovled: true });
+        d1.evolution.insert(
+            "d1_record".into(),
+            Evolution {
+                type_string: SkipprDataType::Record,
+                new_field: "d1_record".into(),
+                sovled: true,
+            },
+        );
         d0_rec.fields.insert("d1".into(), d1);
 
         let mut d1_rec = md();
         d1_rec.determined_type = SkipprDataType::Record;
         let mut d2 = md();
         d2.determined_type = SkipprDataType::String;
-        d2.evolution.insert("d2_record".into(), Evolution { type_string: SkipprDataType::Record, new_field: "d2_record".into(), sovled: true });
+        d2.evolution.insert(
+            "d2_record".into(),
+            Evolution {
+                type_string: SkipprDataType::Record,
+                new_field: "d2_record".into(),
+                sovled: true,
+            },
+        );
         d1_rec.fields.insert("d2".into(), d2);
-        d1_rec.fields.insert("d2_record".into(), make_record_with_child_evolution("leaf", SkipprDataType::String, SkipprDataType::Long));
+        d1_rec.fields.insert(
+            "d2_record".into(),
+            make_record_with_child_evolution("leaf", SkipprDataType::String, SkipprDataType::Long),
+        );
         d0_rec.fields.insert("d1_record".into(), d1_rec);
         root.insert("d0_record".into(), d0_rec);
 
@@ -1961,7 +2116,12 @@ mod tests_evolution_depth_matrix {
         let r0 = Evolution::apply_evolution_factory("d0", &val, &mut root, false).unwrap();
         assert_eq!(r0.field, "d0_record");
 
-        let r3 = evolve_at_depth(&mut root, &["d0_record", "d1_record", "d2_record", "leaf"], &json!(99i64)).unwrap();
+        let r3 = evolve_at_depth(
+            &mut root,
+            &["d0_record", "d1_record", "d2_record", "leaf"],
+            &json!(99i64),
+        )
+        .unwrap();
         assert_eq!(r3.field, "leaf_long");
     }
 
@@ -1972,7 +2132,14 @@ mod tests_evolution_depth_matrix {
 
         let mut l0 = md();
         l0.determined_type = SkipprDataType::String;
-        l0.evolution.insert("l0_record".into(), Evolution { type_string: SkipprDataType::Record, new_field: "l0_record".into(), sovled: true });
+        l0.evolution.insert(
+            "l0_record".into(),
+            Evolution {
+                type_string: SkipprDataType::Record,
+                new_field: "l0_record".into(),
+                sovled: true,
+            },
+        );
         root.insert("l0".into(), l0);
 
         // l3_record: contains leaf
@@ -1981,7 +2148,14 @@ mod tests_evolution_depth_matrix {
         let mut leaf = md();
         leaf.determined_type = SkipprDataType::String;
         leaf.out_field_name = "leaf".into();
-        leaf.evolution.insert("leaf_double".into(), Evolution { type_string: SkipprDataType::Double, new_field: "leaf_double".into(), sovled: true });
+        leaf.evolution.insert(
+            "leaf_double".into(),
+            Evolution {
+                type_string: SkipprDataType::Double,
+                new_field: "leaf_double".into(),
+                sovled: true,
+            },
+        );
         l3_rec.fields.insert("leaf".into(), leaf);
 
         // l2_record: contains l3 -> l3_record
@@ -1989,7 +2163,14 @@ mod tests_evolution_depth_matrix {
         l2_rec.determined_type = SkipprDataType::Record;
         let mut l3 = md();
         l3.determined_type = SkipprDataType::String;
-        l3.evolution.insert("l3_record".into(), Evolution { type_string: SkipprDataType::Record, new_field: "l3_record".into(), sovled: true });
+        l3.evolution.insert(
+            "l3_record".into(),
+            Evolution {
+                type_string: SkipprDataType::Record,
+                new_field: "l3_record".into(),
+                sovled: true,
+            },
+        );
         l2_rec.fields.insert("l3".into(), l3);
         l2_rec.fields.insert("l3_record".into(), l3_rec);
 
@@ -1998,7 +2179,14 @@ mod tests_evolution_depth_matrix {
         l1_rec.determined_type = SkipprDataType::Record;
         let mut l2 = md();
         l2.determined_type = SkipprDataType::String;
-        l2.evolution.insert("l2_record".into(), Evolution { type_string: SkipprDataType::Record, new_field: "l2_record".into(), sovled: true });
+        l2.evolution.insert(
+            "l2_record".into(),
+            Evolution {
+                type_string: SkipprDataType::Record,
+                new_field: "l2_record".into(),
+                sovled: true,
+            },
+        );
         l1_rec.fields.insert("l2".into(), l2);
         l1_rec.fields.insert("l2_record".into(), l2_rec);
 
@@ -2007,7 +2195,14 @@ mod tests_evolution_depth_matrix {
         l0_rec.determined_type = SkipprDataType::Record;
         let mut l1 = md();
         l1.determined_type = SkipprDataType::String;
-        l1.evolution.insert("l1_record".into(), Evolution { type_string: SkipprDataType::Record, new_field: "l1_record".into(), sovled: true });
+        l1.evolution.insert(
+            "l1_record".into(),
+            Evolution {
+                type_string: SkipprDataType::Record,
+                new_field: "l1_record".into(),
+                sovled: true,
+            },
+        );
         l0_rec.fields.insert("l1".into(), l1);
         l0_rec.fields.insert("l1_record".into(), l1_rec);
 
@@ -2021,7 +2216,8 @@ mod tests_evolution_depth_matrix {
             &mut root,
             &["l0_record", "l1_record", "l2_record", "l3_record", "leaf"],
             &json!(3.14),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(r_leaf.field, "leaf_double");
     }
 
@@ -2032,12 +2228,20 @@ mod tests_evolution_depth_matrix {
         outer.determined_type = SkipprDataType::String;
         outer.evolution.insert(
             "outer_record".into(),
-            Evolution { type_string: SkipprDataType::Record, new_field: "outer_record".into(), sovled: true },
+            Evolution {
+                type_string: SkipprDataType::Record,
+                new_field: "outer_record".into(),
+                sovled: true,
+            },
         );
         root.insert("outer".into(), outer);
-        root.insert("outer_record".into(), make_record_with_child_evolution("inner", SkipprDataType::String, SkipprDataType::Long));
+        root.insert(
+            "outer_record".into(),
+            make_record_with_child_evolution("inner", SkipprDataType::String, SkipprDataType::Long),
+        );
 
-        let res = Evolution::apply_evolution_factory("outer", &json!({"inner": 42}), &mut root, true);
+        let res =
+            Evolution::apply_evolution_factory("outer", &json!({"inner": 42}), &mut root, true);
         assert!(res.is_ok(), "flatten=true at depth 2 should work");
     }
 
@@ -2058,16 +2262,32 @@ mod tests_evolution_depth_matrix {
             outer.determined_type = SkipprDataType::String;
             outer.evolution.insert(
                 "outer_record".into(),
-                Evolution { type_string: SkipprDataType::Record, new_field: "outer_record".into(), sovled: true },
+                Evolution {
+                    type_string: SkipprDataType::Record,
+                    new_field: "outer_record".into(),
+                    sovled: true,
+                },
             );
             root.insert("outer".into(), outer);
-            root.insert("outer_record".into(), make_record_with_child_evolution("leaf", SkipprDataType::String, target.clone()));
+            root.insert(
+                "outer_record".into(),
+                make_record_with_child_evolution("leaf", SkipprDataType::String, target.clone()),
+            );
 
-            let r0 = Evolution::apply_evolution_factory("outer", &json!({"leaf": value.clone()}), &mut root, false);
+            let r0 = Evolution::apply_evolution_factory(
+                "outer",
+                &json!({"leaf": value.clone()}),
+                &mut root,
+                false,
+            );
             assert!(r0.is_ok(), "parent evolve for target {:?}", target);
 
             let r1 = evolve_at_depth(&mut root, &["outer_record", "leaf"], &value);
-            assert!(r1.is_ok(), "depth 2 evolution to {:?} should succeed", target);
+            assert!(
+                r1.is_ok(),
+                "depth 2 evolution to {:?} should succeed",
+                target
+            );
             let expected = format!("leaf_{}", target);
             assert_eq!(r1.unwrap().field, expected);
         }
@@ -2230,7 +2450,11 @@ mod tests_evolution_edge_cases {
         f.out_field_name = "foo".to_string();
         f.evolution.insert(
             "foo_long".to_string(),
-            Evolution { type_string: SkipprDataType::Long, new_field: "foo_long".to_string(), sovled: true },
+            Evolution {
+                type_string: SkipprDataType::Long,
+                new_field: "foo_long".to_string(),
+                sovled: true,
+            },
         );
         root.insert("foo".to_string(), f);
 
@@ -2314,7 +2538,11 @@ mod tests_evolution_edge_cases {
         f.determined_type = SkipprDataType::String;
         f.evolution.insert(
             "f_timestamp".into(),
-            Evolution { type_string: SkipprDataType::Timestamp, new_field: "f_timestamp".into(), sovled: true },
+            Evolution {
+                type_string: SkipprDataType::Timestamp,
+                new_field: "f_timestamp".into(),
+                sovled: true,
+            },
         );
         root.insert("f".into(), f);
         let _ = Evolution::apply_evolution_factory("f", &json!(0i64), &mut root, false);
@@ -2327,7 +2555,11 @@ mod tests_evolution_edge_cases {
         f.determined_type = SkipprDataType::String;
         f.evolution.insert(
             "f_timestamp".into(),
-            Evolution { type_string: SkipprDataType::Timestamp, new_field: "f_timestamp".into(), sovled: true },
+            Evolution {
+                type_string: SkipprDataType::Timestamp,
+                new_field: "f_timestamp".into(),
+                sovled: true,
+            },
         );
         root.insert("f".into(), f);
         let _ = Evolution::apply_evolution_factory("f", &json!(-1000i64), &mut root, false);

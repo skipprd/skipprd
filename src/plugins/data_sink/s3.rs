@@ -37,8 +37,17 @@ impl DataSink for DataSinkS3Plugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
+        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
+        let stream = match cdc_ctx {
+            Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+            None => stream,
+        };
         self.inner_sync(stream, filename).await
+    }
+
+    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
+        Some(&crate::plugins::cdc::sink_capabilities::S3)
     }
 }
 
@@ -103,8 +112,10 @@ impl DataSinkS3Plugin {
         let md5_digest = md5::compute(&filename);
         let final_key = format!("{}/{}.parquet", full_key, hex::encode(&md5_digest.0));
 
-        let parquet_bytes = serialize_to_parquet(stream).await
-            .map_err(|e| { counters::dec_uploads_in_flight(); e })?;
+        let parquet_bytes = serialize_to_parquet(stream).await.map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
         let row_count = parquet_bytes.meta_data.num_rows as u64;
         let byte_count = parquet_bytes.size_bytes;
 

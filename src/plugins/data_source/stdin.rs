@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, BufReader};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -10,8 +10,8 @@ use serde_derive::Deserialize;
 use tracing::error;
 
 use crate::helpers::configuration::{Config, DataSourcePluginConfig};
-use crate::helpers::Helpers;
 use crate::helpers::offsets::{OffsetKey, Offsets};
+use crate::helpers::Helpers;
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use crate::plugins::{DataSink, DataSource};
 use crate::RUNNING;
@@ -40,24 +40,23 @@ pub struct DataSourceStdinPlugin {
 
 impl DataSourceStdinPlugin {
     pub async fn new() -> Self {
-        let config: DataSourceStdinPluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(c) => c.into(),
-                Err(_) => DataSourceStdinPluginConfig {
-                    mode: Some(Config::getenv("DATA_SOURCE_STDIN_MODE", "batch")),
-                    format: None,
-                    batch_size_bytes: Some(
-                        Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1")
-                            .parse()
-                            .unwrap_or(1),
-                    ),
-                    batch_size_seconds: Some(
-                        Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "1")
-                            .parse()
-                            .unwrap_or(1),
-                    ),
-                },
-            };
+        let config: DataSourceStdinPluginConfig = match Config::get_pipeline_input_plugin_config() {
+            Ok(c) => c.into(),
+            Err(_) => DataSourceStdinPluginConfig {
+                mode: Some(Config::getenv("DATA_SOURCE_STDIN_MODE", "batch")),
+                format: None,
+                batch_size_bytes: Some(
+                    Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1")
+                        .parse()
+                        .unwrap_or(1),
+                ),
+                batch_size_seconds: Some(
+                    Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "1")
+                        .parse()
+                        .unwrap_or(1),
+                ),
+            },
+        };
 
         Self {
             ingest: Ingest::new(),
@@ -81,6 +80,7 @@ impl DataSourceStdinPlugin {
             bytes: data.len(),
             source_uri: String::new(),
             namespace: None,
+            cdc_rows: None,
         };
         let mut tasks = IngestTasks::new();
         tasks.add(IngestTask::new(
@@ -102,14 +102,11 @@ impl DataSource for DataSourceStdinPlugin {
     ) -> Result<(), std::io::Error> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
 
-        let buffer_size = self
-            .config
-            .batch_size_bytes
-            .unwrap_or(
-                Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1")
-                    .parse()
-                    .unwrap_or(1),
-            ) as usize;
+        let buffer_size = self.config.batch_size_bytes.unwrap_or(
+            Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1")
+                .parse()
+                .unwrap_or(1),
+        ) as usize;
         let buffer_timeout = Duration::from_secs(
             self.config
                 .batch_size_seconds

@@ -73,8 +73,8 @@ impl DataSourceDeltaLakePlugin {
                 .finish()
                 .map_err(|e| std::io::Error::other(format!("Arrow JSON finish: {}", e)))?;
         }
-        let text = String::from_utf8(buf)
-            .map_err(|e| std::io::Error::other(format!("UTF-8: {}", e)))?;
+        let text =
+            String::from_utf8(buf).map_err(|e| std::io::Error::other(format!("UTF-8: {}", e)))?;
         Ok(text
             .lines()
             .filter(|l| !l.is_empty())
@@ -138,8 +138,8 @@ impl DataSource for DataSourceDeltaLakePlugin {
         let mut current_batch: Vec<IngestBatch> = Vec::new();
 
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result
-                .map_err(|e| std::io::Error::other(format!("Delta stream: {}", e)))?;
+            let batch =
+                batch_result.map_err(|e| std::io::Error::other(format!("Delta stream: {}", e)))?;
 
             let json_rows = Self::batch_to_json_rows(&batch)?;
 
@@ -151,6 +151,7 @@ impl DataSource for DataSourceDeltaLakePlugin {
                     bytes,
                     source_uri: format!("delta://{}", self.config.table_uri),
                     namespace: Some(namespace.clone()),
+                    cdc_rows: None,
                 });
 
                 if current_batch.len() >= batch_size {
@@ -176,11 +177,8 @@ impl DataSource for DataSourceDeltaLakePlugin {
                 offsets.clone(),
                 shared_output.clone(),
             ));
-            self.ingest.ingest_file(
-                &Arc::new(ingest_tasks),
-                &offsets,
-                shared_output.clone(),
-            );
+            self.ingest
+                .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
         }
 
         info!("Delta Lake: sync complete for {}", self.config.table_uri);

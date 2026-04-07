@@ -26,13 +26,25 @@ use crate::plugins::athena::DataSinkAthenaPluginConfig;
 
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
+use crate::plugins::data_sink::amqp::DataSinkAmqpPluginConfig;
+use crate::plugins::data_sink::azure_blob::DataSinkAzureBlobPluginConfig;
+use crate::plugins::data_sink::clickhouse::DataSinkClickhousePluginConfig;
+use crate::plugins::data_sink::databricks::DataSinkDatabricksPluginConfig;
+use crate::plugins::data_sink::gcs::DataSinkGcsPluginConfig;
+use crate::plugins::data_sink::motherduck::DataSinkMotherduckPluginConfig;
+use crate::plugins::data_sink::redshift::DataSinkRedshiftPluginConfig;
+use crate::plugins::data_sink::sftp::DataSinkSftpPluginConfig;
+use crate::plugins::data_sink::synapse::DataSinkSynapsePluginConfig;
 use crate::plugins::data_source::amqp::DataSourceAmqpPluginConfig;
+use crate::plugins::data_source::clickhouse::DataSourceClickhousePluginConfig;
+use crate::plugins::data_source::delta_lake::DataSourceDeltaLakePluginConfig;
 use crate::plugins::data_source::eventbridge::DataSourceEventbridgePluginConfig;
 use crate::plugins::data_source::http_client::DataSourceHttpClientPluginConfig;
 use crate::plugins::data_source::http_server::DataSourceHttpServerPluginConfig;
 use crate::plugins::data_source::kafka::DataSourceKafkaPluginConfig;
 use crate::plugins::data_source::kinesis::DataSourceKinesisPluginConfig;
 use crate::plugins::data_source::mongodb::DataSourceMongodbPluginConfig;
+use crate::plugins::data_source::motherduck::DataSourceMotherduckPluginConfig;
 use crate::plugins::data_source::mqtt::DataSourceMqttPluginConfig;
 use crate::plugins::data_source::postgres::DataSourcePostgresPluginConfig;
 use crate::plugins::data_source::redshift::DataSourceRedshiftPluginConfig;
@@ -43,24 +55,12 @@ use crate::plugins::data_source::sqs::DataSourceSqsPluginConfig;
 use crate::plugins::data_source::statsd::DataSourceStatsdPluginConfig;
 use crate::plugins::data_source::stdin::DataSourceStdinPluginConfig;
 use crate::plugins::data_source::websocket::DataSourceWebsocketPluginConfig;
-use crate::plugins::data_sink::amqp::DataSinkAmqpPluginConfig;
-use crate::plugins::data_sink::azure_blob::DataSinkAzureBlobPluginConfig;
-use crate::plugins::data_sink::databricks::DataSinkDatabricksPluginConfig;
-use crate::plugins::data_sink::gcs::DataSinkGcsPluginConfig;
-use crate::plugins::data_sink::sftp::DataSinkSftpPluginConfig;
-use crate::plugins::data_sink::synapse::DataSinkSynapsePluginConfig;
-use crate::plugins::data_source::clickhouse::DataSourceClickhousePluginConfig;
-use crate::plugins::data_source::delta_lake::DataSourceDeltaLakePluginConfig;
-use crate::plugins::data_source::motherduck::DataSourceMotherduckPluginConfig;
-use crate::plugins::data_sink::clickhouse::DataSinkClickhousePluginConfig;
-use crate::plugins::data_sink::redshift::DataSinkRedshiftPluginConfig;
-use crate::plugins::data_sink::motherduck::DataSinkMotherduckPluginConfig;
 use crate::plugins::dynamodb_input::DataSourceDynamodbPluginConfig;
 use crate::plugins::file_input::DataSourceLocalFilePluginConfig;
 use crate::plugins::file_output::DataSinkFilePluginConfig;
 use crate::plugins::mysql_input::DataSourceMysqlPluginConfig;
-use crate::plugins::s3_output::DataSinkS3PluginConfig;
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
+use crate::plugins::s3_output::DataSinkS3PluginConfig;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use toml;
 use tracing::{debug, error, info, warn};
@@ -148,30 +148,78 @@ impl DataSourcePluginConfig {
     pub fn format(&self) -> String {
         match self {
             DataSourcePluginConfig::S3(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::File(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Mssql(c) => c.format.clone().unwrap_or_else(|| "row".to_string()),
-            DataSourcePluginConfig::Mysql(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Dynamodb(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Kinesis(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Sqs(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::HttpClient(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::HttpServer(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Stdin(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Mongodb(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Eventbridge(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Sns(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Mqtt(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Sftp(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Postgres(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Redshift(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Amqp(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Kafka(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Websocket(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Statsd(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Socket(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Clickhouse(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::DeltaLake(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::Motherduck(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSourcePluginConfig::File(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Mssql(c) => {
+                c.format.clone().unwrap_or_else(|| "row".to_string())
+            }
+            DataSourcePluginConfig::Mysql(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Dynamodb(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Kinesis(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Sqs(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::HttpClient(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::HttpServer(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Stdin(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Mongodb(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Eventbridge(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Sns(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Mqtt(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Sftp(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Postgres(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Redshift(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Amqp(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Kafka(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Websocket(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Statsd(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Socket(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Clickhouse(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::DeltaLake(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSourcePluginConfig::Motherduck(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
         }
     }
 
@@ -300,22 +348,46 @@ pub enum DataSinkPluginConfig {
 impl DataSinkPluginConfig {
     pub fn format(&self) -> String {
         match self {
-            DataSinkPluginConfig::Athena(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSinkPluginConfig::Bigquery(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSinkPluginConfig::Athena(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSinkPluginConfig::Bigquery(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
             DataSinkPluginConfig::File(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSinkPluginConfig::Postgres(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSinkPluginConfig::Postgres(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
             DataSinkPluginConfig::S3(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSinkPluginConfig::Snowflake(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
+            DataSinkPluginConfig::Snowflake(c) => {
+                c.format.clone().unwrap_or_else(|| "parquet".to_string())
+            }
             DataSinkPluginConfig::Stdout => "json".to_string(),
-            DataSinkPluginConfig::AzureBlob(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
-            DataSinkPluginConfig::Gcs(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
-            DataSinkPluginConfig::Synapse(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSinkPluginConfig::Sftp(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
+            DataSinkPluginConfig::AzureBlob(c) => {
+                c.format.clone().unwrap_or_else(|| "parquet".to_string())
+            }
+            DataSinkPluginConfig::Gcs(c) => {
+                c.format.clone().unwrap_or_else(|| "parquet".to_string())
+            }
+            DataSinkPluginConfig::Synapse(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSinkPluginConfig::Sftp(c) => {
+                c.format.clone().unwrap_or_else(|| "parquet".to_string())
+            }
             DataSinkPluginConfig::Amqp(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSinkPluginConfig::Databricks(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
-            DataSinkPluginConfig::Clickhouse(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSinkPluginConfig::Redshift(c) => c.format.clone().unwrap_or_else(|| "parquet".to_string()),
-            DataSinkPluginConfig::Motherduck(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
+            DataSinkPluginConfig::Databricks(c) => {
+                c.format.clone().unwrap_or_else(|| "parquet".to_string())
+            }
+            DataSinkPluginConfig::Clickhouse(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
+            DataSinkPluginConfig::Redshift(c) => {
+                c.format.clone().unwrap_or_else(|| "parquet".to_string())
+            }
+            DataSinkPluginConfig::Motherduck(c) => {
+                c.format.clone().unwrap_or_else(|| "json".to_string())
+            }
         }
     }
 
@@ -438,6 +510,16 @@ pub struct Pipeline {
     pub deadletter_sink: Option<String>,
     pub stats: Option<Stats>,
     pub semantic_layer: Option<SemanticLayerSettings>,
+    /// CDC configuration. When present, the pipeline runs in CDC mode and
+    /// validates source/sink compatibility at startup.
+    pub cdc: Option<CdcPipelineConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct CdcPipelineConfig {
+    /// Business key columns used for upsert/delete identity in the target.
+    #[serde(default)]
+    pub business_key_columns: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -616,7 +698,6 @@ impl Config {
         file_path
     }
 
-
     pub fn build_config() {
         let file_path = Config::find_config_file();
 
@@ -727,10 +808,7 @@ impl Config {
     /// fields into its `DataSinkPluginConfig`. This is the single point where
     /// a data sink inherits control-plane config (database name, etc.) from
     /// its associated schema sink.
-    fn inherit_schema_sink_fields(
-        config: &Config,
-        entry: &DataSinkEntry,
-    ) -> DataSinkPluginConfig {
+    fn inherit_schema_sink_fields(config: &Config, entry: &DataSinkEntry) -> DataSinkPluginConfig {
         let mut plugin_config = entry.config.clone();
         let schema_cfg = entry.schema_sink.as_ref().and_then(|schema_ref| {
             let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks").ok()?;
@@ -738,10 +816,7 @@ impl Config {
         });
         if let Some(schema_cfg) = schema_cfg {
             match (&mut plugin_config, schema_cfg) {
-                (
-                    DataSinkPluginConfig::Athena(ref mut athena),
-                    SchemaSinkConfig::Glue(glue),
-                ) => {
+                (DataSinkPluginConfig::Athena(ref mut athena), SchemaSinkConfig::Glue(glue)) => {
                     athena.glue_database_name = glue.glue_database_name;
                 }
                 _ => {}
@@ -926,7 +1001,12 @@ impl Config {
 
             let schema_sink_ref = pipline.data_sink.as_ref().and_then(|sink_ref| {
                 let sink_name = Self::parse_registry_ref(sink_ref, "data_sinks").ok()?;
-                config.data_sinks.as_ref()?.get(&sink_name)?.schema_sink.clone()
+                config
+                    .data_sinks
+                    .as_ref()?
+                    .get(&sink_name)?
+                    .schema_sink
+                    .clone()
             });
 
             if let Some(ref schema_ref) = schema_sink_ref {
@@ -1097,6 +1177,7 @@ impl Config {
                     deadletter_sink: None,
                     stats: None,
                     semantic_layer: None,
+                    cdc: None,
                 }
             }
         };
@@ -1199,10 +1280,7 @@ impl Config {
                 None => default_batch_order_fields,
             };
 
-            Config::set_evncache(
-                "TRANSFORM_BATCH_ORDER_FIELDS",
-                &batch_order_fields.clone(),
-            );
+            Config::set_evncache("TRANSFORM_BATCH_ORDER_FIELDS", &batch_order_fields.clone());
             batch_order_fields.to_string()
         }
     }
@@ -1963,32 +2041,23 @@ impl Config {
             "{}/{}/{}/metadata/metadata.json",
             tenant, workspace, pipeline
         );
-        info!(
-            "get_metadata: pipeline='{}' key='{}'",
-            pipeline, key
-        );
+        info!("get_metadata: pipeline='{}' key='{}'", pipeline, key);
 
         let storage = crate::adapters::storage::get_storage();
         match storage.get_json_opt(&key).await {
-            Ok(Some(json_value)) => {
-                match serde_json::from_value::<PipelineMetadata>(json_value) {
-                    Ok(mut pipeline_metadata) => {
-                        let num_entries = pipeline_metadata.metadata.len();
-                        let keys: Vec<String> =
-                            pipeline_metadata.metadata.keys().cloned().collect();
-                        info!(
-                            "Loaded metadata (entries={}, keys={:?})",
-                            num_entries, keys
-                        );
-                        Self::inject_flatten_flag(&mut pipeline_metadata);
-                        Ok(pipeline_metadata)
-                    }
-                    Err(e) => {
-                        error!("Failed to parse metadata: {}", e);
-                        std::process::exit(1);
-                    }
+            Ok(Some(json_value)) => match serde_json::from_value::<PipelineMetadata>(json_value) {
+                Ok(mut pipeline_metadata) => {
+                    let num_entries = pipeline_metadata.metadata.len();
+                    let keys: Vec<String> = pipeline_metadata.metadata.keys().cloned().collect();
+                    info!("Loaded metadata (entries={}, keys={:?})", num_entries, keys);
+                    Self::inject_flatten_flag(&mut pipeline_metadata);
+                    Ok(pipeline_metadata)
                 }
-            }
+                Err(e) => {
+                    error!("Failed to parse metadata: {}", e);
+                    std::process::exit(1);
+                }
+            },
             Ok(None) => Err(false),
             Err(e) => {
                 error!("Failed to fetch metadata: {}", e);
@@ -2593,6 +2662,7 @@ mod tests {
             deadletter_sink: None,
             stats: None,
             semantic_layer: None,
+            cdc: None,
         };
         let config = Config {
             skippr: Some(Skippr {
@@ -2608,9 +2678,11 @@ mod tests {
             schema_sinks: None,
         };
 
-        assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline)
-            .unwrap()
-            .is_none());
+        assert!(
+            Config::resolve_deadletter_plugin_config_for(&config, &pipeline)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -2633,6 +2705,7 @@ mod tests {
             deadletter_sink: Some("deadletter_sinks.missing".to_string()),
             stats: None,
             semantic_layer: None,
+            cdc: None,
         };
         let config = Config {
             skippr: Some(Skippr {

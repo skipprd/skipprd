@@ -1,54 +1,55 @@
+pub mod cdc;
 pub mod traits;
 
-pub mod data_source;
 pub mod data_sink;
+pub mod data_source;
 pub mod schema_sink;
 pub mod schema_source;
 pub mod util;
 
 // Backward-compatible re-exports at the old module paths.
-pub use data_sink::athena;
-pub use data_sink::bigquery as bigquery_output;
-pub use data_sink::file as file_output;
-pub use data_sink::postgres as postgres_output;
-pub use data_sink::s3 as s3_output;
-pub use data_sink::snowflake as snowflake_output;
-pub use data_source::dynamodb as dynamodb_input;
-pub use data_source::file as file_input;
-pub use data_source::kinesis as kinesis_input;
-pub use data_source::mssql as mssql_input;
-pub use data_source::mysql as mysql_input;
-pub use data_source::s3 as s3_input;
-pub use data_source::sqs as sqs_input;
-pub use data_source::http_client as http_client_input;
-pub use data_source::http_server as http_server_input;
-pub use data_source::pcap as pcap_input;
-pub use data_source::stdin as stdin_input;
-pub use data_source::mongodb as mongodb_input;
-pub use data_source::eventbridge as eventbridge_input;
-pub use data_source::sns as sns_input;
-pub use data_source::mqtt as mqtt_input;
-pub use data_source::sftp as sftp_input;
-pub use data_source::postgres as postgres_input;
-pub use data_source::redshift as redshift_input;
-pub use data_source::amqp as amqp_input;
-pub use data_source::kafka as kafka_input;
-pub use data_source::websocket as websocket_input;
-pub use data_source::statsd as statsd_input;
-pub use data_source::socket as socket_input;
-pub use data_sink::stdout as stdout_output;
-pub use data_sink::azure_blob as azure_blob_output;
-pub use data_sink::gcs as gcs_output;
-pub use data_sink::synapse as synapse_output;
-pub use data_sink::sftp as sftp_output;
 pub use data_sink::amqp as amqp_output;
+pub use data_sink::athena;
+pub use data_sink::azure_blob as azure_blob_output;
+pub use data_sink::bigquery as bigquery_output;
+pub use data_sink::clickhouse as clickhouse_output;
 pub use data_sink::databricks as databricks_output;
+pub use data_sink::file as file_output;
+pub use data_sink::gcs as gcs_output;
+pub use data_sink::motherduck as motherduck_output;
+pub use data_sink::postgres as postgres_output;
+pub use data_sink::redshift as redshift_output;
+pub use data_sink::s3 as s3_output;
+pub use data_sink::sftp as sftp_output;
+pub use data_sink::snowflake as snowflake_output;
+pub use data_sink::stdout as stdout_output;
+pub use data_sink::synapse as synapse_output;
+pub use data_source::amqp as amqp_input;
 pub use data_source::clickhouse as clickhouse_input;
 pub use data_source::delta_lake as delta_lake_input;
+pub use data_source::dynamodb as dynamodb_input;
+pub use data_source::eventbridge as eventbridge_input;
+pub use data_source::file as file_input;
+pub use data_source::http_client as http_client_input;
+pub use data_source::http_server as http_server_input;
+pub use data_source::kafka as kafka_input;
+pub use data_source::kinesis as kinesis_input;
+pub use data_source::mongodb as mongodb_input;
 pub use data_source::motherduck as motherduck_input;
-pub use data_sink::clickhouse as clickhouse_output;
-pub use data_sink::redshift as redshift_output;
-pub use data_sink::motherduck as motherduck_output;
+pub use data_source::mqtt as mqtt_input;
+pub use data_source::mssql as mssql_input;
+pub use data_source::mysql as mysql_input;
+pub use data_source::pcap as pcap_input;
+pub use data_source::postgres as postgres_input;
+pub use data_source::redshift as redshift_input;
+pub use data_source::s3 as s3_input;
+pub use data_source::sftp as sftp_input;
+pub use data_source::sns as sns_input;
+pub use data_source::socket as socket_input;
+pub use data_source::sqs as sqs_input;
+pub use data_source::statsd as statsd_input;
+pub use data_source::stdin as stdin_input;
+pub use data_source::websocket as websocket_input;
 pub use util::parquet as parquet_util;
 
 pub use traits::{DataSink, DataSource, SchemaSink, SchemaSource};
@@ -64,54 +65,45 @@ pub async fn build_schema_sync_plugin(
             let glue_config = crate::helpers::configuration::GlueSchemaSinkConfig {
                 glue_database_name: c.glue_database_name.clone(),
             };
-            Some(Box::new(schema_sink::glue::GlueSchemaSink::new(glue_config, Some(c))))
+            Some(Box::new(schema_sink::glue::GlueSchemaSink::new(
+                glue_config,
+                Some(c),
+            )))
         }
         DataSinkPluginConfig::Snowflake(c) => {
-            let plugin = data_sink::snowflake::DataSinkSnowflakePlugin::new_with_config(
-                String::new(),
-                c,
-            )
-            .await;
+            let plugin =
+                data_sink::snowflake::DataSinkSnowflakePlugin::new_with_config(String::new(), c)
+                    .await;
             Some(Box::new(plugin))
         }
         DataSinkPluginConfig::Postgres(c) => {
-            let plugin = data_sink::postgres::DataSinkPostgresPlugin::new_with_config(
-                String::new(),
-                c,
-            )
-            .await;
+            let plugin =
+                data_sink::postgres::DataSinkPostgresPlugin::new_with_config(String::new(), c)
+                    .await;
             Some(Box::new(plugin))
         }
         DataSinkPluginConfig::Bigquery(c) => {
-            let plugin = data_sink::bigquery::DataSinkBigqueryPlugin::new_with_config(
-                String::new(),
-                c,
-            )
-            .await;
+            let plugin =
+                data_sink::bigquery::DataSinkBigqueryPlugin::new_with_config(String::new(), c)
+                    .await;
             Some(Box::new(plugin))
         }
         DataSinkPluginConfig::Clickhouse(c) => {
-            let plugin = data_sink::clickhouse::DataSinkClickhousePlugin::new_with_config(
-                String::new(),
-                c,
-            )
-            .await;
+            let plugin =
+                data_sink::clickhouse::DataSinkClickhousePlugin::new_with_config(String::new(), c)
+                    .await;
             Some(Box::new(plugin))
         }
         DataSinkPluginConfig::Motherduck(c) => {
-            let plugin = data_sink::motherduck::DataSinkMotherduckPlugin::new_with_config(
-                String::new(),
-                c,
-            )
-            .await;
+            let plugin =
+                data_sink::motherduck::DataSinkMotherduckPlugin::new_with_config(String::new(), c)
+                    .await;
             Some(Box::new(plugin))
         }
         DataSinkPluginConfig::Redshift(c) => {
-            let plugin = data_sink::redshift::DataSinkRedshiftPlugin::new_with_config(
-                String::new(),
-                c,
-            )
-            .await;
+            let plugin =
+                data_sink::redshift::DataSinkRedshiftPlugin::new_with_config(String::new(), c)
+                    .await;
             Some(Box::new(plugin))
         }
         _ => None,
@@ -159,6 +151,7 @@ impl DataSink for NoopOutputPlugin {
         &self,
         _stream: datafusion::execution::SendableRecordBatchStream,
         _filename: String,
+        _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         Ok(())
     }

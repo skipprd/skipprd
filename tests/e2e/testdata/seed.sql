@@ -1,3 +1,8 @@
+CREATE USER IF NOT EXISTS 'skippr'@'%' IDENTIFIED WITH mysql_native_password BY 'testpass';
+GRANT ALL PRIVILEGES ON skippr_test.* TO 'skippr'@'%';
+GRANT REPLICATION CLIENT, REPLICATION SLAVE ON *.* TO 'skippr'@'%';
+FLUSH PRIVILEGES;
+
 CREATE TABLE IF NOT EXISTS test_data (
   id INT PRIMARY KEY,
   name VARCHAR(255),

@@ -251,14 +251,9 @@ pub async fn register_namespace_view(
     let man_opt = {
         let key = crate::sqlrt::registry::manifest_key_for(pipeline, namespace);
         let storage = crate::adapters::storage::get_storage();
-        match tokio::time::timeout(Duration::from_secs(12), storage.get_json_opt(&key))
-            .await
-        {
+        match tokio::time::timeout(Duration::from_secs(12), storage.get_json_opt(&key)).await {
             Ok(Ok(Some(v))) => {
-                debug!(
-                    "Reading manifest key='{}'",
-                    key
-                );
+                debug!("Reading manifest key='{}'", key);
                 debug!("Manifest content: {}", v);
                 Some(v)
             }
@@ -501,7 +496,10 @@ pub async fn register_dbt_models(ctx: &SessionContext) -> Result<(), DataFusionE
         let keys = match storage.list_prefix(&prefix).await {
             Ok(k) => k,
             Err(e) => {
-                warn!("register_dbt_models: list_prefix failed for '{}': {}", prefix, e);
+                warn!(
+                    "register_dbt_models: list_prefix failed for '{}': {}",
+                    prefix, e
+                );
                 continue;
             }
         };
@@ -519,7 +517,10 @@ pub async fn register_dbt_models(ctx: &SessionContext) -> Result<(), DataFusionE
                 continue;
             }
             if seen_models.contains(model) {
-                warn!("dbt model name collision: dbt.{} already registered; replacing with {}", model, key);
+                warn!(
+                    "dbt model name collision: dbt.{} already registered; replacing with {}",
+                    model, key
+                );
             }
             match storage.get_bytes(key).await {
                 Ok(bytes) => {
@@ -537,7 +538,10 @@ pub async fn register_dbt_models(ctx: &SessionContext) -> Result<(), DataFusionE
                             registered_for_pipeline += 1;
                         }
                         Err(e) => {
-                            warn!("Failed to register dbt view for model '{}' from key '{}': {}", model, key, e);
+                            warn!(
+                                "Failed to register dbt view for model '{}' from key '{}': {}",
+                                model, key, e
+                            );
                         }
                     }
                 }

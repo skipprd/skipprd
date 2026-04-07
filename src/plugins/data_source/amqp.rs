@@ -75,10 +75,12 @@ impl DataSource for DataSourceAmqpPlugin {
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> Result<(), std::io::Error> {
-        let conn =
-            Connection::connect(&self.config.connection_string, ConnectionProperties::default())
-                .await
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let conn = Connection::connect(
+            &self.config.connection_string,
+            ConnectionProperties::default(),
+        )
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
         let channel = conn
             .create_channel()
             .await
@@ -164,6 +166,7 @@ impl DataSource for DataSourceAmqpPlugin {
                             bytes,
                             source_uri: format!("amqp://{}", self.config.queue),
                             namespace: Some(namespace.clone()),
+                            cdc_rows: None,
                         }],
                         offsets.clone(),
                         shared_output.clone(),

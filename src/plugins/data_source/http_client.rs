@@ -99,7 +99,12 @@ impl DataSourceHttpClientPlugin {
             ));
         }
 
-        let method = self.config.method.as_deref().unwrap_or("GET").to_uppercase();
+        let method = self
+            .config
+            .method
+            .as_deref()
+            .unwrap_or("GET")
+            .to_uppercase();
         let mut req = match method.as_str() {
             "POST" => self.client.post(&self.config.url),
             "PUT" => self.client.put(&self.config.url),
@@ -187,6 +192,7 @@ impl DataSourceHttpClientPlugin {
                         bytes,
                         source_uri: source_uri.clone(),
                         namespace: Some("http".to_string()),
+                        cdc_rows: None,
                     }],
                     offsets.clone(),
                     shared_output.clone(),
@@ -203,6 +209,7 @@ impl DataSourceHttpClientPlugin {
                     bytes,
                     source_uri: source_uri.clone(),
                     namespace: Some("http".to_string()),
+                    cdc_rows: None,
                 }],
                 offsets.clone(),
                 shared_output.clone(),
@@ -225,7 +232,10 @@ impl DataSource for DataSourceHttpClientPlugin {
     ) -> Result<(), std::io::Error> {
         match self.config.scrape_interval_seconds {
             Some(interval) => {
-                info!("HttpClient polling every {}s: {}", interval, self.config.url);
+                info!(
+                    "HttpClient polling every {}s: {}",
+                    interval, self.config.url
+                );
                 while RUNNING.read().load(Ordering::SeqCst) {
                     if let Err(e) = self.fetch_once(&offsets, &shared_output).await {
                         error!("HttpClient fetch error: {}", e);

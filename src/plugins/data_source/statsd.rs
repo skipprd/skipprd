@@ -148,6 +148,7 @@ impl DataSource for DataSourceStatsdPlugin {
                                     bytes,
                                     source_uri: format!("statsd://{}", addr),
                                     namespace: Some("statsd".to_string()),
+                                    cdc_rows: None,
                                 }],
                                 offsets.clone(),
                                 shared_output.clone(),

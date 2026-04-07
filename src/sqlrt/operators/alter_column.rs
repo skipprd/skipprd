@@ -11,8 +11,8 @@ pub fn alter_column_type(
     )
     .ok_or_else(|| format!("Column '{}' not found", alteration.column_name))?;
 
-    let skippr_new_type =
-        SkipprDataType::from_string(&alteration.new_type.to_string()).ok_or_else(|| {
+    let skippr_new_type = SkipprDataType::from_string(&alteration.new_type.to_string())
+        .ok_or_else(|| {
             format!(
                 "No type equivalent for '{}' in Skippr types",
                 alteration.new_type

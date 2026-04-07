@@ -83,6 +83,7 @@ impl DataSourceSocketPlugin {
                 bytes,
                 source_uri: format!("socket://{}:{}", self.config.mode, self.config.address),
                 namespace: Some(namespace),
+                cdc_rows: None,
             }],
             offsets.clone(),
             shared_output.clone(),
@@ -111,12 +112,7 @@ impl DataSource for DataSourceSocketPlugin {
                             let reader = tokio::io::BufReader::new(stream);
                             let mut lines = reader.lines();
                             while let Ok(Some(line)) = lines.next_line().await {
-                                self.ingest_line(
-                                    line,
-                                    &mut counter,
-                                    &offsets,
-                                    &shared_output,
-                                );
+                                self.ingest_line(line, &mut counter, &offsets, &shared_output);
                                 if !RUNNING.read().load(Ordering::SeqCst) {
                                     break;
                                 }
@@ -161,12 +157,7 @@ impl DataSource for DataSourceSocketPlugin {
                             let reader = tokio::io::BufReader::new(stream);
                             let mut lines = reader.lines();
                             while let Ok(Some(line)) = lines.next_line().await {
-                                self.ingest_line(
-                                    line,
-                                    &mut counter,
-                                    &offsets,
-                                    &shared_output,
-                                );
+                                self.ingest_line(line, &mut counter, &offsets, &shared_output);
                                 if !RUNNING.read().load(Ordering::SeqCst) {
                                     break;
                                 }
