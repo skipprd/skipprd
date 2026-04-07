@@ -16,7 +16,8 @@ env:
   DOCKER_HUB_REPO: skippr-el
   ECR_HOST: 536671797322.dkr.ecr.us-east-1.amazonaws.com
   AWS_ECR_REGISTRY: $ECR_HOST/$COMPONENT_NAME
-  RELEASES_BUCKET: skippr-web-static-site-prod
+  RELEASES_BUCKET: skippr-web-install-site-prod
+  SKIPPR_EL_RELEASE_SUBDIR: skippr-el
   SKIPPR_EL_LATEST_POINTER: latest-skippr-el.txt
 #  CARGO_HOME: "${{ github.workspace }}/cargo"
 #  GITHUB_REF: ${{ startsWith(github.ref, 'refs/tags/') && replace(github.ref, 'refs/tags/', '') || '1.1.1' }}
@@ -442,9 +443,10 @@ jobs:
        run: |
          TAG="${{ github.ref_name }}"
          BUCKET="${{ env.RELEASES_BUCKET }}"
+         RELEASE_SUBDIR="${{ env.SKIPPR_EL_RELEASE_SUBDIR }}"
          LATEST_POINTER="${{ env.SKIPPR_EL_LATEST_POINTER }}"
          for f in skippr-el-*.tar.gz; do
-           aws s3 cp "$f" "s3://${BUCKET}/releases/${TAG}/${f}"
+           aws s3 cp "$f" "s3://${BUCKET}/releases/${TAG}/${RELEASE_SUBDIR}/${f}"
          done
          printf '%s' "$TAG" > "$LATEST_POINTER"
          aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
