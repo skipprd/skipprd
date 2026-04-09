@@ -1,252 +1,236 @@
-// use serde::{Deserialize, Serialize};
+use std::io::Read;
 
-use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Lines, Read, Result, Write};
-use std::path::Path;
+use quick_xml::events::Event;
+use quick_xml::Reader;
+use thiserror::Error;
 
-use serde_value::Value;
+#[derive(Debug, Error)]
+pub enum XmlDecodeError {
+    #[error("XML read failed: {0}")]
+    Read(#[from] std::io::Error),
+    #[error("XML parse failed: {0}")]
+    Parse(String),
+}
 
-#[derive(Debug, Clone)]
-pub struct SerdeXml {
-    #[allow(dead_code)]
-    pub supported_compression_types: Vec<String>,
-    #[allow(dead_code)]
-    pub compression_type: String,
-    #[allow(dead_code)]
-    pub fh: String,
-    #[allow(dead_code)]
-    pub records: Vec<String>,
+pub struct SerdeXml;
+
+#[derive(Debug)]
+struct XmlNode {
+    name: String,
+    fields: serde_json::Map<String, serde_json::Value>,
+    text: String,
+}
+
+impl XmlNode {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            fields: serde_json::Map::new(),
+            text: String::new(),
+        }
+    }
+
+    fn push_value(&mut self, key: String, value: serde_json::Value) {
+        match self.fields.get_mut(&key) {
+            Some(existing) => match existing {
+                serde_json::Value::Array(values) => values.push(value),
+                other => {
+                    let previous = std::mem::replace(other, serde_json::Value::Null);
+                    *other = serde_json::Value::Array(vec![previous, value]);
+                }
+            },
+            None => {
+                self.fields.insert(key, value);
+            }
+        }
+    }
+
+    fn into_value(mut self) -> serde_json::Value {
+        let text = self.text.trim();
+        if !text.is_empty() {
+            if self.fields.is_empty() {
+                return serde_json::Value::String(text.to_string());
+            }
+            self.fields.insert(
+                "$text".to_string(),
+                serde_json::Value::String(text.to_string()),
+            );
+        }
+
+        if self.fields.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::Object(self.fields)
+        }
+    }
 }
 
 impl SerdeXml {
-    #[allow(dead_code)]
-    pub fn new() -> SerdeXml {
-        SerdeXml {
-            supported_compression_types: vec![
-                String::from("VALUE_COMPRESSION"),
-                String::from("NO_COMPRESSION"),
-            ],
-            compression_type: String::from("NO_COMPRESSION"),
-            fh: String::from(""),
-            records: vec![],
-        }
+    pub fn deserialize<R: Read>(mut reader: R) -> Result<Vec<serde_json::Value>, XmlDecodeError> {
+        let mut xml = String::new();
+        reader.read_to_string(&mut xml)?;
+        let value = Self::parse_document(&xml)?;
+        Ok(Self::normalize_root(value))
     }
 
-    pub fn deserialize<R: Read>(reader: R) -> Vec<serde_json::Value> {
-        let value: Vec<Value> = serde_xml_rs::from_reader(reader).unwrap();
-        value.iter().map(|v| SerdeXml::convert_to_json(v)).collect()
-    }
-
-    fn convert_to_json(value: &serde_value::Value) -> serde_json::Value {
+    fn normalize_root(value: serde_json::Value) -> Vec<serde_json::Value> {
         match value {
-            serde_value::Value::Unit => serde_json::Value::Null,
-            serde_value::Value::Bool(b) => serde_json::Value::Bool(*b),
-            serde_value::Value::I64(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-            serde_value::Value::F64(n) => {
-                serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap())
+            serde_json::Value::Array(values) => values,
+            serde_json::Value::Object(root) => {
+                let root_entries: Vec<(String, serde_json::Value)> = root.into_iter().collect();
+                if root_entries.len() == 1 {
+                    let (_, inner) = root_entries.into_iter().next().unwrap();
+                    return match inner {
+                        serde_json::Value::Array(values) => values,
+                        serde_json::Value::Object(inner_map) => {
+                            let inner_entries: Vec<(String, serde_json::Value)> =
+                                inner_map.into_iter().collect();
+                            if inner_entries.len() == 1 {
+                                let (_, nested) = inner_entries.into_iter().next().unwrap();
+                                return match nested {
+                                    serde_json::Value::Array(values) => values,
+                                    serde_json::Value::Object(nested_obj) => {
+                                        vec![serde_json::Value::Object(nested_obj)]
+                                    }
+                                    other => vec![other],
+                                };
+                            }
+
+                            vec![serde_json::Value::Object(
+                                inner_entries.into_iter().collect(),
+                            )]
+                        }
+                        other => vec![other],
+                    };
+                }
+
+                vec![serde_json::Value::Object(root_entries.into_iter().collect())]
             }
-            serde_value::Value::String(s) => serde_json::Value::String(s.clone()),
-            serde_value::Value::Seq(seq) => {
-                serde_json::Value::Array(seq.iter().map(|v| SerdeXml::convert_to_json(v)).collect())
-            }
-            serde_value::Value::Map(map) => serde_json::Value::Object(
-                map.iter()
-                    .map(|(k, v)| {
-                        (
-                            SerdeXml::convert_to_json(k).to_string(),
-                            SerdeXml::convert_to_json(v),
-                        )
-                    })
-                    .collect(),
-            ),
-            serde_value::Value::Bytes(bytes) => {
-                serde_json::Value::String(String::from_utf8_lossy(bytes).to_string())
-            }
-            serde_value::Value::Char(c) => serde_json::Value::String(c.to_string()),
-            serde_value::Value::Option(opt) => match opt {
-                Some(v) => SerdeXml::convert_to_json(v),
-                None => serde_json::Value::Null,
-            },
-            serde_value::Value::Newtype(v) => SerdeXml::convert_to_json(v),
-            serde_value::Value::U8(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-            serde_value::Value::U16(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-            serde_value::Value::U32(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-            serde_value::Value::U64(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-            serde_value::Value::I8(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-            serde_value::Value::I16(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-            serde_value::Value::I32(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-            serde_value::Value::F32(n) => {
-                serde_json::Value::Number(serde_json::Number::from_f64(*n as f64).unwrap())
-            }
+            other => vec![other],
         }
     }
 
-    // pub fn deserialize(record: &str) -> Vec<Value> {
-    //     let mut deserializer = serde_xml_rs::de::Deserializer::new_from_reader(Cursor::new(record));
-    //     let mut serializer = serde_value::Serializer::new();
-    //     transcode(&mut deserializer, &mut serializer)?;
-    //     let value = serializer.unpacked_value();
-    //     // println!("{:?}", value);
-    //     value
-    //
-    // }
+    fn parse_document(xml: &str) -> Result<serde_json::Value, XmlDecodeError> {
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+        let mut stack: Vec<XmlNode> = Vec::new();
+        let mut root: Option<serde_json::Value> = None;
 
-    #[allow(dead_code)]
-    pub fn open_writer(&mut self, filename: String) {
-        self.fh = filename;
+        loop {
+            match reader
+                .read_event_into(&mut buf)
+                .map_err(|err| XmlDecodeError::Parse(err.to_string()))?
+            {
+                Event::Start(start) => {
+                    let mut node = XmlNode::new(
+                        String::from_utf8_lossy(start.name().as_ref()).to_string(),
+                    );
+                    for attribute in start.attributes() {
+                        let attribute =
+                            attribute.map_err(|err| XmlDecodeError::Parse(err.to_string()))?;
+                        let key = format!(
+                            "@{}",
+                            String::from_utf8_lossy(attribute.key.as_ref())
+                        );
+                        let value = attribute
+                            .decode_and_unescape_value(reader.decoder())
+                            .map_err(|err| XmlDecodeError::Parse(err.to_string()))?
+                            .into_owned();
+                        node.push_value(key, serde_json::Value::String(value));
+                    }
+                    stack.push(node);
+                }
+                Event::Empty(start) => {
+                    let mut node =
+                        XmlNode::new(String::from_utf8_lossy(start.name().as_ref()).to_string());
+                    for attribute in start.attributes() {
+                        let attribute =
+                            attribute.map_err(|err| XmlDecodeError::Parse(err.to_string()))?;
+                        let key = format!(
+                            "@{}",
+                            String::from_utf8_lossy(attribute.key.as_ref())
+                        );
+                        let value = attribute
+                            .decode_and_unescape_value(reader.decoder())
+                            .map_err(|err| XmlDecodeError::Parse(err.to_string()))?
+                            .into_owned();
+                        node.push_value(key, serde_json::Value::String(value));
+                    }
+                    Self::attach_node(&mut stack, node, &mut root);
+                }
+                Event::Text(text) => {
+                    if let Some(node) = stack.last_mut() {
+                        node.text.push_str(
+                            &text
+                                .decode()
+                                .map_err(|err| XmlDecodeError::Parse(err.to_string()))?,
+                        );
+                    }
+                }
+                Event::CData(text) => {
+                    if let Some(node) = stack.last_mut() {
+                        node.text.push_str(
+                            &text
+                                .decode()
+                                .map_err(|err| XmlDecodeError::Parse(err.to_string()))?,
+                        );
+                    }
+                }
+                Event::End(_) => {
+                    let node = stack
+                        .pop()
+                        .ok_or_else(|| XmlDecodeError::Parse("Unexpected XML end tag".to_string()))?;
+                    Self::attach_node(&mut stack, node, &mut root);
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+
+            buf.clear();
+        }
+
+        root.ok_or_else(|| XmlDecodeError::Parse("XML document was empty".to_string()))
     }
 
-    #[allow(dead_code)]
-    pub fn close_writer(&mut self) {
-        let file = File::create(&self.fh).unwrap();
-        let mut writer = BufWriter::new(file);
-
-        for data in &self.records {
-            if self.compression_type == "VALUE_COMPRESSION" {
-                // Implement VALUE_COMPRESSION logic here
-            } else if self.compression_type == "NO_COMPRESSION" {
-                writeln!(writer, "{}", data).unwrap();
-            }
+    fn attach_node(
+        stack: &mut Vec<XmlNode>,
+        node: XmlNode,
+        root: &mut Option<serde_json::Value>,
+    ) {
+        let node_name = node.name.clone();
+        let node_value = node.into_value();
+        if let Some(parent) = stack.last_mut() {
+            parent.push_value(node_name, node_value);
+        } else {
+            *root = Some(serde_json::json!({ node_name: node_value }));
         }
     }
-
-    #[allow(dead_code)]
-    pub fn serialize(&mut self, record: Vec<String>) {
-        let serialized = format!(
-            "<SerdeXml>{}</SerdeXml>",
-            record
-                .iter()
-                .map(|r| format!("<Records>{}</Records>", r))
-                .collect::<Vec<String>>()
-                .join("")
-        );
-        self.records.push(serialized);
-    }
-
-    // The output is wrapped in a Result to allow matching on errors
-    // Returns an Iterator to the Reader of the lines of the file.
-    #[allow(dead_code)]
-    pub fn read_lines<P>(filename: P) -> Result<Lines<BufReader<File>>>
-    where
-        P: AsRef<Path>,
-    {
-        let file = File::open(filename)?;
-        Ok(BufReader::new(file).lines())
-    }
-
-    // pub fn xml_decode(string: &str) -> Vec<Value> {
-    //     let mut message: Vec<Value> = Vec::new();
-    //
-    //     match from_str::<Value>(string) {
-    //         Ok(Value::Array(lines)) => {
-    //             message.extend(lines);
-    //         }
-    //         Ok(line) => {
-    //             message.push(line);
-    //         }
-    //         Err(_) => {
-    //             let lines = string
-    //                 .lines()
-    //                 .map(|line| {
-    //                     let mut cleaned_line = line
-    //                         .replace('\\', "")
-    //                         .replace("u'", "\"")
-    //                         .replace('\'', "\"");
-    //
-    //                     let valid_chars: String = cleaned_line
-    //                         .chars()
-    //                         .filter(|c| !c.is_ascii_control())
-    //                         .collect();
-    //
-    //                     if valid_chars.starts_with("efbbbf") {
-    //                         cleaned_line = valid_chars.replace("efbbbf", "");
-    //                     }
-    //
-    //                     if let Some(xml_start) = cleaned_line.find(|c| c == '[' || c == '{') {
-    //                         cleaned_line.drain(..xml_start);
-    //                     }
-    //
-    //                     cleaned_line
-    //                 })
-    //                 .collect::<Vec<_>>();
-    //
-    //             let mut deserialized_lines: Vec<Value> = lines
-    //                 .iter()
-    //                 .map(|line| from_str(line).unwrap_or_default())
-    //                 .collect();
-    //
-    //             if deserialized_lines.is_empty()
-    //                 || deserialized_lines.first().unwrap() == &Value::Null
-    //             {
-    //                 deserialized_lines.clear();
-    //
-    //                 for line in lines {
-    //                     let records: Vec<&str> = line.split("}{").collect();
-    //
-    //                     for (i, record) in records.iter().enumerate() {
-    //                         let mut record = record.to_string();
-    //
-    //                         if i != 0 {
-    //                             record.insert(0, '{');
-    //                         }
-    //
-    //                         if i != records.len() - 1 {
-    //                             record.push('}');
-    //                         }
-    //
-    //                         deserialized_lines
-    //                             .push(from_str(&record).unwrap_or_default());
-    //                     }
-    //                 }
-    //             }
-    //
-    //             message.extend(deserialized_lines);
-    //         }
-    //     }
-    //
-    //     message
-    // }
 }
 
-#[test]
-fn test_xml_serde() {
-    // #[test]
-    // fn test_basic_valid_xml() {
-    let record: String = r#"<note><to>Tove</to><from>Jani</from><heading>Reminder</heading><body>Don't forget me this weekend!</body></note>"#.to_string();
-    println!("{:?}", record);
-    let _msg = SerdeXml::deserialize(record.as_bytes());
-    // println!("{:?}", msg);
-    // assert_eq!(msg.first().unwrap()., "Tove");
-    // assert_eq!(msg["body".to_string()], &Value::String("jj".to_string()));
-    // }
-}
+#[cfg(test)]
+mod tests {
+    use super::SerdeXml;
 
-#[test]
-fn test_xml_repeate_fields_serde() {
-    // #[test]
-    // fn test_basic_valid_xml() {
-    let record: String = r#"<items>
-   <item id="0001" type="donut">
-      <name>Cake</name>
-      <ppu>0.55</ppu>
-      <batters>
-         <batter id="1001">Regular</batter>
-         <batter id="1002">Chocolate</batter>
-         <batter id="1003">Blueberry</batter>
-      </batters>
-      <topping id="5001">None</topping>
-      <topping id="5002">Glazed</topping>
-      <topping id="5005">Sugar</topping>
-      <topping id="5006">Sprinkles</topping>
-      <topping id="5003">Chocolate</topping>
-      <topping id="5004">Maple</topping>
-   </item>
-</items>"#
-        .to_string();
-    println!("{:?}", record);
-    let _msg = SerdeXml::deserialize(record.as_bytes());
-    // println!("{:?}", msg);
-    // assert_eq!(msg.first().unwrap()., "Tove");
-    // assert_eq!(msg["body".to_string()], &Value::String("jj".to_string()));
-    // }
+    #[test]
+    fn invalid_input_returns_error() {
+        let err = SerdeXml::deserialize("<items><item></items>".as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("XML parse failed"));
+    }
+
+    #[test]
+    fn repeated_elements_expand_into_records() {
+        let records = SerdeXml::deserialize(
+            r#"<items>
+                <item><name>Cake</name><ppu>0.55</ppu></item>
+                <item><name>Donut</name><ppu>1.25</ppu></item>
+            </items>"#
+                .as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["name"], "Cake");
+        assert_eq!(records[1]["name"], "Donut");
+    }
 }

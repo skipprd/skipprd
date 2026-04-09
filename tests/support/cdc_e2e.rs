@@ -1,10 +1,12 @@
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 /// Resolves the path to the `skippr-el` binary built by Cargo.
 pub fn skippr_el_bin() -> PathBuf {
-    assert_cmd::cargo::cargo_bin("skippr-el")
+    PathBuf::from(env!("CARGO_BIN_EXE_skippr-el"))
 }
 
 /// Self-contained E2E harness that drives the real `skippr-el sync` binary

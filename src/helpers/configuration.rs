@@ -61,6 +61,7 @@ use crate::plugins::file_output::DataSinkFilePluginConfig;
 use crate::plugins::mysql_input::DataSourceMysqlPluginConfig;
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
 use crate::plugins::s3_output::DataSinkS3PluginConfig;
+use crate::serdes::input_format::InputFormat;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use toml;
 use tracing::{debug, error, info, warn};
@@ -145,6 +146,10 @@ pub enum DataSourcePluginConfig {
 }
 
 impl DataSourcePluginConfig {
+    pub fn input_format(&self) -> InputFormat {
+        InputFormat::from(self.format().as_str())
+    }
+
     pub fn format(&self) -> String {
         match self {
             DataSourcePluginConfig::S3(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),

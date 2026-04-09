@@ -136,6 +136,7 @@ impl SerdeJson {
 #[cfg(test)]
 mod json_serde_tests {
     use super::*;
+    use serde_json::json;
     use std::env;
 
     // Helper function to set up environment for tests
@@ -314,5 +315,42 @@ mod json_serde_tests {
         assert_eq!(msg[1]["id"], "456");
         assert_eq!(msg[1]["data"]["value"], 99);
         assert_eq!(msg[1]["data"]["metadata"]["source"], "user");
+    }
+
+    #[test]
+    fn test_deserialize_reparses_stringified_json_payloads() {
+        let record = r#""{\"status\":\"200\"}""#.to_string();
+        let msg = SerdeJson::deserialize(&record);
+        assert_eq!(msg, vec![json!({"status": "200"})]);
+    }
+
+    #[test]
+    fn test_deserialize_preserves_plain_string_when_reparse_fails() {
+        let record = r#""plain string""#.to_string();
+        let msg = SerdeJson::deserialize(&record);
+        assert_eq!(msg, vec![Value::String("plain string".to_string())]);
+    }
+
+    #[test]
+    fn test_deserialize_batch_parses_multiple_records_and_arrays() {
+        let records = [
+            r#"{"status":"200"}{"status":"201"}"#,
+            r#"[{"status":"202"}]"#,
+        ];
+        let msg = SerdeJson::deserialize_batch(&records);
+        assert_eq!(msg.len(), 3);
+        assert_eq!(msg[0]["status"], "200");
+        assert_eq!(msg[1]["status"], "201");
+        assert_eq!(msg[2]["status"], "202");
+    }
+
+    #[test]
+    fn test_json_decode_respects_feature_flags() {
+        setup_test_env(true, true);
+
+        let msg = SerdeJson::json_decode("{u'status': u'200'}");
+        assert_eq!(msg, vec![json!({"status": "200"})]);
+
+        setup_test_env(false, false);
     }
 }

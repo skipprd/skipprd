@@ -124,6 +124,7 @@ axum = "0.7"
 rdkafka = { version = "0.36", features = ["cmake-build"] }
 clickhouse = { version = "0.13", features = ["inserter"] }
 aws-sdk-dynamodbstreams = "1.51.0"
+quick-xml = { version = "0.39.2", features = ["serialize"] }
 
 [features]
 stats_integration = []

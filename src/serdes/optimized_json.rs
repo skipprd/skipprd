@@ -262,3 +262,129 @@ impl OptimizedJsonParser {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::OptimizedJsonParser;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn needs_processing_is_false_when_features_are_disabled() {
+        let parser = OptimizedJsonParser::new(false, false);
+        assert!(!parser.needs_processing("{'status': u'200'}"));
+    }
+
+    #[test]
+    fn needs_processing_detects_single_quotes_and_unicode_independently() {
+        let single_quote_parser = OptimizedJsonParser::new(true, false);
+        assert!(single_quote_parser.needs_processing("{'status':'200'}"));
+        assert!(!single_quote_parser.needs_processing(r#"{"status":"200"}"#));
+
+        let unicode_parser = OptimizedJsonParser::new(false, true);
+        assert!(unicode_parser.needs_processing("{u'status': 200}"));
+        assert!(!unicode_parser.needs_processing("{'status': 200}"));
+    }
+
+    #[test]
+    fn parse_uses_standard_fast_path_for_object_and_array() {
+        let parser = OptimizedJsonParser::new(false, false);
+        assert_eq!(parser.parse(r#"{"status":"200"}"#), vec![json!({"status": "200"})]);
+        assert_eq!(
+            parser.parse(r#"[{"status":"200"},{"status":"201"}]"#),
+            vec![json!({"status": "200"}), json!({"status": "201"})]
+        );
+    }
+
+    #[test]
+    fn parse_uses_line_by_line_fallback_when_processing_is_not_needed() {
+        let parser = OptimizedJsonParser::new(false, false);
+        let result = parser.parse("{\"status\":\"200\"}\n\n{\"status\":\"201\"}\nnot-json");
+        assert_eq!(result, vec![json!({"status": "200"}), json!({"status": "201"})]);
+    }
+
+    #[test]
+    fn parse_uses_processing_fallback_when_quotes_need_normalization() {
+        let parser = OptimizedJsonParser::new(true, false);
+        let result = parser.parse("{'status':'200'}");
+        assert_eq!(result, vec![json!({"status": "200"})]);
+    }
+
+    #[test]
+    fn parse_uses_substring_extraction_after_other_fallbacks_fail() {
+        let parser = OptimizedJsonParser::new(false, false);
+        let result = parser.parse(r#"prefix {"status":"200"} trailing"#);
+        assert_eq!(result, vec![json!({"status": "200"})]);
+    }
+
+    #[test]
+    fn parse_returns_empty_when_no_strategy_finds_json() {
+        let parser = OptimizedJsonParser::new(false, false);
+        assert!(parser.parse("totally not json").is_empty());
+    }
+
+    #[test]
+    fn parse_line_by_line_skips_blank_lines_and_ignores_broken_lines() {
+        let parser = OptimizedJsonParser::new(false, false);
+        let result = parser.parse_line_by_line("\n{\"status\":\"200\"}\nnot-json\n");
+        assert_eq!(result, vec![json!({"status": "200"})]);
+    }
+
+    #[test]
+    fn parse_line_by_line_handles_concatenated_json_lines() {
+        let parser = OptimizedJsonParser::new(false, false);
+        let result = parser.parse_line_by_line(r#"{"a":1}{"b":2}"#);
+        assert_eq!(result, vec![json!({"a": 1}), json!({"b": 2})]);
+    }
+
+    #[test]
+    fn parse_with_processing_handles_success_concat_and_failure_cases() {
+        let parser = OptimizedJsonParser::new(true, true);
+
+        assert_eq!(
+            parser.parse_with_processing("{'status':'200'}"),
+            vec![json!({"status": "200"})]
+        );
+        assert_eq!(
+            parser.parse_with_processing("{'a':1}{'b':2}"),
+            vec![json!({"a": 1}), json!({"b": 2})]
+        );
+        assert!(parser.parse_with_processing("{'status':").is_empty());
+    }
+
+    #[test]
+    fn process_line_trims_prefix_and_normalizes_special_cases() {
+        let single_quote_parser = OptimizedJsonParser::new(true, false);
+        assert_eq!(
+            single_quote_parser.process_line(r#"prefix {'status':"can't fail"}"#),
+            r#"{"status":"can't fail"}"#
+        );
+        assert_eq!(
+            single_quote_parser.process_line("efbbbfabc\u{0000}"),
+            "abc"
+        );
+
+        let unicode_parser = OptimizedJsonParser::new(false, true);
+        let processed = unicode_parser.process_line("{u'status': u'200'}");
+        let value: Value = serde_json::from_str(&processed).unwrap();
+        assert_eq!(value["status"], "200");
+    }
+
+    #[test]
+    fn parse_concatenated_json_handles_depth_tracking_and_split_fallback() {
+        let parser = OptimizedJsonParser::new(false, false);
+        assert_eq!(
+            parser.parse_concatenated_json(r#"{"a":1}{"b":2}"#),
+            vec![json!({"a": 1}), json!({"b": 2})]
+        );
+
+        let processing_parser = OptimizedJsonParser::new(true, false);
+        assert_eq!(
+            processing_parser.parse_concatenated_json("{'a':1}{'b':2}"),
+            vec![json!({"a": 1}), json!({"b": 2})]
+        );
+        assert_eq!(
+            processing_parser.parse_concatenated_json(r#"{'a':'}'}{'b':2}"#),
+            vec![json!({"a": "}"}), json!({"b": 2})]
+        );
+    }
+}

@@ -6,7 +6,7 @@ use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
-use crate::serdes::json::SerdeJson;
+use crate::serdes::decode::decode_records;
 use crate::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING};
 use dashmap::DashMap;
 use std::sync::atomic::AtomicBool;
@@ -59,10 +59,7 @@ use crate::discover::evolution::{infer_specs_for_record, EvolutionProposal};
 use crate::ingest::fast_ingest::{
     create_default_nested_message, fast_path_ingest, DEFAULT_NESTED_MESSAGE,
 };
-use crate::serdes::csv::SerderCsv;
-
 use crate::ingest::record_types::{NormalizedRecord, SourceRecord};
-use crate::serdes::xml::SerdeXml;
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
 use crate::cli::{Mode, CLI_MODE};
@@ -1176,19 +1173,9 @@ impl Ingest {
         let mut batch_line: u64;
 
         let format = match Config::get_pipeline_input_plugin_config() {
-            Ok(plugin) => plugin.format(),
-            Err(_) => "json".to_string(),
+            Ok(plugin) => plugin.input_format(),
+            Err(_) => Default::default(),
         };
-
-        // @todo - check PluginConfig format is xml
-        // if format == "xml" {
-        //     let batch = IngestBatch {
-        //         offset_key: datas[0].offset_key.clone(),
-        //         data: datas.iter().map(|v| v.data.as_str()).collect::<Vec<&str>>().join(""),
-        //     };
-        //     datas.clear();
-        //     datas.push(batch);
-        // }
 
         let entity_field_dot = match Config::get_transform_config().record_field_path {
             Some(ref field) => field.clone(),
@@ -1272,15 +1259,30 @@ impl Ingest {
             let current_line_offset =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Position, 0);
 
-            let mut records: Vec<Value>;
-            if format == "csv" {
-                records = SerderCsv::deserialize(&ingest_batch.data);
-            } else if format == "xml" {
-                records = SerdeXml::deserialize(ingest_batch.data.as_bytes());
-            } else {
-                // Avoid cloning batch data for JSON deserialization
-                records = SerdeJson::deserialize(ingest_batch.data.as_str());
-            }
+            let mut records: Vec<Value> = match decode_records(format, &ingest_batch.data) {
+                Ok(records) => records,
+                Err(err) => {
+                    let decode_offset_pos = ingest_batch.data.lines().count().max(1) as u64;
+                    dl_records.push(DeadletterRecord {
+                        namespace: Config::get_pipeline_name(),
+                        record: ingest_batch.data.clone(),
+                        error: err.to_string(),
+                        failure_code: "INPUT_FORMAT".to_string(),
+                        event_time: None,
+                        source_uri: ingest_batch.source_uri.clone(),
+                        offset_key: format!(
+                            "{}:{}",
+                            ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition
+                        ),
+                        offset_pos: 1,
+                    });
+                    dl_offsets
+                        .entry(ingest_batch.offset_key.clone())
+                        .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
+                        .or_insert(decode_offset_pos);
+                    continue;
+                }
+            };
 
             if !entity_field_dot.is_empty() {
                 records = match Helpers::process_values(&records, &entity_field_dot) {

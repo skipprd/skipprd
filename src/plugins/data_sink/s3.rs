@@ -13,6 +13,7 @@ use tracing::info;
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkS3PluginConfig {
     pub format: Option<String>,
+    pub endpoint_url: Option<String>,
     pub s3_bucket: String,
     pub s3_prefix: String,
 }
@@ -66,15 +67,22 @@ impl DataSinkS3Plugin {
         _buffer_name: String,
         output_config: Option<DataSinkS3PluginConfig>,
     ) -> DataSinkS3Plugin {
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .load()
-            .await;
-        let s3_client = S3Client::new(&aws_config);
         let config = output_config.unwrap_or(DataSinkS3PluginConfig {
             format: None,
+            endpoint_url: None,
             s3_bucket: Config::getenv("DATA_OUTPUT_S3_BUCKET", ""),
             s3_prefix: Config::getenv("DATA_OUTPUT_S3_PREFIX", ""),
         });
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
+        let mut s3_client_config = aws_sdk_s3::config::Builder::from(&aws_config);
+        if let Some(ref endpoint_url) = config.endpoint_url {
+            s3_client_config = s3_client_config
+                .endpoint_url(endpoint_url)
+                .force_path_style(true);
+        }
+        let s3_client = S3Client::from_conf(s3_client_config.build());
         Self { s3_client, config }
     }
 

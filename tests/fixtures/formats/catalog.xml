@@ -1,0 +1,12 @@
+<items>
+  <item>
+    <id>1</id>
+    <name>Ada Lovelace</name>
+    <category>alpha</category>
+  </item>
+  <item>
+    <id>2</id>
+    <name>Grace Hopper</name>
+    <category>beta</category>
+  </item>
+</items>
