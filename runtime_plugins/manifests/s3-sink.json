@@ -1,0 +1,27 @@
+{
+  "name": "s3-runtime-sink",
+  "kind": "DataSink",
+  "plugin_name": "S3",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": { "executable": "${binary_dir}/skippr-plugin-data-sink-s3" },
+    "darwin-x86_64": { "executable": "${binary_dir}/skippr-plugin-data-sink-s3" },
+    "linux-x86_64": { "executable": "${binary_dir}/skippr-plugin-data-sink-s3" },
+    "linux-aarch64": { "executable": "${binary_dir}/skippr-plugin-data-sink-s3" },
+    "windows-x86_64": { "executable": "${binary_dir}/skippr-plugin-data-sink-s3.exe" }
+  },
+  "executable": "${binary_dir}/skippr-plugin-data-sink-s3",
+  "args": [],
+  "supports_schema": false,
+  "sink_capability": {
+    "name": "S3",
+    "guarantee_tier": "CdcEncodedOnly",
+    "can_manage_skippr_columns": false,
+    "can_maintain_tombstone_tables": false,
+    "can_compare_order_tokens": false,
+    "supports_transactions": false
+  }
+}

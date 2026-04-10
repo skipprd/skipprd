@@ -14,7 +14,7 @@ use std::time::SystemTime;
 use skippr::buffer::segment_file::{PartitionKey, SegmentFile};
 use skippr::helpers::offsets::OffsetKey;
 use skippr::plugins::cdc::*;
-use skippr::plugins::data_sink::cdc_apply::*;
+use skippr::runtime_test_cdc_apply::cdc_apply::*;
 
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
@@ -670,8 +670,11 @@ fn reference_path_unsupported_source_incompatible() {
     let keys = vec!["id".to_string()];
     match derive_and_validate(&source, &sink, "logs", &keys) {
         CompatibilityResult::Compatible(g) => {
-            assert_eq!(g, EffectiveGuarantee::CdcEncoded,
-                "stdin cannot do exact-once, should fall to cdc-encoded");
+            assert_eq!(
+                g,
+                EffectiveGuarantee::CdcEncoded,
+                "stdin cannot do exact-once, should fall to cdc-encoded"
+            );
         }
         CompatibilityResult::Incompatible(_) => {}
     }

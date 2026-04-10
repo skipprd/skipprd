@@ -3,9 +3,47 @@ name = "skippr"
 version = "0.0.0-git"
 edition = "2021"
 
+[workspace]
+resolver = "2"
+members = [
+    "plugins/skippr-plugin-runtime-link",
+    "plugins/data_source/*",
+    "plugins/data_sink/*",
+    "plugins/schema_sink/*",
+]
+
+[workspace.dependencies]
+async-trait = "0.1.77"
+arrow = { version = "56.2.0", features = ["ipc_compression"] }
+bytes = "1.5.0"
+clap = { version = "4.0.32", features = ["derive"] }
+dashmap = "5.5.3"
+datafusion = "50.3.0"
+futures = "0.3.25"
+futures-util = "0.3"
+hex = "0.4.3"
+md5 = "0.7.0"
+native-tls = "0.2.18"
+once_cell = "1.17.0"
+parquet = "56.2.0"
+pgwire-replication = "0.3.0"
+postgres-native-tls = "0.5.2"
+serde = "1.0.105"
+serde_derive = "1.0.105"
+serde_json = "1.0.85"
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = "0.7.16"
+tokio-tungstenite = "0.21"
+tracing = "0.1"
+tungstenite = "0.21"
+
 [[bin]]
 name = "skippr-el"
 path = "src/main.rs"
+
+[[bin]]
+name = "skippr-runtime-plugin-test-helper"
+path = "src/bin/skippr-runtime-plugin-test-helper.rs"
 
 [dependencies]
 serde_derive = "1.0.105"
@@ -24,7 +62,6 @@ envy = "0.4.2"
 aws-config = "1.5.1"
 aws-sdk-s3 = "1.32.0"
 aws-types = "1.3.1"
-aws-sdk-athena = "1.30.0"
 tokio = { version = "1", features = ["full"] }
 flate2 = "1.0.25"
 csv = "1.1.6"
@@ -40,7 +77,7 @@ arrow = { version = "56.2.0", features = ["ipc_compression"] }
 arrow-schema = "56.2.0"
 arrow-buffer = "56.2.0"
 indexmap = "1.9.2"
-reqwest = { version = "0.11.16", features = ["blocking", "json"] }
+reqwest = { version = "0.11.16", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 lazy_static = "1.4.0"
 urldecode = "0.1.1"
 url = "2.3.1"
@@ -87,43 +124,13 @@ crossterm = { version = "0.27" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 crossbeam-channel = "0.5.15"
-ureq = { version = "2", features = ["json"] }
-lancedb = "0.22.3"
 log = "0.4.28"
-tokio-tungstenite = "0.21"
-futures-util = "0.3"
-tungstenite = "0.21"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3.10"
 itertools = "0.12"
-tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono"] }
-bb8 = "0.9"
-bb8-tiberius = "0.15"
-jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
-rsa = "0.9.10"
 base64 = "0.22.1"
 tracing-appender = "0.2.4"
-tokio-postgres = "0.7.16"
-pgwire-replication = "0.3.0"
-postgres-native-tls = "0.5.2"
-native-tls = "0.2.18"
 aes = { version = "0.8", default-features = false }
-mysql_async = "0.34"
-aws-sdk-dynamodb = "1.51.0"
-aws-sdk-kinesis = "1.48.0"
-aws-sdk-sqs = "1.47.0"
-aws-sdk-eventbridge = "1"
-aws-sdk-sns = "1"
-aws-sdk-redshiftdata = "1"
-mongodb = "3"
-rumqttc = "0.24"
-ssh2 = "0.9"
-deltalake = { version = "0.27", features = ["datafusion"] }
-lapin = "2"
-axum = "0.7"
-rdkafka = { version = "0.36", features = ["cmake-build"] }
-clickhouse = { version = "0.13", features = ["inserter"] }
-aws-sdk-dynamodbstreams = "1.51.0"
 quick-xml = { version = "0.39.2", features = ["serialize"] }
 
 [features]
@@ -134,6 +141,14 @@ serial_test = "1.0.0"
 assert_cmd = "2"
 predicates = "3"
 proptest = "1.10.0"
+tokio-postgres = { workspace = true }
+aws-sdk-dynamodb = "1.51.0"
+futures-util = "0.3"
+lapin = "2"
+mongodb = "3"
+mysql_async = "0.34"
+rdkafka = { version = "0.36", features = ["cmake-build"] }
+ssh2 = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 nix = "0.26.2"

@@ -1,0 +1,27 @@
+{
+  "name": "databricks-runtime-sink",
+  "kind": "DataSink",
+  "plugin_name": "Databricks",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": { "executable": "${binary_dir}/skippr-plugin-data-sink-databricks" },
+    "darwin-x86_64": { "executable": "${binary_dir}/skippr-plugin-data-sink-databricks" },
+    "linux-x86_64": { "executable": "${binary_dir}/skippr-plugin-data-sink-databricks" },
+    "linux-aarch64": { "executable": "${binary_dir}/skippr-plugin-data-sink-databricks" },
+    "windows-x86_64": { "executable": "${binary_dir}/skippr-plugin-data-sink-databricks.exe" }
+  },
+  "executable": "${binary_dir}/skippr-plugin-data-sink-databricks",
+  "args": [],
+  "supports_schema": false,
+  "sink_capability": {
+    "name": "Databricks",
+    "guarantee_tier": "ExactOnceCdcEligible",
+    "can_manage_skippr_columns": true,
+    "can_maintain_tombstone_tables": true,
+    "can_compare_order_tokens": true,
+    "supports_transactions": true
+  }
+}

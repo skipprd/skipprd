@@ -23,7 +23,7 @@ pub(crate) struct DeadletterRecord {
     pub offset_pos: u64,
 }
 
-pub(crate) fn table_name() -> String {
+pub fn table_name() -> String {
     format!("_dl_{}", Config::get_pipeline_name())
 }
 

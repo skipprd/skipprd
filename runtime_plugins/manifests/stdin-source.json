@@ -1,0 +1,38 @@
+{
+  "name": "stdin-runtime-source",
+  "kind": "DataSource",
+  "plugin_name": "Stdin",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-stdin"
+    },
+    "darwin-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-stdin"
+    },
+    "linux-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-stdin"
+    },
+    "linux-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-stdin"
+    },
+    "windows-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-stdin.exe"
+    }
+  },
+  "executable": "${binary_dir}/skippr-plugin-data-source-stdin",
+  "args": [],
+  "supports_schema": false,
+  "source_capability": {
+    "name": "Stdin",
+    "guarantee_tier": "Unsupported",
+    "checkpoint_style": "None",
+    "bootstrap_style": "None",
+    "order_model": "UnsupportedForFinalState",
+    "supports_deletes": false,
+    "event_id_semantics": "None"
+  }
+}

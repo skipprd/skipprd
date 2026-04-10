@@ -1,0 +1,29 @@
+{
+  "name": "redshift-runtime-schema",
+  "kind": "SchemaSink",
+  "plugin_name": "Redshift",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-redshift"
+    },
+    "darwin-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-redshift"
+    },
+    "linux-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-redshift"
+    },
+    "linux-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-redshift"
+    },
+    "windows-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-redshift.exe"
+    }
+  },
+  "executable": "${binary_dir}/skippr-plugin-schema-sink-redshift",
+  "args": [],
+  "supports_schema": true
+}

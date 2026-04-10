@@ -1,0 +1,23 @@
+[package]
+name = "skippr-plugin-data-sink-file"
+version = "0.0.0-git"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-data-sink-file"
+path = "src/main.rs"
+
+[dependencies]
+arrow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+datafusion.workspace = true
+futures.workspace = true
+hex.workspace = true
+md5.workspace = true
+parquet.workspace = true
+serde.workspace = true
+serde_derive.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+skippr = { path = "../../.." }

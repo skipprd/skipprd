@@ -210,21 +210,65 @@ struct SchemaHash {
     hash: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct IngestBatch {
-    pub(crate) offset_key: OffsetKey,
-    pub(crate) data: String,
-    pub(crate) bytes: usize,
+    pub offset_key: OffsetKey,
+    pub data: String,
+    pub bytes: usize,
     #[allow(dead_code)]
-    pub(crate) source_uri: String,
+    pub source_uri: String,
     /// Explicit namespace override from the input plugin (e.g. table name for
     /// MSSQL). When `None`, the pipeline name + `transform.namespace_fields`
     /// config is used to derive the namespace from message content.
-    pub(crate) namespace: Option<String>,
+    pub namespace: Option<String>,
     /// Per-row CDC metadata. When `Some`, each element aligns 1:1 with the
     /// rows parsed from `data`. Sources that don't produce CDC leave this as
     /// `None` (append semantics).
-    pub(crate) cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+    pub cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+}
+
+impl IngestBatch {
+    pub fn new(
+        offset_key: OffsetKey,
+        data: String,
+        bytes: usize,
+        source_uri: String,
+        namespace: Option<String>,
+        cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+    ) -> Self {
+        Self {
+            offset_key,
+            data,
+            bytes,
+            source_uri,
+            namespace,
+            cdc_rows,
+        }
+    }
+
+    pub fn offset_key(&self) -> &OffsetKey {
+        &self.offset_key
+    }
+
+    pub fn data(&self) -> &str {
+        &self.data
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn source_uri(&self) -> &str {
+        &self.source_uri
+    }
+
+    pub fn namespace_override(&self) -> Option<&str> {
+        self.namespace.as_deref()
+    }
+
+    pub fn cdc_rows(&self) -> Option<&[crate::plugins::cdc::WalRowMeta]> {
+        self.cdc_rows.as_deref()
+    }
 }
 
 #[derive(Clone)]
@@ -375,7 +419,13 @@ impl Ingest {
         None
     }
 
-    const MIN_FREE_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
+    const DEFAULT_MIN_FREE_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
+
+    fn min_free_bytes() -> u64 {
+        Config::getenv("DATA_DIR_MIN_FREE_BYTES", "")
+            .parse::<u64>()
+            .unwrap_or(Self::DEFAULT_MIN_FREE_BYTES)
+    }
 
     fn wait_for_data_dir_capacity() {
         let Some((high_watermark, low_watermark)) = Self::data_dir_watermarks() else {
@@ -393,9 +443,10 @@ impl Ingest {
 
             // Primary guard: absolute free space floor
             // Secondary guard: percentage watermark (only enforced when free < min)
-            let below_min_free = avail_bytes < Self::MIN_FREE_BYTES;
+            let min_free_bytes = Self::min_free_bytes();
+            let below_min_free = avail_bytes < min_free_bytes;
             let should_block = below_min_free
-                || (used_pct >= high_watermark as f64 && avail_bytes < Self::MIN_FREE_BYTES * 2);
+                || (used_pct >= high_watermark as f64 && avail_bytes < min_free_bytes * 2);
 
             if !paused {
                 if !should_block {
@@ -406,7 +457,7 @@ impl Ingest {
                         "DATA_DIR has insufficient free space (free {} / total {}, min free {}). This pipeline has no reclaimable committed WAL to compact. Free disk or clean another pipeline before retrying.",
                         Helpers::human_readable_size(avail_bytes),
                         Helpers::human_readable_size(total_bytes),
-                        Helpers::human_readable_size(Self::MIN_FREE_BYTES)
+                        Helpers::human_readable_size(min_free_bytes)
                     );
                 }
                 paused = true;
@@ -415,13 +466,13 @@ impl Ingest {
                 warn!(
                     "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Background compaction will continue.",
                     Helpers::human_readable_size(avail_bytes),
-                    Helpers::human_readable_size(Self::MIN_FREE_BYTES),
+                    Helpers::human_readable_size(min_free_bytes),
                     used_pct,
                     Helpers::human_readable_size(total_bytes)
                 );
             }
 
-            if avail_bytes >= Self::MIN_FREE_BYTES {
+            if avail_bytes >= min_free_bytes {
                 DATA_DIR_INGEST_PAUSED.store(false, Ordering::SeqCst);
                 info!(
                     "Resuming ingest: DATA_DIR usage {:.1}% is below low watermark {}% (free {} / total {}).",
@@ -1004,7 +1055,7 @@ impl Ingest {
                     // Spawn the task and ensure it's executed
                     self.thread_pool.execute(move || {
                         // Ensure panics do not wedge queue accounting; always signal completion
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             Ingest::process_batch(
                                 &datas_clone,
                                 &offset_db_clone,
@@ -1013,6 +1064,9 @@ impl Ingest {
                                 shared_output_clone,
                             );
                         }));
+                        if result.is_err() {
+                            error!("Active ingest task panicked; forcing completion signal");
+                        }
                         let _ = tx.send(0);
                     });
 
@@ -1283,6 +1337,14 @@ impl Ingest {
                     continue;
                 }
             };
+            if Config::debug_enabled() {
+                debug!(
+                    "Ingest: decoded {} records for namespace={} format={}",
+                    records.len(),
+                    batch_namespace_override,
+                    format.as_str()
+                );
+            }
 
             if !entity_field_dot.is_empty() {
                 records = match Helpers::process_values(&records, &entity_field_dot) {
@@ -1502,6 +1564,12 @@ impl Ingest {
 
                     // Stats tailer removed; no per-record stats emission
                 }
+            }
+            if Config::debug_enabled() {
+                debug!(
+                    "Ingest: buffered {} records so far",
+                    i
+                );
             }
         }
 
@@ -1833,6 +1901,12 @@ impl Ingest {
         // Batch write: aggregate all partition batches and flush once to avoid tiny WALs
         let mut buffers_copy = buffers;
         let all_batches: Vec<IngestBufferBatch> = buf.into_values().collect();
+        if Config::debug_enabled() {
+            debug!(
+                "Ingest: final buffered partition count before WAL flush = {}",
+                all_batches.len()
+            );
+        }
         if !all_batches.is_empty() {
             if Config::log_wal_enabled() {
                 let total_batches: usize = all_batches

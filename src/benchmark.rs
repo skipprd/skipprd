@@ -1,13 +1,8 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Instant;
 
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::Offsets;
-use crate::plugins::file_input::DataSourceLocalFilePlugin;
-use crate::plugins::file_output::DataSinkFilePlugin;
 
 /// Represents the results of a performance benchmark
 pub struct BenchmarkResults {
@@ -133,117 +128,9 @@ impl PerformanceBenchmark {
         name: &str,
         description: &str,
     ) -> std::io::Result<BenchmarkResults> {
-        // Setup output directory
-        let output_dir = format!("{}/benchmark_output", self.data_dir);
-        if Path::new(&output_dir).exists() {
-            fs::remove_dir_all(&output_dir)?;
-        }
-        fs::create_dir_all(&output_dir)?;
-
-        // Configure the environment for local benchmark
-        Config::setenv("DATA_SOURCE_PLUGIN_NAME", "File");
-        Config::setenv("DATA_SOURCE_PATH", &self.temp_dir);
-        Config::setenv("DATA_OUTPUT_PATH", &output_dir);
-
-        // Initialize components
-        let offsets = Arc::new(Offsets::init().expect("Failed to initialize offsets"));
-        let mut input_plugin = DataSourceLocalFilePlugin::new().await;
-        let output_plugin = DataSinkFilePlugin::new("output".to_string()).await;
-        let boxed_output_plugin: Box<dyn crate::plugins::DataSink + Send + Sync> =
-            Box::new(output_plugin);
-        let arc_output_plugin = Arc::new(boxed_output_plugin);
-
-        // Set up memory measurement
-        #[allow(unused_mut)]
-        let mut initial_memory = 0.0_f64;
-        #[allow(unused_mut)]
-        let mut peak_memory = 0.0_f64;
-
-        #[cfg(target_os = "linux")]
-        {
-            use std::fs::read_to_string;
-            let proc_statm = read_to_string("/proc/self/statm").unwrap_or_default();
-            let parts: Vec<&str> = proc_statm.split_whitespace().collect();
-            if parts.len() >= 2 {
-                if let Ok(heap_pages) = parts[1].parse::<u64>() {
-                    // Convert pages to MB (typically 4KB pages)
-                    initial_memory = (heap_pages * 4096) as f64 / 1_048_576.0;
-                }
-            }
-        }
-
-        // Run the benchmark
-        let start_time = Instant::now();
-
-        // Process the files
-        input_plugin.sync(offsets.clone(), arc_output_plugin).await;
-
-        let elapsed = start_time.elapsed();
-
-        // Measure memory usage
-        #[cfg(target_os = "linux")]
-        {
-            use std::fs::read_to_string;
-            let proc_statm = read_to_string("/proc/self/statm").unwrap_or_default();
-            let parts: Vec<&str> = proc_statm.split_whitespace().collect();
-            if parts.len() >= 2 {
-                if let Ok(heap_pages) = parts[1].parse::<u64>() {
-                    // Convert pages to MB (typically 4KB pages)
-                    peak_memory = (heap_pages * 4096) as f64 / 1_048_576.0;
-                }
-            }
-        }
-
-        // Get metrics
-        let total_records = self.num_files as u64 * self.records_per_file as u64;
-        let total_bytes = self.num_files as u64
-            * self.records_per_file as u64
-            * self.avg_record_size_bytes as u64;
-
-        let duration_ms = elapsed.as_millis();
-        let throughput_records_per_sec = total_records as f64 / (elapsed.as_secs_f64().max(0.001));
-        let throughput_mb_per_sec =
-            (total_bytes as f64 / (1024.0 * 1024.0)) / (elapsed.as_secs_f64().max(0.001));
-
-        let heap_memory_usage_mb = peak_memory - initial_memory;
-
-        let results = BenchmarkResults {
-            name: name.to_string(),
-            description: description.to_string(),
-            duration_ms,
-            throughput_records_per_sec,
-            throughput_mb_per_sec,
-            records_processed: total_records,
-            bytes_processed: total_bytes,
-            heap_memory_usage_mb,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        };
-
-        // Output results to file
-        let results_file = format!("{}/benchmark_results.csv", self.data_dir);
-        let file_exists = Path::new(&results_file).exists();
-
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&results_file)?;
-
-        if !file_exists {
-            writeln!(file, "{}", BenchmarkResults::csv_header())?;
-        }
-
-        writeln!(file, "{}", results.to_csv_line())?;
-
-        println!("Benchmark '{}' completed:", name);
-        println!("Description: {}", description);
-        println!("Duration: {}ms", results.duration_ms);
-        println!(
-            "Throughput: {:.2} records/sec, {:.2} MB/sec",
-            results.throughput_records_per_sec, results.throughput_mb_per_sec
-        );
-        println!("Memory usage: {:.2} MB", results.heap_memory_usage_mb);
-        println!("Results saved to: {}", results_file);
-
-        Ok(results)
+        let _ = (&self.data_dir, &self.temp_dir, name, description);
+        Err(std::io::Error::other(
+            "benchmark mode requires standalone runtime plugin packages; the host binary no longer embeds file source/sink implementations",
+        ))
     }
 }

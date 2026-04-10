@@ -7,7 +7,7 @@
 /// Requires Docker service `clickhouse`.
 ///
 /// Run: `cargo test --test cdc_protocol_clickhouse -- --ignored`
-use skippr::plugins::data_sink::cdc_apply::{
+use skippr::runtime_test_cdc_apply::cdc_apply::{
     ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
     tombstone_table_name, upsert_if_newer_sql, SqlDialect,
 };

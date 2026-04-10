@@ -1,0 +1,16 @@
+[package]
+name = "skippr-plugin-data-source-mysql"
+version = "0.0.0-git"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-data-source-mysql"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+datafusion.workspace = true
+clap.workspace = true
+tokio.workspace = true
+skippr = { path = "../../.." }
+skippr-plugin-runtime-link = { path = "../../skippr-plugin-runtime-link", default-features = false, features = ["runtime-plugin-source-mysql"] }

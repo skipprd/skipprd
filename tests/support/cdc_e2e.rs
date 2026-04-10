@@ -6,7 +6,9 @@ use std::time::Duration;
 
 /// Resolves the path to the `skippr-el` binary built by Cargo.
 pub fn skippr_el_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_skippr-el"))
+    std::env::var_os("SKIPPR_E2E_SKIPPR_EL_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_skippr-el")))
 }
 
 /// Self-contained E2E harness that drives the real `skippr-el sync` binary

@@ -20,7 +20,14 @@ async fn sftp_xml_to_amqp_publishes_two_messages() {
     let input = fs::read_to_string(fixture_path("catalog.xml")).unwrap();
 
     prepare_amqp_queue(AMQP_CONNECTION_STRING, &exchange, &routing_key, &queue).await;
-    sftp_write_file("127.0.0.1", SFTP_PORT, "testuser", "testpass", &remote_path, &input);
+    sftp_write_file(
+        "127.0.0.1",
+        SFTP_PORT,
+        "testuser",
+        "testpass",
+        &remote_path,
+        &input,
+    );
 
     let config = format!(
         r#"skippr:

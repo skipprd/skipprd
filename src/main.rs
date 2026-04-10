@@ -30,7 +30,7 @@ use clap::Parser;
 use std::string::ToString;
 
 use skippr::buffer::BufferChunker;
-use skippr::helpers::configuration::{Config, DataSinkPluginConfig, PIPELINE_NAME};
+use skippr::helpers::configuration::{Config, PIPELINE_NAME};
 use skippr::helpers::logging::init_logging;
 use skippr::helpers::sync_reporter::SyncReporter;
 use tracing::{error, info, warn};
@@ -38,23 +38,7 @@ use tracing::{error, info, warn};
 use skippr::helpers::logger::LogLevel;
 use skippr::helpers::offsets::Offsets;
 
-use skippr::plugins::athena::DataSinkAthenaPlugin;
-
-use skippr::plugins::bigquery_output::DataSinkBigqueryPlugin;
-use skippr::plugins::dynamodb_input::DataSourceDynamodbPlugin;
-use skippr::plugins::kinesis_input::DataSourceKinesisPlugin;
-use skippr::plugins::mssql_input::DataSourceMssqlPlugin;
-use skippr::plugins::mysql_input::DataSourceMysqlPlugin;
-use skippr::plugins::postgres_output::DataSinkPostgresPlugin;
-use skippr::plugins::s3_input::DataSourceS3Plugin;
-use skippr::plugins::snowflake_output::DataSinkSnowflakePlugin;
-use skippr::plugins::sqs_input::DataSourceSqsPlugin;
-use skippr::plugins::stdin_input::DataSourceStdinPlugin;
-use skippr::plugins::stdout_output::DataSinkStdoutPlugin;
-
 use skippr::metrics::{Metrics, MetricsStatus};
-use skippr::plugins::file_input::DataSourceLocalFilePlugin;
-use skippr::plugins::s3_output::DataSinkS3Plugin;
 use skippr::{LOGGER, METADATA, METRICS, RUNNING};
 
 use datafusion::physical_plan::SendableRecordBatchStream;
@@ -62,8 +46,11 @@ use datafusion::prelude::*;
 use skippr::benchmark::PerformanceBenchmark;
 use skippr::buffer::ingest_buffer::{wal_recover, Buffers};
 use skippr::ingest_work::Ingest;
-use skippr::plugins::file_output::DataSinkFilePlugin;
 use skippr::plugins::DataSink;
+use skippr::runtime_plugins::host::{
+    sync_runtime_input_plugin, ResolvedRuntimePlugin, RuntimeDataSinkPlugin,
+};
+use skippr::runtime_plugins::protocol::{RuntimeBinding, RuntimePluginKind, RuntimeSinkConfig};
 use skippr::sqlrt::doc_parser::SqlDocParser;
 use skippr::sqlrt::docs::{get_docs_in_format, DocFormat};
 use skippr::sqlrt::query::query;
@@ -739,9 +726,39 @@ async fn sync(output_mode: &str) {
         let pipeline = Config::get_pipeline_config();
         if let Some(ref cdc_cfg) = pipeline.cdc {
             let input_name = Config::get_pipeline_input_plugin_name();
-            let src_cap = source_capability_for_plugin(&input_name);
-            let sink_cap = sink_capability_for_plugin(&output_plugin_name);
-            if let (Some(src), Some(snk)) = (src_cap, sink_cap) {
+            let runtime_input_manifest = match Config::get_pipeline_runtime_input_plugin() {
+                Ok(Some(entry)) => Some(
+                    resolve_runtime_manifest(entry, RuntimePluginKind::DataSource, &input_name)
+                        .unwrap_or_else(|err| {
+                            panic!("Runtime input manifest resolution failed: {}", err)
+                        }),
+                ),
+                Ok(None) => None,
+                Err(err) => panic!("Runtime input manifest lookup failed: {}", err),
+            };
+            let runtime_output_manifest = match Config::get_pipeline_runtime_output_plugin() {
+                Ok(Some(entry)) => Some(
+                    resolve_runtime_manifest(
+                        entry,
+                        RuntimePluginKind::DataSink,
+                        &output_plugin_name,
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!("Runtime output manifest resolution failed: {}", err)
+                    }),
+                ),
+                Ok(None) => None,
+                Err(err) => panic!("Runtime output manifest lookup failed: {}", err),
+            };
+            let src_cap = runtime_input_manifest
+                .as_ref()
+                .and_then(runtime_source_capability_for_manifest)
+                .or_else(|| source_capability_for_plugin(&input_name).cloned());
+            let sink_cap = runtime_output_manifest
+                .as_ref()
+                .and_then(runtime_sink_capability_for_manifest)
+                .or_else(|| sink_capability_for_plugin(&output_plugin_name).cloned());
+            if let (Some(src), Some(snk)) = (src_cap.as_ref(), sink_cap.as_ref()) {
                 match derive_and_validate(src, snk, "default", &cdc_cfg.business_key_columns) {
                     CompatibilityResult::Compatible(guarantee) => {
                         info!(
@@ -899,10 +916,6 @@ async fn sync(output_mode: &str) {
             finalising_started.elapsed()
         );
     }
-    info!("Finalising: waiting for Athena partition tasks to drain");
-    skippr::plugins::athena::DataSinkAthenaPlugin::await_partition_tasks_zero().await;
-    info!("Finalising: Athena partition tasks drained");
-
     info!("Finalising: draining schema sync worker");
     Config::drain_schema_sync_worker();
     info!("Finalising: schema sync worker drained");
@@ -1001,139 +1014,49 @@ async fn sync(output_mode: &str) {
     }
 }
 
-async fn build_output_plugin_from_config(
-    output_config: DataSinkPluginConfig,
-    buffer_name: String,
-) -> Result<Box<dyn DataSink + Send + Sync>, io::Error> {
-    match output_config {
-        DataSinkPluginConfig::File(file_config) => {
-            let plugin = DataSinkFilePlugin::new_with_config(buffer_name, Some(file_config)).await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Athena(athena_config) => {
-            let plugin = DataSinkAthenaPlugin::new_with_config(buffer_name, athena_config).await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::S3(s3_config) => {
-            let plugin = DataSinkS3Plugin::new_with_config(buffer_name, Some(s3_config)).await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Snowflake(sf_config) => {
-            let plugin = DataSinkSnowflakePlugin::new_with_config(buffer_name, sf_config).await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Bigquery(bq_config) => {
-            let plugin = DataSinkBigqueryPlugin::new_with_config(buffer_name, bq_config).await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Postgres(pg_config) => {
-            let plugin = DataSinkPostgresPlugin::new_with_config(buffer_name, pg_config).await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Stdout => {
-            let plugin = DataSinkStdoutPlugin::new(buffer_name).await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::AzureBlob(c) => {
-            let plugin =
-                skippr::plugins::azure_blob_output::DataSinkAzureBlobPlugin::new_with_config(
-                    buffer_name,
-                    Some(c),
-                )
-                .await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Gcs(c) => {
-            let plugin = skippr::plugins::gcs_output::DataSinkGcsPlugin::new_with_config(
-                buffer_name,
-                Some(c),
-            )
-            .await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Synapse(c) => {
-            let plugin = skippr::plugins::synapse_output::DataSinkSynapsePlugin::new_with_config(
-                buffer_name,
-                c,
-            )
-            .await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Sftp(c) => {
-            let plugin =
-                skippr::plugins::sftp_output::DataSinkSftpPlugin::new_with_config(buffer_name, c)
-                    .await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Amqp(c) => {
-            let plugin =
-                skippr::plugins::amqp_output::DataSinkAmqpPlugin::new_with_config(buffer_name, c)
-                    .await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Databricks(c) => {
-            let plugin =
-                skippr::plugins::databricks_output::DataSinkDatabricksPlugin::new_with_config(
-                    buffer_name,
-                    c,
-                )
-                .await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Clickhouse(c) => {
-            let plugin =
-                skippr::plugins::clickhouse_output::DataSinkClickhousePlugin::new_with_config(
-                    buffer_name,
-                    c,
-                )
-                .await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Redshift(c) => {
-            let plugin = skippr::plugins::redshift_output::DataSinkRedshiftPlugin::new_with_config(
-                buffer_name,
-                c,
-            )
-            .await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
-        DataSinkPluginConfig::Motherduck(c) => {
-            let plugin =
-                skippr::plugins::motherduck_output::DataSinkMotherduckPlugin::new_with_config(
-                    buffer_name,
-                    c,
-                )
-                .await;
-            Ok(Box::new(plugin) as Box<dyn DataSink + Send + Sync>)
-        }
+fn resolve_runtime_manifest(
+    entry: skippr::helpers::configuration::RuntimePluginEntry,
+    expected_kind: RuntimePluginKind,
+    expected_plugin_name: &str,
+) -> Result<ResolvedRuntimePlugin, io::Error> {
+    let resolved = ResolvedRuntimePlugin::load(std::path::PathBuf::from(entry.manifest))?;
+    if resolved.manifest.kind != expected_kind {
+        return Err(io::Error::other(format!(
+            "Runtime manifest '{}' is kind {:?}, expected {:?}",
+            resolved.manifest.name, resolved.manifest.kind, expected_kind
+        )));
     }
+    if resolved.manifest.plugin_name != expected_plugin_name {
+        return Err(io::Error::other(format!(
+            "Runtime manifest '{}' targets plugin '{}' but pipeline config resolved '{}'",
+            resolved.manifest.name, resolved.manifest.plugin_name, expected_plugin_name
+        )));
+    }
+    Ok(resolved)
 }
 
 pub async fn sync_output_plugin(
     plugin_name: &str,
-    buffer_name: String,
+    _buffer_name: String,
 ) -> Result<Box<dyn DataSink + Send + Sync>, io::Error> {
     info!("Output plugin: {}", plugin_name);
 
     let primary_sink_ref = Config::get_pipeline_output_sink_ref();
-    let primary_plugin = match Config::get_pipeline_output_plugin_config() {
-        Ok(output_config) => {
-            build_output_plugin_from_config(output_config, buffer_name.clone()).await?
-        }
-        Err(_) if plugin_name.is_empty() => {
-            info!(
-                "No Data {} plugin specified, defaulting to local file",
-                buffer_name
-            );
-            Box::new(DataSinkFilePlugin::new(buffer_name.clone()).await)
-                as Box<dyn DataSink + Send + Sync>
-        }
-        Err(err) => {
-            return Err(io::Error::other(format!(
-                "Failed to resolve output plugin config: {err}"
-            )))
-        }
-    };
+    let runtime_entry = Config::get_pipeline_runtime_output_plugin()
+        .map_err(io::Error::other)?
+        .ok_or_else(|| io::Error::other("runtime_output is required for the primary data sink"))?;
+    let resolved =
+        resolve_runtime_manifest(runtime_entry, RuntimePluginKind::DataSink, plugin_name)?;
+    let runtime_config = resolve_runtime_sink_config(RuntimeBinding::Primary)?;
+    let primary_plugin = Box::new(
+        RuntimeDataSinkPlugin::new(
+            resolved,
+            Config::get_pipeline_name(),
+            RuntimeBinding::Primary,
+            runtime_config,
+        )
+        .await?,
+    ) as Box<dyn DataSink + Send + Sync>;
 
     let mut sinks: HashMap<String, Arc<Box<dyn DataSink + Send + Sync>>> = HashMap::new();
     sinks.insert(primary_sink_ref.clone(), Arc::new(primary_plugin));
@@ -1151,18 +1074,34 @@ pub async fn sync_output_plugin(
 }
 
 pub async fn sync_deadletter_plugin(
-    buffer_name: String,
+    _buffer_name: String,
 ) -> Result<Option<(String, Box<dyn DataSink + Send + Sync>)>, io::Error> {
     let sink_ref = match Config::get_pipeline_deadletters_ref() {
         Some(sink_ref) => sink_ref,
         None => return Ok(None),
     };
-    let output_config = Config::get_pipeline_deadletter_plugin_config()
-        .map_err(|err| io::Error::other(format!("Failed to resolve deadletter sink: {err}")))?;
-    let Some(output_config) = output_config else {
+    let Some(plugin_name) =
+        Config::get_pipeline_deadletter_plugin_name().map_err(io::Error::other)?
+    else {
         return Ok(None);
     };
-    let plugin = build_output_plugin_from_config(output_config, buffer_name).await?;
+    let runtime_entry = Config::get_pipeline_runtime_output_plugin()
+        .map_err(io::Error::other)?
+        .ok_or_else(|| {
+            io::Error::other("runtime_output is required when a deadletter sink is configured")
+        })?;
+    let resolved =
+        resolve_runtime_manifest(runtime_entry, RuntimePluginKind::DataSink, &plugin_name)?;
+    let runtime_config = resolve_runtime_sink_config(RuntimeBinding::Deadletter)?;
+    let plugin = Box::new(
+        RuntimeDataSinkPlugin::new(
+            resolved,
+            Config::get_pipeline_name(),
+            RuntimeBinding::Deadletter,
+            runtime_config,
+        )
+        .await?,
+    ) as Box<dyn DataSink + Send + Sync>;
     Ok(Some((sink_ref, plugin)))
 }
 
@@ -1176,6 +1115,38 @@ fn build_cdc_contract(
         business_key_columns: cfg.business_key_columns.clone(),
         effective_guarantee,
     }
+}
+
+fn runtime_source_capability_for_manifest(
+    resolved: &ResolvedRuntimePlugin,
+) -> Option<skippr::plugins::cdc::SourceCapability> {
+    resolved
+        .manifest
+        .source_capability
+        .as_ref()
+        .map(|capability| capability.to_cdc_capability())
+}
+
+fn runtime_sink_capability_for_manifest(
+    resolved: &ResolvedRuntimePlugin,
+) -> Option<skippr::plugins::cdc::SinkCapability> {
+    resolved
+        .manifest
+        .sink_capability
+        .as_ref()
+        .map(|capability| capability.to_cdc_capability())
+}
+
+fn resolve_runtime_sink_config(binding: RuntimeBinding) -> Result<RuntimeSinkConfig, io::Error> {
+    let config = match binding {
+        RuntimeBinding::Primary => {
+            Config::get_pipeline_output_plugin_config().map_err(io::Error::other)?
+        }
+        RuntimeBinding::Deadletter => Config::get_pipeline_deadletter_plugin_config()
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("deadletter sink is not configured"))?,
+    };
+    RuntimeSinkConfig::try_from(config).map_err(io::Error::other)
 }
 
 fn source_capability_for_plugin(
@@ -1240,60 +1211,38 @@ pub async fn sync_input_plugin(
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
 ) {
     let plugin_name = Config::get_pipeline_input_plugin_name();
-    let mut source: Box<dyn skippr::plugins::DataSource> = match plugin_name.as_str() {
-        "File" => Box::new(DataSourceLocalFilePlugin::new().await),
-        "S3" => Box::new(DataSourceS3Plugin::new().await),
-        "Mssql" => Box::new(DataSourceMssqlPlugin::new().await),
-        "Kinesis" => Box::new(DataSourceKinesisPlugin::new().await),
-        "Sqs" => Box::new(DataSourceSqsPlugin::new().await),
-        "Mysql" => Box::new(DataSourceMysqlPlugin::new().await),
-        "Dynamodb" => Box::new(DataSourceDynamodbPlugin::new().await),
-        "HttpClient" => {
-            Box::new(skippr::plugins::http_client_input::DataSourceHttpClientPlugin::new().await)
-        }
-        "HttpServer" => {
-            Box::new(skippr::plugins::http_server_input::DataSourceHttpServerPlugin::new().await)
-        }
-        "Stdin" => Box::new(DataSourceStdinPlugin::new().await),
-        "Mongodb" => Box::new(skippr::plugins::mongodb_input::DataSourceMongodbPlugin::new().await),
-        "Eventbridge" => {
-            Box::new(skippr::plugins::eventbridge_input::DataSourceEventbridgePlugin::new().await)
-        }
-        "Sns" => Box::new(skippr::plugins::sns_input::DataSourceSnsPlugin::new().await),
-        "Mqtt" => Box::new(skippr::plugins::mqtt_input::DataSourceMqttPlugin::new().await),
-        "Sftp" => Box::new(skippr::plugins::sftp_input::DataSourceSftpPlugin::new().await),
-        "Postgres" => {
-            Box::new(skippr::plugins::postgres_input::DataSourcePostgresPlugin::new().await)
-        }
-        "Redshift" => {
-            Box::new(skippr::plugins::redshift_input::DataSourceRedshiftPlugin::new().await)
-        }
-        "Amqp" => Box::new(skippr::plugins::amqp_input::DataSourceAmqpPlugin::new().await),
-        "Kafka" => Box::new(skippr::plugins::kafka_input::DataSourceKafkaPlugin::new().await),
-        "Websocket" => {
-            Box::new(skippr::plugins::websocket_input::DataSourceWebsocketPlugin::new().await)
-        }
-        "Statsd" => Box::new(skippr::plugins::statsd_input::DataSourceStatsdPlugin::new().await),
-        "Socket" => Box::new(skippr::plugins::socket_input::DataSourceSocketPlugin::new().await),
-        "Clickhouse" => {
-            Box::new(skippr::plugins::clickhouse_input::DataSourceClickhousePlugin::new().await)
-        }
-        "DeltaLake" => {
-            Box::new(skippr::plugins::delta_lake_input::DataSourceDeltaLakePlugin::new().await)
-        }
-        "Motherduck" => {
-            Box::new(skippr::plugins::motherduck_input::DataSourceMotherduckPlugin::new().await)
-        }
-        "" => {
-            error!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
+    let runtime_entry = match Config::get_pipeline_runtime_input_plugin() {
+        Ok(Some(runtime_entry)) => runtime_entry,
+        Ok(None) => {
+            error!(
+                "runtime_input is required for data source '{}'",
+                plugin_name
+            );
             return;
         }
-        unknown => {
-            error!("Data Source Plugin {} not supported", unknown);
+        Err(err) => {
+            error!(
+                "Failed to resolve runtime input manifest reference: {}",
+                err
+            );
             return;
         }
     };
-    if let Err(e) = source.sync(offsets_clone, shared_output).await {
-        error!("Data source sync failed: {}", e);
+    match resolve_runtime_manifest(runtime_entry, RuntimePluginKind::DataSource, &plugin_name) {
+        Ok(resolved) => {
+            if let Err(err) = sync_runtime_input_plugin(
+                resolved,
+                Config::get_pipeline_name(),
+                offsets_clone,
+                shared_output,
+            )
+            .await
+            {
+                error!("Runtime data source sync failed: {}", err);
+            }
+        }
+        Err(err) => {
+            error!("Runtime input manifest resolution failed: {}", err);
+        }
     }
 }

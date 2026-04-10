@@ -1,0 +1,38 @@
+{
+  "name": "mqtt-runtime-source",
+  "kind": "DataSource",
+  "plugin_name": "Mqtt",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-mqtt"
+    },
+    "darwin-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-mqtt"
+    },
+    "linux-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-mqtt"
+    },
+    "linux-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-mqtt"
+    },
+    "windows-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-mqtt.exe"
+    }
+  },
+  "executable": "${binary_dir}/skippr-plugin-data-source-mqtt",
+  "args": [],
+  "supports_schema": false,
+  "source_capability": {
+    "name": "Mqtt",
+    "guarantee_tier": "UserSuppliedIdentityOnly",
+    "checkpoint_style": "MessageIdentity",
+    "bootstrap_style": "StreamOnly",
+    "order_model": "UnsupportedForFinalState",
+    "supports_deletes": false,
+    "event_id_semantics": "UserSupplied"
+  }
+}

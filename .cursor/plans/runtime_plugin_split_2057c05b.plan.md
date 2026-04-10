@@ -4,22 +4,22 @@ overview: Extract Skippr plugins from the monolithic binary into separately down
 todos:
   - id: define-wire-contracts
     content: Design transport-neutral source, sink, and schema protocol messages that preserve `IngestBatch`, `WalRowMeta`, `WalPartMeta`, `CheckpointEnvelope`, `NamespaceContract`, and `SyncContext`.
-    status: pending
+    status: completed
   - id: checkpoint-authority-model
     content: Plan how source-native resume state, advisory progress hints, and bootstrap anchors cross the plugin boundary while core remains authoritative for WAL ownership and committed offsets.
-    status: pending
+    status: completed
   - id: host-plugin-manager
     content: Plan the host-side launcher, handshake, capability negotiation, CDC contract derivation, supervision, and plugin download/verification flow in core.
-    status: pending
+    status: completed
   - id: config-and-manifests
     content: Plan how compile-time plugin enums evolve into runtime plugin manifests with open-ended config, declared capabilities, checkpoint/bootstrap styles, and protocol versioning.
-    status: pending
+    status: completed
   - id: vertical-slice-migration
     content: Use a CDC-capable source/sink pair, preferably `Postgres -> Postgres`, to prove external-process checkpoints, CDC rows, and exact-once sink apply before migrating all plugins.
-    status: pending
+    status: completed
   - id: sdk-and-repo-layout
     content: Define the Rust-first plugin SDK and repo layout, including typed helpers for checkpoint envelopes, CDC encoding, and sink apply actions.
-    status: pending
+    status: completed
 isProject: false
 ---
 

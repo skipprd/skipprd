@@ -15,11 +15,13 @@ use serde_json::{Map, Value};
 use std::error::Error;
 use std::path::PathBuf;
 
+pub mod athena_admin;
 pub mod configuration;
 pub mod logger;
 pub mod logging;
 pub mod manifest;
 pub mod offsets;
+pub mod plugin_config;
 pub mod progress;
 pub mod s3;
 pub mod sync_reporter;

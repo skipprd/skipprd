@@ -104,7 +104,9 @@ impl SerdeXml {
                     };
                 }
 
-                vec![serde_json::Value::Object(root_entries.into_iter().collect())]
+                vec![serde_json::Value::Object(
+                    root_entries.into_iter().collect(),
+                )]
             }
             other => vec![other],
         }
@@ -123,16 +125,12 @@ impl SerdeXml {
                 .map_err(|err| XmlDecodeError::Parse(err.to_string()))?
             {
                 Event::Start(start) => {
-                    let mut node = XmlNode::new(
-                        String::from_utf8_lossy(start.name().as_ref()).to_string(),
-                    );
+                    let mut node =
+                        XmlNode::new(String::from_utf8_lossy(start.name().as_ref()).to_string());
                     for attribute in start.attributes() {
                         let attribute =
                             attribute.map_err(|err| XmlDecodeError::Parse(err.to_string()))?;
-                        let key = format!(
-                            "@{}",
-                            String::from_utf8_lossy(attribute.key.as_ref())
-                        );
+                        let key = format!("@{}", String::from_utf8_lossy(attribute.key.as_ref()));
                         let value = attribute
                             .decode_and_unescape_value(reader.decoder())
                             .map_err(|err| XmlDecodeError::Parse(err.to_string()))?
@@ -147,10 +145,7 @@ impl SerdeXml {
                     for attribute in start.attributes() {
                         let attribute =
                             attribute.map_err(|err| XmlDecodeError::Parse(err.to_string()))?;
-                        let key = format!(
-                            "@{}",
-                            String::from_utf8_lossy(attribute.key.as_ref())
-                        );
+                        let key = format!("@{}", String::from_utf8_lossy(attribute.key.as_ref()));
                         let value = attribute
                             .decode_and_unescape_value(reader.decoder())
                             .map_err(|err| XmlDecodeError::Parse(err.to_string()))?
@@ -178,9 +173,9 @@ impl SerdeXml {
                     }
                 }
                 Event::End(_) => {
-                    let node = stack
-                        .pop()
-                        .ok_or_else(|| XmlDecodeError::Parse("Unexpected XML end tag".to_string()))?;
+                    let node = stack.pop().ok_or_else(|| {
+                        XmlDecodeError::Parse("Unexpected XML end tag".to_string())
+                    })?;
                     Self::attach_node(&mut stack, node, &mut root);
                 }
                 Event::Eof => break,
@@ -193,11 +188,7 @@ impl SerdeXml {
         root.ok_or_else(|| XmlDecodeError::Parse("XML document was empty".to_string()))
     }
 
-    fn attach_node(
-        stack: &mut Vec<XmlNode>,
-        node: XmlNode,
-        root: &mut Option<serde_json::Value>,
-    ) {
+    fn attach_node(stack: &mut Vec<XmlNode>, node: XmlNode, root: &mut Option<serde_json::Value>) {
         let node_name = node.name.clone();
         let node_value = node.into_value();
         if let Some(parent) = stack.last_mut() {

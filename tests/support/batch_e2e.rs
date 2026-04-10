@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -9,15 +10,8 @@ use std::time::{Duration, Instant};
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
-use futures_util::StreamExt;
-use lapin::options::{
-    BasicAckOptions, BasicConsumeOptions, ExchangeDeclareOptions, QueueBindOptions,
-    QueueDeclareOptions, QueuePurgeOptions,
-};
-use lapin::types::FieldTable;
-use lapin::{Connection, ConnectionProperties, ExchangeKind};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
-use ssh2::Session;
 use walkdir::WalkDir;
 
 use crate::support::cdc_e2e::skippr_el_bin;
@@ -150,6 +144,25 @@ pub fn parquet_row_count_in_dir(dir: &Path) -> i64 {
         .sum()
 }
 
+pub fn parquet_column_names_in_dir(dir: &Path) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    for path in WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(|entry| entry.into_path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("parquet"))
+    {
+        let file = std::fs::File::open(&path)
+            .unwrap_or_else(|e| panic!("failed to open parquet file {:?}: {}", path, e));
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap_or_else(|e| panic!("bad parquet reader for {:?}: {}", path, e));
+        for field in builder.schema().fields() {
+            names.insert(field.name().to_string());
+        }
+    }
+    names.into_iter().collect()
+}
+
 pub fn output_buffer_dir(harness: &BatchE2eHarness) -> PathBuf {
     harness
         .data_dir()
@@ -222,6 +235,8 @@ pub fn sftp_write_file(
     remote_path: &str,
     contents: &str,
 ) {
+    use ssh2::Session;
+
     let tcp = TcpStream::connect(format!("{}:{}", host, port)).unwrap();
     let mut session = Session::new().unwrap();
     session.set_tcp_stream(tcp);
@@ -239,6 +254,12 @@ pub async fn prepare_amqp_queue(
     routing_key: &str,
     queue: &str,
 ) {
+    use lapin::options::{
+        ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions, QueuePurgeOptions,
+    };
+    use lapin::types::FieldTable;
+    use lapin::{Connection, ConnectionProperties, ExchangeKind};
+
     let conn = Connection::connect(connection_string, ConnectionProperties::default())
         .await
         .unwrap();
@@ -289,6 +310,11 @@ pub async fn collect_amqp_messages(
     expected_count: usize,
     timeout: Duration,
 ) -> Vec<String> {
+    use futures_util::StreamExt;
+    use lapin::options::{BasicAckOptions, BasicConsumeOptions};
+    use lapin::types::FieldTable;
+    use lapin::{Connection, ConnectionProperties};
+
     let conn = Connection::connect(connection_string, ConnectionProperties::default())
         .await
         .unwrap();

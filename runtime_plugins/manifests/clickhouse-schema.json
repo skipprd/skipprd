@@ -1,0 +1,29 @@
+{
+  "name": "clickhouse-runtime-schema",
+  "kind": "SchemaSink",
+  "plugin_name": "Clickhouse",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-clickhouse"
+    },
+    "darwin-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-clickhouse"
+    },
+    "linux-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-clickhouse"
+    },
+    "linux-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-clickhouse"
+    },
+    "windows-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-clickhouse.exe"
+    }
+  },
+  "executable": "${binary_dir}/skippr-plugin-schema-sink-clickhouse",
+  "args": [],
+  "supports_schema": true
+}

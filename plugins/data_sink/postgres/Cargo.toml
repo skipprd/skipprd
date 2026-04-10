@@ -1,0 +1,27 @@
+[package]
+name = "skippr-plugin-data-sink-postgres"
+version = "0.0.0-git"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "skippr-plugin-data-sink-postgres"
+path = "src/main.rs"
+
+[dependencies]
+chrono = "=0.4.42"
+clap.workspace = true
+dashmap.workspace = true
+datafusion.workspace = true
+futures.workspace = true
+native-tls.workspace = true
+once_cell.workspace = true
+postgres-native-tls = "0.5.2"
+serde.workspace = true
+serde_derive.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+tracing.workspace = true
+skippr = { path = "../../.." }

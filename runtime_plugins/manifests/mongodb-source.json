@@ -1,0 +1,38 @@
+{
+  "name": "mongodb-runtime-source",
+  "kind": "DataSource",
+  "plugin_name": "Mongodb",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-mongodb"
+    },
+    "darwin-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-mongodb"
+    },
+    "linux-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-mongodb"
+    },
+    "linux-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-mongodb"
+    },
+    "windows-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-mongodb.exe"
+    }
+  },
+  "executable": "${binary_dir}/skippr-plugin-data-source-mongodb",
+  "args": [],
+  "supports_schema": false,
+  "source_capability": {
+    "name": "Mongodb",
+    "guarantee_tier": "SnapshotThenLogExactOnce",
+    "checkpoint_style": "LogNative",
+    "bootstrap_style": "AnchoredSnapshot",
+    "order_model": "StableKeyScopedOrder",
+    "supports_deletes": true,
+    "event_id_semantics": "LogPosition"
+  }
+}

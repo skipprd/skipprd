@@ -37,3 +37,5 @@ _bak
 data
 docs/site
 logs
+__pycache__/
+*.pyc

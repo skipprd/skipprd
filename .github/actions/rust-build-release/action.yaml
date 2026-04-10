@@ -51,12 +51,22 @@ runs:
         sed "s/0\\.0\\.0-git/${{ github.ref_name }}/" Cargo.toml.orig > Cargo.toml
         mv Cargo.lock Cargo.lock.orig
         sed "s/0\\.0\\.0-git/${{ github.ref_name }}/" Cargo.lock.orig > Cargo.lock
+    - name: Verify host dependency boundary
+      shell: bash
+      run: |
+        python3 .github/scripts/check_host_dependency_boundaries.py
     - name: Build release
       shell: bash
       run: |
         cargo build --release
         mkdir -p skippr-el-${{ inputs.architecture_name }}
         cp target/release/skippr-el skippr-el-${{ inputs.architecture_name }}/skippr-el
+        shopt -s nullglob
+        for plugin_bin in target/release/skippr-plugin-*; do
+          if [ -f "${plugin_bin}" ]; then
+            cp "${plugin_bin}" "skippr-el-${{ inputs.architecture_name }}/$(basename "${plugin_bin}")"
+          fi
+        done
         ls -la skippr-el-${{ inputs.architecture_name }}
       env:
         # do not produce debug symbols to keep memory usage down

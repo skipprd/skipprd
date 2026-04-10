@@ -4,8 +4,10 @@ use std::{fs, process};
 // removed unused Write import
 use crate::cli::{Mode, QueryOptions, CLI_MODE};
 use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
+use crate::helpers::athena_admin::{
+    delete_glue_database, glue_delete_table, output_athena_admin_config,
+};
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
-use crate::plugins::athena::AwsAthena;
 use crate::sqlrt::operators::alter_column::alter_column_type;
 use crate::sqlrt::operators::drop_column::alter_column_drop;
 use crate::sqlrt::operators::drop_table::drop_table;
@@ -588,7 +590,7 @@ pub async fn query(sql_str: &str) {
         Ok(Statement::DatabaseDrop(stmt)) => {
             let db_name = stmt.database.clone();
 
-            match AwsAthena::delete_glue_database(&db_name.to_string()).await {
+            match delete_glue_database(&db_name.to_string()).await {
                 Ok(_) => {
                     println!("Dropped Database: {}", db_name);
                 }
@@ -1004,15 +1006,15 @@ pub async fn query(sql_str: &str) {
                     Config::set_metadata(&skippr_metadata, false).await; // we don't need to sync the schemas as we are dropping the table below
 
                     // Delete Glue table
-                    match AwsAthena::glue_delete_table(
-                        &crate::plugins::athena::DataSinkAthenaPlugin::get_config(),
-                        &table_str,
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            println!("Dropped table: {}", table_str);
-                        }
+                    match output_athena_admin_config() {
+                        Ok(config) => match glue_delete_table(&config, &table_str).await {
+                            Ok(_) => {
+                                println!("Dropped table: {}", table_str);
+                            }
+                            Err(e) => {
+                                println!("{}", e);
+                            }
+                        },
                         Err(e) => {
                             println!("{}", e);
                         }

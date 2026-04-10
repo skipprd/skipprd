@@ -47,10 +47,7 @@ impl SerderCsv {
         match headers {
             Some(headers) => {
                 for (idx, value) in record.iter().enumerate() {
-                    let key = headers
-                        .get(idx)
-                        .cloned()
-                        .unwrap_or_else(|| idx.to_string());
+                    let key = headers.get(idx).cloned().unwrap_or_else(|| idx.to_string());
                     obj.insert(key, Value::String(value.to_string()));
                 }
             }

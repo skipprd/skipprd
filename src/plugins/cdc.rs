@@ -392,7 +392,6 @@ pub fn derive_and_validate(
     CompatibilityResult::Compatible(EffectiveGuarantee::CdcEncoded)
 }
 
-
 // ---------------------------------------------------------------------------
 // Sync context
 // ---------------------------------------------------------------------------
@@ -400,7 +399,7 @@ pub fn derive_and_validate(
 /// Context passed to `DataSink::sync` when the partition carries CDC metadata.
 /// Sinks branch on the presence of this context to decide between append-only
 /// INSERT and CDC-aware apply (upsert/delete with order-token guards).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncContext {
     pub part_meta: WalPartMeta,
     /// Namespace contract describing business keys and the enforced guarantee.

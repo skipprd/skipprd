@@ -15,53 +15,17 @@ use once_cell::sync::Lazy;
 use once_cell::sync::OnceCell;
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
-use serde_derive::Deserialize;
+use serde::de::DeserializeOwned;
+use serde_derive::{Deserialize, Serialize};
 
 use serde_json::Value;
 
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
+use crate::helpers::plugin_config::{DataSinkEntry, PluginConfigEntry};
 use crate::METADATA;
-
-use crate::plugins::athena::DataSinkAthenaPluginConfig;
 
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
-use crate::plugins::data_sink::amqp::DataSinkAmqpPluginConfig;
-use crate::plugins::data_sink::azure_blob::DataSinkAzureBlobPluginConfig;
-use crate::plugins::data_sink::clickhouse::DataSinkClickhousePluginConfig;
-use crate::plugins::data_sink::databricks::DataSinkDatabricksPluginConfig;
-use crate::plugins::data_sink::gcs::DataSinkGcsPluginConfig;
-use crate::plugins::data_sink::motherduck::DataSinkMotherduckPluginConfig;
-use crate::plugins::data_sink::redshift::DataSinkRedshiftPluginConfig;
-use crate::plugins::data_sink::sftp::DataSinkSftpPluginConfig;
-use crate::plugins::data_sink::synapse::DataSinkSynapsePluginConfig;
-use crate::plugins::data_source::amqp::DataSourceAmqpPluginConfig;
-use crate::plugins::data_source::clickhouse::DataSourceClickhousePluginConfig;
-use crate::plugins::data_source::delta_lake::DataSourceDeltaLakePluginConfig;
-use crate::plugins::data_source::eventbridge::DataSourceEventbridgePluginConfig;
-use crate::plugins::data_source::http_client::DataSourceHttpClientPluginConfig;
-use crate::plugins::data_source::http_server::DataSourceHttpServerPluginConfig;
-use crate::plugins::data_source::kafka::DataSourceKafkaPluginConfig;
-use crate::plugins::data_source::kinesis::DataSourceKinesisPluginConfig;
-use crate::plugins::data_source::mongodb::DataSourceMongodbPluginConfig;
-use crate::plugins::data_source::motherduck::DataSourceMotherduckPluginConfig;
-use crate::plugins::data_source::mqtt::DataSourceMqttPluginConfig;
-use crate::plugins::data_source::postgres::DataSourcePostgresPluginConfig;
-use crate::plugins::data_source::redshift::DataSourceRedshiftPluginConfig;
-use crate::plugins::data_source::sftp::DataSourceSftpPluginConfig;
-use crate::plugins::data_source::sns::DataSourceSnsPluginConfig;
-use crate::plugins::data_source::socket::DataSourceSocketPluginConfig;
-use crate::plugins::data_source::sqs::DataSourceSqsPluginConfig;
-use crate::plugins::data_source::statsd::DataSourceStatsdPluginConfig;
-use crate::plugins::data_source::stdin::DataSourceStdinPluginConfig;
-use crate::plugins::data_source::websocket::DataSourceWebsocketPluginConfig;
-use crate::plugins::dynamodb_input::DataSourceDynamodbPluginConfig;
-use crate::plugins::file_input::DataSourceLocalFilePluginConfig;
-use crate::plugins::file_output::DataSinkFilePluginConfig;
-use crate::plugins::mysql_input::DataSourceMysqlPluginConfig;
-use crate::plugins::s3_input::DataSourceS3PluginConfig;
-use crate::plugins::s3_output::DataSinkS3PluginConfig;
-use crate::serdes::input_format::InputFormat;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use toml;
 use tracing::{debug, error, info, warn};
@@ -116,208 +80,7 @@ pub struct SemanticLayerSettings {
     pub llm_debounce_ms: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub enum DataSourcePluginConfig {
-    S3(DataSourceS3PluginConfig),
-    File(DataSourceLocalFilePluginConfig),
-    Mssql(DataSourceMssqlPluginConfig),
-    Mysql(DataSourceMysqlPluginConfig),
-    Dynamodb(DataSourceDynamodbPluginConfig),
-    Kinesis(DataSourceKinesisPluginConfig),
-    Sqs(DataSourceSqsPluginConfig),
-    HttpClient(DataSourceHttpClientPluginConfig),
-    HttpServer(DataSourceHttpServerPluginConfig),
-    Stdin(DataSourceStdinPluginConfig),
-    Mongodb(DataSourceMongodbPluginConfig),
-    Eventbridge(DataSourceEventbridgePluginConfig),
-    Sns(DataSourceSnsPluginConfig),
-    Mqtt(DataSourceMqttPluginConfig),
-    Sftp(DataSourceSftpPluginConfig),
-    Postgres(DataSourcePostgresPluginConfig),
-    Redshift(DataSourceRedshiftPluginConfig),
-    Amqp(DataSourceAmqpPluginConfig),
-    Kafka(DataSourceKafkaPluginConfig),
-    Websocket(DataSourceWebsocketPluginConfig),
-    Statsd(DataSourceStatsdPluginConfig),
-    Socket(DataSourceSocketPluginConfig),
-    Clickhouse(DataSourceClickhousePluginConfig),
-    DeltaLake(DataSourceDeltaLakePluginConfig),
-    Motherduck(DataSourceMotherduckPluginConfig),
-}
-
-impl DataSourcePluginConfig {
-    pub fn input_format(&self) -> InputFormat {
-        InputFormat::from(self.format().as_str())
-    }
-
-    pub fn format(&self) -> String {
-        match self {
-            DataSourcePluginConfig::S3(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSourcePluginConfig::File(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Mssql(c) => {
-                c.format.clone().unwrap_or_else(|| "row".to_string())
-            }
-            DataSourcePluginConfig::Mysql(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Dynamodb(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Kinesis(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Sqs(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::HttpClient(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::HttpServer(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Stdin(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Mongodb(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Eventbridge(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Sns(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Mqtt(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Sftp(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Postgres(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Redshift(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Amqp(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Kafka(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Websocket(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Statsd(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Socket(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Clickhouse(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::DeltaLake(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSourcePluginConfig::Motherduck(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-        }
-    }
-
-    pub fn plugin_name(&self) -> Option<String> {
-        match self {
-            DataSourcePluginConfig::S3(_) => Some("S3".to_string()),
-            DataSourcePluginConfig::File(_) => Some("File".to_string()),
-            DataSourcePluginConfig::Mssql(_) => Some("Mssql".to_string()),
-            DataSourcePluginConfig::Mysql(_) => Some("Mysql".to_string()),
-            DataSourcePluginConfig::Dynamodb(_) => Some("Dynamodb".to_string()),
-            DataSourcePluginConfig::Kinesis(_) => Some("Kinesis".to_string()),
-            DataSourcePluginConfig::Sqs(_) => Some("Sqs".to_string()),
-            DataSourcePluginConfig::HttpClient(_) => Some("HttpClient".to_string()),
-            DataSourcePluginConfig::HttpServer(_) => Some("HttpServer".to_string()),
-            DataSourcePluginConfig::Stdin(_) => Some("Stdin".to_string()),
-            DataSourcePluginConfig::Mongodb(_) => Some("Mongodb".to_string()),
-            DataSourcePluginConfig::Eventbridge(_) => Some("Eventbridge".to_string()),
-            DataSourcePluginConfig::Sns(_) => Some("Sns".to_string()),
-            DataSourcePluginConfig::Mqtt(_) => Some("Mqtt".to_string()),
-            DataSourcePluginConfig::Sftp(_) => Some("Sftp".to_string()),
-            DataSourcePluginConfig::Postgres(_) => Some("Postgres".to_string()),
-            DataSourcePluginConfig::Redshift(_) => Some("Redshift".to_string()),
-            DataSourcePluginConfig::Amqp(_) => Some("Amqp".to_string()),
-            DataSourcePluginConfig::Kafka(_) => Some("Kafka".to_string()),
-            DataSourcePluginConfig::Websocket(_) => Some("Websocket".to_string()),
-            DataSourcePluginConfig::Statsd(_) => Some("Statsd".to_string()),
-            DataSourcePluginConfig::Socket(_) => Some("Socket".to_string()),
-            DataSourcePluginConfig::Clickhouse(_) => Some("Clickhouse".to_string()),
-            DataSourcePluginConfig::DeltaLake(_) => Some("DeltaLake".to_string()),
-            DataSourcePluginConfig::Motherduck(_) => Some("Motherduck".to_string()),
-        }
-    }
-
-    pub fn batch_size_bytes(&self) -> Option<i64> {
-        match self {
-            DataSourcePluginConfig::S3(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::File(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Mssql(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Mysql(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Dynamodb(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Kinesis(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Sqs(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::HttpClient(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::HttpServer(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Stdin(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Mongodb(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Eventbridge(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Sns(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Mqtt(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Sftp(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Postgres(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Redshift(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Amqp(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Kafka(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Websocket(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Statsd(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Socket(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Clickhouse(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::DeltaLake(c) => c.batch_size_bytes,
-            DataSourcePluginConfig::Motherduck(c) => c.batch_size_bytes,
-        }
-    }
-
-    pub fn batch_size_seconds(&self) -> Option<i64> {
-        match self {
-            DataSourcePluginConfig::S3(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::File(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Mssql(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Mysql(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Dynamodb(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Kinesis(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Sqs(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::HttpClient(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::HttpServer(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Stdin(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Mongodb(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Eventbridge(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Sns(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Mqtt(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Sftp(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Postgres(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Redshift(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Amqp(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Kafka(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Websocket(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Statsd(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Socket(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Clickhouse(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::DeltaLake(c) => c.batch_size_seconds,
-            DataSourcePluginConfig::Motherduck(c) => c.batch_size_seconds,
-        }
-    }
-}
+pub type DataSourcePluginConfig = PluginConfigEntry;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceMssqlPluginConfig {
@@ -330,91 +93,11 @@ pub struct DataSourceMssqlPluginConfig {
     pub batch_size_seconds: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub enum DataSinkPluginConfig {
-    Athena(DataSinkAthenaPluginConfig),
-    Bigquery(DataSinkBigqueryPluginConfig),
-    File(DataSinkFilePluginConfig),
-    Postgres(DataSinkPostgresPluginConfig),
-    S3(DataSinkS3PluginConfig),
-    Snowflake(DataSinkSnowflakePluginConfig),
-    Stdout,
-    AzureBlob(DataSinkAzureBlobPluginConfig),
-    Gcs(DataSinkGcsPluginConfig),
-    Synapse(DataSinkSynapsePluginConfig),
-    Sftp(DataSinkSftpPluginConfig),
-    Amqp(DataSinkAmqpPluginConfig),
-    Databricks(DataSinkDatabricksPluginConfig),
-    Clickhouse(DataSinkClickhousePluginConfig),
-    Redshift(DataSinkRedshiftPluginConfig),
-    Motherduck(DataSinkMotherduckPluginConfig),
-}
+impl TryFrom<PluginConfigEntry> for DataSourceMssqlPluginConfig {
+    type Error = String;
 
-impl DataSinkPluginConfig {
-    pub fn format(&self) -> String {
-        match self {
-            DataSinkPluginConfig::Athena(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSinkPluginConfig::Bigquery(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSinkPluginConfig::File(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSinkPluginConfig::Postgres(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSinkPluginConfig::S3(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSinkPluginConfig::Snowflake(c) => {
-                c.format.clone().unwrap_or_else(|| "parquet".to_string())
-            }
-            DataSinkPluginConfig::Stdout => "json".to_string(),
-            DataSinkPluginConfig::AzureBlob(c) => {
-                c.format.clone().unwrap_or_else(|| "parquet".to_string())
-            }
-            DataSinkPluginConfig::Gcs(c) => {
-                c.format.clone().unwrap_or_else(|| "parquet".to_string())
-            }
-            DataSinkPluginConfig::Synapse(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSinkPluginConfig::Sftp(c) => {
-                c.format.clone().unwrap_or_else(|| "parquet".to_string())
-            }
-            DataSinkPluginConfig::Amqp(c) => c.format.clone().unwrap_or_else(|| "json".to_string()),
-            DataSinkPluginConfig::Databricks(c) => {
-                c.format.clone().unwrap_or_else(|| "parquet".to_string())
-            }
-            DataSinkPluginConfig::Clickhouse(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-            DataSinkPluginConfig::Redshift(c) => {
-                c.format.clone().unwrap_or_else(|| "parquet".to_string())
-            }
-            DataSinkPluginConfig::Motherduck(c) => {
-                c.format.clone().unwrap_or_else(|| "json".to_string())
-            }
-        }
-    }
-
-    pub fn plugin_name(&self) -> Option<String> {
-        match self {
-            DataSinkPluginConfig::Athena(_) => Some("Athena".to_string()),
-            DataSinkPluginConfig::Bigquery(_) => Some("Bigquery".to_string()),
-            DataSinkPluginConfig::File(_) => Some("File".to_string()),
-            DataSinkPluginConfig::Postgres(_) => Some("Postgres".to_string()),
-            DataSinkPluginConfig::S3(_) => Some("S3".to_string()),
-            DataSinkPluginConfig::Snowflake(_) => Some("Snowflake".to_string()),
-            DataSinkPluginConfig::Stdout => Some("Stdout".to_string()),
-            DataSinkPluginConfig::AzureBlob(_) => Some("AzureBlob".to_string()),
-            DataSinkPluginConfig::Gcs(_) => Some("Gcs".to_string()),
-            DataSinkPluginConfig::Synapse(_) => Some("Synapse".to_string()),
-            DataSinkPluginConfig::Sftp(_) => Some("Sftp".to_string()),
-            DataSinkPluginConfig::Amqp(_) => Some("Amqp".to_string()),
-            DataSinkPluginConfig::Databricks(_) => Some("Databricks".to_string()),
-            DataSinkPluginConfig::Clickhouse(_) => Some("Clickhouse".to_string()),
-            DataSinkPluginConfig::Redshift(_) => Some("Redshift".to_string()),
-            DataSinkPluginConfig::Motherduck(_) => Some("Motherduck".to_string()),
-        }
+    fn try_from(plugin_config: PluginConfigEntry) -> Result<Self, Self::Error> {
+        plugin_config.decode_for_plugin("Mssql")
     }
 }
 
@@ -447,7 +130,7 @@ pub struct DataSinkBigqueryPluginConfig {
     pub format: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DataSinkPostgresPluginConfig {
     #[serde(default = "default_postgres_host")]
     pub host: String,
@@ -475,18 +158,28 @@ pub struct GlueSchemaSinkConfig {
     pub glue_database_name: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub enum SchemaSinkConfig {
-    Glue(GlueSchemaSinkConfig),
+pub type DataSinkPluginConfig = PluginConfigEntry;
+pub type SchemaSinkConfig = PluginConfigEntry;
+
+impl TryFrom<DataSinkPluginConfig> for DataSinkBigqueryPluginConfig {
+    type Error = String;
+
+    fn try_from(entry: DataSinkPluginConfig) -> Result<Self, Self::Error> {
+        entry.decode_for_plugin("Bigquery")
+    }
 }
 
-/// Wrapper for a data sink or deadletter sink registry entry.
-/// Contains the plugin config plus an optional schema_sink reference.
+impl TryFrom<DataSinkPluginConfig> for DataSinkSnowflakePluginConfig {
+    type Error = String;
+
+    fn try_from(entry: DataSinkPluginConfig) -> Result<Self, Self::Error> {
+        entry.decode_for_plugin("Snowflake")
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
-pub struct DataSinkEntry {
-    #[serde(flatten)]
-    pub config: DataSinkPluginConfig,
-    pub schema_sink: Option<String>,
+pub struct RuntimePluginEntry {
+    pub manifest: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -511,6 +204,12 @@ pub struct Pipeline {
     pub data_source: Option<String>,
     #[serde(alias = "output")]
     pub data_sink: Option<String>,
+    #[serde(alias = "runtime_source", alias = "runtime_input_plugin")]
+    pub runtime_input: Option<String>,
+    #[serde(alias = "runtime_sink", alias = "runtime_output_plugin")]
+    pub runtime_output: Option<String>,
+    #[serde(alias = "runtime_schema", alias = "runtime_schema_plugin")]
+    pub runtime_schema_sink: Option<String>,
     #[serde(alias = "deadletters", alias = "deadletter")]
     pub deadletter_sink: Option<String>,
     pub stats: Option<Stats>,
@@ -540,6 +239,7 @@ pub struct Config {
     pub deadletter_sinks: Option<HashMap<String, DataSinkEntry>>,
     #[serde(alias = "schema_outputs")]
     pub schema_sinks: Option<HashMap<String, SchemaSinkConfig>>,
+    pub runtime_plugins: Option<HashMap<String, RuntimePluginEntry>>,
 }
 
 pub static APP_CONFIG: Lazy<Arc<TimedRwLock<Option<Config>>>> =
@@ -670,6 +370,7 @@ impl Config {
             data_sinks: None,
             deadletter_sinks: None,
             schema_sinks: None,
+            runtime_plugins: None,
         }
     }
 
@@ -820,11 +521,16 @@ impl Config {
             config.schema_sinks.as_ref()?.get(&schema_name).cloned()
         });
         if let Some(schema_cfg) = schema_cfg {
-            match (&mut plugin_config, schema_cfg) {
-                (DataSinkPluginConfig::Athena(ref mut athena), SchemaSinkConfig::Glue(glue)) => {
-                    athena.glue_database_name = glue.glue_database_name;
+            if plugin_config.plugin_name == "Athena" && schema_cfg.plugin_name == "Glue" {
+                if let Some(glue_database_name) = schema_cfg
+                    .config
+                    .as_object()
+                    .and_then(|raw| raw.get("glue_database_name"))
+                    .cloned()
+                {
+                    plugin_config =
+                        plugin_config.with_json_field("glue_database_name", glue_database_name);
                 }
-                _ => {}
             }
         }
         plugin_config
@@ -932,6 +638,46 @@ impl Config {
         pipeline.deadletter_sink.clone()
     }
 
+    fn resolve_runtime_plugin_entry(reference: &str) -> Result<RuntimePluginEntry, String> {
+        let config = Config::get();
+        let name = Self::parse_registry_ref(reference, "runtime_plugins")?;
+        config
+            .runtime_plugins
+            .as_ref()
+            .and_then(|registry| registry.get(&name))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "Runtime plugin '{}' was configured but not found.",
+                    reference
+                )
+            })
+    }
+
+    pub fn get_pipeline_runtime_input_plugin() -> Result<Option<RuntimePluginEntry>, String> {
+        let pipeline = Config::get_pipeline_config();
+        match pipeline.runtime_input.as_deref() {
+            Some(reference) => Self::resolve_runtime_plugin_entry(reference).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub fn get_pipeline_runtime_output_plugin() -> Result<Option<RuntimePluginEntry>, String> {
+        let pipeline = Config::get_pipeline_config();
+        match pipeline.runtime_output.as_deref() {
+            Some(reference) => Self::resolve_runtime_plugin_entry(reference).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub fn get_pipeline_runtime_schema_plugin() -> Result<Option<RuntimePluginEntry>, String> {
+        let pipeline = Config::get_pipeline_config();
+        match pipeline.runtime_schema_sink.as_deref() {
+            Some(reference) => Self::resolve_runtime_plugin_entry(reference).map(Some),
+            None => Ok(None),
+        }
+    }
+
     fn resolve_deadletter_plugin_config_for(
         config: &Config,
         pipeline: &Pipeline,
@@ -1026,9 +772,7 @@ impl Config {
 
                 let res = match config.schema_sinks.as_ref() {
                     Some(schema_sinks) => match schema_sinks.get(&schema_name) {
-                        Some(schema_config) => match schema_config {
-                            SchemaSinkConfig::Glue(_) => "Glue".to_string(),
-                        },
+                        Some(schema_config) => schema_config.plugin_name.clone(),
                         None => Config::getenv("DATA_SCHEMA_PLUGIN_NAME", ""),
                     },
                     None => Config::getenv("DATA_SCHEMA_PLUGIN_NAME", ""),
@@ -1179,6 +923,9 @@ impl Config {
                     transform: None,
                     data_source: None,
                     data_sink: None,
+                    runtime_input: None,
+                    runtime_output: None,
+                    runtime_schema_sink: None,
                     deadletter_sink: None,
                     stats: None,
                     semantic_layer: None,
@@ -1757,6 +1504,18 @@ impl Config {
     }
 
     pub fn get_pipeline_input_plugin_config() -> Result<DataSourcePluginConfig, String> {
+        if let Ok(raw_config_json) = std::env::var("SKIPPR_RUNTIME_INPUT_CONFIG_JSON") {
+            let plugin_name = std::env::var("SKIPPR_RUNTIME_INPUT_PLUGIN_NAME")
+                .unwrap_or_else(|_| Self::get_pipeline_input_plugin_name());
+            let config = serde_json::from_str(&raw_config_json).map_err(|err| {
+                format!("Invalid SKIPPR_RUNTIME_INPUT_CONFIG_JSON override: {}", err)
+            })?;
+            return Ok(PluginConfigEntry {
+                plugin_name,
+                config,
+            });
+        }
+
         let pipeline_config = Config::get_pipeline_config();
         let config = Config::get();
         let input_name = match pipeline_config.data_source.as_ref() {
@@ -1853,6 +1612,25 @@ impl Config {
             .and_then(|registry| registry.get(&schema_name))
             .cloned()
             .ok_or_else(|| "Schema sink not found".to_string())
+    }
+
+    pub fn deserialize_pipeline_input_plugin_config<T: DeserializeOwned>() -> Result<T, String> {
+        Self::get_pipeline_input_plugin_config()?.deserialize()
+    }
+
+    pub fn deserialize_pipeline_output_plugin_config<T: DeserializeOwned>() -> Result<T, String> {
+        Self::get_pipeline_output_plugin_config()?.deserialize()
+    }
+
+    pub fn deserialize_pipeline_deadletter_plugin_config<T: DeserializeOwned>(
+    ) -> Result<Option<T>, String> {
+        Self::get_pipeline_deadletter_plugin_config()?
+            .map(|config| config.deserialize())
+            .transpose()
+    }
+
+    pub fn deserialize_pipeline_schema_plugin_config<T: DeserializeOwned>() -> Result<T, String> {
+        Self::get_pipeline_schema_plugin_config()?.deserialize()
     }
 
     // Function to access the config anywhere in the code.
@@ -2344,11 +2122,46 @@ impl Config {
 
                         if !is_deadletter_ns {
                             if primary_plugin.is_none() {
-                                let data_sink_cfg = Config::get_pipeline_output_plugin_config().ok();
-                                if let Ok(cfg) = Config::get_pipeline_schema_plugin_config() {
-                                    primary_plugin = Some(crate::plugins::build_schema_sink(cfg, data_sink_cfg.as_ref()).await);
-                                } else if let Some(cfg) = data_sink_cfg {
-                                    primary_plugin = crate::plugins::build_schema_sync_plugin(cfg).await;
+                                match Config::get_pipeline_runtime_schema_plugin() {
+                                    Ok(Some(runtime_entry)) => {
+                                        let runtime_config = Config::get_pipeline_output_plugin_config()
+                                            .ok()
+                                            .and_then(|cfg| crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
+                                        if let Some(runtime_config) = runtime_config {
+                                            match crate::runtime_plugins::host::ResolvedRuntimePlugin::load(
+                                                std::path::PathBuf::from(runtime_entry.manifest),
+                                            ) {
+                                                Ok(resolved) => {
+                                                    match crate::runtime_plugins::host::RuntimeSchemaSinkPlugin::new(
+                                                        resolved,
+                                                        Config::get_pipeline_name(),
+                                                        crate::runtime_plugins::protocol::RuntimeBinding::Primary,
+                                                        runtime_config,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(plugin) => {
+                                                            primary_plugin = Some(Box::new(plugin));
+                                                        }
+                                                        Err(err) => {
+                                                            warn!("Schema sync: failed to initialize runtime schema plugin: {}", err);
+                                                        }
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    warn!("Schema sync: failed to load runtime schema manifest: {}", err);
+                                                }
+                                            }
+                                        } else {
+                                            warn!("Schema sync: runtime schema plugin configured but the primary sink does not expose a runtime schema config");
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        debug!("Schema sync: no runtime schema plugin configured for primary output");
+                                    }
+                                    Err(err) => {
+                                        warn!("Schema sync: failed to resolve runtime schema plugin: {}", err);
+                                    }
                                 }
                             }
                             if let Some(ref plugin) = primary_plugin {
@@ -2378,10 +2191,46 @@ impl Config {
                         if is_deadletter_ns {
                             if deadletter_plugin.is_none() {
                                 let dl_sink_cfg = Config::get_pipeline_deadletter_plugin_config().ok().flatten();
-                                if let Ok(cfg) = Config::get_pipeline_deadletter_schema_config() {
-                                    deadletter_plugin = Some(crate::plugins::build_schema_sink(cfg, dl_sink_cfg.as_ref()).await);
-                                } else if let Some(cfg) = dl_sink_cfg {
-                                    deadletter_plugin = crate::plugins::build_schema_sync_plugin(cfg).await;
+                                match Config::get_pipeline_runtime_schema_plugin() {
+                                    Ok(Some(runtime_entry)) => {
+                                        let runtime_config = dl_sink_cfg
+                                            .clone()
+                                            .and_then(|cfg| crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
+                                        if let Some(runtime_config) = runtime_config {
+                                            match crate::runtime_plugins::host::ResolvedRuntimePlugin::load(
+                                                std::path::PathBuf::from(runtime_entry.manifest),
+                                            ) {
+                                                Ok(resolved) => {
+                                                    match crate::runtime_plugins::host::RuntimeSchemaSinkPlugin::new(
+                                                        resolved,
+                                                        Config::get_pipeline_name(),
+                                                        crate::runtime_plugins::protocol::RuntimeBinding::Deadletter,
+                                                        runtime_config,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(plugin) => {
+                                                            deadletter_plugin = Some(Box::new(plugin));
+                                                        }
+                                                        Err(err) => {
+                                                            warn!("Schema sync: failed to initialize runtime deadletter schema plugin: {}", err);
+                                                        }
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    warn!("Schema sync: failed to load runtime deadletter schema manifest: {}", err);
+                                                }
+                                            }
+                                        } else {
+                                            warn!("Schema sync: runtime schema plugin configured but the deadletter sink does not expose a runtime schema config");
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        debug!("Schema sync: no runtime schema plugin configured for deadletter output");
+                                    }
+                                    Err(err) => {
+                                        warn!("Schema sync: failed to resolve runtime schema plugin: {}", err);
+                                    }
                                 }
                             }
                             if let Some(ref plugin) = deadletter_plugin {
@@ -2664,6 +2513,9 @@ mod tests {
             transform: None,
             data_source: None,
             data_sink: Some("data_sinks.main".to_string()),
+            runtime_input: None,
+            runtime_output: None,
+            runtime_schema_sink: None,
             deadletter_sink: None,
             stats: None,
             semantic_layer: None,
@@ -2681,6 +2533,7 @@ mod tests {
             data_sinks: None,
             deadletter_sinks: Some(HashMap::new()),
             schema_sinks: None,
+            runtime_plugins: None,
         };
 
         assert!(
@@ -2707,6 +2560,9 @@ mod tests {
             transform: None,
             data_source: None,
             data_sink: Some("data_sinks.main".to_string()),
+            runtime_input: None,
+            runtime_output: None,
+            runtime_schema_sink: None,
             deadletter_sink: Some("deadletter_sinks.missing".to_string()),
             stats: None,
             semantic_layer: None,
@@ -2724,6 +2580,7 @@ mod tests {
             data_sinks: None,
             deadletter_sinks: Some(HashMap::new()),
             schema_sinks: None,
+            runtime_plugins: None,
         };
 
         assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline).is_err());

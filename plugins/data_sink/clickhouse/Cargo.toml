@@ -1,0 +1,14 @@
+[package]
+name = "skippr-plugin-data-sink-clickhouse"
+version = "0.0.0-git"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-data-sink-clickhouse"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+tokio.workspace = true
+skippr = { path = "../../.." }
+skippr-plugin-runtime-link = { path = "../../skippr-plugin-runtime-link", default-features = false, features = ["runtime-sink-link"] }

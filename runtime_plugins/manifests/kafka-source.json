@@ -1,0 +1,38 @@
+{
+  "name": "kafka-runtime-source",
+  "kind": "DataSource",
+  "plugin_name": "Kafka",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-kafka"
+    },
+    "darwin-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-kafka"
+    },
+    "linux-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-kafka"
+    },
+    "linux-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-kafka"
+    },
+    "windows-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-kafka.exe"
+    }
+  },
+  "executable": "${binary_dir}/skippr-plugin-data-source-kafka",
+  "args": [],
+  "supports_schema": false,
+  "source_capability": {
+    "name": "Kafka",
+    "guarantee_tier": "LogStreamExactOnce",
+    "checkpoint_style": "LogNative",
+    "bootstrap_style": "StreamOnly",
+    "order_model": "StableKeyScopedOrder",
+    "supports_deletes": true,
+    "event_id_semantics": "LogPosition"
+  }
+}

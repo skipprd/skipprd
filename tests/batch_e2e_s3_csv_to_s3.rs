@@ -71,7 +71,10 @@ pipelines:
         keys
     );
 
-    let first_key = keys.into_iter().find(|key| key.ends_with(".parquet")).unwrap();
+    let first_key = keys
+        .into_iter()
+        .find(|key| key.ends_with(".parquet"))
+        .unwrap();
     let bytes = get_s3_object_bytes(&client, &sink_bucket, &first_key).await;
     assert!(!bytes.is_empty(), "expected parquet bytes in {}", first_key);
 }

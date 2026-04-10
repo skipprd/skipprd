@@ -1,0 +1,19 @@
+[package]
+name = "skippr-plugin-data-source-postgres"
+version = "0.0.0-git"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-data-source-postgres"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+pgwire-replication.workspace = true
+serde.workspace = true
+serde_derive.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+tracing.workspace = true
+skippr = { path = "../../.." }

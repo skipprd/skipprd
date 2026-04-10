@@ -31,9 +31,11 @@ mod tests {
     fn dispatches_json_csv_and_xml() {
         let json_records = decode_records(InputFormat::Json, r#"{"name":"json"}"#).unwrap();
         let csv_records = decode_records(InputFormat::Csv, "name,age\ncsv,42\n").unwrap();
-        let xml_records =
-            decode_records(InputFormat::Xml, "<items><item><name>xml</name></item></items>")
-                .unwrap();
+        let xml_records = decode_records(
+            InputFormat::Xml,
+            "<items><item><name>xml</name></item></items>",
+        )
+        .unwrap();
 
         assert_eq!(json_records.len(), 1);
         assert_eq!(json_records[0]["name"], "json");

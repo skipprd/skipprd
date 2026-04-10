@@ -13,7 +13,7 @@ use std::time::SystemTime;
 
 use skippr::buffer::segment_file::{PartitionKey, SegmentFile};
 use skippr::plugins::cdc::{MutationKind, WalPartKind, WalPartMeta, WalRowMeta};
-use skippr::plugins::data_sink::cdc_apply::{
+use skippr::runtime_test_cdc_apply::cdc_apply::{
     ddl_add_order_token_column, ddl_create_tombstone_table, tombstone_table_name, SqlDialect,
 };
 
@@ -245,7 +245,7 @@ async fn cdc_upsert_rejects_stale_write() {
     client.batch_execute(&ddl).await.unwrap();
 
     // Insert with order_token = 0002
-    let sql1 = skippr::plugins::data_sink::cdc_apply::upsert_if_newer_sql(
+    let sql1 = skippr::runtime_test_cdc_apply::cdc_apply::upsert_if_newer_sql(
         SqlDialect::Postgres,
         "cdc_stale",
         &ts_table,
@@ -272,7 +272,7 @@ async fn cdc_upsert_rejects_stale_write() {
     assert_eq!(name, "Alice");
 
     // Attempt stale update with order_token = 0001 (should be rejected)
-    let sql2 = skippr::plugins::data_sink::cdc_apply::upsert_if_newer_sql(
+    let sql2 = skippr::runtime_test_cdc_apply::cdc_apply::upsert_if_newer_sql(
         SqlDialect::Postgres,
         "cdc_stale",
         &ts_table,
@@ -299,7 +299,7 @@ async fn cdc_upsert_rejects_stale_write() {
     assert_eq!(name, "Alice", "stale write should have been rejected");
 
     // Newer update with order_token = 0003 (should succeed)
-    let sql3 = skippr::plugins::data_sink::cdc_apply::upsert_if_newer_sql(
+    let sql3 = skippr::runtime_test_cdc_apply::cdc_apply::upsert_if_newer_sql(
         SqlDialect::Postgres,
         "cdc_stale",
         &ts_table,
@@ -359,7 +359,7 @@ async fn cdc_delete_then_stale_insert_blocked_by_tombstone() {
     client.batch_execute(&ddl).await.unwrap();
 
     // Insert row with token 0002
-    let sql_insert = skippr::plugins::data_sink::cdc_apply::upsert_if_newer_sql(
+    let sql_insert = skippr::runtime_test_cdc_apply::cdc_apply::upsert_if_newer_sql(
         SqlDialect::Postgres,
         "cdc_del",
         &ts_table,
@@ -379,7 +379,7 @@ async fn cdc_delete_then_stale_insert_blocked_by_tombstone() {
     client.batch_execute(&sql_insert).await.unwrap();
 
     // Delete with token 0003
-    let sql_delete = skippr::plugins::data_sink::cdc_apply::delete_if_newer_sql(
+    let sql_delete = skippr::runtime_test_cdc_apply::cdc_apply::delete_if_newer_sql(
         SqlDialect::Postgres,
         "cdc_del",
         &ts_table,
@@ -409,7 +409,7 @@ async fn cdc_delete_then_stale_insert_blocked_by_tombstone() {
     assert_eq!(ts_count, 1, "tombstone should exist");
 
     // Stale insert with token 0002 should be blocked by tombstone
-    let sql_stale_insert = skippr::plugins::data_sink::cdc_apply::upsert_if_newer_sql(
+    let sql_stale_insert = skippr::runtime_test_cdc_apply::cdc_apply::upsert_if_newer_sql(
         SqlDialect::Postgres,
         "cdc_del",
         &ts_table,
@@ -470,7 +470,7 @@ async fn cdc_replay_is_idempotent() {
     );
     client.batch_execute(&ddl).await.unwrap();
 
-    let sql = skippr::plugins::data_sink::cdc_apply::upsert_if_newer_sql(
+    let sql = skippr::runtime_test_cdc_apply::cdc_apply::upsert_if_newer_sql(
         SqlDialect::Postgres,
         "cdc_replay",
         &ts_table,

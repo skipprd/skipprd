@@ -1,0 +1,38 @@
+{
+  "name": "websocket-runtime-source",
+  "kind": "DataSource",
+  "plugin_name": "Websocket",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-websocket"
+    },
+    "darwin-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-websocket"
+    },
+    "linux-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-websocket"
+    },
+    "linux-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-websocket"
+    },
+    "windows-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-websocket.exe"
+    }
+  },
+  "executable": "${binary_dir}/skippr-plugin-data-source-websocket",
+  "args": [],
+  "supports_schema": false,
+  "source_capability": {
+    "name": "Websocket",
+    "guarantee_tier": "UserSuppliedIdentityOnly",
+    "checkpoint_style": "None",
+    "bootstrap_style": "StreamOnly",
+    "order_model": "UnsupportedForFinalState",
+    "supports_deletes": false,
+    "event_id_semantics": "UserSupplied"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "motherduck-runtime-source",
+  "kind": "DataSource",
+  "plugin_name": "Motherduck",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-motherduck"
+    },
+    "darwin-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-motherduck"
+    },
+    "linux-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-motherduck"
+    },
+    "linux-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-motherduck"
+    },
+    "windows-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-motherduck.exe"
+    }
+  },
+  "executable": "${binary_dir}/skippr-plugin-data-source-motherduck",
+  "args": [],
+  "supports_schema": false,
+  "source_capability": {
+    "name": "Motherduck",
+    "guarantee_tier": "IncrementalOnly",
+    "checkpoint_style": "CursorBased",
+    "bootstrap_style": "FullScan",
+    "order_model": "UnsupportedForFinalState",
+    "supports_deletes": false,
+    "event_id_semantics": "None"
+  }
+}

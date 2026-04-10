@@ -1701,44 +1701,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55248b47b0caf0546f7988906588779981c43bb1bc9d0c44087278f80cdb44ba"
 
 [[package]]
-name = "bb8"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d89aabfae550a5c44b43ab941844ffcd2e993cb6900b342debf59e9ea74acdb8"
-dependencies = [
- "async-trait",
- "futures-util",
- "parking_lot 0.12.5",
- "tokio",
-]
-
-[[package]]
-name = "bb8"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "457d7ed3f888dfd2c7af56d4975cade43c622f74bdcddfed6d4352f57acc6310"
-dependencies = [
- "futures-util",
- "parking_lot 0.12.5",
- "portable-atomic",
- "tokio",
-]
-
-[[package]]
-name = "bb8-tiberius"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73caefcf24fc336bd39345ee068f8cd64506f38c92a198dc2400a9693d129f33"
-dependencies = [
- "async-trait",
- "bb8 0.8.6",
- "thiserror 1.0.69",
- "tiberius",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "bigdecimal"
 version = "0.4.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5550,19 +5512,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-tls"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6183ddfa99b85da61a140bea0efc93fdf56ceaa041b37d553518030827f9905"
-dependencies = [
- "bytes",
- "hyper 0.14.32",
- "native-tls",
- "tokio",
- "tokio-native-tls",
-]
-
-[[package]]
 name = "hyper-util"
 version = "0.1.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7334,12 +7283,6 @@ dependencies = [
  "cfg-if",
  "digest 0.10.7",
 ]
-
-[[package]]
-name = "md5"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e6bcd6433cff03a4bfc3d9834d504467db1f1cf6d0ea765d37d330249ed629d"
 
 [[package]]
 name = "md5"
@@ -9555,15 +9498,15 @@ dependencies = [
  "http 0.2.12",
  "http-body 0.4.6",
  "hyper 0.14.32",
- "hyper-tls",
+ "hyper-rustls 0.24.2",
  "ipnet",
  "js-sys",
  "log",
  "mime",
- "native-tls",
  "once_cell",
  "percent-encoding",
  "pin-project-lite",
+ "rustls 0.21.12",
  "rustls-pemfile 1.0.4",
  "serde",
  "serde_json",
@@ -9571,12 +9514,13 @@ dependencies = [
  "sync_wrapper 0.1.2",
  "system-configuration",
  "tokio",
- "tokio-native-tls",
+ "tokio-rustls 0.24.1",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "webpki-roots 0.25.4",
  "winreg",
 ]
 
@@ -10624,22 +10568,12 @@ dependencies = [
  "avro-rs",
  "aws-config",
  "aws-credential-types",
- "aws-sdk-athena",
  "aws-sdk-dynamodb",
- "aws-sdk-dynamodbstreams",
- "aws-sdk-eventbridge",
  "aws-sdk-glue",
- "aws-sdk-kinesis",
- "aws-sdk-redshiftdata",
  "aws-sdk-s3",
- "aws-sdk-sns",
- "aws-sdk-sqs",
  "aws-smithy-http 0.60.12",
  "aws-types",
- "axum",
  "base64 0.22.1",
- "bb8 0.9.1",
- "bb8-tiberius",
  "bincode",
  "byteorder",
  "bytes",
@@ -10647,14 +10581,12 @@ dependencies = [
  "chrono",
  "chrono-tz 0.8.6",
  "clap",
- "clickhouse",
  "crossbeam-channel",
  "crossterm",
  "csv",
  "ctrlc",
  "dashmap 5.5.3",
  "datafusion 50.3.0",
- "deltalake",
  "envy",
  "flate2",
  "futures",
@@ -10665,27 +10597,22 @@ dependencies = [
  "indexmap 1.9.3",
  "ini",
  "itertools 0.12.1",
- "jsonwebtoken 10.3.0",
- "lancedb",
  "lapin",
  "lazy_static",
  "libc",
  "log",
  "lru 0.10.1",
- "md5 0.7.0",
+ "md5",
  "memory-stats",
  "mongodb",
  "mysql_async",
- "native-tls",
  "nix 0.26.4",
  "num_cpus",
  "object_store",
  "once_cell",
  "parquet 56.2.0",
  "periodic",
- "pgwire-replication",
  "phf 0.11.3",
- "postgres-native-tls",
  "predicates",
  "proptest",
  "quick-xml 0.39.2",
@@ -10695,8 +10622,6 @@ dependencies = [
  "rdkafka",
  "regex",
  "reqwest 0.11.27",
- "rsa",
- "rumqttc",
  "schemars 0.7.6",
  "serde",
  "serde-transcode",
@@ -10717,9 +10642,616 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "threadpool",
- "tiberius",
  "tokio",
  "tokio-postgres",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "url",
+ "urldecode",
+ "uuid 1.18.1",
+ "walkdir",
+ "yaml-rust",
+ "zerocopy 0.6.6",
+ "zip",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-amqp"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-athena"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-azure-blob"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-bigquery"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-clickhouse"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-databricks"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-file"
+version = "0.0.0-git"
+dependencies = [
+ "arrow 56.2.0",
+ "bytes",
+ "clap",
+ "datafusion 50.3.0",
+ "futures",
+ "hex",
+ "md5",
+ "parquet 56.2.0",
+ "serde",
+ "serde_derive",
+ "skippr",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-gcs"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-motherduck"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-postgres"
+version = "0.0.0-git"
+dependencies = [
+ "chrono",
+ "clap",
+ "dashmap 5.5.3",
+ "datafusion 50.3.0",
+ "futures",
+ "native-tls",
+ "once_cell",
+ "postgres-native-tls",
+ "serde",
+ "serde_derive",
+ "skippr",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-redshift"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-s3"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-sftp"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-snowflake"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-stdout"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-synapse"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-amqp"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-clickhouse"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-delta-lake"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-dynamodb"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-eventbridge"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-file"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-http-client"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-http-server"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-kafka"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-kinesis"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-mongodb"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-motherduck"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-mqtt"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-mssql"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-mysql"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-pcap"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-postgres"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "pgwire-replication",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-redshift"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-s3"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-sftp"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-sns"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-socket"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-sqs"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-statsd"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-stdin"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-websocket"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "datafusion 50.3.0",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-runtime-link"
+version = "0.0.0-git"
+dependencies = [
+ "aes",
+ "arc-swap",
+ "array-init",
+ "arrow 56.2.0",
+ "arrow-buffer 56.2.0",
+ "arrow-schema 56.2.0",
+ "async-trait",
+ "avro-rs",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-athena",
+ "aws-sdk-dynamodb",
+ "aws-sdk-dynamodbstreams",
+ "aws-sdk-eventbridge",
+ "aws-sdk-glue",
+ "aws-sdk-kinesis",
+ "aws-sdk-redshiftdata",
+ "aws-sdk-s3",
+ "aws-sdk-sns",
+ "aws-sdk-sqs",
+ "aws-smithy-http 0.60.12",
+ "aws-types",
+ "axum",
+ "base64 0.22.1",
+ "bincode",
+ "byteorder",
+ "bytes",
+ "cc",
+ "chrono",
+ "chrono-tz 0.8.6",
+ "clap",
+ "clickhouse",
+ "crossbeam-channel",
+ "crossterm",
+ "csv",
+ "ctrlc",
+ "dashmap 5.5.3",
+ "datafusion 50.3.0",
+ "deltalake",
+ "envy",
+ "flate2",
+ "futures",
+ "glob",
+ "hex",
+ "icu",
+ "indexmap 1.9.3",
+ "ini",
+ "itertools 0.12.1",
+ "jsonwebtoken 10.3.0",
+ "lancedb",
+ "lapin",
+ "lazy_static",
+ "libc",
+ "log",
+ "lru 0.10.1",
+ "md5",
+ "memory-stats",
+ "mongodb",
+ "mysql_async",
+ "num_cpus",
+ "object_store",
+ "once_cell",
+ "parquet 56.2.0",
+ "periodic",
+ "phf 0.11.3",
+ "quick-xml 0.39.2",
+ "rand 0.8.5",
+ "ratatui",
+ "rayon",
+ "rdkafka",
+ "regex",
+ "reqwest 0.11.27",
+ "rsa",
+ "rumqttc",
+ "schemars 0.7.6",
+ "serde",
+ "serde-transcode",
+ "serde-value",
+ "serde-xml-rs",
+ "serde_cbor",
+ "serde_derive",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "shellexpand",
+ "signal-hook",
+ "skippr",
+ "sled",
+ "sqlparser 0.43.1",
+ "ssh2",
+ "tar",
+ "tempfile",
+ "thiserror 1.0.69",
+ "threadpool",
+ "tiberius",
+ "tokio",
  "tokio-tungstenite",
  "tokio-util",
  "toml",
@@ -10735,6 +11267,77 @@ dependencies = [
  "yaml-rust",
  "zerocopy 0.6.6",
  "zip",
+]
+
+[[package]]
+name = "skippr-plugin-schema-sink-bigquery"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-schema-sink-clickhouse"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-schema-sink-glue"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-schema-sink-motherduck"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-schema-sink-postgres"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-data-sink-postgres",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-schema-sink-redshift"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-schema-sink-snowflake"
+version = "0.0.0-git"
+dependencies = [
+ "clap",
+ "skippr",
+ "skippr-plugin-runtime-link",
+ "tokio",
 ]
 
 [[package]]
@@ -11450,11 +12053,8 @@ dependencies = [
  "pin-project-lite",
  "pretty-hex",
  "thiserror 1.0.69",
- "tokio",
- "tokio-util",
  "tracing",
  "uuid 1.18.1",
- "winauth",
 ]
 
 [[package]]
@@ -12339,6 +12939,12 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
+version = "0.25.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f20c57d8d7db6d3b86154206ae5d8fba62dd39573114de97c2cb0578251f8e1"
+
+[[package]]
+name = "webpki-roots"
 version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
@@ -12404,19 +13010,6 @@ name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
-
-[[package]]
-name = "winauth"
-version = "0.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f820cd208ce9c6b050812dc2d724ba98c6c1e9db5ce9b3f58d925ae5723a5e6"
-dependencies = [
- "bitflags 1.3.2",
- "byteorder",
- "md5 0.6.1",
- "rand 0.7.3",
- "winapi",
-]
 
 [[package]]
 name = "windows"

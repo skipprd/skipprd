@@ -29,8 +29,25 @@ pub const SLED_NAME: &str = "db";
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[repr(C)]
 pub struct OffsetKey {
-    pub(crate) namespace: String,
-    pub(crate) partition: String,
+    pub namespace: String,
+    pub partition: String,
+}
+
+impl OffsetKey {
+    pub fn new(namespace: impl Into<String>, partition: impl Into<String>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            partition: partition.into(),
+        }
+    }
+
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    pub fn partition(&self) -> &str {
+        &self.partition
+    }
 }
 
 #[derive(Debug)]

@@ -18,6 +18,7 @@ env:
   AWS_ECR_REGISTRY: $ECR_HOST/$COMPONENT_NAME
   RELEASES_BUCKET: skippr-web-install-site-prod
   SKIPPR_EL_RELEASE_SUBDIR: skippr-el
+  RUNTIME_PLUGIN_RELEASE_SUBDIR: runtime-plugins
   SKIPPR_EL_LATEST_POINTER: latest-skippr-el.txt
 #  CARGO_HOME: "${{ github.workspace }}/cargo"
 #  GITHUB_REF: ${{ startsWith(github.ref, 'refs/tags/') && replace(github.ref, 'refs/tags/', '') || '1.1.1' }}
@@ -230,6 +231,11 @@ jobs:
           cargo build --release
           New-Item -ItemType Directory -Force -Path skippr-el-windows_x86
           Copy-Item target\release\skippr-el.exe skippr-el-windows_x86\skippr-el.exe
+          Get-ChildItem target\release\skippr-plugin-*.exe -ErrorAction SilentlyContinue | ForEach-Object {
+            if (Test-Path $_.FullName) {
+              Copy-Item $_.FullName "skippr-el-windows_x86\$($_.Name)"
+            }
+          }
           Get-ChildItem skippr-el-windows_x86
         env:
           RUSTFLAGS: "-C debuginfo=0"
@@ -250,6 +256,49 @@ jobs:
           name: skippr-el-windows_x86
           path: skippr-el-windows_x86
           retention-days: 30
+
+  publish_runtime_plugins:
+    name: Publish Runtime Plugins
+    needs:
+      - linux_x86
+      - macos_arm64
+      - windows_x86
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Stage runtime plugin release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/publish_runtime_plugins.py \
+            --bucket "${{ env.RELEASES_BUCKET }}" \
+            --release-tag "${{ github.ref_name }}" \
+            --subdir "${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --output-dir "$GITHUB_WORKSPACE/runtime-plugin-release"
+          find "$GITHUB_WORKSPACE/runtime-plugin-release" -maxdepth 3 -type f | sort
+
+      - name: Configure AWS credentials for runtime plugin upload
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Upload runtime plugin artifacts and manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          BUCKET="${{ env.RELEASES_BUCKET }}"
+          SUBDIR="${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}"
+          aws s3 cp "$GITHUB_WORKSPACE/runtime-plugin-release/" \
+            "s3://${BUCKET}/releases/${TAG}/${SUBDIR}/" \
+            --recursive
 
 #  linux_x86_heaptrack:
 #    needs:
@@ -276,6 +325,7 @@ jobs:
       - cleanup
       - purge_dynamodb
       - linux_x86
+      - publish_runtime_plugins
     name: test build (linux x86)
     runs-on:
       - ubuntu-latest
@@ -293,6 +343,19 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
+
+      - name: Prepare Rust builder for runtime plugin tests
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+
+      - name: Test runtime plugin release downloads
+        uses: ./.github/actions/e2e/runtime_plugins
+        with:
+          architecture_name: linux_x86
+          releases_bucket: ${{ env.RELEASES_BUCKET }}
+          release_tag: ${{ github.ref_name }}
+          runtime_plugin_release_subdir: ${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}
 
   chaos_mode_test:
     needs:

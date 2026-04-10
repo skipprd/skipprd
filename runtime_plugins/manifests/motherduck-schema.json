@@ -1,0 +1,29 @@
+{
+  "name": "motherduck-runtime-schema",
+  "kind": "SchemaSink",
+  "plugin_name": "Motherduck",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-motherduck"
+    },
+    "darwin-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-motherduck"
+    },
+    "linux-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-motherduck"
+    },
+    "linux-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-motherduck"
+    },
+    "windows-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-schema-sink-motherduck.exe"
+    }
+  },
+  "executable": "${binary_dir}/skippr-plugin-schema-sink-motherduck",
+  "args": [],
+  "supports_schema": true
+}

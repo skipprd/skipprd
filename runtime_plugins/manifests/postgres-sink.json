@@ -1,0 +1,37 @@
+{
+  "name": "postgres-runtime-sink",
+  "kind": "DataSink",
+  "plugin_name": "Postgres",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-sink-postgres"
+    },
+    "darwin-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-sink-postgres"
+    },
+    "linux-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-sink-postgres"
+    },
+    "linux-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-sink-postgres"
+    },
+    "windows-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-sink-postgres.exe"
+    }
+  },
+  "executable": "${binary_dir}/skippr-plugin-data-sink-postgres",
+  "args": [],
+  "supports_schema": true,
+  "sink_capability": {
+    "name": "Postgres",
+    "guarantee_tier": "ExactOnceCdcEligible",
+    "can_manage_skippr_columns": true,
+    "can_maintain_tombstone_tables": true,
+    "can_compare_order_tokens": true,
+    "supports_transactions": true
+  }
+}

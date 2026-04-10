@@ -1,0 +1,38 @@
+{
+  "name": "redshift-runtime-source",
+  "kind": "DataSource",
+  "plugin_name": "Redshift",
+  "version": "0.1.0-dev",
+  "protocol_version": 1,
+  "config_schema_version": 1,
+  "install_root": "${binary_dir}/../runtime_plugins/cache",
+  "artifacts": {
+    "darwin-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-redshift"
+    },
+    "darwin-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-redshift"
+    },
+    "linux-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-redshift"
+    },
+    "linux-aarch64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-redshift"
+    },
+    "windows-x86_64": {
+      "executable": "${binary_dir}/skippr-plugin-data-source-redshift.exe"
+    }
+  },
+  "executable": "${binary_dir}/skippr-plugin-data-source-redshift",
+  "args": [],
+  "supports_schema": false,
+  "source_capability": {
+    "name": "Redshift",
+    "guarantee_tier": "IncrementalOnly",
+    "checkpoint_style": "CursorBased",
+    "bootstrap_style": "FullScan",
+    "order_model": "UnsupportedForFinalState",
+    "supports_deletes": false,
+    "event_id_semantics": "None"
+  }
+}

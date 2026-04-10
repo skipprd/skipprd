@@ -24,5 +24,8 @@ pub mod ingest_work;
 pub mod internalfields;
 pub mod metrics;
 pub mod plugins;
+pub mod runtime_plugins;
+#[cfg(test)]
+pub mod runtime_test_cdc_apply;
 pub mod serdes;
 pub mod sqlrt;

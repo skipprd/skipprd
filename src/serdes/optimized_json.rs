@@ -288,7 +288,10 @@ mod tests {
     #[test]
     fn parse_uses_standard_fast_path_for_object_and_array() {
         let parser = OptimizedJsonParser::new(false, false);
-        assert_eq!(parser.parse(r#"{"status":"200"}"#), vec![json!({"status": "200"})]);
+        assert_eq!(
+            parser.parse(r#"{"status":"200"}"#),
+            vec![json!({"status": "200"})]
+        );
         assert_eq!(
             parser.parse(r#"[{"status":"200"},{"status":"201"}]"#),
             vec![json!({"status": "200"}), json!({"status": "201"})]
@@ -299,7 +302,10 @@ mod tests {
     fn parse_uses_line_by_line_fallback_when_processing_is_not_needed() {
         let parser = OptimizedJsonParser::new(false, false);
         let result = parser.parse("{\"status\":\"200\"}\n\n{\"status\":\"201\"}\nnot-json");
-        assert_eq!(result, vec![json!({"status": "200"}), json!({"status": "201"})]);
+        assert_eq!(
+            result,
+            vec![json!({"status": "200"}), json!({"status": "201"})]
+        );
     }
 
     #[test]
@@ -358,10 +364,7 @@ mod tests {
             single_quote_parser.process_line(r#"prefix {'status':"can't fail"}"#),
             r#"{"status":"can't fail"}"#
         );
-        assert_eq!(
-            single_quote_parser.process_line("efbbbfabc\u{0000}"),
-            "abc"
-        );
+        assert_eq!(single_quote_parser.process_line("efbbbfabc\u{0000}"), "abc");
 
         let unicode_parser = OptimizedJsonParser::new(false, true);
         let processed = unicode_parser.process_line("{u'status': u'200'}");

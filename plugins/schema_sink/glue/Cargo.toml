@@ -1,0 +1,15 @@
+[package]
+name = "skippr-plugin-schema-sink-glue"
+version = "0.0.0-git"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-schema-sink-glue"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+clap.workspace = true
+skippr = { path = "../../.." }
+skippr-plugin-runtime-link = { path = "../../skippr-plugin-runtime-link", default-features = false, features = ["runtime-sink-link"] }
+tokio.workspace = true
