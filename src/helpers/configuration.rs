@@ -116,9 +116,9 @@ pub struct DataSinkSnowflakePluginConfig {
     #[serde(default)]
     pub private_key_path: Option<String>,
     #[serde(default)]
-    pub staging_s3_bucket: Option<String>,
+    pub staging_uri: Option<String>,
     #[serde(default)]
-    pub staging_s3_prefix: Option<String>,
+    pub staging_storage_integration: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

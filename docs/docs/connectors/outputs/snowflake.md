@@ -77,8 +77,8 @@ data_sinks:
 | `SNOWFLAKE_SCHEMA` | *(required)* | Target schema |
 | `SNOWFLAKE_ROLE` | | Optional role to assume |
 | `SNOWFLAKE_STAGE` | `@~` | Snowflake stage for file uploads. Defaults to the user stage. Named stages (e.g., `@SKIPPR_STAGE`) are also supported. |
-| `SNOWFLAKE_STAGING_S3_BUCKET` | | Optional S3 bucket for direct S3 staging (bypasses the Snowflake stage). See below. |
-| `SNOWFLAKE_STAGING_S3_PREFIX` | `skippr-staging` | Key prefix within the S3 staging bucket |
+| `SNOWFLAKE_STAGING_URI` | | Optional external object store URI for direct staging (bypasses the Snowflake stage). Supports `s3://`, `azure://`, and `gcs://`. |
+| `SNOWFLAKE_STAGING_STORAGE_INTEGRATION` | | Optional Snowflake storage integration name for external staging. Required for GCS, optional for S3 and Azure. |
 
 ## Data loading
 
@@ -89,11 +89,23 @@ By default, the plugin uploads Parquet files directly to the configured Snowflak
 3. `COPY INTO` loads the staged file into the target table.
 4. The staged file is removed after a successful load.
 
-This works out of the box with any S3-backed stage — including the default user stage (`@~`), named internal stages, and named external stages. No additional S3 bucket or IAM configuration is required.
+This works out of the box with Snowflake stages backed by S3, Azure Blob Storage, or Google Cloud Storage — including the default user stage (`@~`) and named stages. No extra Skippr storage config is required for the normal internal-stage path.
 
-### Optional: direct S3 staging
+### Optional: direct external object staging
 
-As an alternative, you can set `SNOWFLAKE_STAGING_S3_BUCKET` to bypass the Snowflake stage and upload Parquet directly to an S3 bucket. Snowflake reads from S3 using inline credentials in the `COPY INTO` statement. This can be useful when the Snowflake account's internal stage storage is limited or when you want to retain staged files for debugging.
+As an alternative, you can set `SNOWFLAKE_STAGING_URI` to bypass the Snowflake stage and upload Parquet directly to external object storage. This can be useful when you want full control over the staging location or want staged files to remain visible outside Snowflake for debugging.
+
+Examples:
+
+- `s3://my-bucket/skippr-staging`
+- `azure://myaccount.blob.core.windows.net/mycontainer/skippr-staging`
+- `gcs://my-bucket/skippr-staging`
+
+Snowflake then reads from that URI during `COPY INTO`:
+
+- S3 uses the standard AWS credential chain for uploads and inline AWS credentials for Snowflake reads unless `SNOWFLAKE_STAGING_STORAGE_INTEGRATION` is set.
+- Azure uses `AZURE_STORAGE_SAS_TOKEN` for Snowflake reads unless `SNOWFLAKE_STAGING_STORAGE_INTEGRATION` is set. Uploads accept either `AZURE_STORAGE_SAS_TOKEN` or `AZURE_STORAGE_ACCOUNT_KEY`.
+- GCS uploads use `GOOGLE_APPLICATION_CREDENTIALS` or Application Default Credentials, and `SNOWFLAKE_STAGING_STORAGE_INTEGRATION` is required because Snowflake does not support inline GCS credentials in `COPY INTO`.
 
 ## Table naming
 

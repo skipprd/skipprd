@@ -8,8 +8,16 @@ use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
+use object_store::aws::AmazonS3Builder;
+use object_store::azure::MicrosoftAzureBuilder;
+use object_store::gcp::{GcpCredential, GcpCredentialProvider, GoogleCloudStorageBuilder};
+use object_store::path::Path as ObjectPath;
+use object_store::{Attribute, Attributes, ObjectStore, PutOptions, StaticCredentialProvider};
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{error, info, warn};
+use url::Url;
 
 use crate::buffer::BufferChunker;
 use crate::discover::SkipprDataType;
@@ -29,17 +37,37 @@ const ASYNC_POLL_INTERVAL_MS: u64 = 500;
 const INSERT_CHUNK_STRUCTURED: usize = 100;
 const INSERT_CHUNK_FLAT: usize = 1000;
 
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalStageProvider {
+    S3,
+    Azure,
+    Gcs,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalStageLocation {
+    provider: ExternalStageProvider,
+    root: String,
+    prefix: String,
+    azure_account: Option<String>,
+    azure_host: Option<String>,
+}
+
 struct StageUploadInfo {
     location_type: String,
-    /// S3 location in format "bucket/prefix/"
+    /// Provider-native location in format "container-or-bucket/prefix/"
     location: String,
     region: String,
-    aws_key_id: String,
-    aws_secret_key: String,
-    aws_token: String,
+    creds: HashMap<String, String>,
     encryption_material: Option<EncryptionMaterial>,
-    #[allow(dead_code)]
     end_point: Option<String>,
+    storage_account: Option<String>,
+    #[allow(dead_code)]
+    use_virtual_url: bool,
+    #[allow(dead_code)]
+    use_regional_url: bool,
 }
 
 struct EncryptionMaterial {
@@ -63,6 +91,10 @@ const TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(50 * 60);
 const SESSION_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(3 * 3600);
 
 impl DataSinkSnowflakePlugin {
+    fn boxed_error(message: impl Into<String>) -> BoxError {
+        std::io::Error::other(message.into()).into()
+    }
+
     pub async fn new(buffer_name: String) -> Self {
         let config = Self::load_config();
         Self {
@@ -129,17 +161,21 @@ impl DataSinkSnowflakePlugin {
                     Some(p)
                 }
             },
-            staging_s3_bucket: {
-                let v = Config::getenv("SNOWFLAKE_STAGING_S3_BUCKET", "");
+            staging_uri: {
+                let v = Config::getenv("SNOWFLAKE_STAGING_URI", "");
                 if v.is_empty() {
                     None
                 } else {
                     Some(v)
                 }
             },
-            staging_s3_prefix: {
-                let v = Config::getenv("SNOWFLAKE_STAGING_S3_PREFIX", "skippr-staging");
-                Some(v)
+            staging_storage_integration: {
+                let v = Config::getenv("SNOWFLAKE_STAGING_STORAGE_INTEGRATION", "");
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
             },
         }
     }
@@ -476,7 +512,7 @@ impl DataSinkSnowflakePlugin {
         session_token: &str,
         stage_path: &str,
         filename: &str,
-    ) -> Result<StageUploadInfo, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<StageUploadInfo, BoxError> {
         let request_id = uuid::Uuid::new_v4();
         let url = format!(
             "https://{}.snowflakecomputing.com/queries/v1/query-request?requestId={}",
@@ -522,13 +558,17 @@ impl DataSinkSnowflakePlugin {
                 .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
-            return Err(format!("PUT initiation failed: {}", msg).into());
+            return Err(Self::boxed_error(format!("PUT initiation failed: {}", msg)));
         }
 
         let data = body.get("data").ok_or("Missing 'data' in PUT response")?;
+        Self::parse_stage_upload_info(data)
+    }
+
+    fn parse_stage_upload_info(data: &serde_json::Value) -> Result<StageUploadInfo, BoxError> {
         let stage_info = data
             .get("stageInfo")
-            .ok_or("Missing 'stageInfo' in PUT response")?;
+            .ok_or_else(|| Self::boxed_error("Missing 'stageInfo' in PUT response"))?;
 
         let location_type = stage_info["locationType"]
             .as_str()
@@ -540,37 +580,54 @@ impl DataSinkSnowflakePlugin {
             .and_then(|r| r.as_str())
             .unwrap_or("us-east-1")
             .to_string();
-
-        let creds = stage_info
-            .get("creds")
-            .ok_or("Missing 'creds' in stage info")?;
-        let aws_key_id = creds["AWS_KEY_ID"].as_str().unwrap_or("").to_string();
-        let aws_secret_key = creds["AWS_SECRET_KEY"].as_str().unwrap_or("").to_string();
-        let aws_token = creds
-            .get("AWS_TOKEN")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string();
-
         let end_point = stage_info
             .get("endPoint")
             .and_then(|e| e.as_str())
             .map(String::from);
-
-        // encryptionMaterial can be an object, an array, or null
-        let enc_mat_raw = data.get("encryptionMaterial");
-        let encryption_material = Self::parse_encryption_material(enc_mat_raw);
+        let storage_account = stage_info
+            .get("storageAccount")
+            .and_then(|e| e.as_str())
+            .map(String::from);
+        let use_virtual_url = stage_info
+            .get("useVirtualUrl")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let use_regional_url = stage_info
+            .get("useRegionalUrl")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let creds = stage_info
+            .get("creds")
+            .map(Self::extract_stage_creds)
+            .unwrap_or_default();
 
         Ok(StageUploadInfo {
             location_type,
             location,
             region,
-            aws_key_id,
-            aws_secret_key,
-            aws_token,
-            encryption_material,
+            creds,
+            encryption_material: Self::parse_encryption_material(data.get("encryptionMaterial")),
             end_point,
+            storage_account,
+            use_virtual_url,
+            use_regional_url,
         })
+    }
+
+    fn extract_stage_creds(raw: &serde_json::Value) -> HashMap<String, String> {
+        raw.as_object()
+            .map(|obj| {
+                obj.iter()
+                    .map(|(key, value)| {
+                        let parsed = value
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| value.to_string());
+                        (key.clone(), parsed)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn parse_encryption_material(raw: Option<&serde_json::Value>) -> Option<EncryptionMaterial> {
@@ -604,107 +661,586 @@ impl DataSinkSnowflakePlugin {
         })
     }
 
-    /// Upload a file to the stage's backing S3 storage using the temporary
+    fn split_stage_location(location: &str) -> Result<(String, String), BoxError> {
+        let slash_pos = location.find('/').unwrap_or(location.len());
+        let root = location[..slash_pos].to_string();
+        let prefix = location
+            .get(slash_pos + 1..)
+            .unwrap_or("")
+            .trim_end_matches('/')
+            .to_string();
+
+        if root.is_empty() {
+            return Err(Self::boxed_error(format!(
+                "Snowflake stage location is missing a bucket or container: '{}'",
+                location
+            )));
+        }
+
+        Ok((root, prefix))
+    }
+
+    fn stage_object_key(prefix: &str, filename: &str) -> String {
+        if prefix.is_empty() {
+            filename.to_string()
+        } else {
+            format!("{}/{}", prefix, filename)
+        }
+    }
+
+    fn metadata_attribute(key: &str) -> Attribute {
+        Attribute::Metadata(Cow::Owned(key.to_string()))
+    }
+
+    fn normalize_https_endpoint(endpoint: &str) -> String {
+        let endpoint = endpoint.trim().trim_end_matches('/');
+        if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+            endpoint.to_string()
+        } else {
+            format!("https://{}", endpoint.trim_start_matches('/'))
+        }
+    }
+
+    fn normalize_azure_endpoint(account: &str, endpoint: &str) -> String {
+        let endpoint = endpoint.trim();
+        if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+            endpoint.trim_end_matches('/').to_string()
+        } else {
+            let endpoint = endpoint.trim_start_matches('.').trim_end_matches('/');
+            if endpoint.starts_with(account) {
+                format!("https://{}", endpoint)
+            } else {
+                format!("https://{}.{}", account, endpoint)
+            }
+        }
+    }
+
+    fn parse_sas_query_pairs(sas_token: &str) -> Vec<(String, String)> {
+        sas_token
+            .trim_start_matches('?')
+            .split('&')
+            .filter_map(|pair| {
+                let mut parts = pair.splitn(2, '=');
+                match (parts.next(), parts.next()) {
+                    (Some(key), Some(value)) if !key.is_empty() => {
+                        Some((key.to_string(), value.to_string()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    fn gcs_base_url(info: &StageUploadInfo) -> Option<String> {
+        if let Some(ref endpoint) = info.end_point {
+            Some(Self::normalize_https_endpoint(endpoint))
+        } else if info.use_regional_url {
+            Some(format!(
+                "https://storage.{}.rep.googleapis.com",
+                info.region.trim()
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn sql_string_literal(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn optional_env(name: &str) -> Option<String> {
+        let value = Config::getenv(name, "");
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    }
+
+    fn external_stage_provider_name(provider: ExternalStageProvider) -> &'static str {
+        match provider {
+            ExternalStageProvider::S3 => "S3",
+            ExternalStageProvider::Azure => "Azure Blob Storage",
+            ExternalStageProvider::Gcs => "Google Cloud Storage",
+        }
+    }
+
+    fn parse_external_stage_uri(uri: &str) -> Result<ExternalStageLocation, BoxError> {
+        let trimmed = uri.trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            return Err(Self::boxed_error(
+                "SNOWFLAKE_STAGING_URI must not be empty when provided.",
+            ));
+        }
+
+        let normalized = if let Some(rest) = trimmed.strip_prefix("gs://") {
+            format!("gcs://{}", rest)
+        } else {
+            trimmed.to_string()
+        };
+        let url = Url::parse(&normalized).map_err(|e| {
+            Self::boxed_error(format!(
+                "Invalid SNOWFLAKE_STAGING_URI '{}': {}",
+                uri, e
+            ))
+        })?;
+
+        match url.scheme() {
+            "s3" => {
+                let bucket = url
+                    .host_str()
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| {
+                        Self::boxed_error(format!(
+                            "S3 staging URI '{}' is missing a bucket name.",
+                            uri
+                        ))
+                    })?;
+                Ok(ExternalStageLocation {
+                    provider: ExternalStageProvider::S3,
+                    root: bucket.to_string(),
+                    prefix: url.path().trim_matches('/').to_string(),
+                    azure_account: None,
+                    azure_host: None,
+                })
+            }
+            "gcs" => {
+                let bucket = url
+                    .host_str()
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| {
+                        Self::boxed_error(format!(
+                            "GCS staging URI '{}' is missing a bucket name.",
+                            uri
+                        ))
+                    })?;
+                Ok(ExternalStageLocation {
+                    provider: ExternalStageProvider::Gcs,
+                    root: bucket.to_string(),
+                    prefix: url.path().trim_matches('/').to_string(),
+                    azure_account: None,
+                    azure_host: None,
+                })
+            }
+            "azure" => {
+                let raw_host = url
+                    .host_str()
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| {
+                        Self::boxed_error(format!(
+                            "Azure staging URI '{}' is missing an account host.",
+                            uri
+                        ))
+                    })?;
+                let azure_host = if raw_host.contains('.') {
+                    raw_host.to_string()
+                } else {
+                    format!("{}.blob.core.windows.net", raw_host)
+                };
+                let azure_account = raw_host
+                    .split('.')
+                    .next()
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| {
+                        Self::boxed_error(format!(
+                            "Azure staging URI '{}' is missing a storage account name.",
+                            uri
+                        ))
+                    })?
+                    .to_string();
+                let mut segments = url.path_segments().ok_or_else(|| {
+                    Self::boxed_error(format!(
+                        "Azure staging URI '{}' is missing a container path.",
+                        uri
+                    ))
+                })?;
+                let container = segments.next().filter(|v| !v.is_empty()).ok_or_else(|| {
+                    Self::boxed_error(format!(
+                        "Azure staging URI '{}' is missing a container name.",
+                        uri
+                    ))
+                })?;
+                let prefix = segments.collect::<Vec<_>>().join("/");
+                Ok(ExternalStageLocation {
+                    provider: ExternalStageProvider::Azure,
+                    root: container.to_string(),
+                    prefix,
+                    azure_account: Some(azure_account),
+                    azure_host: Some(azure_host),
+                })
+            }
+            other => Err(Self::boxed_error(format!(
+                "Unsupported SNOWFLAKE_STAGING_URI scheme '{}'. Use s3://, azure://, or gcs://.",
+                other
+            ))),
+        }
+    }
+
+    fn external_stage_object_key(
+        location: &ExternalStageLocation,
+        table_name: &str,
+        file_id: &uuid::Uuid,
+    ) -> String {
+        let filename = format!("{}.parquet", file_id);
+        let table_prefix = if location.prefix.is_empty() {
+            table_name.to_string()
+        } else {
+            format!("{}/{}", location.prefix, table_name)
+        };
+        format!("{}/{}", table_prefix.trim_matches('/'), filename)
+    }
+
+    fn external_stage_object_uri(location: &ExternalStageLocation, object_key: &str) -> String {
+        match location.provider {
+            ExternalStageProvider::S3 => format!("s3://{}/{}", location.root, object_key),
+            ExternalStageProvider::Azure => format!(
+                "azure://{}/{}/{}",
+                location.azure_host.as_deref().unwrap_or_default(),
+                location.root,
+                object_key
+            ),
+            ExternalStageProvider::Gcs => format!("gcs://{}/{}", location.root, object_key),
+        }
+    }
+
+    async fn put_external_object(
+        store: &dyn ObjectStore,
+        object_key: &str,
+        payload: bytes::Bytes,
+    ) -> Result<(), BoxError> {
+        let path = ObjectPath::from(object_key.to_string());
+        store.put(&path, payload.into())
+            .await
+            .map_err(|e| Self::boxed_error(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete_external_object(store: &dyn ObjectStore, object_key: &str) {
+        let path = ObjectPath::from(object_key.to_string());
+        let _ = store.delete(&path).await;
+    }
+
+    fn build_external_azure_store(
+        location: &ExternalStageLocation,
+    ) -> Result<Box<dyn ObjectStore>, BoxError> {
+        let account = location.azure_account.as_deref().ok_or_else(|| {
+            Self::boxed_error("Azure staging URI is missing the storage account name.")
+        })?;
+        let host = location
+            .azure_host
+            .as_deref()
+            .ok_or_else(|| Self::boxed_error("Azure staging URI is missing the account host."))?;
+
+        let mut builder = MicrosoftAzureBuilder::new()
+            .with_account(account)
+            .with_container_name(location.root.clone())
+            .with_endpoint(format!("https://{}", host));
+
+        if let Some(sas) = Self::optional_env("AZURE_STORAGE_SAS_TOKEN") {
+            builder = builder.with_sas_authorization(Self::parse_sas_query_pairs(&sas));
+        } else if let Some(key) = Self::optional_env("AZURE_STORAGE_ACCOUNT_KEY") {
+            builder = builder.with_access_key(&key);
+        } else {
+            return Err(Self::boxed_error(
+                "Azure external staging requires AZURE_STORAGE_SAS_TOKEN or AZURE_STORAGE_ACCOUNT_KEY for uploads.",
+            ));
+        }
+
+        let store = builder.build().map_err(|e| {
+            Self::boxed_error(format!("Failed to build Azure external staging store: {}", e))
+        })?;
+        Ok(Box::new(store))
+    }
+
+    fn build_external_gcs_store(
+        location: &ExternalStageLocation,
+    ) -> Result<Box<dyn ObjectStore>, BoxError> {
+        let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(location.root.clone());
+        if let Some(path) = Self::optional_env("GOOGLE_APPLICATION_CREDENTIALS") {
+            builder = builder.with_service_account_path(path);
+        }
+        let store = builder.build().map_err(|e| {
+            Self::boxed_error(format!("Failed to build GCS external staging store: {}", e))
+        })?;
+        Ok(Box::new(store))
+    }
+
+    async fn external_stage_copy_auth_clause(
+        &self,
+        location: &ExternalStageLocation,
+        aws_cfg: Option<&aws_config::SdkConfig>,
+    ) -> Result<String, std::io::Error> {
+        if let Some(integration) = self.config.staging_storage_integration.as_deref() {
+            return Ok(format!("STORAGE_INTEGRATION = {}", integration));
+        }
+
+        match location.provider {
+            ExternalStageProvider::S3 => {
+                let aws_cfg = aws_cfg.ok_or_else(|| {
+                    std::io::Error::other(
+                        "Missing AWS configuration while preparing Snowflake staging COPY INTO",
+                    )
+                })?;
+                let credentials = aws_cfg
+                    .credentials_provider()
+                    .ok_or_else(|| {
+                        std::io::Error::other("No AWS credentials provider for COPY INTO")
+                    })?
+                    .provide_credentials()
+                    .await
+                    .map_err(|e| {
+                        std::io::Error::other(format!(
+                            "Failed to resolve AWS credentials: {}",
+                            e
+                        ))
+                    })?;
+
+                let mut clause = format!(
+                    "CREDENTIALS = (AWS_KEY_ID={} AWS_SECRET_KEY={}",
+                    Self::sql_string_literal(credentials.access_key_id()),
+                    Self::sql_string_literal(credentials.secret_access_key())
+                );
+                if let Some(token) = credentials.session_token() {
+                    clause.push_str(&format!(" AWS_TOKEN={}", Self::sql_string_literal(token)));
+                }
+                clause.push(')');
+                Ok(clause)
+            }
+            ExternalStageProvider::Azure => {
+                let sas = Self::optional_env("AZURE_STORAGE_SAS_TOKEN").ok_or_else(|| {
+                    std::io::Error::other(
+                        "Azure external staging without SNOWFLAKE_STAGING_STORAGE_INTEGRATION requires AZURE_STORAGE_SAS_TOKEN.",
+                    )
+                })?;
+                Ok(format!(
+                    "CREDENTIALS = (AZURE_SAS_TOKEN={})",
+                    Self::sql_string_literal(&sas)
+                ))
+            }
+            ExternalStageProvider::Gcs => Err(std::io::Error::other(
+                "GCS external staging requires SNOWFLAKE_STAGING_STORAGE_INTEGRATION.",
+            )),
+        }
+    }
+
+    fn required_stage_cred(info: &StageUploadInfo, key: &str) -> Result<String, BoxError> {
+        info.creds.get(key).cloned().ok_or_else(|| {
+            Self::boxed_error(format!(
+                "Missing '{}' in Snowflake stage credentials for '{}' storage.",
+                key, info.location_type
+            ))
+        })
+    }
+
+    fn build_blob_encryptiondata(enc_key_b64: &str, iv_b64: &str) -> String {
+        serde_json::json!({
+            "EncryptionMode": "FullBlob",
+            "WrappedContentKey": {
+                "KeyId": "symmKey1",
+                "EncryptedKey": enc_key_b64,
+                "Algorithm": "AES_CBC_256"
+            },
+            "EncryptionAgent": {
+                "Protocol": "1.0",
+                "EncryptionAlgorithm": "AES_CBC_256"
+            },
+            "ContentEncryptionIV": iv_b64,
+            "KeyWrappingMetadata": {
+                "EncryptionLibrary": "Java 5.3.0"
+            }
+        })
+        .to_string()
+    }
+
+    fn build_stage_upload_payload(
+        info: &StageUploadInfo,
+        data: &[u8],
+    ) -> Result<(Vec<u8>, Attributes), BoxError> {
+        let mut attributes = Attributes::new();
+        attributes.insert(Attribute::ContentType, "application/octet-stream".into());
+
+        let digest_key = if info.location_type == "AZURE" {
+            "sfcdigest"
+        } else {
+            "sfc-digest"
+        };
+        attributes.insert(Self::metadata_attribute(digest_key), Self::sha256_digest(data).into());
+
+        let Some(ref enc) = info.encryption_material else {
+            return Ok((data.to_vec(), attributes));
+        };
+
+        let (encrypted, enc_key_b64, iv_b64) =
+            Self::encrypt_for_stage(data, &enc.query_stage_master_key)?;
+        let key_size_bits = {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            STANDARD
+                .decode(&enc.query_stage_master_key)
+                .map(|b| b.len() * 8)
+                .unwrap_or(256)
+        };
+        let matdesc = serde_json::json!({
+            "queryId": enc.query_id,
+            "smkId": enc.smk_id.to_string(),
+            "keySize": key_size_bits.to_string()
+        })
+        .to_string();
+
+        match info.location_type.as_str() {
+            "S3" => {
+                attributes.insert(Self::metadata_attribute("x-amz-key"), enc_key_b64.into());
+                attributes.insert(Self::metadata_attribute("x-amz-iv"), iv_b64.into());
+                attributes.insert(Self::metadata_attribute("x-amz-matdesc"), matdesc.into());
+            }
+            "AZURE" | "GCS" => {
+                attributes.insert(Self::metadata_attribute("matdesc"), matdesc.into());
+                attributes.insert(
+                    Self::metadata_attribute("encryptiondata"),
+                    Self::build_blob_encryptiondata(&enc_key_b64, &iv_b64).into(),
+                );
+            }
+            other => {
+                return Err(Self::boxed_error(format!(
+                    "Unsupported stage storage: '{}'.",
+                    other
+                )));
+            }
+        }
+
+        Ok((encrypted, attributes))
+    }
+
+    async fn put_stage_object(
+        store: &dyn ObjectStore,
+        object_key: &str,
+        payload: Vec<u8>,
+        attributes: Attributes,
+    ) -> Result<(), BoxError> {
+        let path = ObjectPath::from(object_key.to_string());
+        store.put_opts(&path, payload.into(), PutOptions::from(attributes))
+            .await
+            .map_err(|e| Self::boxed_error(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn upload_to_stage_s3(
+        &self,
+        info: &StageUploadInfo,
+        filename: &str,
+        data: &[u8],
+    ) -> Result<(), BoxError> {
+        let (bucket, prefix) = Self::split_stage_location(&info.location)?;
+        let object_key = Self::stage_object_key(&prefix, filename);
+        let access_key_id = Self::required_stage_cred(info, "AWS_KEY_ID")?;
+        let secret_access_key = Self::required_stage_cred(info, "AWS_SECRET_KEY")?;
+        let (payload, attributes) = Self::build_stage_upload_payload(info, data)?;
+
+        let mut builder = AmazonS3Builder::new()
+            .with_bucket_name(bucket)
+            .with_region(info.region.clone())
+            .with_access_key_id(access_key_id)
+            .with_secret_access_key(secret_access_key);
+
+        if let Some(token) = info.creds.get("AWS_TOKEN") {
+            if !token.is_empty() {
+                builder = builder.with_token(token.clone());
+            }
+        }
+        if let Some(ref endpoint) = info.end_point {
+            builder = builder.with_endpoint(Self::normalize_https_endpoint(endpoint));
+        }
+
+        let store = builder
+            .build()
+            .map_err(|e| Self::boxed_error(format!("Failed to build S3 stage uploader: {}", e)))?;
+
+        Self::put_stage_object(&store, &object_key, payload, attributes).await
+    }
+
+    async fn upload_to_stage_azure(
+        &self,
+        info: &StageUploadInfo,
+        filename: &str,
+        data: &[u8],
+    ) -> Result<(), BoxError> {
+        let (container, prefix) = Self::split_stage_location(&info.location)?;
+        let object_key = Self::stage_object_key(&prefix, filename);
+        let storage_account = info.storage_account.clone().ok_or_else(|| {
+            Self::boxed_error("Missing 'storageAccount' in Snowflake Azure stage info.")
+        })?;
+        let sas_token = Self::required_stage_cred(info, "AZURE_SAS_TOKEN")?;
+        let (payload, attributes) = Self::build_stage_upload_payload(info, data)?;
+
+        let mut builder = MicrosoftAzureBuilder::new()
+            .with_account(&storage_account)
+            .with_container_name(container)
+            .with_sas_authorization(Self::parse_sas_query_pairs(&sas_token));
+
+        if let Some(ref endpoint) = info.end_point {
+            builder = builder.with_endpoint(Self::normalize_azure_endpoint(&storage_account, endpoint));
+        }
+
+        let store = builder.build().map_err(|e| {
+            Self::boxed_error(format!("Failed to build Azure Blob stage uploader: {}", e))
+        })?;
+
+        Self::put_stage_object(&store, &object_key, payload, attributes).await
+    }
+
+    async fn upload_to_stage_gcs(
+        &self,
+        info: &StageUploadInfo,
+        filename: &str,
+        data: &[u8],
+    ) -> Result<(), BoxError> {
+        let (bucket, prefix) = Self::split_stage_location(&info.location)?;
+        let object_key = Self::stage_object_key(&prefix, filename);
+        let access_token = Self::required_stage_cred(info, "GCS_ACCESS_TOKEN")?;
+        let (payload, attributes) = Self::build_stage_upload_payload(info, data)?;
+        let credentials: GcpCredentialProvider = Arc::new(StaticCredentialProvider::new(
+            GcpCredential {
+                bearer: access_token,
+            },
+        ));
+
+        let mut builder = GoogleCloudStorageBuilder::new()
+            .with_bucket_name(bucket)
+            .with_credentials(credentials);
+
+        if let Some(base_url) = Self::gcs_base_url(info) {
+            let service_account_key = serde_json::json!({
+                "gcs_base_url": base_url,
+                "disable_oauth": true,
+                "client_email": "",
+                "private_key": ""
+            });
+            builder = builder.with_service_account_key(service_account_key.to_string());
+        }
+
+        let store = builder
+            .build()
+            .map_err(|e| Self::boxed_error(format!("Failed to build GCS stage uploader: {}", e)))?;
+
+        Self::put_stage_object(&store, &object_key, payload, attributes).await
+    }
+
+    /// Upload a file to the stage's backing object storage using the temporary
     /// credentials returned by the PUT initiation. Encrypts if required.
     async fn upload_to_stage(
         &self,
         info: &StageUploadInfo,
         filename: &str,
         data: &[u8],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if info.location_type != "S3" {
-            return Err(format!(
-                "Unsupported stage storage: '{}'. Only S3-backed stages are currently supported.",
-                info.location_type
-            )
-            .into());
+    ) -> Result<(), BoxError> {
+        match info.location_type.as_str() {
+            "S3" => self.upload_to_stage_s3(info, filename, data).await,
+            "AZURE" => self.upload_to_stage_azure(info, filename, data).await,
+            "GCS" => self.upload_to_stage_gcs(info, filename, data).await,
+            other => Err(Self::boxed_error(format!(
+                "Unsupported stage storage: '{}'.",
+                other
+            ))),
         }
-
-        // location format: "bucket/prefix/" — split into bucket + key prefix
-        let slash_pos = info.location.find('/').unwrap_or(info.location.len());
-        let bucket = &info.location[..slash_pos];
-        let prefix = info
-            .location
-            .get(slash_pos + 1..)
-            .unwrap_or("")
-            .trim_end_matches('/');
-
-        let s3_key = if prefix.is_empty() {
-            filename.to_string()
-        } else {
-            format!("{}/{}", prefix, filename)
-        };
-
-        // Encrypt if stage requires client-side encryption.
-        // S3 metadata uses x-amz-key / x-amz-iv / x-amz-matdesc (not Azure's
-        // encryptiondata blob).
-        let (upload_bytes, extra_metadata) = if let Some(ref enc) = info.encryption_material {
-            let (encrypted, enc_key_b64, iv_b64) =
-                Self::encrypt_for_stage(data, &enc.query_stage_master_key)?;
-
-            let key_size_bits = {
-                use base64::{engine::general_purpose::STANDARD, Engine};
-                STANDARD
-                    .decode(&enc.query_stage_master_key)
-                    .map(|b| b.len() * 8)
-                    .unwrap_or(256)
-            };
-            let matdesc = serde_json::json!({
-                "queryId": enc.query_id,
-                "smkId": enc.smk_id.to_string(),
-                "keySize": key_size_bits.to_string()
-            })
-            .to_string();
-
-            let mut meta = std::collections::HashMap::<String, String>::new();
-            meta.insert("sfc-digest".to_string(), Self::sha256_digest(data));
-            meta.insert("x-amz-key".to_string(), enc_key_b64);
-            meta.insert("x-amz-iv".to_string(), iv_b64);
-            meta.insert("x-amz-matdesc".to_string(), matdesc);
-            (encrypted, Some(meta))
-        } else {
-            let mut meta = std::collections::HashMap::<String, String>::new();
-            meta.insert("sfc-digest".to_string(), Self::sha256_digest(data));
-            (data.to_vec(), Some(meta))
-        };
-
-        // Build a one-shot S3 client with the stage's temporary credentials
-        let creds = aws_credential_types::Credentials::new(
-            &info.aws_key_id,
-            &info.aws_secret_key,
-            if info.aws_token.is_empty() {
-                None
-            } else {
-                Some(info.aws_token.clone())
-            },
-            None,
-            "snowflake-stage",
-        );
-        let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .credentials_provider(creds)
-            .region(aws_types::region::Region::new(info.region.clone()))
-            .load()
-            .await;
-        let s3_client = S3Client::new(&aws_cfg);
-
-        let mut req = s3_client
-            .put_object()
-            .bucket(bucket)
-            .key(&s3_key)
-            .content_type("application/octet-stream")
-            .body(ByteStream::from(upload_bytes));
-
-        if let Some(meta) = extra_metadata {
-            for (k, v) in meta {
-                req = req.metadata(k, v);
-            }
-        }
-
-        req.send()
-            .await
-            .map_err(|e| format!("S3 upload to Snowflake stage failed: {}", e))?;
-
-        Ok(())
     }
 
     // ── Client-side encryption (AES-CBC + AES-ECB key wrapping) ─────────
@@ -1191,9 +1727,9 @@ impl DataSinkSnowflakePlugin {
         stream: SendableRecordBatchStream,
         filename: String,
     ) -> Result<(), std::io::Error> {
-        // Prefer explicit S3 staging when configured
-        if self.config.staging_s3_bucket.is_some() {
-            return self.inner_sync_s3_staging(stream, filename).await;
+        // Prefer explicit external object storage staging when configured.
+        if self.config.staging_uri.is_some() {
+            return self.inner_sync_external_staging(stream, filename).await;
         }
         // Default: PUT to Snowflake stage → COPY INTO
         self.inner_sync_stage(stream, filename).await
@@ -1296,9 +1832,9 @@ impl DataSinkSnowflakePlugin {
         }
     }
 
-    /// Optional fallback: upload Parquet to a user-supplied S3 bucket and
-    /// COPY INTO with inline AWS credentials.
-    async fn inner_sync_s3_staging(
+    /// Optional override: upload Parquet to a user-supplied external object
+    /// store location and COPY INTO from that URI.
+    async fn inner_sync_external_staging(
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
@@ -1326,83 +1862,115 @@ impl DataSinkSnowflakePlugin {
         };
         let row_count = parquet.meta_data.num_rows;
         let byte_count = parquet.size_bytes;
-
-        let staging_bucket = self.config.staging_s3_bucket.as_deref().unwrap();
-        let staging_prefix = self
-            .config
-            .staging_s3_prefix
-            .as_deref()
-            .unwrap_or("skippr-staging");
+        let staging_uri = self.config.staging_uri.as_deref().unwrap();
+        let location = Self::parse_external_stage_uri(staging_uri)
+            .map_err(|e| std::io::Error::other(format!("External staging URI: {}", e)))?;
         let file_id = uuid::Uuid::new_v4();
-        let staging_key = format!(
-            "{}/{}/{}.parquet",
-            staging_prefix.trim_matches('/'),
-            table_name,
-            file_id
-        );
+        let object_key = Self::external_stage_object_key(&location, &table_name, &file_id);
+        let object_uri = Self::external_stage_object_uri(&location, &object_key);
+        let parquet_bytes = parquet.bytes;
 
-        let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .load()
-            .await;
-        let s3_client = S3Client::new(&aws_cfg);
+        let aws_cfg = if location.provider == ExternalStageProvider::S3 {
+            Some(
+                aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .load()
+                    .await,
+            )
+        } else {
+            None
+        };
+        let copy_auth_clause = self
+            .external_stage_copy_auth_clause(&location, aws_cfg.as_ref())
+            .await?;
 
-        s3_client
-            .put_object()
-            .bucket(staging_bucket)
-            .key(&staging_key)
-            .body(ByteStream::from(parquet.bytes))
-            .send()
-            .await
-            .map_err(|e| {
-                counters::dec_uploads_in_flight();
-                std::io::Error::other(format!("S3 staging upload failed: {}", e))
-            })?;
+        let mut uploaded_store: Option<Box<dyn ObjectStore>> = None;
+        match location.provider {
+            ExternalStageProvider::S3 => {
+                let aws_cfg = aws_cfg.as_ref().ok_or_else(|| {
+                    std::io::Error::other("Missing AWS configuration for Snowflake S3 staging")
+                })?;
+                let s3_client = S3Client::new(aws_cfg);
+                s3_client
+                    .put_object()
+                    .bucket(&location.root)
+                    .key(&object_key)
+                    .body(ByteStream::from(parquet_bytes))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        counters::dec_uploads_in_flight();
+                        std::io::Error::other(format!("S3 staging upload failed: {}", e))
+                    })?;
+            }
+            ExternalStageProvider::Azure => {
+                let store = Self::build_external_azure_store(&location).map_err(|e| {
+                    counters::dec_uploads_in_flight();
+                    std::io::Error::other(format!("Azure staging store: {}", e))
+                })?;
+                Self::put_external_object(store.as_ref(), &object_key, parquet_bytes)
+                    .await
+                    .map_err(|e| {
+                        counters::dec_uploads_in_flight();
+                        std::io::Error::other(format!("Azure staging upload failed: {}", e))
+                    })?;
+                uploaded_store = Some(store);
+            }
+            ExternalStageProvider::Gcs => {
+                let store = Self::build_external_gcs_store(&location).map_err(|e| {
+                    counters::dec_uploads_in_flight();
+                    std::io::Error::other(format!("GCS staging store: {}", e))
+                })?;
+                Self::put_external_object(store.as_ref(), &object_key, parquet_bytes)
+                    .await
+                    .map_err(|e| {
+                        counters::dec_uploads_in_flight();
+                        std::io::Error::other(format!("GCS staging upload failed: {}", e))
+                    })?;
+                uploaded_store = Some(store);
+            }
+        }
 
         info!(
-            "Uploaded staging Parquet s3://{}/{} ({} rows, {})",
-            staging_bucket,
-            staging_key,
+            "Uploaded staging Parquet {} ({} rows, {})",
+            object_uri,
             row_count,
             crate::helpers::Helpers::human_readable_size(byte_count)
         );
 
-        let credentials = aws_cfg
-            .credentials_provider()
-            .ok_or_else(|| std::io::Error::other("No AWS credentials provider for COPY INTO"))?
-            .provide_credentials()
-            .await
-            .map_err(|e| {
-                std::io::Error::other(format!("Failed to resolve AWS credentials: {}", e))
-            })?;
-
-        let access_key = credentials.access_key_id();
-        let secret_key = credentials.secret_access_key();
-        let token_clause = credentials
-            .session_token()
-            .map(|t| format!(" AWS_TOKEN='{}'", t))
-            .unwrap_or_default();
-
         let copy_sql = format!(
-            "COPY INTO {} FROM 's3://{}/{}' \
-             CREDENTIALS = (AWS_KEY_ID='{}' AWS_SECRET_KEY='{}'{}) \
-             FILE_FORMAT = (TYPE = PARQUET) \
-             MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE",
-            fq_table, staging_bucket, staging_key, access_key, secret_key, token_clause
+            "COPY INTO {} FROM {} {} FILE_FORMAT = (TYPE = PARQUET) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE",
+            fq_table,
+            Self::sql_string_literal(&object_uri),
+            copy_auth_clause
         );
 
         info!(
-            "Snowflake COPY INTO {} from s3 staging ({} rows)",
-            fq_table, row_count
+            "Snowflake COPY INTO {} from {} staging ({} rows)",
+            fq_table,
+            Self::external_stage_provider_name(location.provider),
+            row_count
         );
 
         let copy_result = self.execute_sql(&copy_sql).await;
 
-        let _ = s3_client
-            .delete_object()
-            .bucket(staging_bucket)
-            .key(&staging_key)
-            .send()
-            .await;
+        match location.provider {
+            ExternalStageProvider::S3 => {
+                if let Some(ref aws_cfg) = aws_cfg {
+                    let s3_client = S3Client::new(aws_cfg);
+                    let _ = s3_client
+                        .delete_object()
+                        .bucket(&location.root)
+                        .key(&object_key)
+                        .send()
+                        .await;
+                }
+            }
+            ExternalStageProvider::Azure | ExternalStageProvider::Gcs => {
+                if let Some(ref store) = uploaded_store {
+                    Self::delete_external_object(store.as_ref(), &object_key).await;
+                }
+            }
+        }
 
         match copy_result {
             Ok(_) => {
@@ -1849,5 +2417,214 @@ impl SchemaSink for DataSinkSnowflakePlugin {
         );
 
         self.ensure_table(&fq_table, &col_defs).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    fn sample_master_key() -> String {
+        STANDARD.encode([7u8; 32])
+    }
+
+    fn sample_encryption_material() -> EncryptionMaterial {
+        EncryptionMaterial {
+            query_stage_master_key: sample_master_key(),
+            query_id: "query-123".to_string(),
+            smk_id: 17,
+        }
+    }
+
+    fn sample_stage_info(location_type: &str) -> StageUploadInfo {
+        StageUploadInfo {
+            location_type: location_type.to_string(),
+            location: "bucket-or-container/prefix/".to_string(),
+            region: "us-east-1".to_string(),
+            creds: HashMap::new(),
+            encryption_material: Some(sample_encryption_material()),
+            end_point: None,
+            storage_account: None,
+            use_virtual_url: false,
+            use_regional_url: false,
+        }
+    }
+
+    fn sample_plugin_config() -> DataSinkSnowflakePluginConfig {
+        DataSinkSnowflakePluginConfig {
+            account: "acct".to_string(),
+            user: "user".to_string(),
+            password: None,
+            warehouse: "wh".to_string(),
+            database: "db".to_string(),
+            schema: "public".to_string(),
+            role: None,
+            stage: Some("@~".to_string()),
+            format: None,
+            private_key_path: None,
+            staging_uri: None,
+            staging_storage_integration: None,
+        }
+    }
+
+    fn metadata_value(attrs: &Attributes, key: &str) -> Option<String> {
+        attrs.get(&DataSinkSnowflakePlugin::metadata_attribute(key))
+            .map(|value| value.as_ref().to_string())
+    }
+
+    #[test]
+    fn parses_azure_stage_upload_info() {
+        let data = serde_json::json!({
+            "stageInfo": {
+                "locationType": "AZURE",
+                "location": "container/prefix/",
+                "region": "westus2",
+                "endPoint": "blob.core.windows.net",
+                "storageAccount": "skipprstage",
+                "useVirtualUrl": true,
+                "useRegionalUrl": false,
+                "creds": {
+                    "AZURE_SAS_TOKEN": "sv=1&sig=abc"
+                }
+            },
+            "encryptionMaterial": {
+                "queryStageMasterKey": sample_master_key(),
+                "queryId": "query-123",
+                "smkId": 17
+            }
+        });
+
+        let info = DataSinkSnowflakePlugin::parse_stage_upload_info(&data).unwrap();
+
+        assert_eq!(info.location_type, "AZURE");
+        assert_eq!(info.location, "container/prefix/");
+        assert_eq!(info.region, "westus2");
+        assert_eq!(info.end_point.as_deref(), Some("blob.core.windows.net"));
+        assert_eq!(info.storage_account.as_deref(), Some("skipprstage"));
+        assert!(info.use_virtual_url);
+        assert_eq!(
+            info.creds.get("AZURE_SAS_TOKEN").map(String::as_str),
+            Some("sv=1&sig=abc")
+        );
+        assert!(info.encryption_material.is_some());
+    }
+
+    #[test]
+    fn builds_s3_stage_payload_metadata() {
+        let info = sample_stage_info("S3");
+        let (_payload, attrs) =
+            DataSinkSnowflakePlugin::build_stage_upload_payload(&info, b"hello").unwrap();
+
+        assert!(metadata_value(&attrs, "sfc-digest").is_some());
+        assert!(metadata_value(&attrs, "x-amz-key").is_some());
+        assert!(metadata_value(&attrs, "x-amz-iv").is_some());
+        assert!(metadata_value(&attrs, "x-amz-matdesc").is_some());
+        assert_eq!(
+            attrs.get(&Attribute::ContentType).map(|v| v.as_ref()),
+            Some("application/octet-stream")
+        );
+    }
+
+    #[test]
+    fn builds_azure_stage_payload_metadata() {
+        let info = sample_stage_info("AZURE");
+        let (_payload, attrs) =
+            DataSinkSnowflakePlugin::build_stage_upload_payload(&info, b"hello").unwrap();
+
+        assert!(metadata_value(&attrs, "sfcdigest").is_some());
+        assert!(metadata_value(&attrs, "matdesc").is_some());
+        assert!(metadata_value(&attrs, "encryptiondata").is_some());
+        assert!(metadata_value(&attrs, "x-amz-key").is_none());
+    }
+
+    #[test]
+    fn builds_gcs_stage_payload_metadata() {
+        let info = sample_stage_info("GCS");
+        let (_payload, attrs) =
+            DataSinkSnowflakePlugin::build_stage_upload_payload(&info, b"hello").unwrap();
+
+        assert!(metadata_value(&attrs, "sfc-digest").is_some());
+        assert!(metadata_value(&attrs, "matdesc").is_some());
+        assert!(metadata_value(&attrs, "encryptiondata").is_some());
+        assert!(metadata_value(&attrs, "x-amz-key").is_none());
+    }
+
+    #[test]
+    fn computes_regional_gcs_base_url() {
+        let mut info = sample_stage_info("GCS");
+        info.region = "us-central1".to_string();
+        info.use_regional_url = true;
+
+        assert_eq!(
+            DataSinkSnowflakePlugin::gcs_base_url(&info).as_deref(),
+            Some("https://storage.us-central1.rep.googleapis.com")
+        );
+    }
+
+    #[test]
+    fn parses_cross_cloud_external_staging_uris() {
+        let s3 = DataSinkSnowflakePlugin::parse_external_stage_uri("s3://stage-bucket/prefix/path")
+            .unwrap();
+        assert_eq!(s3.provider, ExternalStageProvider::S3);
+        assert_eq!(s3.root, "stage-bucket");
+        assert_eq!(s3.prefix, "prefix/path");
+
+        let azure = DataSinkSnowflakePlugin::parse_external_stage_uri(
+            "azure://acct.blob.core.windows.net/container/prefix",
+        )
+        .unwrap();
+        assert_eq!(azure.provider, ExternalStageProvider::Azure);
+        assert_eq!(azure.root, "container");
+        assert_eq!(azure.prefix, "prefix");
+        assert_eq!(azure.azure_account.as_deref(), Some("acct"));
+        assert_eq!(
+            azure.azure_host.as_deref(),
+            Some("acct.blob.core.windows.net")
+        );
+
+        let gcs = DataSinkSnowflakePlugin::parse_external_stage_uri("gs://stage-bucket/prefix")
+            .unwrap();
+        assert_eq!(gcs.provider, ExternalStageProvider::Gcs);
+        assert_eq!(gcs.root, "stage-bucket");
+        assert_eq!(gcs.prefix, "prefix");
+    }
+
+    #[tokio::test]
+    async fn gcs_external_staging_requires_storage_integration() {
+        let plugin = DataSinkSnowflakePlugin::new_with_config(
+            "buffer".to_string(),
+            sample_plugin_config(),
+        )
+        .await;
+        let location =
+            DataSinkSnowflakePlugin::parse_external_stage_uri("gcs://stage-bucket/prefix")
+                .unwrap();
+
+        let err = plugin
+            .external_stage_copy_auth_clause(&location, None)
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("SNOWFLAKE_STAGING_STORAGE_INTEGRATION"));
+    }
+
+    #[tokio::test]
+    async fn storage_integration_clause_overrides_provider_specific_copy_creds() {
+        let mut config = sample_plugin_config();
+        config.staging_storage_integration = Some("my_int".to_string());
+        let plugin = DataSinkSnowflakePlugin::new_with_config("buffer".to_string(), config).await;
+        let location =
+            DataSinkSnowflakePlugin::parse_external_stage_uri("azure://acct/container/prefix")
+                .unwrap();
+
+        let clause = plugin
+            .external_stage_copy_auth_clause(&location, None)
+            .await
+            .unwrap();
+
+        assert_eq!(clause, "STORAGE_INTEGRATION = my_int");
     }
 }
