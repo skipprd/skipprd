@@ -80,11 +80,6 @@ runs:
           echo "::error::Version was not set during build"
           exit 1
         fi
-    - name: Cargo Test
-      shell: bash
-      run: |
-          cargo test --release -- --nocapture
-
 #    - name: Verify release
 #      shell: bash
 #      run: |

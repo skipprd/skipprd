@@ -15,6 +15,28 @@ static ENSURED_DATASETS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
+pub struct BigqueryCdcBackend;
+
+impl super::cdc_apply::CdcApplyBackend for BigqueryCdcBackend {
+    const ORDER_TOKEN_TYPE: &'static str = "BYTES";
+
+    fn binary_literal(hex: &str) -> String {
+        format!("FROM_HEX('{hex}')")
+    }
+
+    fn tx_begin() -> &'static str {
+        "BEGIN TRANSACTION;\n"
+    }
+
+    fn tx_commit() -> &'static str {
+        "\nCOMMIT TRANSACTION;"
+    }
+
+    fn merge_keyword() -> &'static str {
+        "MERGE"
+    }
+}
+
 const JOB_POLL_MAX: u32 = 120;
 const JOB_POLL_INTERVAL_MS: u64 = 500;
 
@@ -685,7 +707,7 @@ impl DataSinkBigqueryPlugin {
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-            upsert_if_newer_sql, SqlDialect,
+            upsert_if_newer_sql,
         };
         use crate::metrics::counters;
         use crate::plugins::cdc::MutationKind;
@@ -741,7 +763,7 @@ impl DataSinkBigqueryPlugin {
         );
 
         if CDC_DDL_ENSURED.insert(fq_table.clone()) {
-            let order_col_ddl = ddl_add_order_token_column(SqlDialect::BigQuery, &fq_table);
+            let order_col_ddl = ddl_add_order_token_column::<BigqueryCdcBackend>(&fq_table);
             if let Err(e) = self.execute_sql(&order_col_ddl).await {
                 CDC_DDL_ENSURED.remove(&fq_table);
                 counters::dec_uploads_in_flight();
@@ -761,7 +783,7 @@ impl DataSinkBigqueryPlugin {
                 })
                 .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table(SqlDialect::BigQuery, &tombstone_table, &bk_type_pairs);
+                ddl_create_tombstone_table::<BigqueryCdcBackend>(&tombstone_table, &bk_type_pairs);
             if let Err(e) = self.execute_sql(&tombstone_ddl).await {
                 CDC_DDL_ENSURED.remove(&fq_table);
                 counters::dec_uploads_in_flight();
@@ -832,8 +854,7 @@ impl DataSinkBigqueryPlugin {
                             .collect();
                         all_values.push(format!("FROM_HEX('{}')", order_token_hex));
 
-                        let sql = upsert_if_newer_sql(
-                            SqlDialect::BigQuery,
+                        let sql = upsert_if_newer_sql::<BigqueryCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &all_names,
@@ -865,8 +886,7 @@ impl DataSinkBigqueryPlugin {
                             })
                             .collect();
 
-                        let sql = delete_if_newer_sql(
-                            SqlDialect::BigQuery,
+                        let sql = delete_if_newer_sql::<BigqueryCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &bk_names_quoted,

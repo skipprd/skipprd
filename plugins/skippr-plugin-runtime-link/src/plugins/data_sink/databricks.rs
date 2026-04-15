@@ -17,6 +17,16 @@ use tracing::{error, info};
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
+pub struct DatabricksCdcBackend;
+
+impl super::cdc_apply::CdcApplyBackend for DatabricksCdcBackend {
+    const ORDER_TOKEN_TYPE: &'static str = "BINARY";
+
+    fn binary_literal(hex: &str) -> String {
+        format!("X'{hex}'")
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkDatabricksPluginConfig {
     #[serde(default)]
@@ -327,7 +337,7 @@ impl DataSinkDatabricksPlugin {
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-            tombstone_table_name, upsert_if_newer_sql, SqlDialect,
+            tombstone_table_name, upsert_if_newer_sql,
         };
         use crate::metrics::counters;
         use crate::plugins::cdc::MutationKind;
@@ -385,7 +395,7 @@ impl DataSinkDatabricksPlugin {
         })?;
 
         if CDC_DDL_ENSURED.insert(fq_table.clone()) {
-            let order_col_ddl = ddl_add_order_token_column(SqlDialect::Databricks, &fq_table);
+            let order_col_ddl = ddl_add_order_token_column::<DatabricksCdcBackend>(&fq_table);
             if let Err(e) = self.execute_sql(&order_col_ddl).await {
                 let msg = e.to_string();
                 if !msg.contains("already exists") {
@@ -409,7 +419,7 @@ impl DataSinkDatabricksPlugin {
                 })
                 .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table(SqlDialect::Databricks, &tombstone_tbl, &bk_type_pairs);
+                ddl_create_tombstone_table::<DatabricksCdcBackend>(&tombstone_tbl, &bk_type_pairs);
             if let Err(e) = self.execute_sql(&tombstone_ddl).await {
                 let msg = e.to_string();
                 if !msg.contains("already exists") {
@@ -485,8 +495,7 @@ impl DataSinkDatabricksPlugin {
                             .collect();
                         all_values.push(format!("X'{}'", order_token_hex));
 
-                        let sql = upsert_if_newer_sql(
-                            SqlDialect::Databricks,
+                        let sql = upsert_if_newer_sql::<DatabricksCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &all_names,
@@ -515,8 +524,7 @@ impl DataSinkDatabricksPlugin {
                             })
                             .collect();
 
-                        let sql = delete_if_newer_sql(
-                            SqlDialect::Databricks,
+                        let sql = delete_if_newer_sql::<DatabricksCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &bk_names_quoted,

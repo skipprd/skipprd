@@ -16,6 +16,16 @@ use crate::plugins::{DataSink, SchemaSink};
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
+pub struct MotherduckCdcBackend;
+
+impl super::cdc_apply::CdcApplyBackend for MotherduckCdcBackend {
+    const ORDER_TOKEN_TYPE: &'static str = "BLOB";
+
+    fn binary_literal(hex: &str) -> String {
+        format!("'\\x{hex}'::BLOB")
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkMotherduckPluginConfig {
     pub motherduck_token: String,
@@ -252,7 +262,7 @@ impl DataSinkMotherduckPlugin {
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-            tombstone_table_name, upsert_if_newer_sql, SqlDialect,
+            tombstone_table_name, upsert_if_newer_sql,
         };
         use crate::metrics::counters;
         use crate::plugins::cdc::MutationKind;
@@ -364,7 +374,7 @@ impl DataSinkMotherduckPlugin {
             })?;
 
         if CDC_DDL_ENSURED.insert(fq_table.clone()) {
-            let order_col_ddl = ddl_add_order_token_column(SqlDialect::Motherduck, &fq_table);
+            let order_col_ddl = ddl_add_order_token_column::<MotherduckCdcBackend>(&fq_table);
             self.execute_sql(&order_col_ddl).await.map_err(|e| {
                 CDC_DDL_ENSURED.remove(&fq_table);
                 counters::dec_uploads_in_flight();
@@ -385,7 +395,7 @@ impl DataSinkMotherduckPlugin {
                 })
                 .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table(SqlDialect::Motherduck, &tombstone_tbl, &bk_type_pairs);
+                ddl_create_tombstone_table::<MotherduckCdcBackend>(&tombstone_tbl, &bk_type_pairs);
             self.execute_sql(&tombstone_ddl).await.map_err(|e| {
                 CDC_DDL_ENSURED.remove(&fq_table);
                 counters::dec_uploads_in_flight();
@@ -458,8 +468,7 @@ impl DataSinkMotherduckPlugin {
                             .collect();
                         all_values.push(format!("'\\x{}'::BLOB", order_token_hex));
 
-                        let sql = upsert_if_newer_sql(
-                            SqlDialect::Motherduck,
+                        let sql = upsert_if_newer_sql::<MotherduckCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &all_names,
@@ -488,8 +497,7 @@ impl DataSinkMotherduckPlugin {
                             })
                             .collect();
 
-                        let sql = delete_if_newer_sql(
-                            SqlDialect::Motherduck,
+                        let sql = delete_if_newer_sql::<MotherduckCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &bk_names_quoted,

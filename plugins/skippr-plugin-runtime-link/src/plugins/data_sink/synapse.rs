@@ -14,6 +14,23 @@ use tracing::{error, info};
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
+pub struct SynapseCdcBackend;
+
+impl super::cdc_apply::CdcApplyBackend for SynapseCdcBackend {
+    const ORDER_TOKEN_TYPE: &'static str = "VARBINARY(MAX)";
+
+    fn binary_literal(hex: &str) -> String {
+        format!("CONVERT(VARBINARY(MAX), 0x{hex})")
+    }
+
+    fn ddl_add_order_token_column(fq_table: &str) -> String {
+        format!(
+            "ALTER TABLE {fq_table} ADD \"_skippr_order_token\" {}",
+            Self::ORDER_TOKEN_TYPE,
+        )
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkSynapsePluginConfig {
     pub connection_string: String,
@@ -153,7 +170,7 @@ impl DataSinkSynapsePlugin {
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-            tombstone_table_name, upsert_if_newer_sql, SqlDialect,
+            tombstone_table_name, upsert_if_newer_sql,
         };
         use crate::metrics::counters;
         use crate::plugins::cdc::MutationKind;
@@ -214,7 +231,7 @@ impl DataSinkSynapsePlugin {
                 }
             }
 
-            let order_col_ddl = ddl_add_order_token_column(SqlDialect::Synapse, &fq_table);
+            let order_col_ddl = ddl_add_order_token_column::<SynapseCdcBackend>(&fq_table);
             if let Err(e) = client.execute(order_col_ddl.as_str(), &[]).await {
                 let msg = e.to_string();
                 if !msg.contains("already exists") && !msg.contains("Column names") {
@@ -239,7 +256,7 @@ impl DataSinkSynapsePlugin {
                 })
                 .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table(SqlDialect::Synapse, &tombstone_tbl, &bk_type_pairs);
+                ddl_create_tombstone_table::<SynapseCdcBackend>(&tombstone_tbl, &bk_type_pairs);
             if let Err(e) = client.execute(tombstone_ddl.as_str(), &[]).await {
                 let msg = e.to_string();
                 if !msg.contains("already exists") && !msg.contains("already an object") {
@@ -317,8 +334,7 @@ impl DataSinkSynapsePlugin {
                             .collect();
                         all_values.push(format!("CONVERT(VARBINARY(MAX), 0x{})", order_token_hex));
 
-                        let sql = upsert_if_newer_sql(
-                            SqlDialect::Synapse,
+                        let sql = upsert_if_newer_sql::<SynapseCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &all_names,
@@ -350,8 +366,7 @@ impl DataSinkSynapsePlugin {
                             })
                             .collect();
 
-                        let sql = delete_if_newer_sql(
-                            SqlDialect::Synapse,
+                        let sql = delete_if_newer_sql::<SynapseCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &bk_names_quoted,

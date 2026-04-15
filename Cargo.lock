@@ -10761,6 +10761,8 @@ dependencies = [
 name = "skippr-plugin-data-sink-postgres"
 version = "0.0.0-git"
 dependencies = [
+ "arrow 56.2.0",
+ "bincode",
  "chrono",
  "clap",
  "dashmap 5.5.3",

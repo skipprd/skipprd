@@ -31,6 +31,16 @@ static TABLE_DDL_GUARDS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
 static ENSURED_TABLES: Lazy<DashMap<String, Vec<(String, String)>>> = Lazy::new(DashMap::new);
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
+pub struct SnowflakeCdcBackend;
+
+impl super::cdc_apply::CdcApplyBackend for SnowflakeCdcBackend {
+    const ORDER_TOKEN_TYPE: &'static str = "BINARY";
+
+    fn binary_literal(hex: &str) -> String {
+        format!("HEX_DECODE_BINARY('{hex}')")
+    }
+}
+
 const ASYNC_POLL_MAX: u32 = 600;
 const ASYNC_POLL_INTERVAL_MS: u64 = 500;
 
@@ -2140,7 +2150,7 @@ impl DataSinkSnowflakePlugin {
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-            tombstone_table_name, upsert_if_newer_sql, SqlDialect,
+            tombstone_table_name, upsert_if_newer_sql,
         };
         use crate::metrics::counters;
         use crate::plugins::cdc::MutationKind;
@@ -2187,7 +2197,7 @@ impl DataSinkSnowflakePlugin {
         })?;
 
         if CDC_DDL_ENSURED.insert(fq_table.clone()) {
-            let order_col_ddl = ddl_add_order_token_column(SqlDialect::Snowflake, &fq_table);
+            let order_col_ddl = ddl_add_order_token_column::<SnowflakeCdcBackend>(&fq_table);
             if let Err(e) = self.execute_sql(&order_col_ddl).await {
                 CDC_DDL_ENSURED.remove(&fq_table);
                 counters::dec_uploads_in_flight();
@@ -2208,7 +2218,7 @@ impl DataSinkSnowflakePlugin {
                 })
                 .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table(SqlDialect::Snowflake, &tombstone_tbl, &bk_type_pairs);
+                ddl_create_tombstone_table::<SnowflakeCdcBackend>(&tombstone_tbl, &bk_type_pairs);
             if let Err(e) = self.execute_sql(&tombstone_ddl).await {
                 CDC_DDL_ENSURED.remove(&fq_table);
                 counters::dec_uploads_in_flight();
@@ -2281,8 +2291,7 @@ impl DataSinkSnowflakePlugin {
                             .collect();
                         all_values.push(format!("HEX_DECODE_BINARY('{}')", order_token_hex));
 
-                        let sql = upsert_if_newer_sql(
-                            SqlDialect::Snowflake,
+                        let sql = upsert_if_newer_sql::<SnowflakeCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &all_names,
@@ -2314,8 +2323,7 @@ impl DataSinkSnowflakePlugin {
                             })
                             .collect();
 
-                        let sql = delete_if_newer_sql(
-                            SqlDialect::Snowflake,
+                        let sql = delete_if_newer_sql::<SnowflakeCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &bk_names_quoted,

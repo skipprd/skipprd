@@ -21,6 +21,16 @@ use crate::plugins::{DataSink, SchemaSink};
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
+pub struct RedshiftCdcBackend;
+
+impl super::cdc_apply::CdcApplyBackend for RedshiftCdcBackend {
+    const ORDER_TOKEN_TYPE: &'static str = "VARBYTE";
+
+    fn binary_literal(hex: &str) -> String {
+        format!("FROM_HEX('{hex}')")
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkRedshiftPluginConfig {
     pub cluster_identifier: Option<String>,
@@ -378,7 +388,7 @@ impl DataSinkRedshiftPlugin {
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-            tombstone_table_name, upsert_if_newer_sql, SqlDialect,
+            tombstone_table_name, upsert_if_newer_sql,
         };
         use crate::metrics::counters;
         use crate::plugins::cdc::MutationKind;
@@ -456,7 +466,7 @@ impl DataSinkRedshiftPlugin {
             })?;
 
         if CDC_DDL_ENSURED.insert(fq_table.clone()) {
-            let order_col_ddl = ddl_add_order_token_column(SqlDialect::Redshift, &fq_table);
+            let order_col_ddl = ddl_add_order_token_column::<RedshiftCdcBackend>(&fq_table);
             if let Err(e) = self.execute_statement(&order_col_ddl).await {
                 let msg = e.to_string();
                 if !msg.contains("already exists") {
@@ -480,7 +490,7 @@ impl DataSinkRedshiftPlugin {
                 })
                 .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table(SqlDialect::Redshift, &tombstone_tbl, &bk_type_pairs);
+                ddl_create_tombstone_table::<RedshiftCdcBackend>(&tombstone_tbl, &bk_type_pairs);
             if let Err(e) = self.execute_statement(&tombstone_ddl).await {
                 let msg = e.to_string();
                 if !msg.contains("already exists") {
@@ -556,8 +566,7 @@ impl DataSinkRedshiftPlugin {
                             .collect();
                         all_values.push(format!("FROM_HEX('{}')", order_token_hex));
 
-                        let sql = upsert_if_newer_sql(
-                            SqlDialect::Redshift,
+                        let sql = upsert_if_newer_sql::<RedshiftCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &all_names,
@@ -586,8 +595,7 @@ impl DataSinkRedshiftPlugin {
                             })
                             .collect();
 
-                        let sql = delete_if_newer_sql(
-                            SqlDialect::Redshift,
+                        let sql = delete_if_newer_sql::<RedshiftCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &bk_names_quoted,

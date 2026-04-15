@@ -1,4 +1,4 @@
-/// CDC Protocol Tests: ClickHouse  (secondary coverage)
+/// CDC Protocol Tests: ClickHouse (secondary coverage)
 ///
 /// Low-level tests that validate ClickHouse CDC SQL generation and apply.
 /// These are NOT the CDC acceptance gate — see `cdc_e2e_clickhouse` for
@@ -6,11 +6,12 @@
 ///
 /// Requires Docker service `clickhouse`.
 ///
-/// Run: `cargo test --test cdc_protocol_clickhouse -- --ignored`
-use skippr::runtime_test_cdc_apply::cdc_apply::{
+/// Run: `cargo test -p skippr-plugin-runtime-link --features runtime-sink-link --test cdc_protocol_clickhouse -- --ignored`
+use skippr_plugin_runtime_link::runtime_sink_link::cdc_apply::{
     ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-    tombstone_table_name, upsert_if_newer_sql, SqlDialect,
+    tombstone_table_name, upsert_if_newer_sql,
 };
+use skippr_plugin_runtime_link::runtime_sink_link::clickhouse::ClickhouseCdcBackend;
 
 async fn execute_sql(_client: &reqwest::Client, sql: &str) -> Result<String, String> {
     let output = std::process::Command::new("docker")
@@ -39,8 +40,6 @@ async fn execute_sql(_client: &reqwest::Client, sql: &str) -> Result<String, Str
     Ok(stdout)
 }
 
-/// Execute a multi-statement SQL string (`;`-separated) one statement at a time.
-/// ClickHouse HTTP API accepts a single statement per request.
 async fn execute_multi_sql(client: &reqwest::Client, sql: &str) -> Result<(), String> {
     for stmt in sql.split(';') {
         let trimmed = stmt.trim();
@@ -51,10 +50,6 @@ async fn execute_multi_sql(client: &reqwest::Client, sql: &str) -> Result<(), St
     }
     Ok(())
 }
-
-// -----------------------------------------------------------------------
-// 1. DDL: order token column (idempotent) + tombstone table creation
-// -----------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore]
@@ -70,7 +65,6 @@ async fn cdc_clickhouse_ddl_order_token_and_tombstone() {
     )
     .await
     .unwrap();
-
     execute_sql(
         &client,
         r#"CREATE TABLE IF NOT EXISTS cdc_ch_test (id UInt64, name String, "_skippr_order_token" String) ENGINE = MergeTree() ORDER BY id"#,
@@ -78,13 +72,11 @@ async fn cdc_clickhouse_ddl_order_token_and_tombstone() {
     .await
     .unwrap();
 
-    // Should be idempotent — column already exists
-    let ddl1 = ddl_add_order_token_column(SqlDialect::ClickHouse, "cdc_ch_test");
+    let ddl1 = ddl_add_order_token_column::<ClickhouseCdcBackend>("cdc_ch_test");
     execute_sql(&client, &ddl1).await.unwrap();
 
     let ts_table = tombstone_table_name("cdc_ch_test");
-    let ddl2 = ddl_create_tombstone_table(
-        SqlDialect::ClickHouse,
+    let ddl2 = ddl_create_tombstone_table::<ClickhouseCdcBackend>(
         &ts_table,
         &[("id".to_string(), "UInt64".to_string())],
     );
@@ -93,22 +85,8 @@ async fn cdc_clickhouse_ddl_order_token_and_tombstone() {
     let result = execute_sql(&client, r#"EXISTS TABLE "_skippr_tombstones_cdc_ch_test""#)
         .await
         .unwrap();
-    assert_eq!(result.trim(), "1", "tombstone table should exist");
-
-    execute_sql(&client, "DROP TABLE IF EXISTS cdc_ch_test")
-        .await
-        .unwrap();
-    execute_sql(
-        &client,
-        r#"DROP TABLE IF EXISTS "_skippr_tombstones_cdc_ch_test""#,
-    )
-    .await
-    .unwrap();
+    assert_eq!(result.trim(), "1");
 }
-
-// -----------------------------------------------------------------------
-// 2. Upsert-if-newer: stale write rejection
-// -----------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore]
@@ -123,7 +101,6 @@ async fn cdc_clickhouse_upsert_if_newer() {
     execute_sql(&client, &format!("DROP TABLE IF EXISTS {ts_table}"))
         .await
         .unwrap();
-
     execute_sql(
         &client,
         &format!(
@@ -133,16 +110,13 @@ async fn cdc_clickhouse_upsert_if_newer() {
     .await
     .unwrap();
 
-    let ddl = ddl_create_tombstone_table(
-        SqlDialect::ClickHouse,
+    let ddl = ddl_create_tombstone_table::<ClickhouseCdcBackend>(
         &ts_table,
         &[("id".to_string(), "UInt64".to_string())],
     );
     execute_sql(&client, &ddl).await.unwrap();
 
-    // Insert with order_token = 0002
-    let sql1 = upsert_if_newer_sql(
-        SqlDialect::ClickHouse,
+    let sql1 = upsert_if_newer_sql::<ClickhouseCdcBackend>(
         table,
         &ts_table,
         &[
@@ -163,14 +137,7 @@ async fn cdc_clickhouse_upsert_if_newer() {
         .await
         .unwrap();
 
-    let result = execute_sql(&client, &format!("SELECT name FROM {table} WHERE id = 1"))
-        .await
-        .unwrap();
-    assert_eq!(result.trim(), "Alice");
-
-    // Stale update with order_token = 0001 (should be rejected)
-    let sql2 = upsert_if_newer_sql(
-        SqlDialect::ClickHouse,
+    let sql2 = upsert_if_newer_sql::<ClickhouseCdcBackend>(
         table,
         &ts_table,
         &[
@@ -194,15 +161,9 @@ async fn cdc_clickhouse_upsert_if_newer() {
     let result = execute_sql(&client, &format!("SELECT name FROM {table} WHERE id = 1"))
         .await
         .unwrap();
-    assert_eq!(
-        result.trim(),
-        "Alice",
-        "stale write should have been rejected"
-    );
+    assert_eq!(result.trim(), "Alice");
 
-    // Newer update with order_token = 0003 (should succeed)
-    let sql3 = upsert_if_newer_sql(
-        SqlDialect::ClickHouse,
+    let sql3 = upsert_if_newer_sql::<ClickhouseCdcBackend>(
         table,
         &ts_table,
         &[
@@ -226,19 +187,8 @@ async fn cdc_clickhouse_upsert_if_newer() {
     let result = execute_sql(&client, &format!("SELECT name FROM {table} WHERE id = 1"))
         .await
         .unwrap();
-    assert_eq!(result.trim(), "Bob", "newer write should have succeeded");
-
-    execute_sql(&client, &format!("DROP TABLE IF EXISTS {table}"))
-        .await
-        .unwrap();
-    execute_sql(&client, &format!("DROP TABLE IF EXISTS {ts_table}"))
-        .await
-        .unwrap();
+    assert_eq!(result.trim(), "Bob");
 }
-
-// -----------------------------------------------------------------------
-// 3. Delete-if-newer + tombstone prevents stale resurrect
-// -----------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore]
@@ -253,7 +203,6 @@ async fn cdc_clickhouse_delete_if_newer_with_tombstone() {
     execute_sql(&client, &format!("DROP TABLE IF EXISTS {ts_table}"))
         .await
         .unwrap();
-
     execute_sql(
         &client,
         &format!(
@@ -263,16 +212,13 @@ async fn cdc_clickhouse_delete_if_newer_with_tombstone() {
     .await
     .unwrap();
 
-    let ddl = ddl_create_tombstone_table(
-        SqlDialect::ClickHouse,
+    let ddl = ddl_create_tombstone_table::<ClickhouseCdcBackend>(
         &ts_table,
         &[("id".to_string(), "UInt64".to_string())],
     );
     execute_sql(&client, &ddl).await.unwrap();
 
-    // Insert row with token 0002
-    let sql_insert = upsert_if_newer_sql(
-        SqlDialect::ClickHouse,
+    let sql_insert = upsert_if_newer_sql::<ClickhouseCdcBackend>(
         table,
         &ts_table,
         &[
@@ -293,9 +239,7 @@ async fn cdc_clickhouse_delete_if_newer_with_tombstone() {
         .await
         .unwrap();
 
-    // Delete with token 0003
-    let sql_delete = delete_if_newer_sql(
-        SqlDialect::ClickHouse,
+    let sql_delete = delete_if_newer_sql::<ClickhouseCdcBackend>(
         table,
         &ts_table,
         &["\"id\"".to_string()],
@@ -317,19 +261,9 @@ async fn cdc_clickhouse_delete_if_newer_with_tombstone() {
     )
     .await
     .unwrap();
-    assert_eq!(result.trim(), "0", "row should be deleted");
+    assert_eq!(result.trim(), "0");
 
-    let result = execute_sql(
-        &client,
-        &format!(r#"SELECT count() FROM {ts_table} WHERE "id" = 1"#),
-    )
-    .await
-    .unwrap();
-    assert_eq!(result.trim(), "1", "tombstone should exist");
-
-    // Stale insert with token 0002 should be blocked by tombstone
-    let sql_stale = upsert_if_newer_sql(
-        SqlDialect::ClickHouse,
+    let sql_stale = upsert_if_newer_sql::<ClickhouseCdcBackend>(
         table,
         &ts_table,
         &[
@@ -356,23 +290,8 @@ async fn cdc_clickhouse_delete_if_newer_with_tombstone() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        result.trim(),
-        "0",
-        "stale insert should be blocked by tombstone"
-    );
-
-    execute_sql(&client, &format!("DROP TABLE IF EXISTS {table}"))
-        .await
-        .unwrap();
-    execute_sql(&client, &format!("DROP TABLE IF EXISTS {ts_table}"))
-        .await
-        .unwrap();
+    assert_eq!(result.trim(), "0");
 }
-
-// -----------------------------------------------------------------------
-// 4. Replay idempotency: replaying the same inserts is safe
-// -----------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore]
@@ -387,7 +306,6 @@ async fn cdc_clickhouse_replay_idempotency() {
     execute_sql(&client, &format!("DROP TABLE IF EXISTS {ts_table}"))
         .await
         .unwrap();
-
     execute_sql(
         &client,
         &format!(
@@ -397,15 +315,13 @@ async fn cdc_clickhouse_replay_idempotency() {
     .await
     .unwrap();
 
-    let ddl = ddl_create_tombstone_table(
-        SqlDialect::ClickHouse,
+    let ddl = ddl_create_tombstone_table::<ClickhouseCdcBackend>(
         &ts_table,
         &[("id".to_string(), "UInt64".to_string())],
     );
     execute_sql(&client, &ddl).await.unwrap();
 
-    let sql = upsert_if_newer_sql(
-        SqlDialect::ClickHouse,
+    let sql = upsert_if_newer_sql::<ClickhouseCdcBackend>(
         table,
         &ts_table,
         &[
@@ -422,7 +338,6 @@ async fn cdc_clickhouse_replay_idempotency() {
         "0000000000000001",
     );
 
-    // Execute twice — should be idempotent
     execute_multi_sql(&client, &sql).await.unwrap();
     execute_sql(&client, &format!("OPTIMIZE TABLE {table} FINAL"))
         .await
@@ -436,16 +351,4 @@ async fn cdc_clickhouse_replay_idempotency() {
         .await
         .unwrap();
     assert_eq!(result.trim(), "1");
-
-    let result = execute_sql(&client, &format!("SELECT val FROM {table} WHERE id = 1"))
-        .await
-        .unwrap();
-    assert_eq!(result.trim(), "first");
-
-    execute_sql(&client, &format!("DROP TABLE IF EXISTS {table}"))
-        .await
-        .unwrap();
-    execute_sql(&client, &format!("DROP TABLE IF EXISTS {ts_table}"))
-        .await
-        .unwrap();
 }

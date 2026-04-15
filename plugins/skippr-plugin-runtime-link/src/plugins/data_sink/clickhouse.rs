@@ -16,6 +16,153 @@ use crate::plugins::{DataSink, SchemaSink};
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
+pub struct ClickhouseCdcBackend;
+
+impl super::cdc_apply::CdcApplyBackend for ClickhouseCdcBackend {
+    const ORDER_TOKEN_TYPE: &'static str = "String";
+
+    fn binary_literal(hex: &str) -> String {
+        format!("'{hex}'")
+    }
+
+    fn ddl_create_tombstone_table(
+        fq_tombstone_table: &str,
+        business_key_cols: &[(String, String)],
+    ) -> String {
+        let mut col_defs: Vec<String> = business_key_cols
+            .iter()
+            .map(|(name, ty)| format!("\"{}\" {} NOT NULL", name, ty))
+            .collect();
+        col_defs.push("\"_skippr_order_token\" String NOT NULL".to_string());
+
+        let pk_cols: Vec<String> = business_key_cols
+            .iter()
+            .map(|(name, _)| format!("\"{}\"", name))
+            .collect();
+
+        format!(
+            "CREATE TABLE IF NOT EXISTS {} ({}) ENGINE = MergeTree() ORDER BY ({})",
+            fq_tombstone_table,
+            col_defs.join(", "),
+            pk_cols.join(", "),
+        )
+    }
+
+    fn upsert_if_newer_sql(
+        fq_table: &str,
+        fq_tombstone_table: &str,
+        all_col_names: &[String],
+        all_col_values: &[String],
+        business_key_names: &[String],
+        order_token_hex: &str,
+    ) -> String {
+        let token = Self::binary_literal(order_token_hex);
+        let tombstone_bk_match = business_key_names
+            .iter()
+            .map(|name| {
+                let idx = all_col_names.iter().position(|n| n == name).unwrap_or(0);
+                format!("{fq_tombstone_table}.{name} = {}", all_col_values[idx])
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let tombstone_bk_match_unqualified = business_key_names
+            .iter()
+            .map(|name| {
+                let idx = all_col_names.iter().position(|n| n == name).unwrap_or(0);
+                format!("{name} = {}", all_col_values[idx])
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let target_bk_match = business_key_names
+            .iter()
+            .map(|name| {
+                let idx = all_col_names.iter().position(|n| n == name).unwrap_or(0);
+                format!("{name} = {}", all_col_values[idx])
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let update_set = all_col_names
+            .iter()
+            .zip(all_col_values.iter())
+            .filter(|(name, _)| !business_key_names.contains(name))
+            .map(|(name, val)| format!("{name} = {val}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        format!(
+            "INSERT INTO {fq_table} ({})\n\
+             SELECT {}\n\
+             WHERE NOT EXISTS (SELECT 1 FROM {fq_table} WHERE {target_bk_match})\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {fq_tombstone_table}\n\
+               WHERE {tombstone_bk_match}\n\
+               AND {fq_tombstone_table}.\"_skippr_order_token\" >= {token}\n\
+             );\n\
+             ALTER TABLE {fq_table} UPDATE {update_set}\n\
+             WHERE {target_bk_match}\n\
+             AND (\"_skippr_order_token\" IS NULL OR \"_skippr_order_token\" < {token})\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {fq_tombstone_table}\n\
+               WHERE {tombstone_bk_match}\n\
+               AND {fq_tombstone_table}.\"_skippr_order_token\" >= {token}\n\
+             );\n\
+             ALTER TABLE {fq_tombstone_table} DELETE\n\
+             WHERE {tombstone_bk_match_unqualified}\n\
+             AND \"_skippr_order_token\" < {token};",
+            all_col_names.join(", "),
+            all_col_values.join(", "),
+        )
+    }
+
+    fn delete_if_newer_sql(
+        fq_table: &str,
+        fq_tombstone_table: &str,
+        business_key_names: &[String],
+        business_key_values: &[String],
+        _business_key_types: &[String],
+        order_token_hex: &str,
+    ) -> String {
+        let token = Self::binary_literal(order_token_hex);
+        let delete_match = business_key_names
+            .iter()
+            .zip(business_key_values.iter())
+            .map(|(name, value)| format!("{name} = {value}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let tombstone_bk_match = business_key_names
+            .iter()
+            .zip(business_key_values.iter())
+            .map(|(name, value)| format!("{fq_tombstone_table}.{name} = {value}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let tombstone_cols = business_key_names
+            .iter()
+            .cloned()
+            .chain(std::iter::once("\"_skippr_order_token\"".to_string()))
+            .collect::<Vec<_>>();
+        let tombstone_vals = business_key_values
+            .iter()
+            .cloned()
+            .chain(std::iter::once(token.clone()))
+            .collect::<Vec<_>>();
+
+        format!(
+            "ALTER TABLE {fq_table} DELETE\n\
+             WHERE {delete_match}\n\
+             AND (\"_skippr_order_token\" IS NULL OR \"_skippr_order_token\" < {token});\n\
+             INSERT INTO {fq_tombstone_table} ({})\n\
+             SELECT {}\n\
+             WHERE NOT EXISTS (\n\
+               SELECT 1 FROM {fq_tombstone_table}\n\
+               WHERE {tombstone_bk_match}\n\
+               AND {fq_tombstone_table}.\"_skippr_order_token\" >= {token}\n\
+             );",
+            tombstone_cols.join(", "),
+            tombstone_vals.join(", "),
+        )
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkClickhousePluginConfig {
     pub url: String,
@@ -304,7 +451,7 @@ impl DataSinkClickhousePlugin {
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-            tombstone_table_name, upsert_if_newer_sql, SqlDialect,
+            tombstone_table_name, upsert_if_newer_sql,
         };
         use crate::metrics::counters;
         use crate::plugins::cdc::MutationKind;
@@ -399,7 +546,7 @@ impl DataSinkClickhousePlugin {
             })?;
 
         if CDC_DDL_ENSURED.insert(fq_table.clone()) {
-            let order_col_ddl = ddl_add_order_token_column(SqlDialect::ClickHouse, &fq_table);
+            let order_col_ddl = ddl_add_order_token_column::<ClickhouseCdcBackend>(&fq_table);
             if let Err(e) = self.execute_ddl(&order_col_ddl).await {
                 let msg = e.to_string();
                 if !msg.contains("already exists") && !msg.contains("duplicate column") {
@@ -423,7 +570,7 @@ impl DataSinkClickhousePlugin {
                 })
                 .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table(SqlDialect::ClickHouse, &tombstone_tbl, &bk_type_pairs);
+                ddl_create_tombstone_table::<ClickhouseCdcBackend>(&tombstone_tbl, &bk_type_pairs);
             if let Err(e) = self.execute_ddl(&tombstone_ddl).await {
                 let msg = e.to_string();
                 if !msg.contains("already exists") {
@@ -499,8 +646,7 @@ impl DataSinkClickhousePlugin {
                             .collect();
                         all_values.push(format!("'{}'", order_token_hex));
 
-                        let sql = upsert_if_newer_sql(
-                            SqlDialect::ClickHouse,
+                        let sql = upsert_if_newer_sql::<ClickhouseCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &all_names,
@@ -529,8 +675,7 @@ impl DataSinkClickhousePlugin {
                             })
                             .collect();
 
-                        let sql = delete_if_newer_sql(
-                            SqlDialect::ClickHouse,
+                        let sql = delete_if_newer_sql::<ClickhouseCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &bk_names_quoted,

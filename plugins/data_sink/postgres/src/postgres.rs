@@ -8,7 +8,7 @@ use tracing::{error, info};
 
 use crate::cdc_apply::{
     ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-    tombstone_table_name, upsert_if_newer_sql, SqlDialect,
+    tombstone_table_name, upsert_if_newer_sql,
 };
 use crate::config::DataSinkPostgresPluginConfig;
 use skippr::buffer::BufferChunker;
@@ -20,6 +20,126 @@ use skippr::plugins::cdc::{MutationKind, SyncContext};
 static ENSURED_SCHEMAS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
+
+pub struct PostgresCdcBackend;
+
+impl crate::cdc_apply::CdcApplyBackend for PostgresCdcBackend {
+    const ORDER_TOKEN_TYPE: &'static str = "BYTEA";
+
+    fn binary_literal(hex: &str) -> String {
+        format!("decode('{hex}', 'hex')")
+    }
+
+    fn upsert_if_newer_sql(
+        fq_table: &str,
+        fq_tombstone_table: &str,
+        all_col_names: &[String],
+        all_col_values: &[String],
+        business_key_names: &[String],
+        order_token_hex: &str,
+    ) -> String {
+        let token = Self::binary_literal(order_token_hex);
+        let tombstone_bk_match = business_key_names
+            .iter()
+            .map(|name| {
+                let idx = all_col_names.iter().position(|n| n == name).unwrap_or(0);
+                format!("{fq_tombstone_table}.{name} = {}", all_col_values[idx])
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let conflict_cols = business_key_names.join(", ");
+        let update_set = all_col_names
+            .iter()
+            .filter(|name| {
+                !business_key_names.contains(name) && name.as_str() != "\"_skippr_order_token\""
+            })
+            .map(|name| format!("{name} = EXCLUDED.{name}"))
+            .collect::<Vec<_>>();
+        let update_set_with_token = {
+            let mut parts = update_set;
+            parts.push("\"_skippr_order_token\" = EXCLUDED.\"_skippr_order_token\"".to_string());
+            parts.join(", ")
+        };
+        let bk_match = business_key_names
+            .iter()
+            .map(|name| format!("{fq_tombstone_table}.{name} = EXCLUDED.{name}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+
+        format!(
+            "BEGIN;\n\
+             INSERT INTO {fq_table} ({})\n\
+             SELECT {}\n\
+             WHERE NOT EXISTS (\n\
+               SELECT 1 FROM {fq_tombstone_table}\n\
+               WHERE {tombstone_bk_match}\n\
+               AND {fq_tombstone_table}.\"_skippr_order_token\" >= {token}\n\
+             )\n\
+             ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set_with_token}\n\
+             WHERE (\n\
+               {fq_table}.\"_skippr_order_token\" IS NULL\n\
+               OR {fq_table}.\"_skippr_order_token\" < {token}\n\
+             )\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {fq_tombstone_table}\n\
+               WHERE {bk_match}\n\
+               AND {fq_tombstone_table}.\"_skippr_order_token\" >= {token}\n\
+             );\n\
+             DELETE FROM {fq_tombstone_table}\n\
+             WHERE {tombstone_bk_match}\n\
+             AND {fq_tombstone_table}.\"_skippr_order_token\" < {token};\n\
+             COMMIT;",
+            all_col_names.join(", "),
+            all_col_values.join(", "),
+        )
+    }
+
+    fn delete_if_newer_sql(
+        fq_table: &str,
+        fq_tombstone_table: &str,
+        business_key_names: &[String],
+        business_key_values: &[String],
+        _business_key_types: &[String],
+        order_token_hex: &str,
+    ) -> String {
+        let token = Self::binary_literal(order_token_hex);
+        let delete_match = business_key_names
+            .iter()
+            .zip(business_key_values.iter())
+            .map(|(name, value)| format!("{name} = {value}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let tombstone_cols = business_key_names
+            .iter()
+            .cloned()
+            .chain(std::iter::once("\"_skippr_order_token\"".to_string()))
+            .collect::<Vec<_>>();
+        let tombstone_vals = business_key_values
+            .iter()
+            .cloned()
+            .chain(std::iter::once(token.clone()))
+            .collect::<Vec<_>>();
+        let conflict_cols = business_key_names.join(", ");
+
+        format!(
+            "BEGIN;\n\
+             DELETE FROM {fq_table}\n\
+             WHERE {delete_match}\n\
+             AND (\n\
+               {fq_table}.\"_skippr_order_token\" IS NULL\n\
+               OR {fq_table}.\"_skippr_order_token\" < {token}\n\
+             );\n\
+             INSERT INTO {fq_tombstone_table} ({})\n\
+             VALUES ({})\n\
+             ON CONFLICT ({conflict_cols}) DO UPDATE\n\
+             SET \"_skippr_order_token\" = EXCLUDED.\"_skippr_order_token\"\n\
+             WHERE {fq_tombstone_table}.\"_skippr_order_token\" < EXCLUDED.\"_skippr_order_token\";\n\
+             COMMIT;",
+            tombstone_cols.join(", "),
+            tombstone_vals.join(", "),
+        )
+    }
+}
 
 pub struct DataSinkPostgresPlugin {
     config: DataSinkPostgresPluginConfig,
@@ -551,7 +671,7 @@ impl DataSinkPostgresPlugin {
         })?;
 
         if CDC_DDL_ENSURED.insert(fq_table.clone()) {
-            let order_col_ddl = ddl_add_order_token_column(SqlDialect::Postgres, &fq_table);
+            let order_col_ddl = ddl_add_order_token_column::<PostgresCdcBackend>(&fq_table);
             if let Err(e) = self.execute_sql(&order_col_ddl).await {
                 CDC_DDL_ENSURED.remove(&fq_table);
                 counters::dec_uploads_in_flight();
@@ -572,7 +692,7 @@ impl DataSinkPostgresPlugin {
                 })
                 .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table(SqlDialect::Postgres, &tombstone_tbl, &bk_type_pairs);
+                ddl_create_tombstone_table::<PostgresCdcBackend>(&tombstone_tbl, &bk_type_pairs);
             if let Err(e) = self.execute_sql(&tombstone_ddl).await {
                 CDC_DDL_ENSURED.remove(&fq_table);
                 counters::dec_uploads_in_flight();
@@ -645,8 +765,7 @@ impl DataSinkPostgresPlugin {
                             .collect();
                         all_values.push(format!("decode('{}', 'hex')", order_token_hex));
 
-                        let sql = upsert_if_newer_sql(
-                            SqlDialect::Postgres,
+                        let sql = upsert_if_newer_sql::<PostgresCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &all_names,
@@ -675,8 +794,7 @@ impl DataSinkPostgresPlugin {
                             })
                             .collect();
 
-                        let sql = delete_if_newer_sql(
-                            SqlDialect::Postgres,
+                        let sql = delete_if_newer_sql::<PostgresCdcBackend>(
                             &fq_table,
                             &tombstone_table,
                             &bk_names_quoted,
