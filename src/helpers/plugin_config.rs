@@ -34,6 +34,12 @@ impl PluginConfigEntry {
         self.i64_field("batch_size_seconds")
     }
 
+    pub fn version(&self) -> Option<String> {
+        self.string_field("version")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
     pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, String> {
         serde_json::from_value(self.config.clone()).map_err(|err| {
             format!(
@@ -149,5 +155,37 @@ fn default_format_for_plugin(plugin_name: &str) -> &'static str {
         "Mssql" => "row",
         "Snowflake" | "AzureBlob" | "Gcs" | "GCS" | "Sftp" | "Databricks" | "Redshift" => "parquet",
         _ => "json",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::PluginConfigEntry;
+
+    #[test]
+    fn version_reads_optional_plugin_field() {
+        let entry = PluginConfigEntry {
+            plugin_name: "Athena".to_string(),
+            config: json!({
+                "version": "0.1.1",
+                "s3_bucket": "bucket"
+            }),
+        };
+
+        assert_eq!(entry.version().as_deref(), Some("0.1.1"));
+    }
+
+    #[test]
+    fn version_ignores_blank_values() {
+        let entry = PluginConfigEntry {
+            plugin_name: "Athena".to_string(),
+            config: json!({
+                "version": "   "
+            }),
+        };
+
+        assert_eq!(entry.version(), None);
     }
 }

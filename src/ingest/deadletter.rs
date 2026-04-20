@@ -9,6 +9,7 @@ use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as Arr
 
 use crate::discover::{Metadata, OutputMetadata, SkipprDataType};
 use crate::helpers::configuration::Config;
+use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
 use crate::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA};
 
 #[derive(Clone, Debug)]
@@ -157,7 +158,7 @@ pub(crate) fn build_batch(records: &[DeadletterRecord]) -> Option<RecordBatch> {
 
 /// Lazily registers the deadletter namespace schema in ARROW_SCHEMA and METADATA
 /// so the table is created alongside normal pipeline tables with no special branches.
-pub(crate) fn ensure_namespace_registered() {
+pub fn ensure_namespace_registered() {
     let dl_ns = table_name();
     if ARROW_SCHEMA.get(&dl_ns).is_some() {
         return;
@@ -217,6 +218,7 @@ pub(crate) fn ensure_namespace_registered() {
     let mut pm = METADATA.load().as_ref().clone();
     pm.metadata.insert(dl_ns.clone(), ns_meta);
     METADATA.store(Arc::new(pm));
+    bump_pipeline_schema_version();
 
     Config::sync_output_schema_namespace(&dl_ns);
 }

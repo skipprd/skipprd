@@ -9,6 +9,9 @@ use crate::runtime_plugins::protocol::{
     HandshakeResponse, RuntimePluginKind, RuntimeSinkCapabilityDescriptor,
     RuntimeSourceCapabilityDescriptor, RUNTIME_PROTOCOL_VERSION,
 };
+use crate::runtime_plugins::targets::{
+    current_target_triple, manifest_key_candidates_for_current_target,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimePluginArtifact {
@@ -65,11 +68,16 @@ impl RuntimePluginManifest {
     }
 
     pub fn current_target() -> String {
-        format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+        current_target_triple().to_string()
     }
 
     pub fn artifact_for_current_target(&self) -> Option<&RuntimePluginArtifact> {
-        self.artifacts.get(&Self::current_target())
+        for key in manifest_key_candidates_for_current_target() {
+            if let Some(artifact) = self.artifacts.get(&key) {
+                return Some(artifact);
+            }
+        }
+        None
     }
 
     pub fn resolve_executable_path(
@@ -165,5 +173,51 @@ impl RuntimePluginManifest {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{RuntimePluginArtifact, RuntimePluginKind, RuntimePluginManifest};
+    use crate::runtime_plugins::protocol::RUNTIME_PROTOCOL_VERSION;
+
+    fn sample_manifest() -> RuntimePluginManifest {
+        RuntimePluginManifest {
+            name: "athena-runtime-sink".to_string(),
+            kind: RuntimePluginKind::DataSink,
+            plugin_name: "Athena".to_string(),
+            version: "0.1.1".to_string(),
+            protocol_version: RUNTIME_PROTOCOL_VERSION,
+            config_schema_version: 1,
+            install_root: None,
+            executable: Some("skippr-plugin-data-sink-athena".to_string()),
+            artifacts: HashMap::from([(
+                "darwin-aarch64".to_string(),
+                RuntimePluginArtifact {
+                    executable: "skippr-plugin-data-sink-athena".to_string(),
+                    url: Some("https://example.invalid/athena".to_string()),
+                    sha256: None,
+                },
+            )]),
+            args: Vec::new(),
+            supports_schema: false,
+            source_capability: None,
+            sink_capability: None,
+        }
+    }
+
+    #[test]
+    fn current_target_artifact_supports_legacy_aliases() {
+        if RuntimePluginManifest::current_target() != "aarch64-apple-darwin" {
+            return;
+        }
+
+        let manifest = sample_manifest();
+        let artifact = manifest
+            .artifact_for_current_target()
+            .expect("legacy darwin alias should resolve on macOS arm64");
+        assert_eq!(artifact.executable, "skippr-plugin-data-sink-athena");
     }
 }

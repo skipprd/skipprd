@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-sink-redshift"
-version = "0.0.0-git"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -10,5 +10,34 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 tokio.workspace = true
-skippr = { path = "../../.." }
-skippr-plugin-runtime-link = { path = "../../skippr-plugin-runtime-link", default-features = false, features = ["runtime-sink-link"] }
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
+bytes.workspace = true
+parquet.workspace = true
+
+arrow = { version = "56.2.0", features = ["ipc_compression"] }
+async-trait = "0.1.77"
+aws-config = "1.5.1"
+aws-sdk-redshiftdata = { version = "1" }
+aws-sdk-s3 = "1.32.0"
+dashmap = "5.5.3"
+datafusion = "50.3.0"
+futures = "0.3.25"
+hex = "0.4.3"
+md5 = "0.7.0"
+once_cell = "1.17.0"
+serde.workspace = true
+serde_derive = "1.0.105"
+tracing = "0.1"
+[package.metadata.skippr-plugin]
+kind = "DataSink"
+plugin_name = "Redshift"
+supports_schema = true
+
+[package.metadata.skippr-plugin.sink_capability]
+name = "Redshift"
+guarantee_tier = "ExactOnceCdcEligible"
+can_manage_skippr_columns = true
+can_maintain_tombstone_tables = true
+can_compare_order_tokens = true
+supports_transactions = true

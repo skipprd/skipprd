@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-sink-stdout"
-version = "0.0.0-git"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -10,5 +10,24 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 tokio.workspace = true
-skippr = { path = "../../.." }
-skippr-plugin-runtime-link = { path = "../../skippr-plugin-runtime-link", default-features = false, features = ["runtime-sink-link"] }
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
+bytes.workspace = true
+hex.workspace = true
+parquet.workspace = true
+
+arrow = { version = "56.2.0", features = ["ipc_compression"] }
+async-trait = "0.1.77"
+datafusion = "50.3.0"
+futures = "0.3.25"
+[package.metadata.skippr-plugin]
+kind = "DataSink"
+plugin_name = "Stdout"
+
+[package.metadata.skippr-plugin.sink_capability]
+name = "Stdout"
+guarantee_tier = "Unsupported"
+can_manage_skippr_columns = false
+can_maintain_tombstone_tables = false
+can_compare_order_tokens = false
+supports_transactions = false

@@ -10,43 +10,32 @@ inputs:
     required: true
   docker_hub_pass:
     required: true
+  runtime_plugin_versions:
+    description: 'Optional newline-delimited PLUGIN=VERSION pins passed to the runtime e2e harness'
+    required: false
+    default: ""
 runs:
   using: "composite"
   steps:
-    - name: Run Skippr Tests
+    - name: Run bike_hire_s3_wal_many via runtime e2e harness
       shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
+        AWS_DEFAULT_REGION: us-east-1
       run: |
-        chmod +x ./skippr-el-${{ inputs.architecture_name }}/skippr-el
-        
-        cp .github/actions/e2e/bike_hire_s3_wal_many/skippr-el.yml ./skippr-el.yml
-        
-        ls -la ./
-        
-        run_allow_137() {
-          set +e
-          "$@"
-          rc=$?
-          set -e
-          if [ "$rc" -eq 137 ]; then
-            echo "Chaos SIGKILL (exit 137) observed; continuing as expected"
-            return 0
+        set -euo pipefail
+        runtime_plugin_args=()
+        while IFS= read -r runtime_plugin_version; do
+          runtime_plugin_version="${runtime_plugin_version#"${runtime_plugin_version%%[![:space:]]*}"}"
+          runtime_plugin_version="${runtime_plugin_version%"${runtime_plugin_version##*[![:space:]]}"}"
+          if [[ -z "${runtime_plugin_version}" ]]; then
+            continue
           fi
-          return "$rc"
-        }
-                
-        RUST_BACKTRACE=1 WAL_STORAGE=s3 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline bike_hire_s3_wal_many
-        RUST_BACKTRACE=1 WAL_STORAGE=s3 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline bike_hire_s3_wal_many
-        RUST_BACKTRACE=1 WAL_STORAGE=s3 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline bike_hire_s3_wal_many
-        RUST_BACKTRACE=1 WAL_STORAGE=s3 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline bike_hire_s3_wal_many
-        RUST_BACKTRACE=1 WAL_STORAGE=s3 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline bike_hire_s3_wal_many
-        RUST_BACKTRACE=1 WAL_STORAGE=s3 SKIPPR_CHAOS_MODE=no AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline bike_hire_s3_wal_many
-
-
-    - name: Asset Athena
-      shell: bash
-      run: |
-        pip install soda-core-athena
-        AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }}  soda scan -d datalake_e2e -c ./soda/configuration.yml ./soda/bike_hire_s3_wal_many.yml
-#        if [[ "$(docker logs soda >& container-logs ; cat container-logs | grep 'All is good' | wc -l)" -gt 0 ]]; then exit 0; fi
-#        if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
+          runtime_plugin_args+=(
+            --runtime-plugin-version
+            "${runtime_plugin_version}"
+          )
+        done <<< "${{ inputs.runtime_plugin_versions }}"
+        python3 .github/scripts/runtime_e2e_harness.py run bike_hire_s3_wal_many --mode full --skippr-el "./skippr-el-${{ inputs.architecture_name }}/skippr-el" "${runtime_plugin_args[@]}"
 

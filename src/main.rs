@@ -45,12 +45,17 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::*;
 use skippr::benchmark::PerformanceBenchmark;
 use skippr::buffer::ingest_buffer::{wal_recover, Buffers};
+use skippr::ingest::deadletter;
 use skippr::ingest_work::Ingest;
 use skippr::plugins::DataSink;
+use skippr::runtime_plugins::discovery::resolve_runtime_plugin;
+#[cfg(unix)]
+use skippr::runtime_plugins::host::terminate_runtime_plugin_children;
 use skippr::runtime_plugins::host::{
     sync_runtime_input_plugin, ResolvedRuntimePlugin, RuntimeDataSinkPlugin,
 };
 use skippr::runtime_plugins::protocol::{RuntimeBinding, RuntimePluginKind, RuntimeSinkConfig};
+use skippr::runtime_plugins::schema_state::clear_runtime_source_schema_state;
 use skippr::sqlrt::doc_parser::SqlDocParser;
 use skippr::sqlrt::docs::{get_docs_in_format, DocFormat};
 use skippr::sqlrt::query::query;
@@ -90,6 +95,19 @@ impl DataSink for OutputRouter {
             ))
         })?;
         plugin.sync(stream, filename, cdc_ctx).await
+    }
+
+    async fn install_schema_state(
+        &self,
+        schema_version: u64,
+        namespaces: &std::collections::BTreeMap<String, skippr::discover::OutputMetadata>,
+    ) -> Result<(), std::io::Error> {
+        for plugin in self.sinks.values() {
+            plugin
+                .install_schema_state(schema_version, namespaces)
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -133,6 +151,51 @@ impl PipelineCache {
     }
 }
 
+async fn run_sync_or_exit(output_mode: &str) {
+    if let Err(err) = sync(output_mode).await {
+        error!(
+            "Pipeline '{}' sync failed: {}",
+            Config::get_pipeline_name(),
+            err
+        );
+        process::exit(1);
+    }
+}
+
+async fn run_discover_or_exit(output_mode: &str) {
+    if let Err(err) = discover(output_mode).await {
+        error!(
+            "Pipeline '{}' discover failed: {}",
+            Config::get_pipeline_name(),
+            err
+        );
+        process::exit(1);
+    }
+}
+
+fn chaos_mode_delay() -> Duration {
+    const DEFAULT_MIN_SECS: u64 = 60;
+    const DEFAULT_MAX_SECS: u64 = 90;
+
+    let min = std::env::var("SKIPPR_CHAOS_MIN_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MIN_SECS)
+        .max(1);
+    let max = std::env::var("SKIPPR_CHAOS_MAX_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MAX_SECS)
+        .max(1);
+    let (min, max) = if min <= max { (min, max) } else { (max, min) };
+    let secs = if min == max {
+        min
+    } else {
+        rand::thread_rng().gen_range(min..=max)
+    };
+    Duration::from_secs(secs)
+}
+
 #[tokio::main]
 async fn main() {
     // let now = Instant::now();
@@ -166,7 +229,7 @@ async fn main() {
                     .push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
-                sync(&output_mode).await;
+                run_sync_or_exit(&output_mode).await;
             } else {
                 let pipeline_name = Config::getenv("PIPELINE_NAME", "");
                 if !pipeline_name.is_empty() {
@@ -174,7 +237,7 @@ async fn main() {
                     PIPELINE_NAME.write().push_str(&pipeline_name.clone());
                     Config::init().await;
 
-                    sync(&output_mode).await;
+                    run_sync_or_exit(&output_mode).await;
                 } else {
                     info!("Syncing all pipelines");
                     let pipelines = Config::get_pipelines();
@@ -206,7 +269,7 @@ async fn main() {
                                 counter_lock.reset();
                             }
 
-                            sync(&output_mode).await;
+                            run_sync_or_exit(&output_mode).await;
                         }
 
                         if run_once {
@@ -229,7 +292,7 @@ async fn main() {
                     .push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
-                discover(&output_mode).await;
+                run_discover_or_exit(&output_mode).await;
             } else {
                 error!("No pipeline name provided, you must provide a pipeline name to discover schemas");
             }
@@ -503,7 +566,7 @@ async fn schema(pipeline: &str) {
     }
 }
 
-async fn discover(output_mode: &str) {
+async fn discover(output_mode: &str) -> io::Result<()> {
     let pipeline_name = Config::get_pipeline_name();
     let start_time = Instant::now();
 
@@ -538,8 +601,10 @@ async fn discover(output_mode: &str) {
     let offsets = match Offsets::init() {
         Ok(offsets) => offsets,
         Err(e) => {
-            error!("Skipping: {}", e);
-            return;
+            return Err(io::Error::other(format!(
+                "Failed to initialize offsets: {}",
+                e
+            )));
         }
     };
 
@@ -559,8 +624,10 @@ async fn discover(output_mode: &str) {
             ) {
                 Ok(_t) => {}
                 Err(e) => {
-                    error!("Failed to prepare arrow schema: {}", e);
-                    return;
+                    return Err(io::Error::other(format!(
+                        "Failed to prepare arrow schema: {}",
+                        e
+                    )));
                 }
             }
         }
@@ -569,7 +636,13 @@ async fn discover(output_mode: &str) {
     if reporter.enabled() {
         reporter.start("Discovering");
     }
-    sync_input_plugin(offsets_db.clone(), shared_output).await;
+    let discover_result = sync_input_plugin(offsets_db.clone(), shared_output).await;
+    if let Err(err) = discover_result {
+        if reporter.enabled() {
+            reporter.finish();
+        }
+        return Err(err);
+    }
     if reporter.enabled() {
         reporter.complete("Discovering");
     }
@@ -612,9 +685,11 @@ async fn discover(output_mode: &str) {
     if reporter.enabled() {
         reporter.finish();
     }
+
+    Ok(())
 }
 
-async fn sync(output_mode: &str) {
+async fn sync(output_mode: &str) -> io::Result<()> {
     let pipeline_name = Config::get_pipeline_name();
     let sync_started = Instant::now();
 
@@ -667,14 +742,14 @@ async fn sync(output_mode: &str) {
                         query(&stmt).await;
                     }
 
-                    return;
+                    return Ok(());
                 }
                 None => {}
             }
 
             if !pipeline_metadata.enabled {
                 info!("Pipeline '{}' disabled, skipping.", pipeline_name);
-                return;
+                return Ok(());
             }
 
             pipeline_metadata
@@ -690,13 +765,19 @@ async fn sync(output_mode: &str) {
     info!("Syncing pipeline: {}", pipeline_name);
     // Stats tailer removed; catalogs built at end-of-run only
 
+    clear_runtime_source_schema_state();
     METADATA.store(Arc::new(pipeline_metadata.clone()));
+    if Config::get_pipeline_deadletters_ref().is_some() {
+        deadletter::ensure_namespace_registered();
+    }
 
     let offsets_db = match Offsets::init() {
         Ok(offsets) => offsets,
         Err(e) => {
-            error!("Skipping: {}", e);
-            return;
+            return Err(io::Error::other(format!(
+                "Failed to initialize offsets: {}",
+                e
+            )));
         }
     };
 
@@ -713,9 +794,7 @@ async fn sync(output_mode: &str) {
     }
 
     let output_plugin_name = Config::get_pipeline_output_plugin_name();
-    let output = sync_output_plugin(&output_plugin_name, "output".to_string())
-        .await
-        .unwrap();
+    let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await?;
     let shared_output = Arc::new(output);
 
     // CDC compatibility validation at startup
@@ -726,28 +805,42 @@ async fn sync(output_mode: &str) {
         let pipeline = Config::get_pipeline_config();
         if let Some(ref cdc_cfg) = pipeline.cdc {
             let input_name = Config::get_pipeline_input_plugin_name();
+            let runtime_input_version =
+                Config::get_pipeline_input_plugin_version().unwrap_or_else(|err| {
+                    panic!("Runtime input plugin version lookup failed: {}", err)
+                });
             let runtime_input_manifest = match Config::get_pipeline_runtime_input_plugin() {
-                Ok(Some(entry)) => Some(
-                    resolve_runtime_manifest(entry, RuntimePluginKind::DataSource, &input_name)
-                        .unwrap_or_else(|err| {
-                            panic!("Runtime input manifest resolution failed: {}", err)
-                        }),
+                Ok(entry) => Some(
+                    resolve_runtime_plugin(
+                        entry,
+                        RuntimePluginKind::DataSource,
+                        &input_name,
+                        runtime_input_version.as_deref(),
+                    )
+                    .await
+                    .unwrap_or_else(|err| {
+                        panic!("Runtime input manifest resolution failed: {}", err)
+                    }),
                 ),
-                Ok(None) => None,
                 Err(err) => panic!("Runtime input manifest lookup failed: {}", err),
             };
+            let runtime_output_version = Config::get_pipeline_output_plugin_version()
+                .unwrap_or_else(|err| {
+                    panic!("Runtime output plugin version lookup failed: {}", err)
+                });
             let runtime_output_manifest = match Config::get_pipeline_runtime_output_plugin() {
-                Ok(Some(entry)) => Some(
-                    resolve_runtime_manifest(
+                Ok(entry) => Some(
+                    resolve_runtime_plugin(
                         entry,
                         RuntimePluginKind::DataSink,
                         &output_plugin_name,
+                        runtime_output_version.as_deref(),
                     )
+                    .await
                     .unwrap_or_else(|err| {
                         panic!("Runtime output manifest resolution failed: {}", err)
                     }),
                 ),
-                Ok(None) => None,
                 Err(err) => panic!("Runtime output manifest lookup failed: {}", err),
             };
             let src_cap = runtime_input_manifest
@@ -806,6 +899,8 @@ async fn sync(output_mode: &str) {
                     warn!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
                     #[cfg(unix)]
                     {
+                        terminate_runtime_plugin_children();
+                        sleep(Duration::from_millis(250));
                         let pid = process::id() as i32;
                         let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
                     }
@@ -815,7 +910,7 @@ async fn sync(output_mode: &str) {
                     }
                 }
             },
-            periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
+            periodic::Every::new(chaos_mode_delay()),
         );
     }
 
@@ -835,8 +930,10 @@ async fn sync(output_mode: &str) {
                     reporter.namespace_discovered(namespace, schema.fields().len());
                 }
                 Err(e) => {
-                    error!("Failed to prepare arrow schema: {}", e);
-                    return;
+                    return Err(io::Error::other(format!(
+                        "Failed to prepare arrow schema: {}",
+                        e
+                    )));
                 }
             }
         }
@@ -872,20 +969,26 @@ async fn sync(output_mode: &str) {
         });
     }
 
-    sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
-
-    if reporter.enabled() {
-        reporter.complete("Ingesting");
+    let source_sync_result = sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
+    match &source_sync_result {
+        Ok(()) => {
+            if reporter.enabled() {
+                reporter.complete("Ingesting");
+            }
+            info!("Reached end of source data");
+            info!(
+                "Ingest completed, flushing remaining buffers to output plugin {}",
+                Config::get_pipeline_config()
+                    .data_sink
+                    .or(Some("".to_string()))
+                    .unwrap()
+            );
+        }
+        Err(err) => {
+            reporter.sync_error(&pipeline_name, &err.to_string(), None);
+            warn!("Source ingest failed, finalizing pipeline state before exiting");
+        }
     }
-
-    info!("Reached end of source data");
-    info!(
-        "Ingest completed, flushing remaining buffers to output plugin {}",
-        Config::get_pipeline_config()
-            .data_sink
-            .or(Some("".to_string()))
-            .unwrap()
-    );
 
     {
         METRICS.write().status = MetricsStatus::Finishing;
@@ -948,7 +1051,11 @@ async fn sync(output_mode: &str) {
     skippr::converters::parquet_ordering::log_unmatched_order_fields();
 
     {
-        METRICS.write().status = MetricsStatus::Completed;
+        METRICS.write().status = if source_sync_result.is_ok() {
+            MetricsStatus::Completed
+        } else {
+            MetricsStatus::Error
+        };
     }
 
     match Metrics::send_metrics(Some(0)).await {
@@ -998,6 +1105,14 @@ async fn sync(output_mode: &str) {
             parquet_objects
         );
     }
+
+    if let Err(err) = source_sync_result {
+        if reporter.enabled() {
+            reporter.finish();
+        }
+        return Err(err);
+    }
+
     info!("Pipeline sync complete");
 
     {
@@ -1012,27 +1127,8 @@ async fn sync(output_mode: &str) {
     if reporter.enabled() {
         reporter.finish();
     }
-}
 
-fn resolve_runtime_manifest(
-    entry: skippr::helpers::configuration::RuntimePluginEntry,
-    expected_kind: RuntimePluginKind,
-    expected_plugin_name: &str,
-) -> Result<ResolvedRuntimePlugin, io::Error> {
-    let resolved = ResolvedRuntimePlugin::load(std::path::PathBuf::from(entry.manifest))?;
-    if resolved.manifest.kind != expected_kind {
-        return Err(io::Error::other(format!(
-            "Runtime manifest '{}' is kind {:?}, expected {:?}",
-            resolved.manifest.name, resolved.manifest.kind, expected_kind
-        )));
-    }
-    if resolved.manifest.plugin_name != expected_plugin_name {
-        return Err(io::Error::other(format!(
-            "Runtime manifest '{}' targets plugin '{}' but pipeline config resolved '{}'",
-            resolved.manifest.name, resolved.manifest.plugin_name, expected_plugin_name
-        )));
-    }
-    Ok(resolved)
+    Ok(())
 }
 
 pub async fn sync_output_plugin(
@@ -1042,11 +1138,15 @@ pub async fn sync_output_plugin(
     info!("Output plugin: {}", plugin_name);
 
     let primary_sink_ref = Config::get_pipeline_output_sink_ref();
-    let runtime_entry = Config::get_pipeline_runtime_output_plugin()
-        .map_err(io::Error::other)?
-        .ok_or_else(|| io::Error::other("runtime_output is required for the primary data sink"))?;
-    let resolved =
-        resolve_runtime_manifest(runtime_entry, RuntimePluginKind::DataSink, plugin_name)?;
+    let runtime_entry = Config::get_pipeline_runtime_output_plugin().map_err(io::Error::other)?;
+    let runtime_version = Config::get_pipeline_output_plugin_version().map_err(io::Error::other)?;
+    let resolved = resolve_runtime_plugin(
+        runtime_entry,
+        RuntimePluginKind::DataSink,
+        plugin_name,
+        runtime_version.as_deref(),
+    )
+    .await?;
     let runtime_config = resolve_runtime_sink_config(RuntimeBinding::Primary)?;
     let primary_plugin = Box::new(
         RuntimeDataSinkPlugin::new(
@@ -1085,13 +1185,16 @@ pub async fn sync_deadletter_plugin(
     else {
         return Ok(None);
     };
-    let runtime_entry = Config::get_pipeline_runtime_output_plugin()
-        .map_err(io::Error::other)?
-        .ok_or_else(|| {
-            io::Error::other("runtime_output is required when a deadletter sink is configured")
-        })?;
-    let resolved =
-        resolve_runtime_manifest(runtime_entry, RuntimePluginKind::DataSink, &plugin_name)?;
+    let runtime_entry = Config::get_pipeline_runtime_output_plugin().map_err(io::Error::other)?;
+    let runtime_version =
+        Config::get_pipeline_deadletter_plugin_version().map_err(io::Error::other)?;
+    let resolved = resolve_runtime_plugin(
+        runtime_entry,
+        RuntimePluginKind::DataSink,
+        &plugin_name,
+        runtime_version.as_deref(),
+    )
+    .await?;
     let runtime_config = resolve_runtime_sink_config(RuntimeBinding::Deadletter)?;
     let plugin = Box::new(
         RuntimeDataSinkPlugin::new(
@@ -1209,40 +1312,36 @@ fn sink_capability_for_plugin(name: &str) -> Option<&'static skippr::plugins::cd
 pub async fn sync_input_plugin(
     offsets_clone: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-) {
+) -> io::Result<()> {
     let plugin_name = Config::get_pipeline_input_plugin_name();
-    let runtime_entry = match Config::get_pipeline_runtime_input_plugin() {
-        Ok(Some(runtime_entry)) => runtime_entry,
-        Ok(None) => {
-            error!(
-                "runtime_input is required for data source '{}'",
-                plugin_name
-            );
-            return;
-        }
-        Err(err) => {
-            error!(
-                "Failed to resolve runtime input manifest reference: {}",
-                err
-            );
-            return;
-        }
-    };
-    match resolve_runtime_manifest(runtime_entry, RuntimePluginKind::DataSource, &plugin_name) {
-        Ok(resolved) => {
-            if let Err(err) = sync_runtime_input_plugin(
-                resolved,
-                Config::get_pipeline_name(),
-                offsets_clone,
-                shared_output,
-            )
-            .await
-            {
-                error!("Runtime data source sync failed: {}", err);
-            }
-        }
-        Err(err) => {
-            error!("Runtime input manifest resolution failed: {}", err);
-        }
-    }
+    let runtime_entry = Config::get_pipeline_runtime_input_plugin().map_err(|err| {
+        io::Error::other(format!(
+            "Failed to resolve runtime input manifest reference: {}",
+            err
+        ))
+    })?;
+    let runtime_version = Config::get_pipeline_input_plugin_version().map_err(|err| {
+        io::Error::other(format!(
+            "Failed to resolve runtime input plugin version: {}",
+            err
+        ))
+    })?;
+    let resolved = resolve_runtime_plugin(
+        runtime_entry,
+        RuntimePluginKind::DataSource,
+        &plugin_name,
+        runtime_version.as_deref(),
+    )
+    .await
+    .map_err(|err| {
+        io::Error::other(format!("Runtime input manifest resolution failed: {}", err))
+    })?;
+    sync_runtime_input_plugin(
+        resolved,
+        Config::get_pipeline_name(),
+        offsets_clone,
+        shared_output,
+    )
+    .await
+    .map_err(|err| io::Error::other(format!("Runtime data source sync failed: {}", err)))
 }

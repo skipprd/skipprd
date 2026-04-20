@@ -20,6 +20,8 @@ env:
   SKIPPR_EL_RELEASE_SUBDIR: skippr-el
   RUNTIME_PLUGIN_RELEASE_SUBDIR: runtime-plugins
   SKIPPR_EL_LATEST_POINTER: latest-skippr-el.txt
+  RUST_BUILD_CACHE_BUCKET: skippr-web-rust-cache-prod
+  RUST_BUILD_CACHE_REGION: us-east-1
 #  CARGO_HOME: "${{ github.workspace }}/cargo"
 #  GITHUB_REF: ${{ startsWith(github.ref, 'refs/tags/') && replace(github.ref, 'refs/tags/', '') || '1.1.1' }}
 
@@ -36,6 +38,37 @@ jobs:
 #          repository: ${{ github.repository }}
 #          retain_days: 30
 #          keep_minimum_runs: 30
+
+  plan_runtime_plugin_release:
+    name: plan runtime plugin release
+    runs-on: ubuntu-latest
+    outputs:
+      runtime_plugin_packages_json: ${{ steps.plan.outputs.runtime_plugin_packages_json }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          plan_file="$(mktemp)"
+          python3 .github/scripts/runtime_plugin_release_plan.py \
+            --workspace "$GITHUB_WORKSPACE" > "$plan_file"
+          cat "$plan_file"
+          python3 - "$plan_file" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+
+          plan_path, output_path = sys.argv[1], sys.argv[2]
+          with open(plan_path, encoding="utf-8") as handle:
+              plan = json.load(handle)
+
+          with open(output_path, "a", encoding="utf-8") as handle:
+              handle.write("runtime_plugin_packages_json<<EOF\n")
+              handle.write(json.dumps(plan["packages"]))
+              handle.write("\nEOF\n")
+          PY
 
 #  cargo_test:
 #    name: cargo test
@@ -122,7 +155,18 @@ jobs:
 
   macos_arm64:
     name: cargo build (macos arm64)
+    needs:
+      - plan_runtime_plugin_release
     runs-on: macos-14
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      SCCACHE_BUCKET: skippr-web-rust-cache-prod
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_KEY_PREFIX: skipprd
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_USE_SSL: "true"
     steps:
       - uses: actions/checkout@v3
       - name: Build macOS arm64 release
@@ -130,6 +174,7 @@ jobs:
         with:
           rust-version: stable
           architecture_name: macos_arm64
+          runtime_plugin_packages_json: ${{ needs.plan_runtime_plugin_release.outputs.runtime_plugin_packages_json }}
 
 #  macos_arm64_test:
 #    needs:
@@ -174,9 +219,20 @@ jobs:
   linux_x86:
 #    needs: smoke_test
     name: cargo build (linux x86)
+    needs:
+      - plan_runtime_plugin_release
     runs-on:
       - ubuntu-latest-32-cores
 #      - ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      SCCACHE_BUCKET: skippr-web-rust-cache-prod
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_KEY_PREFIX: skipprd
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_USE_SSL: "true"
     steps:
       - uses: actions/checkout@v3
       - name: Build linux x86 release
@@ -184,11 +240,23 @@ jobs:
         with:
           rust-version: stable
           architecture_name: linux_x86
+          runtime_plugin_packages_json: ${{ needs.plan_runtime_plugin_release.outputs.runtime_plugin_packages_json }}
 
   linux_test_suite:
     name: cargo test (linux host/packages)
+    needs:
+      - plan_runtime_plugin_release
     runs-on:
       - ubuntu-latest-32-cores
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      SCCACHE_BUCKET: skippr-web-rust-cache-prod
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_KEY_PREFIX: skipprd
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_USE_SSL: "true"
     steps:
       - uses: actions/checkout@v3
         with:
@@ -201,10 +269,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          mv Cargo.toml Cargo.toml.orig
-          sed "s/0\\.0\\.0-git/${{ github.ref_name }}/" Cargo.toml.orig > Cargo.toml
-          mv Cargo.lock Cargo.lock.orig
-          sed "s/0\\.0\\.0-git/${{ github.ref_name }}/" Cargo.lock.orig > Cargo.lock
+          python3 .github/scripts/set_root_package_version.py \
+            --workspace "$GITHUB_WORKSPACE" \
+            --version "${{ github.ref_name }}"
       - name: Verify host dependency boundary
         shell: bash
         run: |
@@ -213,10 +280,6 @@ jobs:
         shell: bash
         run: |
           cargo test -p skippr -- --nocapture
-      - name: Run runtime-link package tests
-        shell: bash
-        run: |
-          cargo test -p skippr-plugin-runtime-link --features runtime-sink-link -- --nocapture
       - name: Run postgres plugin tests
         shell: bash
         run: |
@@ -224,7 +287,18 @@ jobs:
 
   macos_arm64_test_compile:
     name: cargo test --no-run (macos arm64)
+    needs:
+      - plan_runtime_plugin_release
     runs-on: macos-14
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      SCCACHE_BUCKET: skippr-web-rust-cache-prod
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_KEY_PREFIX: skipprd
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_USE_SSL: "true"
     steps:
       - uses: actions/checkout@v3
         with:
@@ -242,6 +316,17 @@ jobs:
           rustup toolchain install stable
           rustup default stable
           rustup component add rustfmt
+      - name: Install sccache
+        if: env.SCCACHE_BUCKET != ''
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.10.0
+      - name: Configure sccache
+        if: env.SCCACHE_BUCKET != ''
+        shell: bash
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_IDLE_TIMEOUT=0" >> $GITHUB_ENV
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -250,10 +335,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          mv Cargo.toml Cargo.toml.orig
-          sed "s/0\\.0\\.0-git/${{ github.ref_name }}/" Cargo.toml.orig > Cargo.toml
-          mv Cargo.lock Cargo.lock.orig
-          sed "s/0\\.0\\.0-git/${{ github.ref_name }}/" Cargo.lock.orig > Cargo.lock
+          python3 .github/scripts/set_root_package_version.py \
+            --workspace "$GITHUB_WORKSPACE" \
+            --version "${{ github.ref_name }}"
       - name: Verify host dependency boundary
         shell: bash
         run: |
@@ -262,10 +346,6 @@ jobs:
         shell: bash
         run: |
           cargo test -p skippr --no-run
-      - name: Compile runtime-link tests
-        shell: bash
-        run: |
-          cargo test -p skippr-plugin-runtime-link --features runtime-sink-link --no-run
       - name: Compile postgres plugin tests
         shell: bash
         run: |
@@ -273,7 +353,18 @@ jobs:
 
   windows_x86:
     name: cargo build (windows x86)
+    needs:
+      - plan_runtime_plugin_release
     runs-on: windows-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      SCCACHE_BUCKET: skippr-web-rust-cache-prod
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_KEY_PREFIX: skipprd
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_USE_SSL: "true"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -286,55 +377,177 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install sccache
+        if: env.SCCACHE_BUCKET != ''
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.10.0
+
+      - name: Configure vcpkg cache
+        shell: pwsh
+        run: |
+          $triplet = "x64-windows-static-md"
+          $cacheDir = Join-Path $env:RUNNER_TEMP "vcpkg-binary-cache"
+          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          echo "VCPKG_DEFAULT_TRIPLET=$triplet" >> $env:GITHUB_ENV
+          echo "VCPKG_TARGET_TRIPLET=$triplet" >> $env:GITHUB_ENV
+          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\$triplet" >> $env:GITHUB_ENV
+          echo "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\$triplet" >> $env:GITHUB_ENV
+          echo "VCPKG_BINARY_CACHE_DIR=$cacheDir" >> $env:GITHUB_ENV
+          echo "VCPKG_BINARY_SOURCES=clear;files,$cacheDir,readwrite" >> $env:GITHUB_ENV
+
+      - name: Restore vcpkg cache
+        shell: pwsh
+        run: |
+          $cachePrefix = "$env:SCCACHE_S3_KEY_PREFIX/vcpkg/$env:VCPKG_DEFAULT_TRIPLET"
+          $archiveUri = "s3://$env:RUST_BUILD_CACHE_BUCKET/$cachePrefix/cache.zip"
+          $archivePath = Join-Path $env:RUNNER_TEMP "vcpkg-cache-$env:VCPKG_DEFAULT_TRIPLET.zip"
+          if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+            Write-Warning "AWS CLI not found; skipping vcpkg cache restore"
+            exit 0
+          }
+
+          Write-Host "Restoring vcpkg binary cache from $archiveUri"
+          $restoreOutput = aws s3 cp $archiveUri $archivePath --region $env:RUST_BUILD_CACHE_REGION --no-progress --only-show-errors 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            try {
+              Expand-Archive -Path $archivePath -DestinationPath $env:VCPKG_BINARY_CACHE_DIR -Force
+              Write-Host "Restored vcpkg binary cache archive"
+            } catch {
+              Write-Warning "Failed to extract vcpkg cache archive: $($_.Exception.Message)"
+            }
+          } else {
+            $restoreOutputText = ($restoreOutput | Out-String).Trim()
+            Write-Warning "Skipping vcpkg cache restore from ${archiveUri}: $restoreOutputText"
+            $global:LASTEXITCODE = 0
+          }
 
       - name: Install native dependencies (vcpkg)
         shell: pwsh
         run: |
           vcpkg install curl:x64-windows-static-md openssl:x64-windows-static-md zlib:x64-windows-static-md
-          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
-          echo "VCPKG_DEFAULT_TRIPLET=x64-windows-static-md" >> $env:GITHUB_ENV
-          echo "VCPKG_TARGET_TRIPLET=x64-windows-static-md" >> $env:GITHUB_ENV
-          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" >> $env:GITHUB_ENV
-          echo "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" >> $env:GITHUB_ENV
-          echo "ZLIB_ROOT=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" >> $env:GITHUB_ENV
+
+      - name: Persist vcpkg cache
+        if: always()
+        shell: pwsh
+        run: |
+          $cachePrefix = "$env:SCCACHE_S3_KEY_PREFIX/vcpkg/$env:VCPKG_DEFAULT_TRIPLET"
+          $archiveUri = "s3://$env:RUST_BUILD_CACHE_BUCKET/$cachePrefix/cache.zip"
+          $archivePath = Join-Path $env:RUNNER_TEMP "vcpkg-cache-$env:VCPKG_DEFAULT_TRIPLET.zip"
+          if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+            Write-Warning "AWS CLI not found; skipping vcpkg cache persist"
+            exit 0
+          }
+
+          $cacheEntries = Get-ChildItem -Path $env:VCPKG_BINARY_CACHE_DIR -Recurse -File -ErrorAction SilentlyContinue
+          if (-not $cacheEntries) {
+            Write-Host "No vcpkg cache artifacts to persist"
+            exit 0
+          }
+
+          if (Test-Path $archivePath) {
+            Remove-Item $archivePath -Force
+          }
+          Compress-Archive -Path (Join-Path $env:VCPKG_BINARY_CACHE_DIR '*') -DestinationPath $archivePath -Force
+          Write-Host "Persisting vcpkg binary cache to $archiveUri"
+          $persistOutput = aws s3 cp $archivePath $archiveUri --region $env:RUST_BUILD_CACHE_REGION --no-progress --only-show-errors 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $persistOutputText = ($persistOutput | Out-String).Trim()
+            Write-Warning "Failed to upload vcpkg cache archive: $persistOutputText"
+            $global:LASTEXITCODE = 0
+          }
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: v2-release-windows_x86
+      - name: Configure sccache
+        if: env.SCCACHE_BUCKET != ''
+        shell: pwsh
+        run: |
+          "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
+          "SCCACHE_IDLE_TIMEOUT=0" >> $env:GITHUB_ENV
 
       - name: Configure version if tag commit
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
-          (Get-Content Cargo.toml) -replace '0\.0\.0-git', '${{ github.ref_name }}' | Set-Content Cargo.toml
-          (Get-Content Cargo.lock) -replace '0\.0\.0-git', '${{ github.ref_name }}' | Set-Content Cargo.lock
+          python .github/scripts/set_root_package_version.py --workspace "$env:GITHUB_WORKSPACE" --version "${{ github.ref_name }}"
 
       - name: Build release
         shell: pwsh
         run: |
-          cargo build --release
-          New-Item -ItemType Directory -Force -Path skippr-el-windows_x86
-          Copy-Item target\release\skippr-el.exe skippr-el-windows_x86\skippr-el.exe
-          Get-ChildItem target\release\skippr-plugin-*.exe -ErrorAction SilentlyContinue | ForEach-Object {
-            if (Test-Path $_.FullName) {
-              Copy-Item $_.FullName "skippr-el-windows_x86\$($_.Name)"
+          # libz-sys consults VCPKGRS_NO_ZLIB at runtime, so force a targeted
+          # rebuild when the cached target dir is restored.
+          cargo clean -p libz-sys -p rdkafka-sys -p rdkafka
+
+          $rawPluginPackages = @'
+          ${{ needs.plan_runtime_plugin_release.outputs.runtime_plugin_packages_json }}
+          '@
+          $pluginPackages = @()
+          $parsedPluginPackages = ConvertFrom-Json $rawPluginPackages
+          if ($null -ne $parsedPluginPackages) {
+            $pluginPackages = @($parsedPluginPackages)
+          }
+
+          # The Kafka runtime plugin currently does not link cleanly on
+          # windows-latest due to the bundled librdkafka/zlib toolchain path.
+          # Publish it on supported targets only until the native dependency
+          # chain is fixed.
+          $windowsUnsupportedPluginPackages = @(
+            'skippr-plugin-data-source-kafka'
+          )
+          $skippedPluginPackages = @(
+            $pluginPackages | Where-Object { $_ -in $windowsUnsupportedPluginPackages }
+          )
+          if ($skippedPluginPackages.Count -gt 0) {
+            Write-Host "Skipping unsupported Windows runtime plugins: $($skippedPluginPackages -join ', ')"
+            $pluginPackages = @(
+              $pluginPackages | Where-Object { $_ -notin $windowsUnsupportedPluginPackages }
+            )
+          }
+
+          cargo build --release --bin skippr-el
+          if ($pluginPackages.Count -gt 0) {
+            $buildArgs = @('build', '--release')
+            foreach ($package in $pluginPackages) {
+              $buildArgs += @('-p', [string]$package)
             }
+            cargo @buildArgs
+          }
+
+          New-Item -ItemType Directory -Force -Path skippr-el-windows_x86
+          New-Item -ItemType Directory -Force -Path runtime-plugin-binaries-windows_x86
+          Copy-Item target\release\skippr-el.exe skippr-el-windows_x86\skippr-el.exe
+          foreach ($package in $pluginPackages) {
+            $pluginBinary = "target\release\$package.exe"
+            if (-not (Test-Path $pluginBinary)) {
+              throw "Expected runtime plugin binary was not produced: $pluginBinary"
+            }
+            Copy-Item $pluginBinary "runtime-plugin-binaries-windows_x86\$package.exe"
           }
           Get-ChildItem skippr-el-windows_x86
+          Get-ChildItem runtime-plugin-binaries-windows_x86
         env:
           RUSTFLAGS: "-C debuginfo=0"
+          VCPKGRS_NO_ZLIB: "1"
 
       - name: Verify compiled version
         shell: pwsh
         run: |
           $version = (.\target\release\skippr-el.exe --version 2>&1) -replace '^skippr\s+', ''
           Write-Host "skippr-el version: $version"
-          if ($version -eq '0.0.0-git' -or [string]::IsNullOrEmpty($version)) {
-            Write-Error "Version was not set during build"
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+            Write-Error "Version was not plain semver"
             exit 1
           }
+      - name: Show sccache stats
+        if: env.SCCACHE_BUCKET != ''
+        shell: pwsh
+        run: sccache --show-stats
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -343,9 +556,27 @@ jobs:
           path: skippr-el-windows_x86
           retention-days: 30
 
+      - name: Upload Runtime Plugin Binaries Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-plugin-binaries-windows_x86
+          path: runtime-plugin-binaries-windows_x86
+          retention-days: 30
+
   windows_x86_test_compile:
     name: cargo test --no-run (windows x86)
+    needs:
+      - plan_runtime_plugin_release
     runs-on: windows-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      SCCACHE_BUCKET: skippr-web-rust-cache-prod
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_KEY_PREFIX: skipprd
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_USE_SSL: "true"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -356,27 +587,99 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install sccache
+        if: env.SCCACHE_BUCKET != ''
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.10.0
+      - name: Configure vcpkg cache
+        shell: pwsh
+        run: |
+          $triplet = "x64-windows-static-md"
+          $cacheDir = Join-Path $env:RUNNER_TEMP "vcpkg-binary-cache"
+          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          echo "VCPKG_DEFAULT_TRIPLET=$triplet" >> $env:GITHUB_ENV
+          echo "VCPKG_TARGET_TRIPLET=$triplet" >> $env:GITHUB_ENV
+          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\$triplet" >> $env:GITHUB_ENV
+          echo "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\$triplet" >> $env:GITHUB_ENV
+          echo "VCPKG_BINARY_CACHE_DIR=$cacheDir" >> $env:GITHUB_ENV
+          echo "VCPKG_BINARY_SOURCES=clear;files,$cacheDir,readwrite" >> $env:GITHUB_ENV
+      - name: Restore vcpkg cache
+        shell: pwsh
+        run: |
+          $cachePrefix = "$env:SCCACHE_S3_KEY_PREFIX/vcpkg/$env:VCPKG_DEFAULT_TRIPLET"
+          $archiveUri = "s3://$env:RUST_BUILD_CACHE_BUCKET/$cachePrefix/cache.zip"
+          $archivePath = Join-Path $env:RUNNER_TEMP "vcpkg-cache-$env:VCPKG_DEFAULT_TRIPLET.zip"
+          if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+            Write-Warning "AWS CLI not found; skipping vcpkg cache restore"
+            exit 0
+          }
+
+          Write-Host "Restoring vcpkg binary cache from $archiveUri"
+          $restoreOutput = aws s3 cp $archiveUri $archivePath --region $env:RUST_BUILD_CACHE_REGION --no-progress --only-show-errors 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            try {
+              Expand-Archive -Path $archivePath -DestinationPath $env:VCPKG_BINARY_CACHE_DIR -Force
+              Write-Host "Restored vcpkg binary cache archive"
+            } catch {
+              Write-Warning "Failed to extract vcpkg cache archive: $($_.Exception.Message)"
+            }
+          } else {
+            $restoreOutputText = ($restoreOutput | Out-String).Trim()
+            Write-Warning "Skipping vcpkg cache restore from ${archiveUri}: $restoreOutputText"
+            $global:LASTEXITCODE = 0
+          }
       - name: Install native dependencies (vcpkg)
         shell: pwsh
         run: |
           vcpkg install curl:x64-windows-static-md openssl:x64-windows-static-md zlib:x64-windows-static-md
-          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
-          echo "VCPKG_DEFAULT_TRIPLET=x64-windows-static-md" >> $env:GITHUB_ENV
-          echo "VCPKG_TARGET_TRIPLET=x64-windows-static-md" >> $env:GITHUB_ENV
-          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" >> $env:GITHUB_ENV
-          echo "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" >> $env:GITHUB_ENV
-          echo "ZLIB_ROOT=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" >> $env:GITHUB_ENV
+      - name: Persist vcpkg cache
+        if: always()
+        shell: pwsh
+        run: |
+          $cachePrefix = "$env:SCCACHE_S3_KEY_PREFIX/vcpkg/$env:VCPKG_DEFAULT_TRIPLET"
+          $archiveUri = "s3://$env:RUST_BUILD_CACHE_BUCKET/$cachePrefix/cache.zip"
+          $archivePath = Join-Path $env:RUNNER_TEMP "vcpkg-cache-$env:VCPKG_DEFAULT_TRIPLET.zip"
+          if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+            Write-Warning "AWS CLI not found; skipping vcpkg cache persist"
+            exit 0
+          }
+
+          $cacheEntries = Get-ChildItem -Path $env:VCPKG_BINARY_CACHE_DIR -Recurse -File -ErrorAction SilentlyContinue
+          if (-not $cacheEntries) {
+            Write-Host "No vcpkg cache artifacts to persist"
+            exit 0
+          }
+
+          if (Test-Path $archivePath) {
+            Remove-Item $archivePath -Force
+          }
+          Compress-Archive -Path (Join-Path $env:VCPKG_BINARY_CACHE_DIR '*') -DestinationPath $archivePath -Force
+          Write-Host "Persisting vcpkg binary cache to $archiveUri"
+          $persistOutput = aws s3 cp $archivePath $archiveUri --region $env:RUST_BUILD_CACHE_REGION --no-progress --only-show-errors 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $persistOutputText = ($persistOutput | Out-String).Trim()
+            Write-Warning "Failed to upload vcpkg cache archive: $persistOutputText"
+            $global:LASTEXITCODE = 0
+          }
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: v2-test-windows_x86
+      - name: Configure sccache
+        if: env.SCCACHE_BUCKET != ''
+        shell: pwsh
+        run: |
+          "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
+          "SCCACHE_IDLE_TIMEOUT=0" >> $env:GITHUB_ENV
       - name: Configure version if tag commit
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
-          (Get-Content Cargo.toml) -replace '0\.0\.0-git', '${{ github.ref_name }}' | Set-Content Cargo.toml
-          (Get-Content Cargo.lock) -replace '0\.0\.0-git', '${{ github.ref_name }}' | Set-Content Cargo.lock
+          python .github/scripts/set_root_package_version.py --workspace "$env:GITHUB_WORKSPACE" --version "${{ github.ref_name }}"
       - name: Verify host dependency boundary
         shell: pwsh
         run: |
@@ -385,10 +688,6 @@ jobs:
         shell: pwsh
         run: |
           cargo test -p skippr --no-run
-      - name: Compile runtime-link tests
-        shell: pwsh
-        run: |
-          cargo test -p skippr-plugin-runtime-link --features runtime-sink-link --no-run
       - name: Compile postgres plugin tests
         shell: pwsh
         run: |
@@ -397,6 +696,7 @@ jobs:
   publish_runtime_plugins:
     name: Publish Runtime Plugins
     needs:
+      - plan_runtime_plugin_release
       - linux_x86
       - macos_arm64
       - windows_x86
@@ -416,11 +716,76 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/publish_runtime_plugins.py \
             --bucket "${{ env.RELEASES_BUCKET }}" \
-            --release-tag "${{ github.ref_name }}" \
             --subdir "${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}" \
+            --public-base-url "https://install.skippr.io/releases/${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}" \
             --workspace "$GITHUB_WORKSPACE" \
             --output-dir "$GITHUB_WORKSPACE/runtime-plugin-release"
-          find "$GITHUB_WORKSPACE/runtime-plugin-release" -maxdepth 3 -type f | sort
+          python3 -c 'from pathlib import Path; [print(path) for path in sorted(Path("runtime-plugin-release").rglob("*")) if path.is_file()]'
+
+      - name: Validate staged runtime plugin manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          sys.path.insert(0, str((workspace / ".github" / "scripts").resolve()))
+          from runtime_plugin_catalog import (
+              load_workspace_plugin_catalog,
+              versioned_manifest_relative_path,
+              workspace_runtime_protocol_version,
+          )
+
+          release_root = workspace / "runtime-plugin-release"
+          catalog_entries = load_workspace_plugin_catalog(workspace)
+          manifest_paths = [
+              release_root / versioned_manifest_relative_path(entry)
+              for entry in catalog_entries
+          ]
+          missing_manifests = [str(path) for path in manifest_paths if not path.exists()]
+          if missing_manifests:
+              raise SystemExit(
+                  "staged runtime release is missing generated manifests:\n"
+                  + "\n".join(missing_manifests)
+              )
+
+          expected_protocol_version = workspace_runtime_protocol_version(workspace)
+          mismatches = []
+          for path in manifest_paths:
+              payload = json.loads(path.read_text(encoding="utf-8"))
+              actual = payload.get("protocol_version")
+              if actual != expected_protocol_version:
+                  mismatches.append(
+                      f"{path.name}: expected protocol_version {expected_protocol_version}, got {actual}"
+                  )
+
+          if mismatches:
+              raise SystemExit(
+                  "staged runtime manifests failed validation:\n" + "\n".join(mismatches)
+              )
+
+          latest_index_path = release_root / "latest" / "manifest-index.json"
+          if not latest_index_path.exists():
+              raise SystemExit(
+                  f"staged runtime release is missing required index file: {latest_index_path}"
+              )
+          latest_index = json.loads(latest_index_path.read_text(encoding="utf-8"))
+          indexed_filenames = sorted(
+              entry["manifest_filename"] for entry in latest_index.get("manifests", [])
+          )
+          expected_filenames = sorted(
+              entry["manifest_filename"] for entry in catalog_entries
+          )
+          if indexed_filenames != expected_filenames:
+              raise SystemExit(
+                  "latest manifest index does not match the workspace catalog:\n"
+                  f"expected={expected_filenames}\nactual={indexed_filenames}"
+              )
+          PY
 
       - name: Configure AWS credentials for runtime plugin upload
         uses: aws-actions/configure-aws-credentials@v4
@@ -433,12 +798,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ github.ref_name }}"
           BUCKET="${{ env.RELEASES_BUCKET }}"
           SUBDIR="${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}"
+          RELEASE_ROOT="$GITHUB_WORKSPACE/runtime-plugin-release"
+          aws s3 cp "$RELEASE_ROOT/" \
+            "s3://${BUCKET}/releases/${SUBDIR}/" \
+            --recursive \
+            --exclude "*.json"
           aws s3 cp "$GITHUB_WORKSPACE/runtime-plugin-release/" \
-            "s3://${BUCKET}/releases/${TAG}/${SUBDIR}/" \
-            --recursive
+            "s3://${BUCKET}/releases/${SUBDIR}/" \
+            --recursive \
+            --exclude "*" \
+            --include "*.json" \
+            --cache-control "no-cache, no-store, must-revalidate" \
+            --content-type "application/json"
 
 #  linux_x86_heaptrack:
 #    needs:
@@ -469,6 +842,15 @@ jobs:
     name: test build (linux x86)
     runs-on:
       - ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      SCCACHE_BUCKET: skippr-web-rust-cache-prod
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_KEY_PREFIX: skipprd
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_USE_SSL: "true"
     steps:
       - uses: actions/checkout@v3
 
@@ -494,7 +876,6 @@ jobs:
         with:
           architecture_name: linux_x86
           releases_bucket: ${{ env.RELEASES_BUCKET }}
-          release_tag: ${{ github.ref_name }}
           runtime_plugin_release_subdir: ${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}
 
   chaos_mode_test:
@@ -502,6 +883,7 @@ jobs:
       - cleanup
       - purge_dynamodb
       - linux_x86
+      - publish_runtime_plugins
     name: Chaos Mode (linux x86)
     runs-on:
       - ubuntu-latest-32-cores
@@ -525,6 +907,7 @@ jobs:
       - cleanup
       - purge_dynamodb
       - linux_x86
+      - publish_runtime_plugins
     name: S3 WAL (linux x86)
     runs-on:
       - ubuntu-latest-32-cores
@@ -548,6 +931,7 @@ jobs:
       - cleanup
       - purge_dynamodb
       - linux_x86
+      - publish_runtime_plugins
     name: Deadletter Output Routing Test
     runs-on:
       - ubuntu-latest
@@ -597,6 +981,7 @@ jobs:
      - linux_x86_test
      - chaos_mode_test
      - s3_wal_test
+     - deadletters_test
      - macos_arm64
      - macos_arm64_test_compile
      - windows_x86
@@ -652,7 +1037,7 @@ jobs:
          RELEASE_SUBDIR="${{ env.SKIPPR_EL_RELEASE_SUBDIR }}"
          LATEST_POINTER="${{ env.SKIPPR_EL_LATEST_POINTER }}"
          for f in skippr-el-*.tar.gz; do
-           aws s3 cp "$f" "s3://${BUCKET}/releases/${TAG}/${RELEASE_SUBDIR}/${f}"
+           aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
          done
          printf '%s' "$TAG" > "$LATEST_POINTER"
          aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"

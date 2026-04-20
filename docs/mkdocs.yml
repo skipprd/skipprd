@@ -1,12 +1,18 @@
-site_name: Skippr Docs
+site_name: Skippr Developer & Maintainer Docs
 repo_url: https://github.com/skipprd/skipprd
-site_description: Skippr EL is a data ingestion CLI that discovers schemas and writes optimised Parquet to S3 with Glue/Athena integration.
+site_description: Developer and maintainer guide for Skippr's ingest host, runtime plugin system, CI harness, and release workflow.
+docs_dir: docs
+site_dir: public-docs
 theme:
   name: material
   custom_dir: overrides
   features:
+    - content.code.copy
     - navigation.footer
+    - navigation.indexes
     - navigation.sections
+    - search.highlight
+    - search.suggest
   palette:
     - scheme: default
       toggle:
@@ -22,81 +28,92 @@ extra_css:
   - stylesheets/app.css
 nav:
   - Home: index.md
-  - Getting Started:
+  - Maintainers:
+      - Repository Map: maintainers/repository-map.md
+      - Local Development: maintainers/local-development.md
+      - Runtime Plugins: maintainers/runtime-plugins.md
+      - Runtime Plugin Contract: maintainers/runtime-plugin-contract.md
+      - Runtime E2E Harness: maintainers/runtime-e2e-harness.md
+      - Release Workflow: maintainers/release-workflow.md
+  - Architecture:
+      - How Skippr Works: concepts/how-it-works.md
+      - Exactly-Once Delivery: concepts/exactly-once.md
+      - Schema Discovery & Evolution: concepts/schema.md
+      - Deadletters: concepts/deadletters.md
+  - Operator Guides:
       - Installation: getting-started/install.md
       - Quick Start: getting-started/quickstart.md
-  - Concepts:
-      - How Skippr Works: concepts/how-it-works.md
-      - Schema Discovery & Evolution: concepts/schema.md
-      - Exactly-Once Delivery: concepts/exactly-once.md
-      - Deadletters: concepts/deadletters.md
-  - CLI Reference:
-      - discover: cli/discover.md
-      - sync: cli/sync.md
-      - query: cli/query.md
-      - schema: cli/schema.md
-      - sql-help: cli/sql-help.md
-      - benchmark: cli/benchmark.md
-  - SQL Reference: sql/reference.md
-  - Configuration:
-      - Overview: configuration/overview.md
-      - Pipeline & Workspace: configuration/pipeline.md
-      - Input Source: configuration/input.md
-      - Output Destination: configuration/output.md
-      - Transforms: configuration/transforms.md
-      - Buffering & WAL: configuration/buffering.md
-      - Advanced: configuration/advanced.md
-  - Connectors:
-      - Inputs:
-          - Databases:
-              - ClickHouse: connectors/inputs/clickhouse.md
-              - DuckDB: connectors/inputs/duckdb.md
-              - DynamoDB: connectors/inputs/dynamodb.md
-              - MongoDB: connectors/inputs/mongodb.md
-              - MSSQL: connectors/inputs/mssql.md
-              - MySQL: connectors/inputs/mysql.md
-              - PostgreSQL: connectors/inputs/postgres.md
-              - Redshift: connectors/inputs/redshift.md
-          - Object Stores:
-              - Delta Lake: connectors/inputs/delta_lake.md
-              - Local File: connectors/inputs/file.md
-              - S3: connectors/inputs/s3.md
-              - SFTP: connectors/inputs/sftp.md
-          - Streaming:
-              - Kafka: connectors/inputs/kafka.md
-              - SQS: connectors/inputs/sqs.md
-              - Kinesis: connectors/inputs/kinesis.md
-              - AMQP (RabbitMQ): connectors/inputs/amqp.md
-              - SNS: connectors/inputs/sns.md
-              - EventBridge: connectors/inputs/eventbridge.md
-              - MQTT: connectors/inputs/mqtt.md
-              - WebSocket: connectors/inputs/websocket.md
-          - HTTP:
-              - HTTP Client: connectors/inputs/http_client.md
-              - HTTP Server: connectors/inputs/http_server.md
-          - Other:
-              - Socket (TCP/UDP/Unix): connectors/inputs/socket.md
-              - StatsD: connectors/inputs/statsd.md
-              - Stdin: connectors/inputs/stdin.md
-      - Outputs:
-          - Warehouses:
-              - Athena (S3 + Glue): connectors/outputs/athena.md
-              - ClickHouse: connectors/outputs/clickhouse.md
-              - Databricks: connectors/outputs/databricks.md
-              - DuckDB: connectors/outputs/duckdb.md
-              - Postgres: connectors/outputs/postgres.md
-              - Redshift: connectors/outputs/redshift.md
-              - Snowflake: connectors/outputs/snowflake.md
-              - Synapse: connectors/outputs/synapse.md
-          - Cloud Storage:
-              - GCS: connectors/outputs/gcs.md
-              - Azure Blob: connectors/outputs/azure_blob.md
-              - SFTP: connectors/outputs/sftp.md
-          - Messaging:
-              - AMQP (RabbitMQ): connectors/outputs/amqp.md
-          - Other:
-              - Local File: connectors/outputs/file.md
-              - Stdout: connectors/outputs/stdout.md
+  - Reference:
+      - CLI:
+          - discover: cli/discover.md
+          - sync: cli/sync.md
+          - query: cli/query.md
+          - schema: cli/schema.md
+          - sql-help: cli/sql-help.md
+          - benchmark: cli/benchmark.md
+      - SQL Reference: sql/reference.md
+      - Configuration:
+          - Overview: configuration/overview.md
+          - Pipeline & Workspace: configuration/pipeline.md
+          - Input Source: configuration/input.md
+          - Output Destination: configuration/output.md
+          - Transforms: configuration/transforms.md
+          - Buffering & WAL: configuration/buffering.md
+          - Advanced: configuration/advanced.md
+      - Connectors:
+          - Inputs:
+              - Databases:
+                  - ClickHouse: connectors/inputs/clickhouse.md
+                  - DynamoDB: connectors/inputs/dynamodb.md
+                  - MongoDB: connectors/inputs/mongodb.md
+                  - MotherDuck: connectors/inputs/motherduck.md
+                  - MSSQL: connectors/inputs/mssql.md
+                  - MySQL: connectors/inputs/mysql.md
+                  - PostgreSQL: connectors/inputs/postgres.md
+                  - Redshift: connectors/inputs/redshift.md
+              - Object Stores:
+                  - Delta Lake: connectors/inputs/delta_lake.md
+                  - Local File: connectors/inputs/file.md
+                  - S3: connectors/inputs/s3.md
+                  - SFTP: connectors/inputs/sftp.md
+              - Streaming:
+                  - Kafka: connectors/inputs/kafka.md
+                  - SQS: connectors/inputs/sqs.md
+                  - Kinesis: connectors/inputs/kinesis.md
+                  - AMQP (RabbitMQ): connectors/inputs/amqp.md
+                  - SNS: connectors/inputs/sns.md
+                  - EventBridge: connectors/inputs/eventbridge.md
+                  - MQTT: connectors/inputs/mqtt.md
+                  - WebSocket: connectors/inputs/websocket.md
+              - HTTP:
+                  - HTTP Client: connectors/inputs/http_client.md
+                  - HTTP Server: connectors/inputs/http_server.md
+              - Other:
+                  - Socket (TCP/UDP/Unix): connectors/inputs/socket.md
+                  - StatsD: connectors/inputs/statsd.md
+                  - Stdin: connectors/inputs/stdin.md
+                  - PCAP: connectors/inputs/pcap.md
+          - Outputs:
+              - Warehouses:
+                  - Athena (S3 + Glue): connectors/outputs/athena.md
+                  - BigQuery: connectors/outputs/bigquery.md
+                  - ClickHouse: connectors/outputs/clickhouse.md
+                  - Databricks: connectors/outputs/databricks.md
+                  - MotherDuck: connectors/outputs/motherduck.md
+                  - Postgres: connectors/outputs/postgres.md
+                  - Redshift: connectors/outputs/redshift.md
+                  - Snowflake: connectors/outputs/snowflake.md
+                  - Synapse: connectors/outputs/synapse.md
+              - Cloud Storage:
+                  - S3: connectors/outputs/s3.md
+                  - GCS: connectors/outputs/gcs.md
+                  - Azure Blob: connectors/outputs/azure_blob.md
+                  - SFTP: connectors/outputs/sftp.md
+              - Messaging:
+                  - AMQP (RabbitMQ): connectors/outputs/amqp.md
+              - Other:
+                  - Local File: connectors/outputs/file.md
+                  - Stdout: connectors/outputs/stdout.md
   - Operations:
       - Logging Event Map: operations/logging.md
       - Troubleshooting: operations/troubleshooting.md

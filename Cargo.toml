@@ -1,12 +1,13 @@
 [package]
 name = "skippr"
-version = "0.0.0-git"
+version = "0.1.0"
 edition = "2021"
 
 [workspace]
 resolver = "2"
 members = [
-    "plugins/skippr-plugin-runtime-link",
+    "crates/skippr-core",
+    "crates/skippr-runtime-sdk",
     "plugins/data_source/*",
     "plugins/data_sink/*",
     "plugins/schema_sink/*",
@@ -36,6 +37,8 @@ tokio-postgres = "0.7.16"
 tokio-tungstenite = "0.21"
 tracing = "0.1"
 tungstenite = "0.21"
+skippr-core = { path = "crates/skippr-core" }
+skippr-runtime-sdk = { path = "crates/skippr-runtime-sdk" }
 
 [[bin]]
 name = "skippr-el"
@@ -141,14 +144,6 @@ serial_test = "1.0.0"
 assert_cmd = "2"
 predicates = "3"
 proptest = "1.10.0"
-tokio-postgres = { workspace = true }
-aws-sdk-dynamodb = "1.51.0"
-futures-util = "0.3"
-lapin = "2"
-mongodb = "3"
-mysql_async = "0.34"
-rdkafka = { version = "0.36", features = ["cmake-build"] }
-ssh2 = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 nix = "0.26.2"

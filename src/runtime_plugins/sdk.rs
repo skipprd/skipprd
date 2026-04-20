@@ -16,19 +16,27 @@ use futures::StreamExt;
 pub async fn encode_record_batch_stream(
     mut stream: SendableRecordBatchStream,
 ) -> Result<Vec<u8>, io::Error> {
-    let schema = stream.schema();
+    let mut batches = Vec::new();
+    while let Some(batch_result) = stream.next().await {
+        batches.push(batch_result.map_err(|err| io::Error::other(err.to_string()))?);
+    }
+    encode_record_batches(&batches)
+}
+
+pub fn encode_record_batches(batches: &[RecordBatch]) -> Result<Vec<u8>, io::Error> {
+    let schema = batches
+        .first()
+        .map(|batch| batch.schema())
+        .unwrap_or_else(|| Arc::new(arrow_schema::Schema::empty()));
     let mut bytes = Vec::new();
     let options = IpcWriteOptions::default();
     let mut writer = StreamWriter::try_new_with_options(&mut bytes, &schema, options)
         .map_err(|err| io::Error::other(err.to_string()))?;
-
-    while let Some(batch_result) = stream.next().await {
-        let batch = batch_result.map_err(|err| io::Error::other(err.to_string()))?;
+    for batch in batches {
         writer
-            .write(&batch)
+            .write(batch)
             .map_err(|err| io::Error::other(err.to_string()))?;
     }
-
     writer
         .finish()
         .map_err(|err| io::Error::other(err.to_string()))?;

@@ -1,11 +1,7 @@
-#[path = "../../../shared/append_source_runtime.rs"]
-mod append_source_runtime;
-
-use append_source_runtime::run_append_data_source_main;
-use skippr::plugins::cdc;
-use skippr::plugins::DataSource;
-use skippr_plugin_runtime_link::runtime_plugin_data_sources::runtime_source_socket::DataSourceSocketPlugin;
-use skippr_plugin_runtime_link::runtime_plugin_data_sources::runtime_source_socket::DataSourceSocketPluginConfig;
+use skippr_core::plugins::cdc;
+use skippr_core::plugins::DataSource;
+use skippr_plugin_data_source_socket::*;
+use skippr_runtime_sdk::append_source_runtime::run_append_data_source_main;
 
 #[tokio::main]
 async fn main() {

@@ -20,7 +20,7 @@ data_sources:
     S3:
       batch_size_bytes: 2048000
       s3_bucket: skippr-e2e-sample-data
-      s3_prefix: many/bike-hire-many
+      s3_prefix: bike-hire/
 
 data_sinks:
   test_datalake:

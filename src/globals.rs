@@ -37,3 +37,6 @@ pub static ARROW_SCHEMA: Lazy<dashmap::DashMap<String, ArcSwap<Schema>>> =
     Lazy::new(|| dashmap::DashMap::new());
 pub static ARROW_SCHEMA_VERSION: Lazy<dashmap::DashMap<String, AtomicU64>> =
     Lazy::new(|| dashmap::DashMap::new());
+
+/// Monotonic latest-only schema version for the whole pipeline runtime.
+pub static PIPELINE_SCHEMA_VERSION: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));

@@ -25,5 +25,5 @@ All notable changes to this project will be documented in this file.
 - Code structure optimization
 - Build system enhancements
 
-## [0.0.0-git] - 2024-03-23
+## [0.1.0] - 2024-03-23
 - Initial development version 

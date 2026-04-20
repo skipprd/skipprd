@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-sink-s3"
-version = "0.0.0-git"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -10,5 +10,30 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 tokio.workspace = true
-skippr = { path = "../../.." }
-skippr-plugin-runtime-link = { path = "../../skippr-plugin-runtime-link", default-features = false, features = ["runtime-sink-link"] }
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
+arrow.workspace = true
+bytes.workspace = true
+futures.workspace = true
+parquet.workspace = true
+
+async-trait = "0.1.77"
+aws-config = "1.5.1"
+aws-sdk-s3 = "1.32.0"
+datafusion = "50.3.0"
+hex = "0.4.3"
+md5 = "0.7.0"
+serde.workspace = true
+serde_derive = "1.0.105"
+tracing = "0.1"
+[package.metadata.skippr-plugin]
+kind = "DataSink"
+plugin_name = "S3"
+
+[package.metadata.skippr-plugin.sink_capability]
+name = "S3"
+guarantee_tier = "CdcEncodedOnly"
+can_manage_skippr_columns = false
+can_maintain_tombstone_tables = false
+can_compare_order_tokens = false
+supports_transactions = false

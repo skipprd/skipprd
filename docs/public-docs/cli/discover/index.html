@@ -6,12 +6,12 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Skippr is a data ingestion CLI that discovers schemas and writes optimised Parquet to S3 with Glue/Athena integration.">
+        <meta name="description" content="Developer and maintainer guide for Skippr's ingest host, runtime plugin system, CI harness, and release workflow.">
       
       
       
       
-        <link rel="prev" href="../../concepts/deadletters/">
+        <link rel="prev" href="../../getting-started/quickstart/">
       
       
         <link rel="next" href="../sync/">
@@ -21,7 +21,7 @@
     
     
       
-        <title>discover - Skippr Docs</title>
+        <title>discover - Skippr Developer & Maintainer Docs</title>
       
     
     
@@ -87,7 +87,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#skippr-discover" class="md-skip">
+        <a href="#skippr-el-discover" class="md-skip">
           Skip to content
         </a>
       
@@ -113,7 +113,7 @@
 
 <header class="md-header md-header--shadow" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
-    <a href="../.." title="Skippr Docs" class="md-header__button md-logo" aria-label="Skippr Docs" data-md-component="logo">
+    <a href="../.." title="Skippr Developer &amp; Maintainer Docs" class="md-header__button md-logo" aria-label="Skippr Developer & Maintainer Docs" data-md-component="logo">
       
   
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54Z"/></svg>
@@ -126,7 +126,7 @@
       <div class="md-header__ellipsis">
         <div class="md-header__topic">
           <span class="md-ellipsis">
-            Skippr Docs
+            Skippr Developer & Maintainer Docs
           </span>
         </div>
         <div class="md-header__topic" data-md-component="header-topic">
@@ -186,6 +186,8 @@
         </button>
       </nav>
       
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
     </form>
     <div class="md-search__output">
       <div class="md-search__scrollwrap" data-md-scrollfix>
@@ -237,13 +239,13 @@
 
 <nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
   <label class="md-nav__title" for="__drawer">
-    <a href="../.." title="Skippr Docs" class="md-nav__button md-logo" aria-label="Skippr Docs" data-md-component="logo">
+    <a href="../.." title="Skippr Developer &amp; Maintainer Docs" class="md-nav__button md-logo" aria-label="Skippr Developer & Maintainer Docs" data-md-component="logo">
       
   
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54Z"/></svg>
 
     </a>
-    Skippr Docs
+    Skippr Developer & Maintainer Docs
   </label>
   
     <div class="md-nav__source">
@@ -293,16 +295,260 @@
       <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
       
       
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+      
       
         <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
-          Getting Started
+          Maintainers
           <span class="md-nav__icon md-icon"></span>
         </label>
       
       <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
         <label class="md-nav__title" for="__nav_2">
           <span class="md-nav__icon md-icon"></span>
-          Getting Started
+          Maintainers
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../maintainers/repository-map/" class="md-nav__link">
+        Repository Map
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../maintainers/local-development/" class="md-nav__link">
+        Local Development
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../maintainers/runtime-plugins/" class="md-nav__link">
+        Runtime Plugins
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../maintainers/runtime-plugin-contract/" class="md-nav__link">
+        Runtime Plugin Contract
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../maintainers/runtime-e2e-harness/" class="md-nav__link">
+        Runtime E2E Harness
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../maintainers/release-workflow/" class="md-nav__link">
+        Release Workflow
+      </a>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    
+      
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+      
+      
+      
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+      
+      
+        
+          
+        
+          
+        
+          
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+          Architecture
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_3">
+          <span class="md-nav__icon md-icon"></span>
+          Architecture
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/how-it-works/" class="md-nav__link">
+        How Skippr Works
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/exactly-once/" class="md-nav__link">
+        Exactly-Once Delivery
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/schema/" class="md-nav__link">
+        Schema Discovery & Evolution
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/deadletters/" class="md-nav__link">
+        Deadletters
+      </a>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    
+      
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+      
+      
+      
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+      
+      
+        
+          
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+          Operator Guides
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_4">
+          <span class="md-nav__icon md-icon"></span>
+          Operator Guides
         </label>
         <ul class="md-nav__list" data-md-scrollfix>
           
@@ -346,99 +592,6 @@
 
   
   
-  
-    
-      
-    
-    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
-      
-      
-      
-      
-      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
-      
-      
-      
-        <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
-          Concepts
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
-        <label class="md-nav__title" for="__nav_3">
-          <span class="md-nav__icon md-icon"></span>
-          Concepts
-        </label>
-        <ul class="md-nav__list" data-md-scrollfix>
-          
-            
-              
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../concepts/how-it-works/" class="md-nav__link">
-        How Skippr Works
-      </a>
-    </li>
-  
-
-            
-          
-            
-              
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../concepts/schema/" class="md-nav__link">
-        Schema Discovery & Evolution
-      </a>
-    </li>
-  
-
-            
-          
-            
-              
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../concepts/exactly-once/" class="md-nav__link">
-        Exactly-Once Delivery
-      </a>
-    </li>
-  
-
-            
-          
-            
-              
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../concepts/deadletters/" class="md-nav__link">
-        Deadletters
-      </a>
-    </li>
-  
-
-            
-          
-        </ul>
-      </nav>
-    </li>
-  
-
-    
-      
-      
-      
-
-  
-  
     
   
   
@@ -450,19 +603,72 @@
       
       
       
-      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
       
       
+        
+          
+        
+          
+        
+          
+        
+          
+        
       
-        <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
-          CLI Reference
+      
+        <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+          Reference
           <span class="md-nav__icon md-icon"></span>
         </label>
       
-      <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
-        <label class="md-nav__title" for="__nav_4">
+      <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+        <label class="md-nav__title" for="__nav_5">
           <span class="md-nav__icon md-icon"></span>
-          CLI Reference
+          Reference
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+    
+  
+  
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+      
+      
+      
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" checked>
+      
+      
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+          CLI
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="true">
+        <label class="md-nav__title" for="__nav_5_1">
+          <span class="md-nav__icon md-icon"></span>
+          CLI
         </label>
         <ul class="md-nav__list" data-md-scrollfix>
           
@@ -529,6 +735,26 @@
         <li class="md-nav__item">
   <a href="#example" class="md-nav__link">
     Example
+  </a>
+  
+    <nav class="md-nav" aria-label="Example">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#structured-output-for-programmatic-use" class="md-nav__link">
+    Structured output for programmatic use
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-discovered-schemas" class="md-nav__link">
+    Reading discovered schemas
   </a>
   
 </li>
@@ -631,11 +857,10 @@
     </li>
   
 
-    
-      
-      
-      
-
+            
+          
+            
+              
   
   
   
@@ -646,33 +871,46 @@
     </li>
   
 
-    
-      
-      
-      
-
+            
+          
+            
+              
   
   
   
     
-      
-    
-    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
       
       
       
-      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_3" >
       
       
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
       
-        <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+      
+        <label class="md-nav__link" for="__nav_5_3" id="__nav_5_3_label" tabindex="0">
           Configuration
           <span class="md-nav__icon md-icon"></span>
         </label>
       
-      <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
-        <label class="md-nav__title" for="__nav_6">
+      <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_3_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_3">
           <span class="md-nav__icon md-icon"></span>
           Configuration
         </label>
@@ -781,33 +1019,36 @@
     </li>
   
 
-    
-      
-      
-      
-
+            
+          
+            
+              
   
   
   
     
-      
-    
-    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
       
       
       
-      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4" >
       
       
+        
+          
+        
+          
+        
       
-        <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+      
+        <label class="md-nav__link" for="__nav_5_4" id="__nav_5_4_label" tabindex="0">
           Connectors
           <span class="md-nav__icon md-icon"></span>
         </label>
       
-      <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
-        <label class="md-nav__title" for="__nav_7">
+      <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_4_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_4">
           <span class="md-nav__icon md-icon"></span>
           Connectors
         </label>
@@ -824,17 +1065,29 @@
       
       
       
-      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7_1" >
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4_1" >
       
       
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
       
-        <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+      
+        <label class="md-nav__link" for="__nav_5_4_1" id="__nav_5_4_1_label" tabindex="0">
           Inputs
           <span class="md-nav__icon md-icon"></span>
         </label>
       
-      <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
-        <label class="md-nav__title" for="__nav_7_1">
+      <nav class="md-nav" data-md-level="3" aria-labelledby="__nav_5_4_1_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_4_1">
           <span class="md-nav__icon md-icon"></span>
           Inputs
         </label>
@@ -845,9 +1098,54 @@
   
   
   
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+      
+      
+      
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4_1_1" >
+      
+      
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_5_4_1_1" id="__nav_5_4_1_1_label" tabindex="0">
+          Databases
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" data-md-level="4" aria-labelledby="__nav_5_4_1_1_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_4_1_1">
+          <span class="md-nav__icon md-icon"></span>
+          Databases
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+  
     <li class="md-nav__item">
-      <a href="../../connectors/inputs/s3/" class="md-nav__link">
-        S3
+      <a href="../../connectors/inputs/clickhouse/" class="md-nav__link">
+        ClickHouse
       </a>
     </li>
   
@@ -860,8 +1158,92 @@
   
   
     <li class="md-nav__item">
-      <a href="../../connectors/inputs/file/" class="md-nav__link">
-        Local File
+      <a href="../../connectors/inputs/dynamodb/" class="md-nav__link">
+        DynamoDB
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/mongodb/" class="md-nav__link">
+        MongoDB
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/motherduck/" class="md-nav__link">
+        MotherDuck
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/mssql/" class="md-nav__link">
+        MSSQL
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/mysql/" class="md-nav__link">
+        MySQL
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/postgres/" class="md-nav__link">
+        PostgreSQL
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/redshift/" class="md-nav__link">
+        Redshift
       </a>
     </li>
   
@@ -886,19 +1268,515 @@
       
       
       
-      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7_2" >
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4_1_2" >
+      
+      
+        
+          
+        
+          
+        
+          
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_5_4_1_2" id="__nav_5_4_1_2_label" tabindex="0">
+          Object Stores
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" data-md-level="4" aria-labelledby="__nav_5_4_1_2_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_4_1_2">
+          <span class="md-nav__icon md-icon"></span>
+          Object Stores
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/delta_lake/" class="md-nav__link">
+        Delta Lake
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/file/" class="md-nav__link">
+        Local File
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/s3/" class="md-nav__link">
+        S3
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/sftp/" class="md-nav__link">
+        SFTP
+      </a>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    
+    <li class="md-nav__item md-nav__item--nested">
       
       
       
-        <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+      
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4_1_3" >
+      
+      
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_5_4_1_3" id="__nav_5_4_1_3_label" tabindex="0">
+          Streaming
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" data-md-level="4" aria-labelledby="__nav_5_4_1_3_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_4_1_3">
+          <span class="md-nav__icon md-icon"></span>
+          Streaming
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/kafka/" class="md-nav__link">
+        Kafka
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/sqs/" class="md-nav__link">
+        SQS
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/kinesis/" class="md-nav__link">
+        Kinesis
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/amqp/" class="md-nav__link">
+        AMQP (RabbitMQ)
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/sns/" class="md-nav__link">
+        SNS
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/eventbridge/" class="md-nav__link">
+        EventBridge
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/mqtt/" class="md-nav__link">
+        MQTT
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/websocket/" class="md-nav__link">
+        WebSocket
+      </a>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+      
+      
+      
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4_1_4" >
+      
+      
+        
+          
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_5_4_1_4" id="__nav_5_4_1_4_label" tabindex="0">
+          HTTP
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" data-md-level="4" aria-labelledby="__nav_5_4_1_4_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_4_1_4">
+          <span class="md-nav__icon md-icon"></span>
+          HTTP
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/http_client/" class="md-nav__link">
+        HTTP Client
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/http_server/" class="md-nav__link">
+        HTTP Server
+      </a>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+      
+      
+      
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4_1_5" >
+      
+      
+        
+          
+        
+          
+        
+          
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_5_4_1_5" id="__nav_5_4_1_5_label" tabindex="0">
+          Other
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" data-md-level="4" aria-labelledby="__nav_5_4_1_5_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_4_1_5">
+          <span class="md-nav__icon md-icon"></span>
+          Other
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/socket/" class="md-nav__link">
+        Socket (TCP/UDP/Unix)
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/statsd/" class="md-nav__link">
+        StatsD
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/stdin/" class="md-nav__link">
+        Stdin
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/inputs/pcap/" class="md-nav__link">
+        PCAP
+      </a>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+      
+      
+      
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4_2" >
+      
+      
+        
+          
+        
+          
+        
+          
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_5_4_2" id="__nav_5_4_2_label" tabindex="0">
           Outputs
           <span class="md-nav__icon md-icon"></span>
         </label>
       
-      <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
-        <label class="md-nav__title" for="__nav_7_2">
+      <nav class="md-nav" data-md-level="3" aria-labelledby="__nav_5_4_2_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_4_2">
           <span class="md-nav__icon md-icon"></span>
           Outputs
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+  
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+      
+      
+      
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4_2_1" >
+      
+      
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_5_4_2_1" id="__nav_5_4_2_1_label" tabindex="0">
+          Warehouses
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" data-md-level="4" aria-labelledby="__nav_5_4_2_1_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_4_2_1">
+          <span class="md-nav__icon md-icon"></span>
+          Warehouses
         </label>
         <ul class="md-nav__list" data-md-scrollfix>
           
@@ -922,9 +1800,341 @@
   
   
     <li class="md-nav__item">
+      <a href="../../connectors/outputs/bigquery/" class="md-nav__link">
+        BigQuery
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/clickhouse/" class="md-nav__link">
+        ClickHouse
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/databricks/" class="md-nav__link">
+        Databricks
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/motherduck/" class="md-nav__link">
+        MotherDuck
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/postgres/" class="md-nav__link">
+        Postgres
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/redshift/" class="md-nav__link">
+        Redshift
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/snowflake/" class="md-nav__link">
+        Snowflake
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/synapse/" class="md-nav__link">
+        Synapse
+      </a>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+      
+      
+      
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4_2_2" >
+      
+      
+        
+          
+        
+          
+        
+          
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_5_4_2_2" id="__nav_5_4_2_2_label" tabindex="0">
+          Cloud Storage
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" data-md-level="4" aria-labelledby="__nav_5_4_2_2_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_4_2_2">
+          <span class="md-nav__icon md-icon"></span>
+          Cloud Storage
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/s3/" class="md-nav__link">
+        S3
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/gcs/" class="md-nav__link">
+        GCS
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/azure_blob/" class="md-nav__link">
+        Azure Blob
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/sftp/" class="md-nav__link">
+        SFTP
+      </a>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+      
+      
+      
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4_2_3" >
+      
+      
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_5_4_2_3" id="__nav_5_4_2_3_label" tabindex="0">
+          Messaging
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" data-md-level="4" aria-labelledby="__nav_5_4_2_3_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_4_2_3">
+          <span class="md-nav__icon md-icon"></span>
+          Messaging
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/amqp/" class="md-nav__link">
+        AMQP (RabbitMQ)
+      </a>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+      
+      
+      
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_4_2_4" >
+      
+      
+        
+          
+        
+          
+        
+      
+      
+        <label class="md-nav__link" for="__nav_5_4_2_4" id="__nav_5_4_2_4_label" tabindex="0">
+          Other
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" data-md-level="4" aria-labelledby="__nav_5_4_2_4_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_5_4_2_4">
+          <span class="md-nav__icon md-icon"></span>
+          Other
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../connectors/outputs/file/" class="md-nav__link">
         Local File
       </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../connectors/outputs/stdout/" class="md-nav__link">
+        Stdout
+      </a>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
     </li>
   
 
@@ -958,17 +2168,23 @@
       
       
       
-      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+      <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
       
       
+        
+          
+        
+          
+        
       
-        <label class="md-nav__link" for="__nav_8" id="__nav_8_label" tabindex="0">
+      
+        <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
           Operations
           <span class="md-nav__icon md-icon"></span>
         </label>
       
-      <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
-        <label class="md-nav__title" for="__nav_8">
+      <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+        <label class="md-nav__title" for="__nav_6">
           <span class="md-nav__icon md-icon"></span>
           Operations
         </label>
@@ -1075,6 +2291,26 @@
     Example
   </a>
   
+    <nav class="md-nav" aria-label="Example">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#structured-output-for-programmatic-use" class="md-nav__link">
+    Structured output for programmatic use
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-discovered-schemas" class="md-nav__link">
+    Reading discovered schemas
+  </a>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1109,10 +2345,10 @@
   
 
 
-<h1 id="skippr-discover">skippr discover<a class="headerlink" href="#skippr-discover" title="Permanent link">&para;</a></h1>
-<p>Connect to the data source, sample records, and infer the pipeline schema.</p>
+<h1 id="skippr-el-discover">skippr-el discover<a class="headerlink" href="#skippr-el-discover" title="Permanent link">&para;</a></h1>
+<p>Connect to the data source, sample records, and infer the pipeline schema. Unlike <code>sync</code>, discover never writes to the output destination -- it only discovers schemas and persists metadata.</p>
 <h2 id="usage">Usage<a class="headerlink" href="#usage" title="Permanent link">&para;</a></h2>
-<pre><code class="language-bash">skippr discover --pipeline &lt;name&gt; [--log [LEVEL]] [--verbose]
+<pre><code class="language-bash">skippr-el discover --pipeline &lt;name&gt; [--output &lt;mode&gt;] [--log [LEVEL]]
 </code></pre>
 <h2 id="flags">Flags<a class="headerlink" href="#flags" title="Permanent link">&para;</a></h2>
 <table>
@@ -1130,42 +2366,59 @@
 <td>Pipeline name. Falls back to <code>PIPELINE_NAME</code> env var.</td>
 </tr>
 <tr>
+<td><code>--output</code></td>
+<td>No</td>
+<td>Output mode: <code>progress</code> (default, interactive spinner), <code>json</code> (structured JSON lines to stdout), or <code>text</code> (plain text summaries).</td>
+</tr>
+<tr>
 <td><code>--log</code></td>
 <td>No</td>
 <td>Enable logging. Optional level: <code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code>. Defaults to <code>info</code> when flag is present.</td>
-</tr>
-<tr>
-<td><code>--verbose</code></td>
-<td>No</td>
-<td>Stream verbose logs to stdout instead of showing a progress bar.</td>
 </tr>
 </tbody>
 </table>
 <h2 id="what-it-does">What it does<a class="headerlink" href="#what-it-does" title="Permanent link">&para;</a></h2>
 <ol>
-<li>Reads configuration from environment variables (and optional config file)</li>
+<li>Loads or creates pipeline metadata (from S3 or local disk, depending on <code>SKIPPR_STORAGE_MODE</code>)</li>
+<li>Initializes the offset database</li>
 <li>Connects to the data source configured by <code>DATA_SOURCE_PLUGIN_NAME</code></li>
-<li>Samples records and infers the complete nested schema</li>
-<li>Persists the schema as pipeline metadata to <code>SKIPPR_S3_BUCKET</code></li>
+<li>Samples records and infers the complete nested schema via type inference</li>
+<li>Persists the updated pipeline metadata</li>
+<li>Exits</li>
 </ol>
+<p>Discover does <strong>not</strong> initialize or sync to any output plugin. It is purely a schema inference operation.</p>
 <h2 id="example">Example<a class="headerlink" href="#example" title="Permanent link">&para;</a></h2>
 <pre><code class="language-bash">DATA_SOURCE_PLUGIN_NAME=s3 \
 DATA_SOURCE_S3_BUCKET=my-source-bucket \
 DATA_SOURCE_S3_PREFIX=events/ \
 SKIPPR_S3_BUCKET=my-state-bucket \
-skippr discover --pipeline events --log
+skippr-el discover --pipeline events --log
+</code></pre>
+<h3 id="structured-output-for-programmatic-use">Structured output for programmatic use<a class="headerlink" href="#structured-output-for-programmatic-use" title="Permanent link">&para;</a></h3>
+<pre><code class="language-bash">skippr-el discover --pipeline el_mssql --output json
+</code></pre>
+<p>This emits JSON events to stdout:</p>
+<pre><code class="language-json">{&quot;event&quot;:&quot;discover_start&quot;,&quot;pipeline&quot;:&quot;el_mssql&quot;,&quot;timestamp&quot;:&quot;2026-03-18T12:00:00Z&quot;}
+{&quot;event&quot;:&quot;namespace_discovered&quot;,&quot;namespace&quot;:&quot;mssql.MyDB.dbo.customers&quot;,&quot;fields&quot;:[{&quot;name&quot;:&quot;id&quot;,&quot;type&quot;:&quot;Long&quot;},{&quot;name&quot;:&quot;email&quot;,&quot;type&quot;:&quot;String&quot;}],&quot;timestamp&quot;:&quot;...&quot;}
+{&quot;event&quot;:&quot;namespace_discovered&quot;,&quot;namespace&quot;:&quot;mssql.MyDB.dbo.orders&quot;,&quot;fields&quot;:[{&quot;name&quot;:&quot;order_id&quot;,&quot;type&quot;:&quot;Long&quot;},{&quot;name&quot;:&quot;total&quot;,&quot;type&quot;:&quot;Double&quot;}],&quot;timestamp&quot;:&quot;...&quot;}
+{&quot;event&quot;:&quot;discover_complete&quot;,&quot;pipeline&quot;:&quot;el_mssql&quot;,&quot;namespaces_discovered&quot;:2,&quot;elapsed_ms&quot;:12000,&quot;timestamp&quot;:&quot;...&quot;}
+</code></pre>
+<p>The <code>fields</code> array uses <code>SkipprDataType</code> names (<code>String</code>, <code>Long</code>, <code>Double</code>, <code>Boolean</code>, <code>Date</code>, <code>Timestamp</code>, etc.) representing the inferred source types.</p>
+<h2 id="reading-discovered-schemas">Reading discovered schemas<a class="headerlink" href="#reading-discovered-schemas" title="Permanent link">&para;</a></h2>
+<p>After <code>skippr-el discover</code> completes, use <a href="../../sql/reference/#show-pipeline"><code>SHOW PIPELINE</code></a> to retrieve the full discovered schema including field names and inferred types:</p>
+<pre><code class="language-bash">skippr-el query --sql &quot;SHOW PIPELINE el_mssql&quot; --plain
 </code></pre>
 <h2 id="key-log-events">Key log events<a class="headerlink" href="#key-log-events" title="Permanent link">&para;</a></h2>
 <ul>
-<li><code>Discovered new namespace: &lt;name&gt;</code> — a new event type/schema was found</li>
-<li><code>Discovered new field: &lt;field&gt;</code> — a new field was added to the schema</li>
-<li><code>Updated pipeline metadata in S3</code> — schema persisted</li>
+<li><code>Discovered new namespace: &lt;name&gt;</code> -- a new event type/schema was found</li>
+<li><code>Discovered new field: &lt;field&gt;</code> -- a new field was added to the schema</li>
+<li><code>Updated pipeline metadata</code> -- schema persisted</li>
 </ul>
 <h2 id="notes">Notes<a class="headerlink" href="#notes" title="Permanent link">&para;</a></h2>
 <ul>
 <li>Discovery must be run before the first <code>sync</code> to establish the pipeline schema.</li>
 <li>Re-running discover updates the schema if the source data has changed.</li>
-<li>Discovery does not ingest or move data — it only reads a sample.</li>
+<li>Discovery does not ingest or move data -- it only reads a sample and infers types.</li>
 </ul>
 
 
@@ -1190,7 +2443,7 @@ skippr discover --pipeline events --log
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../../concepts/deadletters/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Deadletters" rel="prev">
+          <a href="../../getting-started/quickstart/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Quick Start" rel="prev">
             <div class="md-footer__button md-icon">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12Z"/></svg>
             </div>
@@ -1199,7 +2452,7 @@ skippr discover --pipeline events --log
                 Previous
               </span>
               <div class="md-ellipsis">
-                Deadletters
+                Quick Start
               </div>
             </div>
           </a>
@@ -1366,7 +2619,7 @@ skippr discover --pipeline events --log
       </div>
       <script>var consent=__md_get("__consent");if(consent)for(var input of document.forms.consent.elements)input.name&&(input.checked=consent[input.name]||!1);else"file:"!==location.protocol&&setTimeout(function(){document.querySelector("[data-md-component=consent]").hidden=!1},250);var action,form=document.forms.consent;for(action of["submit","reset"])form.addEventListener(action,function(e){if(e.preventDefault(),"reset"===e.type)for(var n of document.forms.consent.elements)n.name&&(n.checked=!1);__md_set("__consent",Object.fromEntries(Array.from(new FormData(form).keys()).map(function(e){return[e,!0]}))),location.hash="",location.reload()})</script>
     
-    <script id="__config" type="application/json">{"base": "../..", "features": ["navigation.footer", "navigation.sections"], "search": "../../assets/javascripts/workers/search.74e28a9f.min.js", "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}}</script>
+    <script id="__config" type="application/json">{"base": "../..", "features": ["content.code.copy", "navigation.footer", "navigation.indexes", "navigation.sections", "search.highlight", "search.suggest"], "search": "../../assets/javascripts/workers/search.74e28a9f.min.js", "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}}</script>
     
     
       <script src="../../assets/javascripts/bundle.220ee61c.min.js"></script>

@@ -27,7 +27,11 @@ fn make_batch() -> arrow::record_batch::RecordBatch {
         std::sync::Arc::new(schema),
         vec![
             std::sync::Arc::new(Int64Array::from(vec![1, 2, 3])),
-            std::sync::Arc::new(StringArray::from(vec![Some("Alice"), Some("Bob"), Some("Charlie")])),
+            std::sync::Arc::new(StringArray::from(vec![
+                Some("Alice"),
+                Some("Bob"),
+                Some("Charlie"),
+            ])),
         ],
     )
     .unwrap()
@@ -171,8 +175,10 @@ fn reference_path_checkpoint_envelope_authority_model() {
         payload_bytes: b"s3:last-key:data/2024/file.csv".to_vec(),
     };
 
-    let d1: CheckpointEnvelope = bincode::deserialize(&bincode::serialize(&wal_owned).unwrap()).unwrap();
-    let d2: CheckpointEnvelope = bincode::deserialize(&bincode::serialize(&advisory).unwrap()).unwrap();
+    let d1: CheckpointEnvelope =
+        bincode::deserialize(&bincode::serialize(&wal_owned).unwrap()).unwrap();
+    let d2: CheckpointEnvelope =
+        bincode::deserialize(&bincode::serialize(&advisory).unwrap()).unwrap();
     assert_eq!(d1.authority, CheckpointAuthority::WalOwnership);
     assert_eq!(d2.authority, CheckpointAuthority::AdvisoryHint);
 }

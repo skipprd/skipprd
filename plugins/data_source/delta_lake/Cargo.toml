@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-source-delta-lake"
-version = "0.0.0-git"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -12,5 +12,24 @@ async-trait.workspace = true
 datafusion.workspace = true
 clap.workspace = true
 tokio.workspace = true
-skippr = { path = "../../.." }
-skippr-plugin-runtime-link = { path = "../../skippr-plugin-runtime-link", default-features = false, features = ["runtime-plugin-source-delta-lake"] }
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
+
+arrow = { version = "56.2.0", features = ["ipc_compression"] }
+deltalake = { version = "0.27", features = ["datafusion"] }
+futures = "0.3.25"
+serde.workspace = true
+serde_derive = "1.0.105"
+tracing = "0.1"
+[package.metadata.skippr-plugin]
+kind = "DataSource"
+plugin_name = "DeltaLake"
+
+[package.metadata.skippr-plugin.source_capability]
+name = "DeltaLake"
+guarantee_tier = "SnapshotThenLogExactOnce"
+checkpoint_style = "LogNative"
+bootstrap_style = "AnchoredSnapshot"
+order_model = "GlobalTotalOrder"
+supports_deletes = true
+event_id_semantics = "LogPosition"

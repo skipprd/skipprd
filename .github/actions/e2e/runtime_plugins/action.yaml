@@ -7,9 +7,10 @@ inputs:
   releases_bucket:
     description: 'Public S3 bucket containing release assets'
     required: true
-  release_tag:
-    description: 'Release tag whose runtime plugin manifests should be consumed'
-    required: true
+  runtime_plugin_versions:
+    description: 'Optional newline-delimited PLUGIN=VERSION pins to validate; unpinned plugins resolve from latest'
+    required: false
+    default: ""
   runtime_plugin_release_subdir:
     description: 'Release subdirectory for published runtime plugin assets'
     required: true
@@ -23,68 +24,22 @@ runs:
         set -euo pipefail
 
         chmod +x "./skippr-el-${{ inputs.architecture_name }}/skippr-el"
-        export SKIPPR_E2E_SKIPPR_EL_BIN="$PWD/skippr-el-${{ inputs.architecture_name }}/skippr-el"
-        export SKIPPR_RUNTIME_PLUGIN_DIR
-        SKIPPR_RUNTIME_PLUGIN_DIR="$(mktemp -d)"
-        export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
-
-        MANIFEST_DIR="$(mktemp -d)"
-        MANIFEST_ROOT="https://${{ inputs.releases_bucket }}.s3.amazonaws.com/releases/${{ inputs.release_tag }}/${{ inputs.runtime_plugin_release_subdir }}/manifests"
-
-        cleanup() {
-          docker compose down -v >/dev/null 2>&1 || true
-          rm -rf "$MANIFEST_DIR" "$SKIPPR_RUNTIME_PLUGIN_DIR"
-        }
-        trap cleanup EXIT
-
-        mapfile -t runtime_source_manifests < <(cd runtime_plugins/manifests && ls *-source.json 2>/dev/null | sort)
-        expected_source_manifests=("postgres-source.json")
-        if [[ "${runtime_source_manifests[*]:-}" != "${expected_source_manifests[*]}" ]]; then
-          echo "Runtime source manifest inventory changed: ${runtime_source_manifests[*]:-}" >&2
-          echo "Update this action to cover every published runtime source manifest." >&2
-          exit 1
-        fi
-
-        for manifest in file-sink.json postgres-source.json postgres-sink.json postgres-schema.json; do
-          curl --fail --silent --show-error --location \
-            "${MANIFEST_ROOT}/${manifest}" \
-            --output "${MANIFEST_DIR}/${manifest}"
-        done
-
-        export SKIPPR_RUNTIME_FILE_SINK_MANIFEST="${MANIFEST_DIR}/file-sink.json"
-        export SKIPPR_RUNTIME_POSTGRES_SOURCE_MANIFEST="${MANIFEST_DIR}/postgres-source.json"
-        export SKIPPR_RUNTIME_POSTGRES_SINK_MANIFEST="${MANIFEST_DIR}/postgres-sink.json"
-        export SKIPPR_RUNTIME_POSTGRES_SCHEMA_MANIFEST="${MANIFEST_DIR}/postgres-schema.json"
-
-        docker compose up -d postgres postgres-target
-
-        wait_for_health() {
-          local service="$1"
-          local container_id
-          container_id="$(docker compose ps -q "$service")"
-          if [[ -z "$container_id" ]]; then
-            echo "No container found for service '$service'" >&2
-            docker compose ps
-            exit 1
+        runtime_plugin_args=()
+        while IFS= read -r runtime_plugin_version; do
+          runtime_plugin_version="${runtime_plugin_version#"${runtime_plugin_version%%[![:space:]]*}"}"
+          runtime_plugin_version="${runtime_plugin_version%"${runtime_plugin_version##*[![:space:]]}"}"
+          if [[ -z "${runtime_plugin_version}" ]]; then
+            continue
           fi
-
-          for _ in $(seq 1 30); do
-            local status
-            status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id")"
-            if [[ "$status" == "healthy" || "$status" == "running" ]]; then
-              return 0
-            fi
-            sleep 2
-          done
-
-          echo "Service '$service' did not become healthy in time" >&2
-          docker compose logs "$service"
-          exit 1
-        }
-
-        wait_for_health postgres
-        wait_for_health postgres-target
-
-        cargo test --test runtime_host_contracts -- --nocapture
-        cargo test --test runtime_file_csv_to_file -- --nocapture
-        cargo test --test runtime_cdc_e2e_postgres -- --nocapture
+          runtime_plugin_args+=(
+            --runtime-plugin-version
+            "${runtime_plugin_version}"
+          )
+        done <<< "${{ inputs.runtime_plugin_versions }}"
+        python3 .github/scripts/runtime_e2e_harness.py runtime-plugins \
+          --skippr-el "$PWD/skippr-el-${{ inputs.architecture_name }}/skippr-el" \
+          --mode full \
+          --architecture-name "${{ inputs.architecture_name }}" \
+          --releases-bucket "${{ inputs.releases_bucket }}" \
+          --runtime-plugin-release-subdir "${{ inputs.runtime_plugin_release_subdir }}" \
+          "${runtime_plugin_args[@]}"

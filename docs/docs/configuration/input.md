@@ -2,13 +2,15 @@
 
 ## DATA_SOURCE_PLUGIN_NAME
 
-The input plugin to use for reading data.
+The input connector to use for reading data.
 
 | | |
 |---|---|
 | **Environment variable** | `DATA_SOURCE_PLUGIN_NAME` |
 | **Required** | Yes |
-| **Values** | `S3`, `File`, `Mssql`, `Mysql`, `Dynamodb`, `Kinesis`, `Sqs`, `Http`, `Stdin` |
+| **Values** | Connector-specific. See the input connector reference for the currently supported runtime plugins. |
+
+In YAML config, each connector block can also include an optional `version` field to pin a published runtime plugin version instead of following the latest registry entry.
 
 ## S3 source options
 
@@ -86,7 +88,7 @@ Optional YAML: `queue_url`, `region`, `mode` (`batch` or `stream`). See the [SQS
 |---|---|---|
 | `DATA_SOURCE_HTTP_URL` | *(required)* | URL to download via HTTP GET |
 
-Optional YAML: `url`, `format`, `batch_size_bytes`, `batch_size_seconds`. Gzip-compressed responses are supported. See the [HTTP connector docs](../connectors/inputs/http.md) for details.
+Optional YAML: `url`, `format`, `batch_size_bytes`, `batch_size_seconds`. Gzip-compressed responses are supported. See the [HTTP Client connector docs](../connectors/inputs/http_client.md) and [HTTP Server connector docs](../connectors/inputs/http_server.md) for details.
 
 ## Stdin source options
 

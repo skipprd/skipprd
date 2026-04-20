@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use skippr::buffer::segment_file::{PartitionKey, SegmentFile};
-use skippr::plugins::cdc::{MutationKind, WalPartKind, WalPartMeta, WalRowMeta};
+use skippr_core::buffer::segment_file::{PartitionKey, SegmentFile};
+use skippr_core::plugins::cdc::{MutationKind, WalPartKind, WalPartMeta, WalRowMeta};
 use skippr_plugin_data_sink_postgres::{
     ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
     tombstone_table_name, upsert_if_newer_sql, PostgresCdcBackend,

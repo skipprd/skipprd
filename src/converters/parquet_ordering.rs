@@ -28,20 +28,27 @@ fn configured_order_fields() -> Vec<String> {
 
 /// Resolve configured order fields against the output schema, returning only
 /// those that exist. Records which fields were ever matched globally.
-pub fn resolve_effective_order(schema: &SchemaRef) -> Vec<String> {
-    let configured = configured_order_fields();
+pub fn resolve_effective_order_from_fields(
+    schema: &SchemaRef,
+    configured: &[String],
+) -> Vec<String> {
     if configured.is_empty() {
         return vec![];
     }
     let schema_fields: HashSet<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     let mut effective = Vec::new();
-    for name in &configured {
+    for name in configured {
         if schema_fields.contains(name.as_str()) {
             effective.push(name.clone());
             MATCHED_ORDER_FIELDS.insert(name.clone());
         }
     }
     effective
+}
+
+pub fn resolve_effective_order(schema: &SchemaRef) -> Vec<String> {
+    let configured = configured_order_fields();
+    resolve_effective_order_from_fields(schema, &configured)
 }
 
 /// Log a single end-of-run warning for configured order fields that never

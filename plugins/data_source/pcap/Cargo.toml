@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-source-pcap"
-version = "0.0.0-git"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -12,5 +12,20 @@ async-trait.workspace = true
 datafusion.workspace = true
 clap.workspace = true
 tokio.workspace = true
-skippr = { path = "../../.." }
-skippr-plugin-runtime-link = { path = "../../skippr-plugin-runtime-link", default-features = false, features = ["runtime-plugin-source-pcap"] }
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
+
+serde.workspace = true
+serde_derive = "1.0.105"
+[package.metadata.skippr-plugin]
+kind = "DataSource"
+plugin_name = "Pcap"
+
+[package.metadata.skippr-plugin.source_capability]
+name = "Pcap"
+guarantee_tier = "Unsupported"
+checkpoint_style = "None"
+bootstrap_style = "None"
+order_model = "UnsupportedForFinalState"
+supports_deletes = false
+event_id_semantics = "None"

@@ -6,6 +6,11 @@ use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
+use crate::runtime_plugins::protocol::{
+    RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint, RuntimeOffsetPosition,
+};
+use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
+use crate::runtime_plugins::sdk::encode_record_batches;
 use crate::serdes::decode::decode_records;
 use crate::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING};
 use dashmap::DashMap;
@@ -321,6 +326,48 @@ pub struct ThroughputMetrics {
     pub active_cores: usize,
     pub queue_length: usize,
     pub optimal_chunk_size: usize,
+}
+
+fn runtime_ingest_batches_from_buffer_batches(
+    batches: &[IngestBufferBatch],
+) -> Result<Vec<RuntimeIngestPartitionBatch>, std::io::Error> {
+    batches
+        .iter()
+        .map(|batch| {
+            let arrow_stream_bytes =
+                encode_record_batches(batch.record_batches.as_deref().unwrap_or(&[]))?;
+            Ok(RuntimeIngestPartitionBatch {
+                sink_ref: batch.sink_ref.clone(),
+                namespace: batch._namespace.clone(),
+                partition: batch._partition.clone(),
+                time: batch._time,
+                shard: batch._shard.clone(),
+                offsets: batch
+                    .offsets
+                    .iter()
+                    .map(|(key, position)| RuntimeOffsetPosition {
+                        key: key.clone(),
+                        position: *position,
+                    })
+                    .collect(),
+                arrow_stream_bytes,
+                cdc_rows: batch.cdc_rows.clone(),
+            })
+        })
+        .collect()
+}
+
+fn runtime_offset_hints_from_positions(
+    offsets: &HashMap<OffsetKey, u64>,
+) -> Vec<RuntimeOffsetMaterializationHint> {
+    offsets
+        .iter()
+        .map(|(key, position)| RuntimeOffsetMaterializationHint {
+            key: key.clone(),
+            position: *position,
+            closed: true,
+        })
+        .collect()
 }
 
 /// Main struct for managing ingestion of data
@@ -731,8 +778,10 @@ impl Ingest {
                     cv.notify_all();
                 }
 
-                let _current_queue_length = queue_length_clone.load(Ordering::Acquire);
+                let current_queue_length = queue_length_clone.load(Ordering::Acquire);
                 let current_active_threads = active_count_clone.load(Ordering::Acquire);
+                crate::metrics::counters::set_active_threads(current_active_threads);
+                crate::metrics::counters::set_queue_length(current_queue_length);
 
                 // println!("Task completed ({} tasks in queue, {}/{} active threads)",
                 //          current_queue_length,
@@ -776,6 +825,9 @@ impl Ingest {
 
                         // Increment active count before spawning
                         active_count_clone.fetch_add(1, AcqRel);
+                        crate::metrics::counters::set_active_threads(
+                            active_count_clone.load(Ordering::Acquire),
+                        );
                         // Note: We don't increment queue_length here since we're processing from the queue,
                         // and the task was already counted in queue_length when it was added to the queue
 
@@ -1051,6 +1103,12 @@ impl Ingest {
                     // Increment active count and queue length before spawning
                     self.active_count.fetch_add(1, Ordering::Acquire);
                     self.queue_length.fetch_add(1, Ordering::Acquire);
+                    crate::metrics::counters::set_active_threads(
+                        self.active_count.load(Ordering::Acquire),
+                    );
+                    crate::metrics::counters::set_queue_length(
+                        self.queue_length.load(Ordering::Acquire),
+                    );
 
                     // Spawn the task and ensure it's executed
                     self.thread_pool.execute(move || {
@@ -1082,6 +1140,9 @@ impl Ingest {
 
                     // Increment queue length when adding to queue
                     self.queue_length.fetch_add(1, Ordering::Acquire);
+                    crate::metrics::counters::set_queue_length(
+                        self.queue_length.load(Ordering::Acquire),
+                    );
 
                     self.update_throughput(task_bytes);
                 }
@@ -1210,6 +1271,26 @@ impl Ingest {
         let _updated_schema = "no".to_string();
 
         let buffers = Buffers::new();
+
+        if Config::debug_enabled() || Config::log_wal_enabled() {
+            let input_bytes: usize = datas.iter().map(|batch| batch.bytes).sum();
+            let input_sample: Vec<String> = datas
+                .iter()
+                .take(3)
+                .map(|batch| {
+                    format!(
+                        "{}:{}@{}",
+                        batch.offset_key.namespace, batch.offset_key.partition, batch.bytes
+                    )
+                })
+                .collect();
+            info!(
+                "Ingest: process_batch start input_batches={} input_bytes={} sample_offsets={:?}",
+                datas.len(),
+                input_bytes,
+                input_sample
+            );
+        }
 
         let mut bytes: u64 = 0;
         let mut latest_timestamp: i64 = 0;
@@ -1566,10 +1647,7 @@ impl Ingest {
                 }
             }
             if Config::debug_enabled() {
-                debug!(
-                    "Ingest: buffered {} records so far",
-                    i
-                );
+                debug!("Ingest: buffered {} records so far", i);
             }
         }
 
@@ -1887,13 +1965,31 @@ impl Ingest {
                 }
             }
             if !dl_offsets_committed && !dl_offsets.is_empty() {
-                for (ok, pos) in dl_offsets.drain() {
-                    let offset_key = OffsetKey {
-                        namespace: ok.namespace.clone(),
-                        partition: ok.partition.clone(),
-                    };
-                    offset_db_clone.insert(&offset_key, OffsetTypes::Position, pos);
-                    offset_db_clone.insert(&offset_key, OffsetTypes::Closed, 1);
+                if offset_db_clone.is_remote() {
+                    match shared_output.runtime_ingest_relay() {
+                        Some(relay) => {
+                            let hints = runtime_offset_hints_from_positions(&dl_offsets);
+                            if let Err(err) = relay.relay_offset_hints(hints) {
+                                error!(
+                                    "Ingest: failed to relay dropped-offset materialization hints: {}",
+                                    err
+                                );
+                            }
+                            dl_offsets.clear();
+                        }
+                        None => error!(
+                            "Ingest: runtime source generated dropped offsets without a relay sink"
+                        ),
+                    }
+                } else {
+                    for (ok, pos) in dl_offsets.drain() {
+                        let offset_key = OffsetKey {
+                            namespace: ok.namespace.clone(),
+                            partition: ok.partition.clone(),
+                        };
+                        offset_db_clone.set(&offset_key, OffsetTypes::Closed, 1);
+                        offset_db_clone.set(&offset_key, OffsetTypes::Position, pos);
+                    }
                 }
             }
         }
@@ -1908,22 +2004,66 @@ impl Ingest {
             );
         }
         if !all_batches.is_empty() {
-            if Config::log_wal_enabled() {
+            if Config::debug_enabled() || Config::log_wal_enabled() {
                 let total_batches: usize = all_batches
                     .iter()
                     .map(|e| e.record_batches.as_ref().map(|v| v.len()).unwrap_or(0))
                     .sum();
-                debug!(
-                    "Ingest: produced {} record batches across {} partitions",
+                let total_offsets: usize =
+                    all_batches.iter().map(|batch| batch.offsets.len()).sum();
+                let partition_sample: Vec<String> = all_batches
+                    .iter()
+                    .take(3)
+                    .map(|batch| {
+                        format!(
+                            "{}/{}/offsets={}",
+                            batch._namespace,
+                            batch._partition,
+                            batch.offsets.len()
+                        )
+                    })
+                    .collect();
+                info!(
+                    "Ingest: flushing {} record batches across {} partitions with {} offsets sample_partitions={:?}",
                     total_batches,
-                    all_batches.len()
+                    all_batches.len(),
+                    total_offsets,
+                    partition_sample
                 );
             }
-            buffers_copy.write(all_batches);
-            let fut = buffers_copy.flush(offset_db_clone.clone(), shared_output.clone());
-            let h = tokio::runtime::Handle::try_current()
-                .expect("flush must run inside a tokio runtime");
-            let _ = h.block_on(fut);
+            if offset_db_clone.is_remote() {
+                let relay_result = shared_output
+                    .runtime_ingest_relay()
+                    .ok_or_else(|| {
+                        std::io::Error::other(
+                            "runtime source offsets are remote but shared output is not a relay",
+                        )
+                    })
+                    .and_then(|relay| {
+                        let runtime_batches =
+                            runtime_ingest_batches_from_buffer_batches(&all_batches)?;
+                        relay.relay_ingest_batches(runtime_batches)
+                    });
+                if Config::debug_enabled() || Config::log_wal_enabled() {
+                    match &relay_result {
+                        Ok(()) => info!("Ingest: relayed prepared batches to runtime host"),
+                        Err(err) => error!("Ingest: runtime relay returned error: {}", err),
+                    }
+                }
+            } else {
+                buffers_copy.write(all_batches);
+                let fut = buffers_copy.flush(offset_db_clone.clone(), shared_output.clone());
+                let h = tokio::runtime::Handle::try_current()
+                    .expect("flush must run inside a tokio runtime");
+                let flush_result = h.block_on(fut);
+                if Config::debug_enabled() || Config::log_wal_enabled() {
+                    match &flush_result {
+                        Ok(()) => info!("Ingest: WAL flush completed successfully"),
+                        Err(err) => error!("Ingest: WAL flush returned error: {}", err),
+                    }
+                }
+                let _ = flush_result;
+            }
         }
     }
 
@@ -2014,6 +2154,7 @@ impl Ingest {
                 .entry(skpr_namespace.to_string())
                 .or_insert_with(|| AtomicU64::new(0));
             entry.fetch_add(1, Ordering::Release);
+            bump_pipeline_schema_version();
         }
 
         if did_update_schema {
@@ -2094,6 +2235,7 @@ impl Ingest {
                 .entry(skpr_namespace.to_string())
                 .or_insert_with(|| AtomicU64::new(0));
             entry.fetch_add(1, Ordering::Relaxed);
+            bump_pipeline_schema_version();
         }
 
         // Mark schema as ready deterministically for this namespace

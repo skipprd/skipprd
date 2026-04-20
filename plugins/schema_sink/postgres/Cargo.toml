@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-schema-sink-postgres"
-version = "0.0.0-git"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -8,7 +8,14 @@ name = "skippr-plugin-schema-sink-postgres"
 path = "src/main.rs"
 
 [dependencies]
+async-trait.workspace = true
 clap.workspace = true
-skippr = { path = "../../.." }
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
 skippr-plugin-data-sink-postgres = { path = "../../data_sink/postgres" }
 tokio.workspace = true
+
+[package.metadata.skippr-plugin]
+kind = "SchemaSink"
+plugin_name = "Postgres"
+supports_schema = true

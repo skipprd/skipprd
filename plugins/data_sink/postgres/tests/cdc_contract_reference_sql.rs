@@ -5,9 +5,9 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use skippr::buffer::segment_file::{PartitionKey, SegmentFile};
-use skippr::helpers::offsets::OffsetKey;
-use skippr::plugins::cdc::*;
+use skippr_core::buffer::segment_file::{PartitionKey, SegmentFile};
+use skippr_core::helpers::offsets::OffsetKey;
+use skippr_core::plugins::cdc::*;
 use skippr_plugin_data_sink_postgres::{
     ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
     tombstone_table_name, upsert_if_newer_sql, PostgresCdcBackend,
@@ -35,7 +35,11 @@ fn make_batch() -> arrow::record_batch::RecordBatch {
         std::sync::Arc::new(schema),
         vec![
             std::sync::Arc::new(Int64Array::from(vec![1, 2, 3])),
-            std::sync::Arc::new(StringArray::from(vec![Some("Alice"), Some("Bob"), Some("Charlie")])),
+            std::sync::Arc::new(StringArray::from(vec![
+                Some("Alice"),
+                Some("Bob"),
+                Some("Charlie"),
+            ])),
         ],
     )
     .unwrap()

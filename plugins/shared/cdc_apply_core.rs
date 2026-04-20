@@ -291,12 +291,9 @@ fn tombstone_match_with_row_values(
         .join(" AND ")
 }
 
-fn qualified_matches(
-    names: &[String],
-    values: &[String],
-    qualifier: Option<&str>,
-) -> String {
-    names.iter()
+fn qualified_matches(names: &[String], values: &[String], qualifier: Option<&str>) -> String {
+    names
+        .iter()
         .zip(values.iter())
         .map(|(name, value)| match qualifier {
             Some(prefix) => format!("{prefix}.{name} = {value}"),

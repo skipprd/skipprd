@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-source-kinesis"
-version = "0.0.0-git"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -12,5 +12,24 @@ async-trait.workspace = true
 datafusion.workspace = true
 clap.workspace = true
 tokio.workspace = true
-skippr = { path = "../../.." }
-skippr-plugin-runtime-link = { path = "../../skippr-plugin-runtime-link", default-features = false, features = ["runtime-plugin-source-kinesis"] }
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
+
+aws-config = "1.5.1"
+aws-sdk-kinesis = { version = "1.48.0" }
+aws-types = "1.3.1"
+serde.workspace = true
+serde_derive = "1.0.105"
+tracing = "0.1"
+[package.metadata.skippr-plugin]
+kind = "DataSource"
+plugin_name = "Kinesis"
+
+[package.metadata.skippr-plugin.source_capability]
+name = "Kinesis"
+guarantee_tier = "LogStreamExactOnce"
+checkpoint_style = "LogNative"
+bootstrap_style = "StreamOnly"
+order_model = "StableKeyScopedOrder"
+supports_deletes = false
+event_id_semantics = "LogPosition"

@@ -1,10 +1,26 @@
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::discover::OutputMetadata;
 use crate::helpers::offsets::Offsets;
-use crate::plugins::cdc::{CheckpointEnvelope, SinkCapability, SourceCapability, SyncContext};
+use crate::plugins::cdc::{SinkCapability, SourceCapability, SyncContext};
+use crate::runtime_plugins::protocol::{
+    RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint,
+};
+
+pub trait RuntimeIngestRelay: Send + Sync {
+    fn relay_ingest_batches(
+        &self,
+        batches: Vec<RuntimeIngestPartitionBatch>,
+    ) -> Result<(), std::io::Error>;
+
+    fn relay_offset_hints(
+        &self,
+        offsets: Vec<RuntimeOffsetMaterializationHint>,
+    ) -> Result<(), std::io::Error>;
+}
 
 /// Reads records from an external system and feeds them into the pipeline.
 #[async_trait]
@@ -19,16 +35,6 @@ pub trait DataSource: Send + Sync {
     /// Default returns `None` for backward compatibility with existing
     /// connectors that have not yet declared capabilities.
     fn capability(&self) -> Option<&'static SourceCapability> {
-        None
-    }
-
-    /// For exact-once snapshot-then-log sources: capture a durable resume
-    /// anchor from the source log before starting a snapshot. Returns the
-    /// anchor as an opaque checkpoint envelope that will be persisted through
-    /// the WAL.
-    ///
-    /// Default returns `None` (source does not support anchored bootstrap).
-    fn capture_bootstrap_anchor(&self) -> Option<CheckpointEnvelope> {
         None
     }
 }
@@ -53,6 +59,18 @@ pub trait DataSink: Send + Sync {
     fn capability(&self) -> Option<&'static SinkCapability> {
         None
     }
+
+    fn runtime_ingest_relay(&self) -> Option<&dyn RuntimeIngestRelay> {
+        None
+    }
+
+    async fn install_schema_state(
+        &self,
+        _schema_version: u64,
+        _namespaces: &BTreeMap<String, OutputMetadata>,
+    ) -> Result<(), std::io::Error> {
+        Ok(())
+    }
 }
 
 /// Creates or updates schema definitions at a destination (Glue catalog,
@@ -60,6 +78,12 @@ pub trait DataSink: Send + Sync {
 ///
 /// Paired with a [`DataSink`] via the sink's config entry. The schema sync
 /// background worker calls this independently of data writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchemaSyncRequest<'a> {
+    pub namespace: &'a str,
+    pub compaction_id: &'a str,
+}
+
 #[async_trait]
 pub trait SchemaSink: Send + Sync {
     async fn sync_schema(
@@ -67,6 +91,22 @@ pub trait SchemaSink: Send + Sync {
         namespace: &str,
         metadata: &OutputMetadata,
     ) -> Result<(), std::io::Error>;
+
+    async fn sync_schema_request(
+        &self,
+        request: SchemaSyncRequest<'_>,
+        metadata: &OutputMetadata,
+    ) -> Result<(), std::io::Error> {
+        self.sync_schema(request.namespace, metadata).await
+    }
+
+    async fn install_schema_state(
+        &self,
+        _schema_version: u64,
+        _namespaces: &BTreeMap<String, OutputMetadata>,
+    ) -> Result<(), std::io::Error> {
+        Ok(())
+    }
 }
 
 /// Reads schema definitions from an external catalog or system.

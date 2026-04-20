@@ -14,6 +14,22 @@
 
 **Fix:** Ensure `discover` has been run and completed successfully. Then run `sync`, which will create the Glue database and table on startup.
 
+### `Skippr could not find a published runtime ... plugin named ...`
+
+**Cause:** Runtime plugin discovery could not find a matching manifest in the latest published index, or a pinned `version` does not exist for that plugin.
+
+**Fix:**
+1. Check the plugin name and casing in the pipeline config
+2. Remove the version pin if you intended to follow latest
+3. Verify the plugin crate has been published and appears in `latest/manifest-index.json`
+4. If you are testing local artifacts, switch to an explicit manifest override or `--local-runtime-manifest-dir` in the runtime e2e harness
+
+### `skippr-el artifact unexpectedly contains runtime plugin binaries`
+
+**Cause:** A host artifact directory contains `skippr-plugin-*` executables beside `skippr-el`. The runtime e2e harness rejects this because the host is not supposed to ship bundled plugins anymore.
+
+**Fix:** Copy `skippr-el` into a clean temporary directory before running the harness, or point the harness at a release artifact directory that contains only the host binary.
+
 ### `Compactor: integrity check mismatch`
 
 **Cause:** The number of uploaded rows doesn't match the expected count, or partitions were quarantined. This can indicate data loss or duplication.

@@ -10,125 +10,32 @@ inputs:
     required: true
   docker_hub_pass:
     required: true
+  runtime_plugin_versions:
+    description: 'Optional newline-delimited PLUGIN=VERSION pins passed to the runtime e2e harness'
+    required: false
+    default: ""
 runs:
   using: "composite"
   steps:
-    - name: Run Skippr Tests
+    - name: Run bike_hire_many via runtime e2e harness
       shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
+        AWS_DEFAULT_REGION: us-east-1
       run: |
-        chmod +x ./skippr-el-${{ inputs.architecture_name }}/skippr-el
-        
-        cp .github/actions/e2e/bike_hire_many/skippr-el.yml ./skippr-el.yml
-                
-        run_allow_137() {
-          set +e
-          "$@"
-          rc=$?
-          set -e
-          if [ "$rc" -eq 137 ]; then
-            echo "Chaos SIGKILL (exit 137) observed; continuing as expected"
-            return 0
+        set -euo pipefail
+        runtime_plugin_args=()
+        while IFS= read -r runtime_plugin_version; do
+          runtime_plugin_version="${runtime_plugin_version#"${runtime_plugin_version%%[![:space:]]*}"}"
+          runtime_plugin_version="${runtime_plugin_version%"${runtime_plugin_version##*[![:space:]]}"}"
+          if [[ -z "${runtime_plugin_version}" ]]; then
+            continue
           fi
-          return "$rc"
-        }
-                
-        RUST_BACKTRACE=1 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline bike_hire_many
-        RUST_BACKTRACE=1 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline bike_hire_many
-        RUST_BACKTRACE=1 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline bike_hire_many
-        RUST_BACKTRACE=1 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline bike_hire_many
-        RUST_BACKTRACE=1 SKIPPR_CHAOS_MODE=no AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline bike_hire_many
-
-
-    - name: Assert Athena scan pruning
-      shell: bash
-      run: |
-        export AWS_DEFAULT_REGION=us-east-1
-        export AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }}
-        export AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }}
-
-        aws --version
-
-        wait_for_athena_query() {
-          local query_execution_id="$1"
-          while true; do
-            local state
-            state=$(aws athena get-query-execution \
-              --query-execution-id "$query_execution_id" \
-              --query 'QueryExecution.Status.State' \
-              --output text)
-
-            case "$state" in
-              SUCCEEDED)
-                return 0
-                ;;
-              FAILED|CANCELLED)
-                aws athena get-query-execution \
-                  --query-execution-id "$query_execution_id" \
-                  --output json
-                echo "Athena query $query_execution_id ended in state $state"
-                return 1
-                ;;
-              *)
-                sleep 2
-                ;;
-            esac
-          done
-        }
-
-        start_athena_query() {
-          local sql="$1"
-          aws athena start-query-execution \
-            --work-group bikehire \
-            --query-execution-context Database=bikehire \
-            --query-string "$sql" \
-            --query 'QueryExecutionId' \
-            --output text
-        }
-
-        sample_bike_id_query_id=$(start_athena_query "SELECT bike_id FROM bike_hire_many WHERE bike_id IS NOT NULL LIMIT 1")
-        wait_for_athena_query "$sample_bike_id_query_id"
-        sample_bike_id=$(aws athena get-query-results \
-          --query-execution-id "$sample_bike_id_query_id" \
-          --query 'ResultSet.Rows[1].Data[0].VarCharValue' \
-          --output text)
-
-        if [ -z "$sample_bike_id" ] || [ "$sample_bike_id" = "None" ]; then
-          echo "Failed to sample a bike_id from bike_hire_many"
-          exit 1
-        fi
-
-        escaped_sample_bike_id=${sample_bike_id//\'/\'\'}
-
-        echo "Sampled bike_id for pruning check: $sample_bike_id"
-
-        full_scan_query_id=$(start_athena_query "SELECT count(*) FROM bike_hire_many WHERE bike_id IS NOT NULL")
-        wait_for_athena_query "$full_scan_query_id"
-        full_scan_bytes=$(aws athena get-query-execution \
-          --query-execution-id "$full_scan_query_id" \
-          --query 'QueryExecution.Statistics.DataScannedInBytes' \
-          --output text)
-
-        filtered_scan_query_id=$(start_athena_query "SELECT count(*) FROM bike_hire_many WHERE bike_id = '$escaped_sample_bike_id'")
-        wait_for_athena_query "$filtered_scan_query_id"
-        filtered_scan_bytes=$(aws athena get-query-execution \
-          --query-execution-id "$filtered_scan_query_id" \
-          --query 'QueryExecution.Statistics.DataScannedInBytes' \
-          --output text)
-
-        echo "Athena full scan bytes: $full_scan_bytes"
-        echo "Athena filtered scan bytes: $filtered_scan_bytes"
-
-        if [ "$filtered_scan_bytes" -ge "$full_scan_bytes" ]; then
-          echo "Expected filtered query to scan fewer bytes than the full query"
-          exit 1
-        fi
-
-    - name: Assert Athena correctness
-      shell: bash
-      run: |
-        pip install soda-core-athena
-        AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }}  soda scan -d datalake_e2e -c ./soda/configuration.yml ./soda/bike_hire_many.yml
-#        docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/chaos_mode.yml
-#        if [[ "$(docker logs soda >& container-logs ; cat container-logs | grep 'All is good' | wc -l)" -gt 0 ]]; then exit 0; fi
-#        if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
+          runtime_plugin_args+=(
+            --runtime-plugin-version
+            "${runtime_plugin_version}"
+          )
+        done <<< "${{ inputs.runtime_plugin_versions }}"
+        python3 .github/scripts/runtime_e2e_harness.py run bike_hire_many --mode full --skippr-el "./skippr-el-${{ inputs.architecture_name }}/skippr-el" "${runtime_plugin_args[@]}"
 

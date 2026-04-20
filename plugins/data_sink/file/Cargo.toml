@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-sink-file"
-version = "0.0.0-git"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -8,6 +8,7 @@ name = "skippr-plugin-data-sink-file"
 path = "src/main.rs"
 
 [dependencies]
+async-trait.workspace = true
 arrow.workspace = true
 bytes.workspace = true
 clap.workspace = true
@@ -20,4 +21,17 @@ serde.workspace = true
 serde_derive.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-skippr = { path = "../../.." }
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
+
+[package.metadata.skippr-plugin]
+kind = "DataSink"
+plugin_name = "File"
+
+[package.metadata.skippr-plugin.sink_capability]
+name = "File"
+guarantee_tier = "CdcEncodedOnly"
+can_manage_skippr_columns = false
+can_maintain_tombstone_tables = false
+can_compare_order_tokens = false
+supports_transactions = false

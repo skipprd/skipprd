@@ -9,6 +9,10 @@ inputs:
     description: 'macos_arm64, macos-x86, linux_x86'
     required: true
     default: 'stable'
+  runtime_plugin_packages_json:
+    description: 'JSON array of runtime plugin package names to build for this release'
+    required: false
+    default: '[]'
 runs:
   using: "composite"
   steps:
@@ -39,6 +43,17 @@ runs:
         rustup toolchain install stable
         rustup default stable
         rustup component add rustfmt
+    - name: Install sccache
+      if: env.SCCACHE_BUCKET != ''
+      uses: mozilla-actions/sccache-action@v0.0.9
+      with:
+        version: v0.10.0
+    - name: Configure sccache
+      if: env.SCCACHE_BUCKET != ''
+      shell: bash
+      run: |
+        echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+        echo "SCCACHE_IDLE_TIMEOUT=0" >> $GITHUB_ENV
     - name: Rust cache
       uses: Swatinem/rust-cache@v2
       with:
@@ -47,10 +62,9 @@ runs:
       shell: bash
       if: startsWith(github.ref, 'refs/tags/')
       run: |
-        mv Cargo.toml Cargo.toml.orig
-        sed "s/0\\.0\\.0-git/${{ github.ref_name }}/" Cargo.toml.orig > Cargo.toml
-        mv Cargo.lock Cargo.lock.orig
-        sed "s/0\\.0\\.0-git/${{ github.ref_name }}/" Cargo.lock.orig > Cargo.lock
+        python3 .github/scripts/set_root_package_version.py \
+          --workspace "$GITHUB_WORKSPACE" \
+          --version "${{ github.ref_name }}"
     - name: Verify host dependency boundary
       shell: bash
       run: |
@@ -58,16 +72,41 @@ runs:
     - name: Build release
       shell: bash
       run: |
-        cargo build --release
+        export RUNTIME_PLUGIN_PACKAGES_JSON='${{ inputs.runtime_plugin_packages_json }}'
+        plugin_packages_file="$(mktemp)"
+        python3 - <<'PY' > "${plugin_packages_file}"
+        import json
+        import os
+
+        for package in json.loads(os.environ["RUNTIME_PLUGIN_PACKAGES_JSON"]):
+            print(package)
+        PY
+
+        cargo build --release --bin skippr-el
+        if [ -s "${plugin_packages_file}" ]; then
+          cargo_args=()
+          while IFS= read -r package; do
+            [ -n "${package}" ] || continue
+            cargo_args+=(-p "$package")
+          done < "${plugin_packages_file}"
+          cargo build --release "${cargo_args[@]}"
+        fi
+
         mkdir -p skippr-el-${{ inputs.architecture_name }}
+        mkdir -p runtime-plugin-binaries-${{ inputs.architecture_name }}
         cp target/release/skippr-el skippr-el-${{ inputs.architecture_name }}/skippr-el
-        shopt -s nullglob
-        for plugin_bin in target/release/skippr-plugin-*; do
-          if [ -f "${plugin_bin}" ]; then
-            cp "${plugin_bin}" "skippr-el-${{ inputs.architecture_name }}/$(basename "${plugin_bin}")"
+        while IFS= read -r package; do
+          [ -n "${package}" ] || continue
+          plugin_bin="target/release/${package}"
+          if [ ! -f "${plugin_bin}" ]; then
+            echo "::error::Expected runtime plugin binary was not produced: ${plugin_bin}"
+            exit 1
           fi
-        done
+          cp "${plugin_bin}" "runtime-plugin-binaries-${{ inputs.architecture_name }}/$(basename "${plugin_bin}")"
+        done < "${plugin_packages_file}"
+        rm -f "${plugin_packages_file}"
         ls -la skippr-el-${{ inputs.architecture_name }}
+        ls -la runtime-plugin-binaries-${{ inputs.architecture_name }}
       env:
         # do not produce debug symbols to keep memory usage down
         RUSTFLAGS: "-C debuginfo=0"
@@ -76,10 +115,14 @@ runs:
       run: |
         VERSION=$(target/release/skippr-el --version 2>&1 | awk '{print $2}')
         echo "skippr-el version: $VERSION"
-        if [ "$VERSION" = "0.0.0-git" ] || [ -z "$VERSION" ]; then
-          echo "::error::Version was not set during build"
+        if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::Version was not plain semver"
           exit 1
         fi
+    - name: Show sccache stats
+      if: env.SCCACHE_BUCKET != ''
+      shell: bash
+      run: ${SCCACHE_PATH:-sccache} --show-stats || true
 #    - name: Verify release
 #      shell: bash
 #      run: |
@@ -96,4 +139,10 @@ runs:
       with:
         name: skippr-el-${{ inputs.architecture_name }}
         path: skippr-el-${{ inputs.architecture_name }}
+        retention-days: 30
+    - name: Upload Runtime Plugin Binaries Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: runtime-plugin-binaries-${{ inputs.architecture_name }}
+        path: runtime-plugin-binaries-${{ inputs.architecture_name }}
         retention-days: 30

@@ -8,6 +8,8 @@ This guide walks through ingesting JSON data from S3 into Athena-queryable Parqu
 curl -sL "https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh" | sudo bash
 ```
 
+The install script places `skippr-el` on your machine. Runtime source, sink, and schema plugins are downloaded automatically the first time the pipeline needs them.
+
 ## 2. Set your environment
 
 ```bash
@@ -53,6 +55,7 @@ skippr-el sync --pipeline bikehire --log
 
 Sync reads from the source, buffers through the WAL, compacts into Parquet, uploads to S3, and registers Glue partitions. Watch the logs for:
 
+- `Resolving runtime ... plugin ... from published registry` — plugin discovery and download on first use
 - `Uploaded ...parquet to S3 (rows=..., bytes=...)` — data landing
 - `Pipeline sync complete` — run finished successfully
 

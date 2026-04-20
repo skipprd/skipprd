@@ -1,22 +1,20 @@
 use std::collections::HashMap;
 use std::io;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde_derive::{Deserialize, Serialize};
-use tokio::io::AsyncWrite;
 use tokio_postgres::{NoTls, Row};
 use tracing::{info, warn};
 
 use crate::pgoutput::{self, PgColumn, PgOutputMessage};
-use skippr::helpers::offsets::OffsetKey;
-use skippr::ingest_work::IngestBatch;
-use skippr::plugins::cdc::{
-    CheckpointAuthority, CheckpointEnvelope, CheckpointKind, MutationKind, PostgresCheckpoint,
-    WalRowMeta,
+use skippr_core::helpers::offsets::{OffsetKey, Offsets};
+use skippr_core::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_core::plugins::cdc::{
+    source_capabilities, CheckpointAuthority, CheckpointKind, MutationKind,
+    PostgresCheckpoint, SourceCapability, WalRowMeta,
 };
-use skippr::runtime_plugins::framing::write_plugin_frame;
-use skippr::runtime_plugins::protocol::{
-    PluginFrame, RuntimeCheckpointUpdate, SourceEvent, SourceStartRequest,
-};
+use skippr_core::plugins::{DataSink, DataSource};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DataSourcePostgresPluginConfig {
@@ -37,14 +35,17 @@ pub struct DataSourcePostgresPluginConfig {
     pub publication_name: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-struct RuntimePostgresSource {
+pub struct DataSourcePostgresPlugin {
+    ingest: Ingest,
     config: DataSourcePostgresPluginConfig,
 }
 
-impl RuntimePostgresSource {
-    fn new(config: DataSourcePostgresPluginConfig) -> Self {
-        Self { config }
+impl DataSourcePostgresPlugin {
+    pub fn with_runtime_config(config: DataSourcePostgresPluginConfig) -> Self {
+        Self {
+            ingest: Ingest::new(),
+            config,
+        }
     }
 
     fn connection_string(&self) -> String {
@@ -103,77 +104,104 @@ impl RuntimePostgresSource {
         lsn.as_u64().to_be_bytes().to_vec()
     }
 
-    async fn emit_batches<W>(&self, writer: &mut W, batches: Vec<IngestBatch>) -> io::Result<()>
-    where
-        W: AsyncWrite + Unpin,
-    {
-        write_plugin_frame(
-            writer,
-            &PluginFrame::SourceEvent(SourceEvent::IngestBatches { batches }),
-        )
-        .await
+    fn slot_name(&self) -> String {
+        self.config
+            .replication_slot_name
+            .clone()
+            .unwrap_or_else(|| "skippr_slot".to_string())
     }
 
-    async fn emit_checkpoint<W>(
+    fn publication_name(&self) -> String {
+        self.config
+            .publication_name
+            .clone()
+            .unwrap_or_else(|| "skippr_publication".to_string())
+    }
+
+    fn checkpoint_key(slot_name: &str) -> String {
+        format!("postgres:{slot_name}:lsn")
+    }
+
+    fn stored_resume_lsn(&self, offsets: &Offsets, slot_name: &str) -> Option<u64> {
+        offsets
+            .load_checkpoint_payload::<PostgresCheckpoint>(&Self::checkpoint_key(slot_name))
+            .map(|checkpoint| checkpoint.lsn)
+    }
+
+    fn store_resume_checkpoint(
         &self,
-        writer: &mut W,
-        key: &str,
-        kind: CheckpointKind,
-        authority: CheckpointAuthority,
-        lsn: u64,
-        include_legacy_bytes: bool,
+        offsets: &Offsets,
         slot_name: &str,
-    ) -> io::Result<()>
-    where
-        W: AsyncWrite + Unpin,
-    {
-        let payload = PostgresCheckpoint {
+        lsn: u64,
+    ) -> io::Result<()> {
+        let checkpoint = PostgresCheckpoint {
             lsn,
             slot_name: slot_name.to_string(),
         };
-        let envelope = CheckpointEnvelope::from_payload(authority, kind, 1, &payload)
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        let update = RuntimeCheckpointUpdate {
-            key: key.to_string(),
-            envelope,
-            legacy_payload_bytes: include_legacy_bytes.then(|| lsn.to_be_bytes().to_vec()),
-        };
-        write_plugin_frame(
-            writer,
-            &PluginFrame::SourceEvent(SourceEvent::CheckpointUpdate(update)),
-        )
-        .await
+        offsets
+            .store_checkpoint_payload(
+                &Self::checkpoint_key(slot_name),
+                CheckpointAuthority::WalOwnership,
+                CheckpointKind::SourceResume,
+                1,
+                &checkpoint,
+            )
+            .map_err(io::Error::other)
     }
 
-    fn parse_resume_lsn(start: &SourceStartRequest) -> Option<u64> {
-        if let Some(resume) = start.resume_checkpoint.as_ref() {
-            if let Ok(payload) = resume.into_payload::<PostgresCheckpoint>() {
-                return Some(payload.lsn);
-            }
+    fn ingest_batches(
+        &self,
+        batches: Vec<IngestBatch>,
+        offsets: Arc<Offsets>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+    ) {
+        if batches.is_empty() {
+            return;
         }
-        start.legacy_resume_bytes.as_ref().map(|bytes| {
-            let arr: [u8; 8] = bytes.as_slice().try_into().unwrap_or([0u8; 8]);
-            u64::from_be_bytes(arr)
-        })
+        let mut ingest_tasks = IngestTasks::new();
+        ingest_tasks.add(IngestTask::new(
+            batches,
+            offsets.clone(),
+            shared_output.clone(),
+        ));
+        self.ingest
+            .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output);
     }
 
-    pub async fn run<W>(&self, writer: &mut W, start: SourceStartRequest) -> io::Result<()>
-    where
-        W: AsyncWrite + Unpin,
-    {
+    fn cdc_batch(
+        &self,
+        table: &str,
+        columns: &[PgColumn],
+        tuple: &[Option<String>],
+        mutation: MutationKind,
+        lsn_id: &[u8],
+    ) -> IngestBatch {
+        let namespace = format!("postgres.{}", table);
+        let offset_key = OffsetKey::new(namespace.clone(), table.to_string());
+        let json_str = Self::tuple_to_json(columns, tuple);
+        let bytes = json_str.len();
+        IngestBatch::new(
+            offset_key,
+            json_str,
+            bytes,
+            format!("postgres://{}", table),
+            Some(namespace),
+            Some(vec![WalRowMeta {
+                mutation,
+                event_id: lsn_id.to_vec(),
+                order_token: lsn_id.to_vec(),
+            }]),
+        )
+    }
+
+    async fn sync_cdc(
+        &mut self,
+        offsets: Arc<Offsets>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+    ) -> io::Result<()> {
         let conn_str = self.connection_string();
-        let slot_name = self
-            .config
-            .replication_slot_name
-            .clone()
-            .unwrap_or_else(|| "skippr_slot".to_string());
-        let pub_name = self
-            .config
-            .publication_name
-            .clone()
-            .unwrap_or_else(|| "skippr_publication".to_string());
-        let checkpoint_key = format!("postgres:{slot_name}:lsn");
-        let bootstrap_anchor_key = format!("postgres:{slot_name}:bootstrap_anchor");
+        let slot_name = self.slot_name();
+        let pub_name = self.publication_name();
 
         let (ddl_client, ddl_conn) = tokio_postgres::connect(&conn_str, NoTls)
             .await
@@ -201,7 +229,7 @@ impl RuntimePostgresSource {
             info!("Created publication {}", pub_name);
         }
 
-        let stored_lsn = Self::parse_resume_lsn(&start);
+        let stored_lsn = self.stored_resume_lsn(offsets.as_ref(), &slot_name);
         let resume_mode = stored_lsn.is_some();
 
         let snapshot_lsn: u64 = if let Some(lsn_val) = stored_lsn {
@@ -303,37 +331,21 @@ impl RuntimePostgresSource {
                 ));
 
                 if current_batch.len() >= batch_size {
-                    self.emit_batches(writer, std::mem::take(&mut current_batch))
-                        .await?;
+                    self.ingest_batches(
+                        std::mem::take(&mut current_batch),
+                        offsets.clone(),
+                        shared_output.clone(),
+                    );
                 }
             }
 
             if !current_batch.is_empty() {
-                self.emit_batches(writer, current_batch).await?;
+                self.ingest_batches(current_batch, offsets.clone(), shared_output.clone());
             }
         }
 
         if !resume_mode {
-            self.emit_checkpoint(
-                writer,
-                &bootstrap_anchor_key,
-                CheckpointKind::BootstrapAnchor,
-                CheckpointAuthority::WalOwnership,
-                snapshot_lsn,
-                false,
-                &slot_name,
-            )
-            .await?;
-            self.emit_checkpoint(
-                writer,
-                &checkpoint_key,
-                CheckpointKind::SourceResume,
-                CheckpointAuthority::WalOwnership,
-                snapshot_lsn,
-                true,
-                &slot_name,
-            )
-            .await?;
+            self.store_resume_checkpoint(offsets.as_ref(), &slot_name, snapshot_lsn)?;
         }
 
         info!("Runtime Postgres CDC snapshot complete, starting logical replication");
@@ -364,6 +376,7 @@ impl RuntimePostgresSource {
             .await
             .map_err(|err| io::Error::other(err.to_string()))?;
         let mut relation_map: HashMap<u32, (String, Vec<PgColumn>)> = HashMap::new();
+        let mut pending_batches = Vec::new();
 
         while let Some(event) = client
             .recv()
@@ -393,43 +406,37 @@ impl RuntimePostgresSource {
                         PgOutputMessage::Insert { oid, new_row } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
                                 let lsn_id = Self::lsn_bytes(wal_end);
-                                self.emit_cdc_row(
-                                    writer,
+                                pending_batches.push(self.cdc_batch(
                                     table,
                                     cols,
                                     &new_row,
                                     MutationKind::Insert,
                                     &lsn_id,
-                                )
-                                .await?;
+                                ));
                             }
                         }
                         PgOutputMessage::Update { oid, new_row, .. } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
                                 let lsn_id = Self::lsn_bytes(wal_end);
-                                self.emit_cdc_row(
-                                    writer,
+                                pending_batches.push(self.cdc_batch(
                                     table,
                                     cols,
                                     &new_row,
                                     MutationKind::Update,
                                     &lsn_id,
-                                )
-                                .await?;
+                                ));
                             }
                         }
                         PgOutputMessage::Delete { oid, old_row } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
                                 let lsn_id = Self::lsn_bytes(wal_end);
-                                self.emit_cdc_row(
-                                    writer,
+                                pending_batches.push(self.cdc_batch(
                                     table,
                                     cols,
                                     &old_row,
                                     MutationKind::Delete,
                                     &lsn_id,
-                                )
-                                .await?;
+                                ));
                             }
                         }
                     }
@@ -437,16 +444,12 @@ impl RuntimePostgresSource {
                 ReplicationEvent::Commit { lsn, .. } => {
                     client.update_applied_lsn(lsn);
                     let lsn_u64: u64 = lsn.into();
-                    self.emit_checkpoint(
-                        writer,
-                        &checkpoint_key,
-                        CheckpointKind::SourceResume,
-                        CheckpointAuthority::WalOwnership,
-                        lsn_u64,
-                        true,
-                        &slot_name,
-                    )
-                    .await?;
+                    self.ingest_batches(
+                        std::mem::take(&mut pending_batches),
+                        offsets.clone(),
+                        shared_output.clone(),
+                    );
+                    self.store_resume_checkpoint(offsets.as_ref(), &slot_name, lsn_u64)?;
                 }
                 ReplicationEvent::KeepAlive { .. } => {}
                 ReplicationEvent::StoppedAt { .. } => {
@@ -457,38 +460,22 @@ impl RuntimePostgresSource {
             }
         }
 
-        write_plugin_frame(writer, &PluginFrame::SourceEvent(SourceEvent::Completed)).await
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DataSource for DataSourcePostgresPlugin {
+    async fn sync(
+        &mut self,
+        offsets: Arc<Offsets>,
+        output: Arc<Box<dyn DataSink + Send + Sync>>,
+    ) -> Result<(), std::io::Error> {
+        self.sync_cdc(offsets, output).await
     }
 
-    async fn emit_cdc_row<W>(
-        &self,
-        writer: &mut W,
-        table: &str,
-        columns: &[PgColumn],
-        tuple: &[Option<String>],
-        mutation: MutationKind,
-        lsn_id: &[u8],
-    ) -> io::Result<()>
-    where
-        W: AsyncWrite + Unpin,
-    {
-        let namespace = format!("postgres.{}", table);
-        let offset_key = OffsetKey::new(namespace.clone(), table.to_string());
-        let json_str = Self::tuple_to_json(columns, tuple);
-        let bytes = json_str.len();
-        let batch = IngestBatch::new(
-            offset_key,
-            json_str,
-            bytes,
-            format!("postgres://{}", table),
-            Some(namespace),
-            Some(vec![WalRowMeta {
-                mutation,
-                event_id: lsn_id.to_vec(),
-                order_token: lsn_id.to_vec(),
-            }]),
-        );
-        self.emit_batches(writer, vec![batch]).await
+    fn capability(&self) -> Option<&'static SourceCapability> {
+        Some(&source_capabilities::POSTGRES)
     }
 }
 
@@ -501,15 +488,4 @@ fn parse_pg_lsn(lsn_str: &str) -> u64 {
     let high = u64::from_str_radix(parts[0], 16).unwrap_or(0);
     let low = u64::from_str_radix(parts[1], 16).unwrap_or(0);
     (high << 32) | low
-}
-
-pub async fn run_runtime_postgres_source<W>(
-    writer: &mut W,
-    config: DataSourcePostgresPluginConfig,
-    start: SourceStartRequest,
-) -> io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    RuntimePostgresSource::new(config).run(writer, start).await
 }

@@ -1,14 +1,26 @@
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
+// `skippr-runtime-sdk` re-exports this module because the current dependency
+// graph is `skippr-runtime-sdk -> skippr-core -> skippr`.
 use crate::discover::OutputMetadata;
 use crate::helpers::configuration::{DataSinkPluginConfig, DataSourcePluginConfig};
-use crate::ingest_work::IngestBatch;
+use crate::helpers::offsets::{OffsetKey, RuntimeOffsetRpcRequest, RuntimeOffsetRpcResponse};
 use crate::plugins::cdc::{
     CheckpointEnvelope, EventIdSemantics, SinkCapability, SinkGuaranteeTier, SourceBootstrapStyle,
     SourceCapability, SourceCheckpointStyle, SourceGuaranteeTier, SourceOrderModel, SyncContext,
 };
+use serde::{Deserialize, Serialize};
 
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 1;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 6;
+pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
+pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
+pub const SKIPPR_RUNTIME_SESSION_TOKEN_ENV: &str = "SKIPPR_RUNTIME_SESSION_TOKEN";
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeSessionHello {
+    pub protocol_version: u32,
+    pub token: String,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum RuntimePluginKind {
@@ -172,6 +184,54 @@ impl TryFrom<DataSinkPluginConfig> for RuntimeSchemaConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeOutputLayout {
+    pub partition_fields: Vec<String>,
+    #[serde(default)]
+    pub order_fields: Vec<String>,
+    pub time_partition_granularity: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeExecutionContext {
+    pub pipeline_name: String,
+    pub workspace_name: String,
+    pub data_dir: String,
+    #[serde(default)]
+    pub output_layout: RuntimeOutputLayout,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct RuntimeSchemaState {
+    pub version: u64,
+    pub namespaces: BTreeMap<String, OutputMetadata>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSinkInstallRequest {
+    pub context: RuntimeExecutionContext,
+    pub binding: RuntimeBinding,
+    pub config: RuntimeSinkConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSchemaInstallRequest {
+    pub context: RuntimeExecutionContext,
+    pub binding: RuntimeBinding,
+    pub config: RuntimeSchemaConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct RuntimeSchemaStateInstallRequest {
+    pub schema_state: RuntimeSchemaState,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeSchemaRefreshRequest {
+    pub required_version: u64,
+    pub installed_version: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct HandshakeRequest {
     pub pipeline_name: String,
@@ -190,64 +250,125 @@ pub struct HandshakeResponse {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SourceStartRequest {
+    pub context: RuntimeExecutionContext,
     pub config: RuntimeSourceConfig,
-    pub resume_checkpoint: Option<CheckpointEnvelope>,
-    pub legacy_resume_bytes: Option<Vec<u8>>,
-    pub bootstrap_anchor: Option<CheckpointEnvelope>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimeCheckpointUpdate {
     pub key: String,
     pub envelope: CheckpointEnvelope,
-    pub legacy_payload_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeOffsetPosition {
+    pub key: OffsetKey,
+    pub position: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeOffsetMaterializationHint {
+    pub key: OffsetKey,
+    pub position: u64,
+    pub closed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeIngestPartitionBatch {
+    pub sink_ref: String,
+    pub namespace: String,
+    pub partition: String,
+    pub time: Option<i64>,
+    pub shard: String,
+    pub offsets: Vec<RuntimeOffsetPosition>,
+    pub arrow_stream_bytes: Vec<u8>,
+    pub cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSourceSinkWrite {
+    pub filename: String,
+    pub compaction_id: String,
+    pub arrow_stream_bytes: Vec<u8>,
+    pub cdc_ctx: Option<SyncContext>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeRequestAck {
+    pub request_id: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum SourceEvent {
-    IngestBatches {
-        batches: Vec<IngestBatch>,
-    },
-    SinkWrite {
-        filename: String,
-        arrow_stream_bytes: Vec<u8>,
-        cdc_ctx: Option<SyncContext>,
-    },
-    CheckpointUpdate(RuntimeCheckpointUpdate),
+    SchemaStateUpdate(RuntimeSchemaState),
     Completed,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SinkRunRequest {
-    pub config: RuntimeSinkConfig,
+    pub request_id: u64,
+    pub compaction_id: String,
     pub binding: RuntimeBinding,
+    pub required_schema_version: u64,
     pub filename: String,
-    pub arrow_stream_bytes: Vec<u8>,
     pub cdc_ctx: Option<SyncContext>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSinkPayload {
+    pub request_id: u64,
+    pub arrow_stream_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SchemaRunRequest {
-    pub config: RuntimeSchemaConfig,
+    pub request_id: u64,
+    pub compaction_id: String,
     pub binding: RuntimeBinding,
+    pub required_schema_version: u64,
     pub namespace: String,
-    pub metadata: OutputMetadata,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum HostFrame {
     Handshake(HandshakeRequest),
+    InstallSink(RuntimeSinkInstallRequest),
+    InstallSchema(RuntimeSchemaInstallRequest),
+    InstallSchemaState(RuntimeSchemaStateInstallRequest),
     RunSource(SourceStartRequest),
     RunSink(SinkRunRequest),
     RunSchema(SchemaRunRequest),
+    OffsetResponse(RuntimeOffsetRpcResponse),
     Shutdown,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum PluginFrame {
     HandshakeAck(HandshakeResponse),
+    Installed,
     SourceEvent(SourceEvent),
-    SinkAck,
-    SchemaAck,
+    OffsetRequest(RuntimeOffsetRpcRequest),
+    SinkAck(RuntimeRequestAck),
+    SchemaAck(RuntimeRequestAck),
+    SchemaStateRefreshRequired(RuntimeSchemaRefreshRequest),
     Error(String),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum HostDataFrame {
+    SinkPayload(RuntimeSinkPayload),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum PluginDataFrame {
+    IngestBatches {
+        batches: Vec<RuntimeIngestPartitionBatch>,
+    },
+    CheckpointUpdate {
+        update: RuntimeCheckpointUpdate,
+    },
+    OffsetMaterializationHints {
+        hints: Vec<RuntimeOffsetMaterializationHint>,
+    },
+    SinkWrite(RuntimeSourceSinkWrite),
 }

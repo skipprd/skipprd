@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-schema-sink-motherduck"
-version = "0.0.0-git"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -9,6 +9,12 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-skippr = { path = "../../.." }
-skippr-plugin-runtime-link = { path = "../../skippr-plugin-runtime-link", default-features = false, features = ["runtime-sink-link"] }
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
 tokio.workspace = true
+skippr-plugin-data-sink-motherduck = { path = "../../data_sink/motherduck" }
+
+[package.metadata.skippr-plugin]
+kind = "SchemaSink"
+plugin_name = "Motherduck"
+supports_schema = true

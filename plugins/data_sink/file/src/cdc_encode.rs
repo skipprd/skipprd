@@ -7,7 +7,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::{RecordBatchStream, SendableRecordBatchStream};
 use futures::Stream;
-use skippr::plugins::cdc::{MutationKind, WalPartMeta, WalRowMeta};
+use skippr_core::plugins::cdc::{MutationKind, WalPartMeta, WalRowMeta};
 
 pub fn augment_stream_with_cdc_columns(
     stream: SendableRecordBatchStream,

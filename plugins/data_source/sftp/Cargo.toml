@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-source-sftp"
-version = "0.0.0-git"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -12,5 +12,23 @@ async-trait.workspace = true
 datafusion.workspace = true
 clap.workspace = true
 tokio.workspace = true
-skippr = { path = "../../.." }
-skippr-plugin-runtime-link = { path = "../../skippr-plugin-runtime-link", default-features = false, features = ["runtime-plugin-source-sftp"] }
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
+
+glob = "0.3.0"
+serde.workspace = true
+serde_derive = "1.0.105"
+ssh2 = { version = "0.9" }
+tracing = "0.1"
+[package.metadata.skippr-plugin]
+kind = "DataSource"
+plugin_name = "Sftp"
+
+[package.metadata.skippr-plugin.source_capability]
+name = "Sftp"
+guarantee_tier = "IncrementalOnly"
+checkpoint_style = "ObjectIdentity"
+bootstrap_style = "FullScan"
+order_model = "UnsupportedForFinalState"
+supports_deletes = false
+event_id_semantics = "ObjectPath"

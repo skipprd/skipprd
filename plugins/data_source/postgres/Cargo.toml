@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-source-postgres"
-version = "0.0.0-git"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -8,6 +8,7 @@ name = "skippr-plugin-data-source-postgres"
 path = "src/main.rs"
 
 [dependencies]
+async-trait.workspace = true
 clap.workspace = true
 pgwire-replication.workspace = true
 serde.workspace = true
@@ -16,4 +17,18 @@ serde_json.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
 tracing.workspace = true
-skippr = { path = "../../.." }
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
+
+[package.metadata.skippr-plugin]
+kind = "DataSource"
+plugin_name = "Postgres"
+
+[package.metadata.skippr-plugin.source_capability]
+name = "Postgres"
+guarantee_tier = "SnapshotThenLogExactOnce"
+checkpoint_style = "LogNative"
+bootstrap_style = "AnchoredSnapshot"
+order_model = "GlobalTotalOrder"
+supports_deletes = true
+event_id_semantics = "LogPosition"

@@ -1,7 +1,9 @@
 pub mod cdc;
 pub mod traits;
 
-pub use traits::{DataSink, DataSource, SchemaSink, SchemaSource};
+pub use traits::{
+    DataSink, DataSource, RuntimeIngestRelay, SchemaSink, SchemaSource, SchemaSyncRequest,
+};
 
 /// No-op output plugin used by `discover` mode to run the input pipeline
 /// without writing to any destination.

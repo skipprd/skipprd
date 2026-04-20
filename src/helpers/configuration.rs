@@ -82,54 +82,6 @@ pub struct SemanticLayerSettings {
 
 pub type DataSourcePluginConfig = PluginConfigEntry;
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct DataSourceMssqlPluginConfig {
-    pub connection_string: String,
-    pub tables: Option<Vec<String>>,
-    pub batch_size_rows: Option<usize>,
-    pub query_timeout_seconds: Option<u64>,
-    pub format: Option<String>,
-    pub batch_size_bytes: Option<i64>,
-    pub batch_size_seconds: Option<i64>,
-}
-
-impl TryFrom<PluginConfigEntry> for DataSourceMssqlPluginConfig {
-    type Error = String;
-
-    fn try_from(plugin_config: PluginConfigEntry) -> Result<Self, Self::Error> {
-        plugin_config.decode_for_plugin("Mssql")
-    }
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct DataSinkSnowflakePluginConfig {
-    pub account: String,
-    pub user: String,
-    #[serde(default)]
-    pub password: Option<String>,
-    pub warehouse: String,
-    pub database: String,
-    pub schema: String,
-    pub role: Option<String>,
-    pub stage: Option<String>,
-    pub format: Option<String>,
-    #[serde(default)]
-    pub private_key_path: Option<String>,
-    #[serde(default)]
-    pub staging_uri: Option<String>,
-    #[serde(default)]
-    pub staging_storage_integration: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct DataSinkBigqueryPluginConfig {
-    pub project: String,
-    pub dataset: String,
-    pub location: Option<String>,
-    pub credentials_path: Option<String>,
-    pub format: Option<String>,
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DataSinkPostgresPluginConfig {
     #[serde(default = "default_postgres_host")]
@@ -153,29 +105,8 @@ fn default_postgres_schema() -> String {
     "public".to_string()
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct GlueSchemaSinkConfig {
-    pub glue_database_name: String,
-}
-
 pub type DataSinkPluginConfig = PluginConfigEntry;
 pub type SchemaSinkConfig = PluginConfigEntry;
-
-impl TryFrom<DataSinkPluginConfig> for DataSinkBigqueryPluginConfig {
-    type Error = String;
-
-    fn try_from(entry: DataSinkPluginConfig) -> Result<Self, Self::Error> {
-        entry.decode_for_plugin("Bigquery")
-    }
-}
-
-impl TryFrom<DataSinkPluginConfig> for DataSinkSnowflakePluginConfig {
-    type Error = String;
-
-    fn try_from(entry: DataSinkPluginConfig) -> Result<Self, Self::Error> {
-        entry.decode_for_plugin("Snowflake")
-    }
-}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RuntimePluginEntry {
@@ -733,6 +664,37 @@ impl Config {
             Some(plugin_config) => Ok(plugin_config.plugin_name()),
             None => Ok(None),
         }
+    }
+
+    pub fn get_pipeline_deadletter_schema_plugin_name() -> Result<Option<String>, String> {
+        let pipeline = Config::get_pipeline_config();
+        if pipeline.deadletter_sink.is_none() {
+            return Ok(None);
+        }
+
+        Ok(Some(
+            Self::get_pipeline_deadletter_schema_config()?.plugin_name,
+        ))
+    }
+
+    pub fn get_pipeline_input_plugin_version() -> Result<Option<String>, String> {
+        Ok(Self::get_pipeline_input_plugin_config()?.version())
+    }
+
+    pub fn get_pipeline_output_plugin_version() -> Result<Option<String>, String> {
+        Ok(Self::get_pipeline_output_plugin_config()?.version())
+    }
+
+    pub fn get_pipeline_deadletter_plugin_version() -> Result<Option<String>, String> {
+        Ok(Self::get_pipeline_deadletter_plugin_config()?.and_then(|config| config.version()))
+    }
+
+    pub fn get_pipeline_schema_plugin_version() -> Result<Option<String>, String> {
+        Ok(Self::get_pipeline_schema_plugin_config()?.version())
+    }
+
+    pub fn get_pipeline_deadletter_schema_plugin_version() -> Result<Option<String>, String> {
+        Ok(Self::get_pipeline_deadletter_schema_config()?.version())
     }
 
     pub fn get_pipeline_schema_plugin_name() -> String {
@@ -2110,57 +2072,83 @@ impl Config {
                     );
                     let flatten = Config::get_transform_flatten_events();
                     let md_snapshot = { METADATA.load().metadata.clone() };
-                    if let Some(schema) = md_snapshot.get(&ns) {
-                        let out_meta = if flatten {
+                    let out_meta = if let Some(schema) = md_snapshot.get(&ns) {
+                        Some(if flatten {
                             OutputMetadata::from_flatterened_metadata(schema)
                         } else {
                             OutputMetadata::from_metadata(schema)
-                        };
+                        })
+                    } else {
+                        crate::runtime_plugins::schema_state::runtime_schema_output_metadata(&ns)
+                    };
+                    if let Some(out_meta) = out_meta {
 
                         let deadletter_namespace = crate::ingest::deadletter::table_name();
                         let is_deadletter_ns = ns == deadletter_namespace;
 
                         if !is_deadletter_ns {
                             if primary_plugin.is_none() {
-                                match Config::get_pipeline_runtime_schema_plugin() {
-                                    Ok(Some(runtime_entry)) => {
-                                        let runtime_config = Config::get_pipeline_output_plugin_config()
-                                            .ok()
-                                            .and_then(|cfg| crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
-                                        if let Some(runtime_config) = runtime_config {
-                                            match crate::runtime_plugins::host::ResolvedRuntimePlugin::load(
-                                                std::path::PathBuf::from(runtime_entry.manifest),
-                                            ) {
-                                                Ok(resolved) => {
-                                                    match crate::runtime_plugins::host::RuntimeSchemaSinkPlugin::new(
-                                                        resolved,
-                                                        Config::get_pipeline_name(),
-                                                        crate::runtime_plugins::protocol::RuntimeBinding::Primary,
-                                                        runtime_config,
-                                                    )
-                                                    .await
-                                                    {
-                                                        Ok(plugin) => {
-                                                            primary_plugin = Some(Box::new(plugin));
-                                                        }
-                                                        Err(err) => {
-                                                            warn!("Schema sync: failed to initialize runtime schema plugin: {}", err);
-                                                        }
+                                let schema_plugin_name = Config::get_pipeline_schema_plugin_name();
+                                if schema_plugin_name.is_empty() {
+                                    debug!("Schema sync: no schema sink configured for primary output");
+                                } else {
+                                    let runtime_entry =
+                                        match Config::get_pipeline_runtime_schema_plugin() {
+                                            Ok(runtime_entry) => runtime_entry,
+                                            Err(err) => {
+                                                warn!(
+                                                    "Schema sync: failed to resolve runtime schema plugin reference: {}",
+                                                    err
+                                                );
+                                                None
+                                            }
+                                        };
+                                    let runtime_version =
+                                        match Config::get_pipeline_schema_plugin_version() {
+                                            Ok(runtime_version) => runtime_version,
+                                            Err(err) => {
+                                                warn!(
+                                                    "Schema sync: failed to resolve runtime schema plugin version: {}",
+                                                    err
+                                                );
+                                                None
+                                            }
+                                        };
+                                    let runtime_config = Config::get_pipeline_output_plugin_config()
+                                        .ok()
+                                        .and_then(|cfg| crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
+                                    if let Some(runtime_config) = runtime_config {
+                                        match crate::runtime_plugins::discovery::resolve_runtime_plugin(
+                                            runtime_entry,
+                                            crate::runtime_plugins::protocol::RuntimePluginKind::SchemaSink,
+                                            &schema_plugin_name,
+                                            runtime_version.as_deref(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(resolved) => {
+                                                match crate::runtime_plugins::host::RuntimeSchemaSinkPlugin::new(
+                                                    resolved,
+                                                    Config::get_pipeline_name(),
+                                                    crate::runtime_plugins::protocol::RuntimeBinding::Primary,
+                                                    runtime_config,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(plugin) => {
+                                                        primary_plugin = Some(Box::new(plugin));
+                                                    }
+                                                    Err(err) => {
+                                                        warn!("Schema sync: failed to initialize runtime schema plugin: {}", err);
                                                     }
                                                 }
-                                                Err(err) => {
-                                                    warn!("Schema sync: failed to load runtime schema manifest: {}", err);
-                                                }
                                             }
-                                        } else {
-                                            warn!("Schema sync: runtime schema plugin configured but the primary sink does not expose a runtime schema config");
+                                            Err(err) => {
+                                                warn!("Schema sync: failed to resolve runtime schema manifest: {}", err);
+                                            }
                                         }
-                                    }
-                                    Ok(None) => {
-                                        debug!("Schema sync: no runtime schema plugin configured for primary output");
-                                    }
-                                    Err(err) => {
-                                        warn!("Schema sync: failed to resolve runtime schema plugin: {}", err);
+                                    } else {
+                                        warn!("Schema sync: runtime schema plugin configured but the primary sink does not expose a runtime schema config");
                                     }
                                 }
                             }
@@ -2191,15 +2179,43 @@ impl Config {
                         if is_deadletter_ns {
                             if deadletter_plugin.is_none() {
                                 let dl_sink_cfg = Config::get_pipeline_deadletter_plugin_config().ok().flatten();
-                                match Config::get_pipeline_runtime_schema_plugin() {
-                                    Ok(Some(runtime_entry)) => {
+                                match Config::get_pipeline_deadletter_schema_plugin_name() {
+                                    Ok(Some(schema_plugin_name)) => {
+                                        let runtime_entry =
+                                            match Config::get_pipeline_runtime_schema_plugin() {
+                                                Ok(runtime_entry) => runtime_entry,
+                                                Err(err) => {
+                                                    warn!(
+                                                        "Schema sync: failed to resolve runtime schema plugin reference: {}",
+                                                        err
+                                                    );
+                                                    None
+                                                }
+                                            };
                                         let runtime_config = dl_sink_cfg
                                             .clone()
                                             .and_then(|cfg| crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
+                                        let runtime_version =
+                                            match Config::get_pipeline_deadletter_schema_plugin_version()
+                                            {
+                                                Ok(runtime_version) => runtime_version,
+                                                Err(err) => {
+                                                    warn!(
+                                                        "Schema sync: failed to resolve runtime deadletter schema plugin version: {}",
+                                                        err
+                                                    );
+                                                    None
+                                                }
+                                            };
                                         if let Some(runtime_config) = runtime_config {
-                                            match crate::runtime_plugins::host::ResolvedRuntimePlugin::load(
-                                                std::path::PathBuf::from(runtime_entry.manifest),
-                                            ) {
+                                            match crate::runtime_plugins::discovery::resolve_runtime_plugin(
+                                                runtime_entry,
+                                                crate::runtime_plugins::protocol::RuntimePluginKind::SchemaSink,
+                                                &schema_plugin_name,
+                                                runtime_version.as_deref(),
+                                            )
+                                            .await
+                                            {
                                                 Ok(resolved) => {
                                                     match crate::runtime_plugins::host::RuntimeSchemaSinkPlugin::new(
                                                         resolved,
@@ -2218,7 +2234,7 @@ impl Config {
                                                     }
                                                 }
                                                 Err(err) => {
-                                                    warn!("Schema sync: failed to load runtime deadletter schema manifest: {}", err);
+                                                    warn!("Schema sync: failed to resolve runtime deadletter schema manifest: {}", err);
                                                 }
                                             }
                                         } else {
@@ -2226,10 +2242,10 @@ impl Config {
                                         }
                                     }
                                     Ok(None) => {
-                                        debug!("Schema sync: no runtime schema plugin configured for deadletter output");
+                                        debug!("Schema sync: no schema sink configured for deadletter output");
                                     }
                                     Err(err) => {
-                                        warn!("Schema sync: failed to resolve runtime schema plugin: {}", err);
+                                        warn!("Schema sync: failed to resolve deadletter schema plugin: {}", err);
                                     }
                                 }
                             }
@@ -2467,6 +2483,9 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+    use serial_test::serial;
+
     use super::*;
 
     // Tests for our new JSON parsing configuration options
@@ -2585,5 +2604,112 @@ mod tests {
 
         assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline).is_err());
         assert!(!Config::deadletter_config_violations_for(&config, &pipeline).is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn plugin_versions_are_resolved_per_active_plugin_config() {
+        let original_config = APP_CONFIG.read().clone();
+        let original_pipeline_name = PIPELINE_NAME.read().clone();
+        ENV_CACHE.write().clear();
+
+        let config: Config = serde_json::from_value(json!({
+            "skippr": {
+                "workspace": "default",
+                "tenant": "default",
+                "skippr_s3_bucket": "skippr-e2e-sample-data-output"
+            },
+            "pipelines": {
+                "bike_hire": {
+                    "data_source": "data_sources.input",
+                    "data_sink": "data_sinks.output",
+                    "deadletter_sink": "deadletter_sinks.deadletters"
+                }
+            },
+            "data_sources": {
+                "input": {
+                    "S3": {
+                        "version": "1.2.3",
+                        "s3_bucket": "source-bucket",
+                        "s3_prefix": "input/"
+                    }
+                }
+            },
+            "data_sinks": {
+                "output": {
+                    "schema_sink": "schema_sinks.output_schema",
+                    "Athena": {
+                        "version": "2.3.4",
+                        "athena_workgroup_name": "bikehire",
+                        "s3_bucket": "output-bucket",
+                        "athena_results_s3_bucket": "output-bucket",
+                        "s3_prefix": "bikehire"
+                    }
+                }
+            },
+            "deadletter_sinks": {
+                "deadletters": {
+                    "schema_sink": "schema_sinks.deadletter_schema",
+                    "S3": {
+                        "version": "4.5.6",
+                        "s3_bucket": "deadletters-bucket",
+                        "s3_prefix": "deadletters/"
+                    }
+                }
+            },
+            "schema_sinks": {
+                "output_schema": {
+                    "Glue": {
+                        "version": "3.4.5",
+                        "glue_database_name": "datalake"
+                    }
+                },
+                "deadletter_schema": {
+                    "Glue": {
+                        "version": "5.6.7",
+                        "glue_database_name": "deadletters"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        *APP_CONFIG.write() = Some(config);
+        *PIPELINE_NAME.write() = "bike_hire".to_string();
+
+        assert_eq!(
+            Config::get_pipeline_input_plugin_version()
+                .unwrap()
+                .as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            Config::get_pipeline_output_plugin_version()
+                .unwrap()
+                .as_deref(),
+            Some("2.3.4")
+        );
+        assert_eq!(
+            Config::get_pipeline_schema_plugin_version()
+                .unwrap()
+                .as_deref(),
+            Some("3.4.5")
+        );
+        assert_eq!(
+            Config::get_pipeline_deadletter_plugin_version()
+                .unwrap()
+                .as_deref(),
+            Some("4.5.6")
+        );
+        assert_eq!(
+            Config::get_pipeline_deadletter_schema_plugin_version()
+                .unwrap()
+                .as_deref(),
+            Some("5.6.7")
+        );
+
+        *APP_CONFIG.write() = original_config;
+        *PIPELINE_NAME.write() = original_pipeline_name;
+        ENV_CACHE.write().clear();
     }
 }

@@ -1,4 +1,5 @@
 use sled;
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 use Result;
@@ -6,6 +7,7 @@ use Result;
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::OffsetsError::VacuumError;
 use crate::helpers::Helpers;
+use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use crate::METRICS;
 use serde_derive::{Deserialize, Serialize};
 use sled::{IVec, Mode};
@@ -50,11 +52,41 @@ impl OffsetKey {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum OffsetTypes {
     Filesize,
     Position,
     Closed,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub enum RuntimeOffsetOperation {
+    Validate {
+        key: OffsetKey,
+        offset_type: OffsetTypes,
+        offset_value: u64,
+    },
+    LoadCheckpointEnvelope {
+        key: String,
+    },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeOffsetRpcRequest {
+    pub request_id: u64,
+    pub operation: RuntimeOffsetOperation,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub enum RuntimeOffsetValue {
+    Validate(Option<bool>),
+    LoadCheckpointEnvelope(Option<CheckpointEnvelope>),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeOffsetRpcResponse {
+    pub request_id: u64,
+    pub result: Result<RuntimeOffsetValue, String>,
 }
 
 // We use `LittleEndian` for values because
@@ -75,14 +107,26 @@ pub struct Offset {
     pub(crate) key: OffsetKey,
 }
 
+pub trait OffsetTransport: Send + Sync {
+    fn call(&self, operation: RuntimeOffsetOperation) -> Result<RuntimeOffsetValue, String>;
+}
+
+pub trait CheckpointTransport: Send + Sync {
+    fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String>;
+}
+
 #[derive(Clone)]
-pub struct Offsets {
-    /// The Key-Value store that contains all offset data.
-    /// Resources can be found using their Subject.
-    /// Try not to use this directly, but use the Trees.
+struct LocalOffsets {
     #[allow(dead_code)]
     db: sled::Db,
-    pub(crate) tree: sled::Tree,
+    tree: sled::Tree,
+}
+
+#[derive(Clone)]
+pub struct Offsets {
+    local: Option<LocalOffsets>,
+    transport: Option<Arc<dyn OffsetTransport>>,
+    checkpoint_transport: Option<Arc<dyn CheckpointTransport>>,
 }
 
 // #[derive(Debug, Error)]
@@ -98,6 +142,84 @@ pub enum OffsetsError {
 }
 
 impl Offsets {
+    fn offset_value_bytes(offset_type: OffsetTypes, offset: u64) -> sled::IVec {
+        match offset_type {
+            OffsetTypes::Filesize => sled::IVec::from(
+                OffsetValue {
+                    filesize: U64::new(offset),
+                    line: U64::new(0),
+                    closed: U64::new(0),
+                }
+                .as_bytes(),
+            ),
+            OffsetTypes::Position => sled::IVec::from(
+                OffsetValue {
+                    filesize: U64::new(0),
+                    line: U64::new(offset),
+                    closed: U64::new(0),
+                }
+                .as_bytes(),
+            ),
+            OffsetTypes::Closed => sled::IVec::from(
+                OffsetValue {
+                    filesize: U64::new(0),
+                    line: U64::new(0),
+                    closed: U64::new(offset),
+                }
+                .as_bytes(),
+            ),
+        }
+    }
+
+    fn checkpoint_storage_key(key: &str) -> String {
+        format!("cdc_checkpoint:{}", key)
+    }
+
+    pub fn from_transport(transport: Arc<dyn OffsetTransport>) -> Self {
+        Self::from_runtime_transports(transport, None)
+    }
+
+    pub fn from_runtime_transports(
+        transport: Arc<dyn OffsetTransport>,
+        checkpoint_transport: Option<Arc<dyn CheckpointTransport>>,
+    ) -> Self {
+        Self {
+            local: None,
+            transport: Some(transport),
+            checkpoint_transport,
+        }
+    }
+
+    fn local_tree(&self) -> Option<&sled::Tree> {
+        self.local.as_ref().map(|local| &local.tree)
+    }
+
+    fn transport(&self) -> Option<&Arc<dyn OffsetTransport>> {
+        self.transport.as_ref()
+    }
+
+    fn checkpoint_transport(&self) -> Option<&Arc<dyn CheckpointTransport>> {
+        self.checkpoint_transport.as_ref()
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.local_tree().is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_for_test(&self) {
+        if let Some(tree) = self.local_tree() {
+            tree.clear().unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flush_for_test(&self) {
+        if let Some(tree) = self.local_tree() {
+            tree.flush().unwrap();
+        }
+    }
+
     pub fn init() -> Result<Offsets, OffsetsError> {
         // match Self::vacuum() { // requires a full scan of table which is expensive on EFS since we're opting to keep all offsets to support replays
         //     Ok(size) => {}
@@ -176,7 +298,11 @@ impl Offsets {
         //     println!("Key: {:?}, Value: {:?}", key, value);
         // }
 
-        let store = Offsets { db, tree };
+        let store = Offsets {
+            local: Some(LocalOffsets { db, tree }),
+            transport: None,
+            checkpoint_transport: None,
+        };
 
         Ok(store)
     }
@@ -392,6 +518,17 @@ impl Offsets {
         // result.extend_from_slice(u16_slice);
     }
 
+    fn remote_value(&self, operation: RuntimeOffsetOperation) -> Option<RuntimeOffsetValue> {
+        let transport = self.transport()?;
+        match transport.call(operation) {
+            Ok(value) => Some(value),
+            Err(err) => {
+                error!("Remote offset operation failed: {}", err);
+                None
+            }
+        }
+    }
+
     pub fn build_key(&self, key: &OffsetKey) -> String {
         // let namespace = ;
         // let partition = self.vec_8_to_u16(partition.as_bytes());
@@ -412,15 +549,26 @@ impl Offsets {
     }
 
     pub fn flush(&self) -> Option<usize> {
-        match self.tree.flush() {
-            Ok(val) => Some(val),
-            Err(err) => {
-                println!("Failed flushing offsets, Error: {:?}", err);
-                None
+        if let Some(tree) = self.local_tree() {
+            match tree.flush() {
+                Ok(val) => Some(val),
+                Err(err) => {
+                    println!("Failed flushing offsets, Error: {:?}", err);
+                    None
+                }
             }
+        } else {
+            None
         }
     }
     pub fn set(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
+        if self.local_tree().is_none() {
+            error!(
+                "Remote offsets are read-only; ignoring set for {}:{} type={:?} offset={}",
+                key.namespace, key.partition, offset_type, offset
+            );
+            return None;
+        }
         match self.upsert(key, offset_type, offset) {
             Ok(val) => val,
             Err(err) => {
@@ -439,24 +587,24 @@ impl Offsets {
     }
 
     pub fn insert(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
+        let Some(tree) = self.local_tree() else {
+            error!(
+                "Remote offsets are read-only; ignoring insert for {}:{} type={:?} offset={}",
+                key.namespace, key.partition, offset_type, offset
+            );
+            return None;
+        };
         let key = self.build_key(key);
         let bytes: &[u8] = key.as_bytes();
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
 
         let new_val = match offset_type {
             // @todo - deprecated, we never implement Filesize
-            OffsetTypes::Filesize => sled::IVec::from(
-                OffsetValue {
-                    filesize: U64::new(offset),
-                    line: U64::new(0),
-                    closed: U64::new(0),
-                }
-                .as_bytes(),
-            ),
+            OffsetTypes::Filesize => Self::offset_value_bytes(offset_type, offset),
 
             // @todo - compare and swap, we should only insert offsets that are greater than value in db
             OffsetTypes::Position => {
-                let value_opt = self.tree.get(bytes).unwrap();
+                let value_opt = tree.get(bytes).unwrap();
                 // self.tree.f(bytes, |value_opt| {
                 if let Some(existing) = value_opt {
                     let mut backing_bytes = sled::IVec::from(existing);
@@ -469,55 +617,40 @@ impl Offsets {
 
                     let new_value = self.increment(old_value.line, offset.into());
 
-                    sled::IVec::from(
-                        OffsetValue {
-                            filesize: U64::new(0),
-                            line: new_value,
-                            closed: U64::new(0),
-                        }
-                        .as_bytes(),
-                    )
+                    Self::offset_value_bytes(OffsetTypes::Position, new_value.get())
                 } else {
-                    sled::IVec::from(
-                        OffsetValue {
-                            filesize: U64::new(0),
-                            line: U64::new(offset),
-                            closed: U64::new(0),
-                        }
-                        .as_bytes(),
-                    )
+                    Self::offset_value_bytes(offset_type, offset)
                 }
             }
-            OffsetTypes::Closed => sled::IVec::from(
-                OffsetValue {
-                    filesize: U64::new(0),
-                    line: U64::new(0),
-                    closed: U64::new(offset),
-                }
-                .as_bytes(),
-            ),
+            OffsetTypes::Closed => Self::offset_value_bytes(offset_type, offset),
         };
 
-        let old_val = self.tree.insert(bytes, &new_val).unwrap();
+        let old_val = tree.insert(bytes, &new_val).unwrap();
 
         old_val
     }
 
     pub fn get(&self, key: &OffsetKey) -> Option<IVec> {
+        let Some(tree) = self.local_tree() else {
+            return None;
+        };
         let key = self.build_key(key);
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
         let bytes: &[u8] = key.as_bytes();
-        self.tree.get(bytes).unwrap_or_else(|_err| {
+        tree.get(bytes).unwrap_or_else(|_err| {
             // println!("Failed getting offset, Error: {:?}", err);
             None
         })
     }
 
     pub fn get_line(&self, key: &OffsetKey) -> Option<U64<LittleEndian>> {
+        let Some(tree) = self.local_tree() else {
+            return None;
+        };
         let key = self.build_key(key);
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
         let bytes: &[u8] = key.as_bytes();
-        match self.tree.get(bytes) {
+        match tree.get(bytes) {
             Ok(val) => {
                 let mut backing_bytes = sled::IVec::from(val.unwrap());
 
@@ -539,10 +672,13 @@ impl Offsets {
     }
 
     pub fn get_latest(&self, key: &OffsetKey) -> Option<IVec> {
+        let Some(tree) = self.local_tree() else {
+            return None;
+        };
         let key = self.build_key(key);
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
         let bytes: &[u8] = key.as_bytes();
-        match self.tree.get(bytes) {
+        match tree.get(bytes) {
             Ok(val) => val,
             Err(err) => {
                 println!("Failed getting latest offset, Error: {:?}", err);
@@ -552,10 +688,15 @@ impl Offsets {
     }
 
     pub fn remove(&self, key: &OffsetKey) -> Result<Option<IVec>, sled::Error> {
+        let Some(tree) = self.local_tree() else {
+            return Err(sled::Error::ReportableBug(
+                "Remote offsets do not support remove".to_string(),
+            ));
+        };
         let key = self.build_key(key);
         let bytes: &[u8] = key.as_bytes();
 
-        match self.tree.remove(bytes) {
+        match tree.remove(bytes) {
             Ok(val) => Ok(val),
             // @todo - enumerate the possible sled::Error errors that can occur
             Err(err) => Err(sled::Error::ReportableBug(format!(
@@ -584,6 +725,20 @@ impl Offsets {
         offset_type: OffsetTypes,
         offset_value: u64,
     ) -> Option<bool> {
+        if self.local_tree().is_none() {
+            return match self.remote_value(RuntimeOffsetOperation::Validate {
+                key: key.clone(),
+                offset_type,
+                offset_value,
+            }) {
+                Some(RuntimeOffsetValue::Validate(value)) => value,
+                Some(other) => {
+                    error!("Remote validate returned unexpected response: {:?}", other);
+                    None
+                }
+                None => None,
+            };
+        }
         // self.build_key(namespace, partition);
 
         let resp = match self.get(key) {
@@ -624,7 +779,9 @@ impl Offsets {
                         }
                     }
                     OffsetTypes::Closed => {
-                        if value.closed.get() == offset_value {
+                        if (offset_value == 0 && value.closed.get() == 0)
+                            || (offset_value != 0 && value.closed.get() != 0)
+                        {
                             // Some(false)
                             bool = true
                         }
@@ -645,6 +802,12 @@ impl Offsets {
         offset_type: OffsetTypes,
         offset: u64,
     ) -> Result<Option<IVec>, sled::Error> {
+        let Some(tree) = self.local_tree() else {
+            return Err(sled::Error::ReportableBug(format!(
+                "Remote offsets are read-only; refusing upsert for {}:{} type={:?} offset={}",
+                key.namespace, key.partition, offset_type, offset
+            )));
+        };
         // let key = Key { namespace: namespace.to_string(), partition: partition.to_string() };
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
 
@@ -654,7 +817,7 @@ impl Offsets {
 
         // "UPSERT" functionality
         // let resp = self.tree.update_and_fetch(bytes, |value_opt| {
-        self.tree.fetch_and_update(bytes, |value_opt| {
+        tree.fetch_and_update(bytes, |value_opt| {
             if let Some(existing) = value_opt {
                 // We need to make a copy that will be written back
                 // into the database. This allows other threads that
@@ -692,55 +855,135 @@ impl Offsets {
                 // Some(value)
                 // Some(is_updated)
             } else {
-                // println!("Creating offset");
-
-                let new_val = sled::IVec::from(
-                    OffsetValue {
-                        filesize: U64::new(0),
-                        line: U64::new(0),
-                        closed: U64::new(0),
-                    }
-                    .as_bytes(),
-                );
-
-                self.tree.insert(bytes, &new_val).unwrap();
-
-                Some(new_val)
-
-                // Some(true)
+                Some(Self::offset_value_bytes(offset_type, offset))
             }
         })
     }
 
-    /// Store an opaque CDC checkpoint blob keyed by a source-defined string.
-    /// Used by CDC sources to persist resume state (LSN, binlog position,
-    /// resume token, sequence number) across restarts.
-    pub fn store_checkpoint(&self, key: &str, value: &[u8]) {
-        let sled_key = format!("cdc_checkpoint:{}", key);
-        if let Err(e) = self.tree.insert(sled_key.as_bytes(), value) {
-            error!("Failed to store CDC checkpoint '{}': {}", key, e);
+    pub fn store_checkpoint_envelope(
+        &self,
+        key: &str,
+        envelope: &CheckpointEnvelope,
+    ) -> Result<(), String> {
+        if self.local_tree().is_none() {
+            let transport = self.checkpoint_transport().ok_or_else(|| {
+                format!("remote offsets have no checkpoint transport for '{}'", key)
+            })?;
+            return transport.store_checkpoint(key, envelope);
+        }
+        let Some(tree) = self.local_tree() else {
+            return Err(format!("offset checkpoint tree missing for '{}'", key));
+        };
+        let sled_key = Self::checkpoint_storage_key(key);
+        let value = bincode::serialize(envelope).map_err(|err| err.to_string())?;
+        tree.insert(sled_key.as_bytes(), value)
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    pub fn store_checkpoint_payload<T: serde::Serialize>(
+        &self,
+        key: &str,
+        authority: CheckpointAuthority,
+        kind: CheckpointKind,
+        payload_version: u32,
+        payload: &T,
+    ) -> Result<(), String> {
+        let envelope = CheckpointEnvelope::from_payload(authority, kind, payload_version, payload)
+            .map_err(|err| err.to_string())?;
+        self.store_checkpoint_envelope(key, &envelope)
+    }
+
+    pub fn load_checkpoint_envelope(&self, key: &str) -> Option<CheckpointEnvelope> {
+        if self.local_tree().is_none() {
+            return match self.remote_value(RuntimeOffsetOperation::LoadCheckpointEnvelope {
+                key: key.to_string(),
+            }) {
+                Some(RuntimeOffsetValue::LoadCheckpointEnvelope(value)) => value,
+                Some(other) => {
+                    error!(
+                        "Remote load_checkpoint_envelope returned unexpected response: {:?}",
+                        other
+                    );
+                    None
+                }
+                None => None,
+            };
+        }
+        let Some(tree) = self.local_tree() else {
+            return None;
+        };
+        let sled_key = Self::checkpoint_storage_key(key);
+        let value = tree.get(sled_key.as_bytes()).ok().flatten()?;
+        match bincode::deserialize::<CheckpointEnvelope>(&value) {
+            Ok(envelope) => Some(envelope),
+            Err(err) => {
+                error!("Failed to deserialize checkpoint envelope '{}': {}", key, err);
+                None
+            }
         }
     }
 
-    /// Load a previously stored CDC checkpoint blob.  Returns `None` if no
-    /// checkpoint has been stored for this key.
-    pub fn load_checkpoint(&self, key: &str) -> Option<Vec<u8>> {
-        let sled_key = format!("cdc_checkpoint:{}", key);
-        self.tree
-            .get(sled_key.as_bytes())
-            .ok()
-            .flatten()
-            .map(|v| v.to_vec())
+    pub fn load_checkpoint_payload<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
+        self.load_checkpoint_envelope(key)
+            .and_then(|envelope| envelope.into_payload().ok())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
 
-    use crate::helpers::offsets::{OffsetKey, OffsetTypes, OffsetValue, Offsets};
+    use crate::helpers::offsets::{
+        CheckpointTransport, OffsetKey, OffsetTransport, OffsetTypes, OffsetValue, Offsets,
+        RuntimeOffsetOperation, RuntimeOffsetValue,
+    };
+    use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 
     use serial_test::serial;
     use zerocopy::{AsBytes, U64};
+
+    #[derive(Default)]
+    struct RecordingOffsetTransport {
+        calls: Mutex<Vec<RuntimeOffsetOperation>>,
+    }
+
+    impl OffsetTransport for RecordingOffsetTransport {
+        fn call(&self, operation: RuntimeOffsetOperation) -> Result<RuntimeOffsetValue, String> {
+            self.calls.lock().unwrap().push(operation.clone());
+            match operation {
+                RuntimeOffsetOperation::Validate { .. } => {
+                    Ok(RuntimeOffsetValue::Validate(Some(true)))
+                }
+                RuntimeOffsetOperation::LoadCheckpointEnvelope { .. } => Ok(
+                    RuntimeOffsetValue::LoadCheckpointEnvelope(Some(
+                        CheckpointEnvelope::from_payload(
+                            CheckpointAuthority::AdvisoryHint,
+                            CheckpointKind::AdvisoryProgress,
+                            1,
+                            &b"checkpoint".to_vec(),
+                        )
+                        .unwrap(),
+                    )),
+                ),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingCheckpointTransport {
+        calls: Mutex<Vec<(String, CheckpointEnvelope)>>,
+    }
+
+    impl CheckpointTransport for RecordingCheckpointTransport {
+        fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((key.to_string(), envelope.clone()));
+            Ok(())
+        }
+    }
 
     #[test]
     #[serial]
@@ -753,7 +996,7 @@ mod tests {
             }
         };
 
-        db.tree.clear().unwrap();
+        db.clear_for_test();
 
         let key = &OffsetKey {
             namespace: "foo".to_string(),
@@ -823,7 +1066,7 @@ mod tests {
             }
         };
 
-        db.tree.clear().unwrap();
+        db.clear_for_test();
 
         // assert_eq!(db.validate(key, 1, 1), Some(true));
         // assert_eq!(db.validate(key, 1, 1), Some(false)); // @todo this is atleast once
@@ -841,10 +1084,10 @@ mod tests {
         };
 
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 1), None);
-        db.set(key, OffsetTypes::Filesize, 1).unwrap();
+        db.set(key, OffsetTypes::Filesize, 1);
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 1), Some(false));
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 2), Some(true));
-        db.set(key, OffsetTypes::Filesize, 2).unwrap();
+        db.set(key, OffsetTypes::Filesize, 2);
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 1), Some(false));
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 2), Some(false));
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 3), Some(true));
@@ -858,17 +1101,74 @@ mod tests {
 
         assert_eq!(db.validate(key, OffsetTypes::Closed, 0), None);
         assert_eq!(db.validate(key, OffsetTypes::Closed, 1), None);
-        db.set(key, OffsetTypes::Closed, 1).unwrap();
+        db.set(key, OffsetTypes::Closed, 1);
+        assert_eq!(db.validate(key, OffsetTypes::Closed, 1), Some(true));
+        assert_eq!(db.validate(key, OffsetTypes::Closed, 0), Some(false));
+        db.set(key, OffsetTypes::Closed, 42);
         assert_eq!(db.validate(key, OffsetTypes::Closed, 1), Some(true));
         assert_eq!(db.validate(key, OffsetTypes::Closed, 0), Some(false));
 
         // db.remove(key).unwrap();
 
-        db.tree.flush().unwrap();
+        db.flush_for_test();
         // db.db.flush().unwrap();
         // drop(db.db);
         // drop(db.tree);
         // drop(db);
+    }
+
+    #[test]
+    fn test_remote_offsets_route_transport_calls() {
+        let transport = Arc::new(RecordingOffsetTransport::default());
+        let checkpoints = Arc::new(RecordingCheckpointTransport::default());
+        let offsets =
+            Offsets::from_runtime_transports(transport.clone(), Some(checkpoints.clone()));
+        let key = OffsetKey::new("remote-ns", "remote-partition");
+
+        assert_eq!(offsets.validate(&key, OffsetTypes::Closed, 1), Some(true));
+        offsets.set(&key, OffsetTypes::Position, 42);
+        offsets
+            .store_checkpoint_payload(
+                "remote-key",
+                CheckpointAuthority::AdvisoryHint,
+                CheckpointKind::AdvisoryProgress,
+                1,
+                &b"value".to_vec(),
+            )
+            .unwrap();
+        assert_eq!(
+            offsets.load_checkpoint_payload::<Vec<u8>>("remote-key"),
+            Some(b"checkpoint".to_vec())
+        );
+        assert_eq!(offsets.flush(), None);
+
+        let calls = transport.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                RuntimeOffsetOperation::Validate {
+                    key: key.clone(),
+                    offset_type: OffsetTypes::Closed,
+                    offset_value: 1,
+                },
+                RuntimeOffsetOperation::LoadCheckpointEnvelope {
+                    key: "remote-key".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            checkpoints.calls.lock().unwrap().clone(),
+            vec![(
+                "remote-key".to_string(),
+                CheckpointEnvelope::from_payload(
+                    CheckpointAuthority::AdvisoryHint,
+                    CheckpointKind::AdvisoryProgress,
+                    1,
+                    &b"value".to_vec(),
+                )
+                .unwrap(),
+            )]
+        );
     }
 
     // #[test]

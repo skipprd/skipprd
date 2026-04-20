@@ -1,6 +1,6 @@
 # How Skippr Works
 
-Skippr is a single-binary data pipeline tool. It reads from a source, discovers schemas, buffers data through a write-ahead log (WAL), compacts it into Parquet, and uploads to S3 with Glue catalog integration.
+Skippr is a host binary plus a published runtime plugin system. The host orchestrates discovery, sync, WAL recovery, compaction, and schema state, while runtime source, sink, and schema plugins are resolved from published manifests or explicit local overrides.
 
 ## Pipeline lifecycle
 
@@ -16,9 +16,9 @@ Connects to the configured data source, samples records, and infers the complete
 
 Discovery detects:
 
-- Field names and nesting (including arrays of structs)
-- Data types (string, integer, long, double, boolean, timestamps)
-- Namespace separation when `TRANSFORM_NAMESPACE_FIELDS` is configured (one schema per event type)
+- field names and nesting (including arrays of structs)
+- data types (string, integer, long, double, boolean, timestamps)
+- namespace separation when `TRANSFORM_NAMESPACE_FIELDS` is configured
 
 ### 2. Sync
 
@@ -28,13 +28,14 @@ skippr-el sync --pipeline my_pipeline --log
 
 The main ingestion loop:
 
-1. **Read** — the input plugin reads batches from the source (S3, local files)
-2. **Buffer** — records are written to the WAL as segments. Segments can live on local disk (`WAL_STORAGE=disk`, the default) or S3 (`WAL_STORAGE=s3`) for fully durable remote storage
-3. **Compact** — the compactor service reads WAL segments, converts them to Snappy-compressed Parquet, and uploads to the destination S3 bucket
-4. **Register** — Glue table and Hive-style partitions are created or updated automatically
-5. **Checkpoint** — offsets are committed to the offsets database after successful upload, ensuring exactly-once delivery
+1. **Resolve plugins** — the host resolves the required runtime source, sink, and schema plugins from the published registry. Latest is the default; per-plugin version pins are optional.
+2. **Connect runtime sessions** — plugins connect back to the host over a TCP control channel and a TCP data channel.
+3. **Read** — runtime source plugins read external systems and send raw or prepared batches to the host.
+4. **Durably buffer** — the host writes those batches to the WAL. Visible committed WAL state is the durable ingest boundary.
+5. **Compact and write** — the host replays committed WAL work through sink and schema plugins using replay-safe compaction ids.
+6. **Materialize resume state** — the host updates its offsets/checkpoint view from WAL-visible progress and provides that state back to sources on restart.
 
-On shutdown (or crash recovery), the WAL is replayed to resume from the last committed offset.
+On shutdown or crash recovery, the host replays from committed WAL state.
 
 ### 3. Query
 
@@ -48,52 +49,53 @@ Runs SQL against the destination tables via Athena. Also supports pipeline manag
 
 ### Write-Ahead Log (WAL)
 
-Every ingested record is first written to the WAL before any processing. This guarantees that data survives process crashes, including SIGKILL.
+Every ingested record is first written to the WAL before downstream compaction and destination writes. This guarantees that data survives process crashes, including SIGKILL.
 
-- **Local disk WAL** (`WAL_STORAGE=disk`) — segments written to `DATA_DIR`. Fast, but requires the same disk on restart for recovery.
-- **S3 WAL** (`WAL_STORAGE=s3`) — segments written to `SKIPPR_S3_BUCKET`. Fully durable, no local state required. Enables truly stateless compute.
+- **Local disk WAL** (`WAL_STORAGE=disk`) — segments written under `DATA_DIR`
+- **S3 WAL** (`WAL_STORAGE=s3`) — segments written to `SKIPPR_S3_BUCKET`
 
 ### Compactor
 
-A background actor service that continuously processes WAL segments:
-
-1. Groups segments by partition (time bucket + namespace)
-2. Reads and merges segment data
-3. Writes Parquet via multipart upload to S3
-4. Registers Glue partitions
-5. Deletes consumed segments (local files or S3 objects)
-6. Records tombstones to prevent reprocessing
-
-On pipeline shutdown, the compactor drains all remaining segments before the process exits.
+The compactor reads committed WAL work, groups data by output partition, produces Parquet, and drives replay-safe sink/schema operations. If compaction is replayed after a crash, the same logical `compaction_id` is reused.
 
 ### Offsets database
 
-Tracks which source records have been successfully processed. Stored on local disk at `DATA_DIR` and used during WAL recovery to skip already-committed data. This is the mechanism that provides exactly-once semantics.
+The offsets database is stored at `DATA_DIR`, opened only by the host process, and treated as a materialized view of committed WAL progress.
+
+Runtime source plugins do not open the durable `sled` database directly. They ask the host to validate resume state and load checkpoints over the runtime protocol, while the host remains the only writer.
 
 ### Pipeline metadata
 
 Stored in S3 at `{tenant}/{workspace}/{pipeline}/metadata.json`. Contains the discovered schema, field types, namespace definitions, and configuration. Updated on schema discovery and evolution.
 
+### Runtime plugin registry
+
+By default, runtime plugins are resolved from the latest published manifest index at `install.skippr.io`. Each plugin crate is versioned independently, and the host is not stamped with a shared plugin bundle version.
+
 ## Data flow diagram
 
-```
-Source (S3 / file)
+```text
+Published registry (`latest/manifest-index.json`)
   │
   ▼
-Input Plugin ─── reads batches ───▶ Ingest Buffer
-                                        │
-                                        ▼
-                                   WAL Segments
-                                   (disk or S3)
-                                        │
-                                        ▼
-                                   Compactor Service
-                                        │
-                                   ┌────┴────┐
-                                   ▼         ▼
-                              Parquet    Glue Table
-                              on S3      + Partitions
-                                   │
-                                   ▼
-                              Athena SQL
+Host (`skippr-el`)
+  │
+  ├── TCP control/data sessions
+  │
+  ├── Runtime Source Plugin ──▶ Host WAL writer
+  │                               │
+  │                               ▼
+  │                          WAL Segments
+  │                          (disk or S3)
+  │                               │
+  │                               ▼
+  │                          Compaction replay
+  │                               │
+  │                          ┌────┴────┐
+  │                          ▼         ▼
+  ├── Runtime Sink Plugin ▶ Parquet   Destination writes
+  │
+  ├── Runtime Schema Plugin ─▶ Glue/catalog updates
+  │
+  └── Host-owned offsets/checkpoint view
 ```

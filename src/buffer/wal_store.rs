@@ -128,10 +128,14 @@ impl WalStore for DiskWalStore {
         let seg_file = SegmentFile::new(&seg_dir, snapshot_id)?;
         let (meta, total_rows, sha256) =
             seg_file.write_snapshot(offsets, batches, partitions_meta, part_meta_blobs)?;
-        let header =
-            SegmentFile::build_commit_header_bytes(meta.num_partitions, meta.total_bytes, &sha256);
-        let commit_path = seg_file.path.with_extension("seg.commit");
-        fs::write(&commit_path, &header)?;
+        // Publish the commit marker with the same fsync discipline as the legacy
+        // WAL path so offsets are not advanced before the marker is durable.
+        crate::buffer::ingest_buffer::Buffers::write_seg_commit(
+            &seg_file.path,
+            &sha256,
+            meta.num_partitions,
+            meta.total_bytes,
+        )?;
         Ok(SegmentWriteResult {
             meta,
             total_rows,

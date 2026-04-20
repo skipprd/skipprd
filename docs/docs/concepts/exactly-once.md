@@ -1,50 +1,61 @@
 # Exactly-Once Delivery
 
-Skippr guarantees that every source record is written to the destination exactly once, even through crashes and restarts (including SIGKILL).
+Skippr's exactly-once contract starts at the WAL and stays host-owned all the way through recovery.
 
-## How it works
+## Durable boundary
 
-Three mechanisms work together:
+The only durable boundary is a **visible committed WAL segment**.
 
-### 1. Write-Ahead Log (WAL)
+That means:
 
-Every ingested record is written to the WAL before any processing. WAL segments are immutable once flushed. On crash, the WAL is replayed to recover any data that was ingested but not yet compacted.
+- a source batch is durable once the host has written it to the WAL and made the commit visible
+- the offsets database is **not** the source of truth
+- sink progress is not the primary durability ledger
 
-WAL segments can be stored on local disk (`WAL_STORAGE=disk`) or S3 (`WAL_STORAGE=s3`). S3 WAL removes any dependency on local state.
+Exactly-once output therefore depends on two things working together:
 
-### 2. Offsets database
+1. **WAL-first durability** in the host
+2. **Replay-safe sink behavior** when compaction work is retried
 
-The offsets database tracks which source records have been fully processed (ingested, compacted, uploaded). It is stored on local disk at `DATA_DIR`.
+## WAL
 
-On restart, Skippr reads the offsets database and skips any source records that were already committed. This prevents duplicate writes.
+Every ingested record is written to the WAL before downstream compaction and destination writes. WAL segments can be stored on local disk (`WAL_STORAGE=disk`) or S3 (`WAL_STORAGE=s3`).
 
-### 3. Compactor drain
+If Skippr crashes, recovery starts from committed WAL state, not from in-memory progress.
 
-On clean shutdown, the compactor service is drained: all in-flight WAL segments are compacted and uploaded before the process exits. If the drain fails, the process exits with a non-zero status code, signaling that the run should not be trusted.
+## Offsets database
+
+The durable offsets database is stored on local disk at `DATA_DIR`, but it is owned by the host process only.
+
+Its role is to materialize the latest source positions that are already represented by committed WAL state. In other words:
+
+- offsets represent **WAL-visible progress**
+- runtime source plugins do not mutate the DB directly
+- runtime source plugins read resume information from the host over the runtime protocol
+
+This keeps the host as the only authority for durable ingest progress.
+
+## Compaction and sinks
+
+After data is durable in the WAL, the host compacts that data and sends destination work to sink and schema plugins.
+
+Compaction can be retried after crashes or reconnects, so sink-side work must be replay-safe. Skippr uses stable `compaction_id` values so repeated work can be identified and handled idempotently where the destination supports it.
 
 ## Crash recovery
 
 When Skippr restarts after a crash:
 
-1. The WAL is scanned — all segment files (disk or S3) are indexed
-2. Committed offsets are loaded from the offsets database
-3. Segments containing already-committed data are skipped
-4. Remaining segments are re-compacted and uploaded
+1. The host scans committed WAL segments.
+2. The host re-materializes offset and checkpoint state from committed WAL progress.
+3. Any remaining compaction work is replayed.
+4. Runtime source plugins resume from host-provided checkpoint and offset state.
 
-The key invariant: **no data is lost and no data is duplicated**, because the offsets database records what has been uploaded and the WAL preserves what was ingested.
+The key invariant is: **WAL recovery is the source of truth, and the offsets DB is a host-owned cache of that truth**.
+
+## Clean shutdown
+
+On clean shutdown, the host drains in-flight WAL work before exit. If that drain fails, the process exits non-zero so the run is treated as untrusted and recovery will replay from WAL on the next start.
 
 ## Chaos mode
 
-Skippr includes a built-in chaos mode (`SKIPPR_CHAOS_MODE=yes`) that injects random SIGKILL signals during ingestion. This is used in CI/CD to validate exactly-once guarantees under failure conditions.
-
-The integrity check at the end of each run verifies:
-
-```
-Compactor: summary uploaded_rows=X expected_msgs=Y quarantined_parts=Z
-```
-
-A clean run has `uploaded_rows == expected_msgs` and `quarantined_parts == 0`.
-
-## Tombstones
-
-When a WAL segment has been fully compacted and uploaded, Skippr writes a tombstone marker. Tombstones prevent a segment from being reprocessed on recovery. Tombstones are only written after the segment is successfully deleted, preventing orphaned state.
+Skippr includes a built-in chaos mode (`SKIPPR_CHAOS_MODE=yes`) that injects random SIGKILL signals during ingestion. This is used to validate the WAL-first recovery model under crash conditions.

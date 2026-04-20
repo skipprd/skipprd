@@ -41,7 +41,7 @@ pub enum CheckpointAuthority {
 /// Each source plugin defines its own typed payload and serialization rules.
 /// The core only stores and returns opaque bytes plus enough metadata to reject
 /// incompatible or stale payload versions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointEnvelope {
     pub authority: CheckpointAuthority,
     pub kind: CheckpointKind,

@@ -1,6 +1,8 @@
 # Output Destination
 
-Skippr's primary output is Athena — writing Snappy-compressed Parquet to S3 and managing Glue catalog tables.
+Skippr resolves runtime sink and schema plugins on demand. Athena remains the primary reference destination, but the output registry now maps to independently versioned runtime plugins rather than a bundled host binary.
+
+In YAML config, sink and schema connector blocks can include an optional `version` field to pin an individual published runtime plugin version.
 
 ## Athena output configuration
 

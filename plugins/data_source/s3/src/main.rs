@@ -1,11 +1,7 @@
-#[path = "../../../shared/append_source_runtime.rs"]
-mod append_source_runtime;
-
-use append_source_runtime::run_append_data_source_main;
-use skippr::plugins::cdc;
-use skippr::plugins::DataSource;
-use skippr_plugin_runtime_link::runtime_plugin_data_sources::runtime_source_s3::DataSourceS3Plugin;
-use skippr_plugin_runtime_link::runtime_plugin_data_sources::runtime_source_s3::DataSourceS3PluginConfig;
+use skippr_core::plugins::cdc;
+use skippr_core::plugins::DataSource;
+use skippr_plugin_data_source_s3::*;
+use skippr_runtime_sdk::append_source_runtime::run_append_data_source_main;
 
 #[tokio::main]
 async fn main() {
@@ -29,7 +25,7 @@ async fn run() -> std::io::Result<()> {
                     .map_err(std::io::Error::other)?;
                 let cfg: DataSourceS3PluginConfig =
                     start.config.0.decode().map_err(std::io::Error::other)?;
-                let plugin = DataSourceS3Plugin::with_runtime_config(cfg).await;
+                let plugin = DataSourceS3Plugin::with_runtime_config(cfg, start.context).await;
                 Ok(Box::new(plugin) as Box<dyn DataSource + Send>)
             })
         },

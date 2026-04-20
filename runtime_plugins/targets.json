@@ -1,0 +1,39 @@
+{
+  "targets": [
+    {
+      "triple": "aarch64-apple-darwin",
+      "aliases": [
+        "darwin-aarch64",
+        "macos-aarch64"
+      ],
+      "publish_artifact_dir": "runtime-plugin-binaries-macos_arm64"
+    },
+    {
+      "triple": "x86_64-apple-darwin",
+      "aliases": [
+        "darwin-x86_64",
+        "macos-x86_64"
+      ]
+    },
+    {
+      "triple": "x86_64-unknown-linux-gnu",
+      "aliases": [
+        "linux-x86_64"
+      ],
+      "publish_artifact_dir": "runtime-plugin-binaries-linux_x86"
+    },
+    {
+      "triple": "aarch64-unknown-linux-gnu",
+      "aliases": [
+        "linux-aarch64"
+      ]
+    },
+    {
+      "triple": "x86_64-pc-windows-msvc",
+      "aliases": [
+        "windows-x86_64"
+      ],
+      "publish_artifact_dir": "runtime-plugin-binaries-windows_x86"
+    }
+  ]
+}

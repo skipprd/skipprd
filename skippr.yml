@@ -455,6 +455,7 @@ data_sources:
 #      s3_prefix: inventory-topics-aaa/skippr-e2e-sample-data/topics-aaa-only-testing-end-slash
   metrics:
     S3:
+      # version: 0.1.1
       batch_size_bytes: 2048000
       s3_bucket: skippr-metric-prod
       s3_prefix: compacted/metric/drvnsolutions/uat
@@ -494,6 +495,7 @@ data_sinks:
   test_datalake:
     schema_sink: schema_sinks.glue_bikehire
     Athena:
+      # version: 0.1.1
       athena_workgroup_name: bikehire
       s3_bucket: skippr-e2e-sample-data-output
       athena_results_s3_bucket: skippr-e2e-sample-data-output
@@ -531,6 +533,7 @@ data_sinks:
 deadletter_sinks:
   sample:
     S3:
+      # version: 0.1.1
       s3_bucket: skippr-e2e-sample-data-output
       s3_prefix: /deadletters
 
@@ -543,12 +546,14 @@ schema_sinks:
       glue_database_name: test_cube_events
   glue_datalake:
     Glue:
+      # version: 0.1.1
       glue_database_name: datalake
   glue_ieu_gps_can_mil:
     Glue:
       glue_database_name: ieu_gps_can_mil
   glue_bikehire:
     Glue:
+      # version: 0.1.1
       glue_database_name: bikehire
   glue_datalake_staging:
     Glue:

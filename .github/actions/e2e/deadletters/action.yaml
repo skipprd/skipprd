@@ -10,94 +10,31 @@ inputs:
     required: true
   docker_hub_pass:
     required: true
+  runtime_plugin_versions:
+    description: 'Optional newline-delimited PLUGIN=VERSION pins passed to the runtime e2e harness'
+    required: false
+    default: ""
 runs:
   using: "composite"
   steps:
-    - name: Run Deadletters Test
+    - name: Run deadletters via runtime e2e harness
       shell: bash
-      run: |
-        chmod +x ./skippr-el-${{ inputs.architecture_name }}/skippr-el
-        
-        cp .github/actions/e2e/deadletters/skippr-el.yml ./skippr-el.yml        
-        
-        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline deadletters_test
-
-#    - name: Assert deadletters exist via Skippr SQL
-#      shell: bash
-#      run: |
-#        set -euo pipefail
-#        OUT=$(AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID='${{ inputs.aws_access_key_id }}' AWS_SECRET_ACCESS_KEY='${{ inputs.aws_secret_access_key }}' ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "SELECT COUNT(*) AS c FROM _dl_deadletters_test")
-#        echo "$OUT"
-#        COUNT=$(echo "$OUT" | grep -Eo '[0-9]+' | tail -1)
-#        if [ -z "$COUNT" ] || [ "$COUNT" -lt 1 ]; then
-#          echo "Expected deadletters in _dl_deadletters_test, got count=$COUNT" >&2
-#          exit 1
-#        fi
-
-    - name: Assert deadletter Athena routing
-      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
+        AWS_DEFAULT_REGION: us-east-1
       run: |
         set -euo pipefail
-        export AWS_DEFAULT_REGION=us-east-1
-        export AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }}
-        export AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }}
-
-        wait_for_athena_query() {
-          local query_id="$1"
-          while true; do
-            local state
-            state=$(aws athena get-query-execution \
-              --query-execution-id "$query_id" \
-              --query 'QueryExecution.Status.State' \
-              --output text)
-            case "$state" in
-              SUCCEEDED)
-                return 0
-                ;;
-              FAILED|CANCELLED)
-                aws athena get-query-execution --query-execution-id "$query_id"
-                echo "Athena query failed: $query_id state=$state" >&2
-                exit 1
-                ;;
-              *)
-                sleep 2
-                ;;
-            esac
-          done
-        }
-
-        deadletter_count_query_id=$(aws athena start-query-execution \
-          --work-group bikehire \
-          --query-string "SELECT count(*) FROM _dl_deadletters_test" \
-          --query-execution-context Database=deadletters,Catalog=AwsDataCatalog \
-          --result-configuration OutputLocation=s3://skippr-e2e-sample-data-output/deadletters-assertions \
-          --query 'QueryExecutionId' \
-          --output text)
-        wait_for_athena_query "$deadletter_count_query_id"
-        deadletter_count=$(aws athena get-query-results \
-          --query-execution-id "$deadletter_count_query_id" \
-          --query 'ResultSet.Rows[1].Data[0].VarCharValue' \
-          --output text)
-        if [ -z "$deadletter_count" ] || [ "$deadletter_count" = "None" ] || [ "$deadletter_count" -lt 1 ]; then
-          echo "Expected _dl_deadletters_test table in deadletters database to contain rows" >&2
-          exit 1
-        fi
-
-        columns=$(aws glue get-table \
-          --database-name deadletters \
-          --name _dl_deadletters_test \
-          --query 'Table.StorageDescriptor.Columns[].Name' \
-          --output text | tr '\t' ' ')
-        for required_col in id namespace record error failure_code processed_time; do
-          if [[ " $columns " != *" $required_col "* ]]; then
-            echo "Missing expected deadletter column: $required_col" >&2
-            exit 1
+        runtime_plugin_args=()
+        while IFS= read -r runtime_plugin_version; do
+          runtime_plugin_version="${runtime_plugin_version#"${runtime_plugin_version%%[![:space:]]*}"}"
+          runtime_plugin_version="${runtime_plugin_version%"${runtime_plugin_version##*[![:space:]]}"}"
+          if [[ -z "${runtime_plugin_version}" ]]; then
+            continue
           fi
-        done
-
-    - name: Assert Athena outputs with Soda
-      shell: bash
-      run: |
-        pip install soda-core-athena
-        AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} soda scan -d datalake_e2e -c ./soda/configuration.yml ./soda/deadletters_test.yml
-        AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} soda scan -d deadletters_e2e -c ./soda/configuration.yml ./soda/deadletters_deadletter_output.yml
+          runtime_plugin_args+=(
+            --runtime-plugin-version
+            "${runtime_plugin_version}"
+          )
+        done <<< "${{ inputs.runtime_plugin_versions }}"
+        python3 .github/scripts/runtime_e2e_harness.py run deadletters_test --mode full --skippr-el "./skippr-el-${{ inputs.architecture_name }}/skippr-el" "${runtime_plugin_args[@]}"
