@@ -1,9 +1,5 @@
 name: Rust CI/CD Pipeline
 
-#concurrency:
-#  group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
-#  cancel-in-progress: true
-
 on:
   push:
     tags:
@@ -22,23 +18,8 @@ env:
   SKIPPR_EL_LATEST_POINTER: latest-skippr-el.txt
   RUST_BUILD_CACHE_BUCKET: skippr-web-rust-cache-prod
   RUST_BUILD_CACHE_REGION: us-east-1
-#  CARGO_HOME: "${{ github.workspace }}/cargo"
-#  GITHUB_REF: ${{ startsWith(github.ref, 'refs/tags/') && replace(github.ref, 'refs/tags/', '') || '1.1.1' }}
 
 jobs:
-#  del_runs:
-#    runs-on: ubuntu-latest
-#    permissions:
-#      actions: write
-#    steps:
-#      - name: Delete workflow runs
-#        uses: Mattraks/delete-workflow-runs@v2
-#        with:
-#          token: ${{ github.token }}
-#          repository: ${{ github.repository }}
-#          retain_days: 30
-#          keep_minimum_runs: 30
-
   plan_runtime_plugin_release:
     name: plan runtime plugin release
     runs-on: ubuntu-latest
@@ -70,35 +51,13 @@ jobs:
               handle.write("\nEOF\n")
           PY
 
-#  cargo_test:
-#    name: cargo test
-#    runs-on: ubuntu-latest
-#    container:
-#      image: amd64/rust
-#    steps:
-#      - uses: actions/checkout@v3
-#      - name: Cache Cargo
-#        uses: actions/cache@v3
-#        with:
-#          # these represent dependencies downloaded by cargo
-#          # and thus do not depend on the OS, arch nor rust version.
-#          path: /github/home/.cargo
-#          key: cargo-cache-
-#      - name: Setup Rust toolchain
-#        uses: ./.github/actions/setup-builder
-#        with:
-#          rust-version: stable
-#
-#      - name: Run tests
-#        run: cargo test
-
   cleanup:
     runs-on: ubuntu-latest
     container:
       image: python:3.8-alpine
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: Install dependencies
         run: |
           apk add --no-cache groff less jq
@@ -123,35 +82,12 @@ jobs:
       AWS_DEFAULT_REGION: us-east-1
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: Install dependencies
         run: |
           npm install aws-sdk
       - name: Run script
         run: node _files/purge-dynamodb.js
-
-#  smoke_test:
-#    needs:
-#      - cleanup
-#      - purge_dynamodb
-#    name: Smoke Tests
-#    runs-on:
-#      - ubuntu-latest-32-cores
-#    #      - ubuntu-latest
-#    steps:
-#      - uses: actions/checkout@v3
-#
-##      - name: Download Artifacts
-##        uses: actions/download-artifact@v4
-#
-#      - name: Test linux x86 release
-#        uses: ./.github/actions/e2e/smoke_test
-#        with:
-#          architecture_name: linux_x86
-#          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-##          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
-
 
   macos_arm64:
     name: cargo build (macos arm64)
@@ -168,7 +104,9 @@ jobs:
       SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
       SCCACHE_S3_USE_SSL: "true"
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Build macOS arm64 release
         uses: ./.github/actions/rust-build-release
         with:
@@ -176,54 +114,12 @@ jobs:
           architecture_name: macos_arm64
           runtime_plugin_packages_json: ${{ needs.plan_runtime_plugin_release.outputs.runtime_plugin_packages_json }}
 
-#  macos_arm64_test:
-#    needs:
-#      - cleanup
-#      - purge_dynamodb
-#      - macos_arm64
-#    name: test build (mac arm64)
-#    runs-on:
-#      - macOS
-#      - self-hosted
-#      - ARM64 #MacBook-Pro-3
-#    steps:
-#      - uses: actions/checkout@v3
-#
-#      - name: Download Artifacts
-#        uses: actions/download-artifact@v4
-#
-#      - name: Test Mac arm release
-#        uses: ./.github/actions/e2e/chaos_mode
-#        with:
-#          architecture_name: macos_arm64
-#          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
-
-#  macos_x86:
-#    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/0.0.0')
-#    name: cargo build (mac x86)
-##    needs: smoke_test
-#    runs-on:
-#      - macOS
-#      - self-hosted
-#      - X64 #MacBook-Pro-4
-#    steps:
-#      - uses: actions/checkout@v3
-#      - name: Build macOS x86 release
-#        uses: ./.github/actions/rust-build-release
-#        with:
-#          rust-version: stable
-#          architecture_name: macos_x86
-
   linux_x86:
-#    needs: smoke_test
     name: cargo build (linux x86)
     needs:
       - plan_runtime_plugin_release
     runs-on:
       - ubuntu-latest-32-cores
-#      - ubuntu-latest
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -234,7 +130,9 @@ jobs:
       SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
       SCCACHE_S3_USE_SSL: "true"
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Build linux x86 release
         uses: ./.github/actions/rust-build-release
         with:
@@ -258,7 +156,7 @@ jobs:
       SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
       SCCACHE_S3_USE_SSL: "true"
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
       - name: Prepare Rust builder
@@ -300,7 +198,7 @@ jobs:
       SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
       SCCACHE_S3_USE_SSL: "true"
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
       - name: Install system dependencies (macos)
@@ -705,10 +603,14 @@ jobs:
       - windows_x86_test_compile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-plugin-binaries-*
 
       - name: Stage runtime plugin release assets
         shell: bash
@@ -813,26 +715,6 @@ jobs:
             --cache-control "no-cache, no-store, must-revalidate" \
             --content-type "application/json"
 
-#  linux_x86_heaptrack:
-#    needs:
-#      - linux_x86
-#    name: Test Heaptrack (linux x86)
-#    runs-on:
-#      - ubuntu-latest
-#    steps:
-#      - uses: actions/checkout@v3
-#
-#      - name: Download Artifacts
-#        uses: actions/download-artifact@v4
-#
-#      - name: Test linux x86 release
-#        uses: ./.github/actions/e2e/heaptrack
-#        with:
-#          architecture_name: linux_x86
-#          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
-
   linux_x86_test:
     needs:
       - cleanup
@@ -852,19 +734,20 @@ jobs:
       SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
       SCCACHE_S3_USE_SSL: "true"
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4
+        with:
+          pattern: skippr-el-linux_x86
 
       - name: Test linux x86 release
-        uses: ./.github/actions/e2e/bike_hire
-#        uses: ./.github/actions/e2e/bike_hire_many
+        uses: ./.github/actions/e2e/runtime_scenario
         with:
+          scenario: bike_hire
           architecture_name: linux_x86
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
       - name: Prepare Rust builder for runtime plugin tests
         uses: ./.github/actions/setup-builder
@@ -887,20 +770,21 @@ jobs:
     name: Chaos Mode (linux x86)
     runs-on:
       - ubuntu-latest-32-cores
-    #      - ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4
+        with:
+          pattern: skippr-el-linux_x86
 
       - name: Test linux x86 release
-        uses: ./.github/actions/e2e/bike_hire_many
+        uses: ./.github/actions/e2e/runtime_scenario
         with:
+          scenario: bike_hire_many
           architecture_name: linux_x86
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
   s3_wal_test:
     needs:
@@ -911,20 +795,21 @@ jobs:
     name: S3 WAL (linux x86)
     runs-on:
       - ubuntu-latest-32-cores
-    #      - ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4
+        with:
+          pattern: skippr-el-linux_x86
 
       - name: Test linux x86 release
-        uses: ./.github/actions/e2e/bike_hire_s3_wal_many
+        uses: ./.github/actions/e2e/runtime_scenario
         with:
+          scenario: bike_hire_s3_wal_many
           architecture_name: linux_x86
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
   deadletters_test:
     needs:
@@ -936,42 +821,20 @@ jobs:
     runs-on:
       - ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4
+        with:
+          pattern: skippr-el-linux_x86
 
       - name: Test linux x86 release
-        uses: ./.github/actions/e2e/deadletters
+        uses: ./.github/actions/e2e/runtime_scenario
         with:
+          scenario: deadletters_test
           architecture_name: linux_x86
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
-
-
-#  linux_x86_event_types_test:
-#    needs:
-#      - cleanup
-#      - purge_dynamodb
-#      - linux_x86
-#    name: Test Event Types (linux x86)
-#    runs-on:
-#      - ubuntu-latest-32-cores
-#    #      - ubuntu-latest
-#    steps:
-#      - uses: actions/checkout@v3
-#
-#      - name: Download Artifacts
-#        uses: actions/download-artifact@v4
-#
-#      - name: Test linux x86 release
-#        uses: ./.github/actions/e2e/event_types
-#        with:
-#          architecture_name: linux_x86
-#          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
 
   publish_skippr_el:
@@ -990,9 +853,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
      - name: Check out code
-       uses: actions/checkout@v3
+       uses: actions/checkout@v4
      - name: Download Artifacts
        uses: actions/download-artifact@v4
+       with:
+         pattern: skippr-el-*
      - name: Compress Release Artifacts
        run: |
          tar -czvf skippr-el-linux_x86.tar.gz skippr-el-linux_x86/
@@ -1041,54 +906,6 @@ jobs:
          done
          printf '%s' "$TAG" > "$LATEST_POINTER"
          aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
-
-
-
-  # dockerize:  # Skippr Docker disabled
-  #   if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
-  #   needs:
-  #     - publish
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Check out code
-  #       uses: actions/checkout@v3
-  #     - name: Download Artifacts
-  #       uses: actions/download-artifact@v4
-  #     - name: Docker Login
-  #       uses: docker/login-action@v2
-  #       with:
-  #         username: skippr-el
-  #         password: ${{ secrets.DOCKER_HUB_PASS }}
-  #     - name: Build and push Docker image
-  #       run: |
-  #         docker build -t ${{ env.CONTAINER_IMAGE }} -f Dockerfile .
-  #         docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_IMAGE }}
-  #         docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_IMAGE }}
-  #         docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
-  #         docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
-  #         docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/skippr-el:stable
-  #         docker push ${{ env.DOCKER_HUB_REPO }}/skippr-el:stable
-
-
-#  linux_x86_test_many:
-#    needs:
-#      - dockerize
-#    name: test (many) build (linux x86)
-#    runs-on:
-#      - ubuntu-latest-32-cores
-#    steps:
-#      - uses: actions/checkout@v3
-#
-#      - name: Download Artifacts
-#        uses: actions/download-artifact@v4
-#
-#      - name: Test (many) linux x86 release
-#        uses: ./.github/actions/e2e-docker/bike_hire_many
-#        with:
-#          architecture_name: linux_x86
-#          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
 
 

@@ -1,5 +1,5 @@
 name: Rust Build Release
-description: 'Rust release'
+description: 'Rust release; caller must checkout repo with submodules'
 inputs:
   rust-version:
     description: 'version of rust to install (e.g. stable)'
@@ -16,9 +16,6 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - uses: actions/checkout@v3
-      with:
-        submodules: true
     - name: Install system dependencies (linux)
       if: runner.os == 'Linux'
       shell: bash
@@ -123,17 +120,6 @@ runs:
       if: env.SCCACHE_BUCKET != ''
       shell: bash
       run: ${SCCACHE_PATH:-sccache} --show-stats || true
-#    - name: Verify release
-#      shell: bash
-#      run: |
-#        AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID=${{secrets.AWS_ACCESS_KEY_ID}} AWS_SECRET_ACCESS_KEY=${{secrets.AWS_SECRET_ACCESS_KEY}} DATA_SOURCE_PLUGIN_NAME=s3 DATA_SOURCE_S3_BUCKET=skippr-e2e-sample-data DATA_SOURCE_S3_PREFIX=bike-hire DATA_SOURCE_BATCH_SIZE_BYTES=2048000 PIPELINE_NAME=bikehire SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg DATA_DIR=./data APP_ENV=test target/release/skippr-el sync
-#        target/release/skippr-el query 'SELECT * FROM bikehire LIMIT 10'
-#        target/release/skippr-el query 'SELECT * FROM bikehire LIMIT 10' | wc -l
-#        if [ $(target/release/skippr-el query 'SELECT * FROM bikehire LIMIT 10' | wc -l) -ne 10 ]; then echo "Query did not return 10 rows"; exit 1; fi
-#
-#        target/release/skippr-el query 'SELECT COUNT(*) FROM bikehire'
-#        target/release/skippr-el query 'SELECT COUNT(*) FROM bikehire' | tail -n 1
-#        if [ $(target/release/skippr-el query 'SELECT COUNT(*) FROM bikehire' | tail -n 1) -ne 5100000 ]; then echo "Query did not return 5100000 rows"; exit 1; fi
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:

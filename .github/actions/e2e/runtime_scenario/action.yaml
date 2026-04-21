@@ -1,5 +1,8 @@
-name: Bike Hire Many Scan Pruning Test
+name: Runtime E2E Scenario
 inputs:
+  scenario:
+    description: 'Harness scenario name to run'
+    required: true
   architecture_name:
     description: 'macos_arm64, macos-x86, linux_x86'
     required: true
@@ -8,8 +11,6 @@ inputs:
     required: true
   aws_secret_access_key:
     required: true
-  docker_hub_pass:
-    required: true
   runtime_plugin_versions:
     description: 'Optional newline-delimited PLUGIN=VERSION pins passed to the runtime e2e harness'
     required: false
@@ -17,7 +18,7 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Run bike_hire_many via runtime e2e harness
+    - name: Run runtime e2e harness scenario
       shell: bash
       env:
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
@@ -37,5 +38,4 @@ runs:
             "${runtime_plugin_version}"
           )
         done <<< "${{ inputs.runtime_plugin_versions }}"
-        python3 .github/scripts/runtime_e2e_harness.py run bike_hire_many --mode full --skippr-el "./skippr-el-${{ inputs.architecture_name }}/skippr-el" "${runtime_plugin_args[@]}"
-
+        python3 .github/scripts/runtime_e2e_harness.py run "${{ inputs.scenario }}" --mode full --skippr-el "./skippr-el-${{ inputs.architecture_name }}/skippr-el" "${runtime_plugin_args[@]}"
