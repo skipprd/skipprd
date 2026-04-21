@@ -14,6 +14,11 @@ PLUGIN_ROOT_PREFIXES = (
 )
 PLAIN_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 RUNTIME_PROTOCOL_VERSION_RE = re.compile(r"pub const RUNTIME_PROTOCOL_VERSION: u32 = (\d+);")
+RUNTIME_PROTOCOL_VERSION_CANDIDATES = (
+    Path("src/runtime_plugins/protocol.rs"),
+    Path("crates/skippr-runtime-sdk/src/protocol.rs"),
+    Path("crates/skippr-core/src/runtime_plugins/protocol.rs"),
+)
 WORKSPACE_BUILD_INPUT_FILES = (
     "Cargo.toml",
     "Cargo.lock",
@@ -148,14 +153,50 @@ def package_dependency_checksum(
     return combined_checksum(entries)
 
 
-def workspace_runtime_protocol_version(workspace: Path) -> int:
-    protocol_path = workspace / "crates" / "skippr-runtime-sdk" / "src" / "protocol.rs"
-    match = RUNTIME_PROTOCOL_VERSION_RE.search(protocol_path.read_text(encoding="utf-8"))
+def runtime_protocol_version_from_file(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    match = RUNTIME_PROTOCOL_VERSION_RE.search(path.read_text(encoding="utf-8"))
     if match is None:
-        raise SystemExit(
-            f"failed to determine runtime protocol version from {protocol_path}"
-        )
+        return None
     return int(match.group(1))
+
+
+def workspace_runtime_protocol_version(workspace: Path) -> int:
+    checked_paths = []
+    for relative_path in RUNTIME_PROTOCOL_VERSION_CANDIDATES:
+        protocol_path = workspace / relative_path
+        checked_paths.append(protocol_path)
+        version = runtime_protocol_version_from_file(protocol_path)
+        if version is not None:
+            return version
+
+    matches = []
+    for search_root in (workspace / "src", workspace / "crates"):
+        if not search_root.exists():
+            continue
+        for protocol_path in sorted(search_root.rglob("*.rs")):
+            version = runtime_protocol_version_from_file(protocol_path)
+            if version is not None:
+                matches.append((protocol_path, version))
+
+    versions = {version for _, version in matches}
+    if len(versions) == 1:
+        return next(iter(versions))
+    if len(versions) > 1:
+        locations = ", ".join(
+            f"{path}={version}" for path, version in matches
+        )
+        raise SystemExit(
+            "found multiple runtime protocol versions in workspace: "
+            f"{locations}"
+        )
+
+    searched = ", ".join(str(path) for path in checked_paths)
+    raise SystemExit(
+        "failed to determine runtime protocol version from workspace; "
+        f"checked {searched}"
+    )
 
 
 def runtime_plugin_slug(relative_dir: str) -> str:
