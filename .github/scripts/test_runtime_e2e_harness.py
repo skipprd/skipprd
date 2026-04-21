@@ -305,7 +305,6 @@ schema_sinks:
                 payload={
                     "version": "0.1.0",
                     "protocol_version": 2,
-                    "build_checksum": "checksum",
                     "artifacts": {},
                 },
             )
@@ -327,6 +326,36 @@ schema_sinks:
                 target=target,
                 download_dir=Path("/tmp"),
             )
+
+    def test_verify_runtime_release_artifacts_ignores_build_checksum_mismatch(self) -> None:
+        target = runtime_e2e_harness.published_target_for_architecture_name("linux_x86")
+        manifests = {
+            "athena-sink.json": runtime_e2e_harness.DownloadedRuntimeManifest(
+                path=Path("/tmp/athena-sink.json"),
+                payload={
+                    "version": "0.1.1",
+                    "protocol_version": 2,
+                    "build_checksum": "stale-checksum",
+                    "artifacts": {},
+                },
+            )
+        }
+
+        runtime_e2e_harness.verify_runtime_release_artifacts(
+            manifests,
+            source_manifests=set(),
+            full_download_manifests=set(),
+            catalog_by_manifest={
+                "athena-sink.json": {
+                    "package_version": "0.1.1",
+                    "checksum": "fresh-checksum",
+                }
+            },
+            expected_versions_by_manifest=None,
+            expected_protocol_version=2,
+            target=target,
+            download_dir=Path("/tmp"),
+        )
 
     def test_public_release_base_url_prefers_install_site(self) -> None:
         self.assertEqual(

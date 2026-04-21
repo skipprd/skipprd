@@ -19,11 +19,7 @@ RUNTIME_PROTOCOL_VERSION_CANDIDATES = (
     Path("crates/skippr-runtime-sdk/src/protocol.rs"),
     Path("crates/skippr-core/src/runtime_plugins/protocol.rs"),
 )
-WORKSPACE_BUILD_INPUT_FILES = (
-    "Cargo.toml",
-    "Cargo.lock",
-    "rust-toolchain.toml",
-)
+SHARED_PLUGIN_DIR = Path("plugins/shared")
 PLUGIN_KIND_SUFFIX = {
     "DataSource": "source",
     "DataSink": "sink",
@@ -56,74 +52,6 @@ def plugin_dir_checksum(plugin_dir: Path) -> str:
     return digest.hexdigest()
 
 
-def workspace_input_digests(workspace: Path) -> tuple[tuple[str, str], ...]:
-    digests = []
-    for relative_path in WORKSPACE_BUILD_INPUT_FILES:
-        path = workspace / relative_path
-        if not path.exists():
-            continue
-        digests.append((relative_path, hashlib.sha256(path.read_bytes()).hexdigest()))
-    return tuple(digests)
-
-
-def local_workspace_packages(metadata: dict, workspace: Path) -> dict[str, dict]:
-    packages = {}
-    for package in metadata["packages"]:
-        manifest_path = Path(package["manifest_path"]).resolve()
-        try:
-            package_dir = manifest_path.parent
-            relative_dir = package_dir.relative_to(workspace).as_posix()
-        except ValueError:
-            continue
-
-        packages[package["id"]] = {
-            "name": package["name"],
-            "relative_dir": relative_dir,
-            "dir_checksum": plugin_dir_checksum(package_dir),
-        }
-    return packages
-
-
-def dependency_graph(metadata: dict) -> dict[str, tuple[str, ...]]:
-    package_ids_by_dir = {}
-    for package in metadata["packages"]:
-        manifest_path = Path(package["manifest_path"]).resolve()
-        package_ids_by_dir[manifest_path.parent] = package["id"]
-
-    graph = {}
-    for package in metadata["packages"]:
-        dependency_ids = set()
-        for dependency in package.get("dependencies", []):
-            dependency_path = dependency.get("path")
-            if not dependency_path:
-                continue
-            dependency_id = package_ids_by_dir.get(Path(dependency_path).resolve())
-            if dependency_id:
-                dependency_ids.add(dependency_id)
-        graph[package["id"]] = tuple(sorted(dependency_ids))
-    return graph
-
-
-def local_dependency_closure(
-    package_id: str,
-    dependency_graph_by_id: dict[str, tuple[str, ...]],
-    local_packages: dict[str, dict],
-) -> tuple[str, ...]:
-    seen = set()
-    stack = [package_id]
-
-    while stack:
-        current = stack.pop()
-        if current in seen or current not in local_packages:
-            continue
-        seen.add(current)
-        for dependency_id in dependency_graph_by_id.get(current, ()): 
-            if dependency_id in local_packages and dependency_id not in seen:
-                stack.append(dependency_id)
-
-    return tuple(sorted(seen, key=lambda current: local_packages[current]["relative_dir"]))
-
-
 def combined_checksum(entries: list[tuple[str, str]]) -> str:
     digest = hashlib.sha256()
     for key, value in sorted(entries):
@@ -134,22 +62,23 @@ def combined_checksum(entries: list[tuple[str, str]]) -> str:
     return digest.hexdigest()
 
 
-def package_dependency_checksum(
-    package_id: str,
-    dependency_graph_by_id: dict[str, tuple[str, ...]],
-    local_packages: dict[str, dict],
-    workspace_inputs: tuple[tuple[str, str], ...],
-) -> str:
+def package_build_checksum(package_dir: Path, workspace: Path) -> str:
+    package_dir = package_dir.resolve()
+    workspace = workspace.resolve()
     entries = [
         (
-            local_packages[dependency_id]["relative_dir"],
-            local_packages[dependency_id]["dir_checksum"],
-        )
-        for dependency_id in local_dependency_closure(
-            package_id, dependency_graph_by_id, local_packages
+            package_dir.relative_to(workspace).as_posix(),
+            plugin_dir_checksum(package_dir),
         )
     ]
-    entries.extend(workspace_inputs)
+    shared_dir = workspace / SHARED_PLUGIN_DIR
+    if shared_dir.exists():
+        entries.append(
+            (
+                SHARED_PLUGIN_DIR.as_posix(),
+                plugin_dir_checksum(shared_dir),
+            )
+        )
     return combined_checksum(entries)
 
 
@@ -350,24 +279,7 @@ def manifest_payload_for_catalog_entry(
 
 def load_workspace_plugin_catalog(workspace: Path) -> list[dict]:
     metadata = cargo_metadata(workspace)
-    local_packages = local_workspace_packages(metadata, workspace)
-    dependency_graph_by_id = dependency_graph(metadata)
-    workspace_inputs = workspace_input_digests(workspace)
-    checksum_cache: dict[str, str] = {}
     catalog = []
-
-    def checksum_for_package(package_id: str) -> str:
-        cached = checksum_cache.get(package_id)
-        if cached is not None:
-            return cached
-        checksum = package_dependency_checksum(
-            package_id,
-            dependency_graph_by_id,
-            local_packages,
-            workspace_inputs,
-        )
-        checksum_cache[package_id] = checksum
-        return checksum
 
     for package in metadata["packages"]:
         manifest_path = Path(package["manifest_path"]).resolve()
@@ -397,7 +309,7 @@ def load_workspace_plugin_catalog(workspace: Path) -> list[dict]:
                 "package_name": package["name"],
                 "package_dir": relative_dir,
                 "package_version": package["version"],
-                "checksum": checksum_for_package(package["id"]),
+                "checksum": package_build_checksum(manifest_path.parent, workspace),
                 "binary_name": package["name"],
                 "manifest_filename": manifest_filename,
                 "manifest_stem": manifest_filename.removesuffix('.json'),

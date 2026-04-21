@@ -21,54 +21,78 @@ class RuntimePluginCatalogTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(contents, encoding="utf-8")
 
-    def test_local_dependency_closure_follows_transitive_workspace_deps(self) -> None:
-        local_packages = {
-            "root": {"relative_dir": "plugins/data_source/s3", "dir_checksum": "root-checksum"},
-            "dep": {"relative_dir": "crates/skippr-runtime-sdk", "dir_checksum": "dep-checksum"},
-            "leaf": {"relative_dir": "plugins/shared", "dir_checksum": "leaf-checksum"},
-        }
-        dependency_graph = {
-            "root": ("dep",),
-            "dep": ("leaf",),
-            "leaf": (),
-            "external": (),
-        }
+    def test_package_build_checksum_changes_when_shared_code_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            plugin_dir = workspace / "plugins" / "data_source" / "s3"
+            shared_dir = workspace / "plugins" / "shared"
+            self.write_workspace_file(
+                workspace,
+                "plugins/data_source/s3/Cargo.toml",
+                "[package]\nname = 'skippr-plugin-data-source-s3'\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "plugins/data_source/s3/src/main.rs",
+                "fn main() {}\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "plugins/shared/parquet_util.rs",
+                "pub fn helper() {}\n",
+            )
 
-        closure = runtime_plugin_catalog.local_dependency_closure(
-            "root",
-            dependency_graph,
-            local_packages,
-        )
+            initial = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
 
-        self.assertEqual(closure, ("dep", "root", "leaf"))
+            self.write_workspace_file(
+                workspace,
+                "plugins/shared/parquet_util.rs",
+                "pub fn helper() { println!(\"updated\"); }\n",
+            )
+            updated = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
 
-    def test_package_dependency_checksum_changes_when_shared_dep_changes(self) -> None:
-        dependency_graph = {
-            "root": ("dep",),
-            "dep": (),
-        }
-        workspace_inputs = (("Cargo.lock", "lock-a"),)
-        local_packages = {
-            "root": {"relative_dir": "plugins/data_source/s3", "dir_checksum": "root-a"},
-            "dep": {"relative_dir": "crates/skippr-runtime-sdk", "dir_checksum": "dep-a"},
-        }
+            self.assertNotEqual(initial, updated)
 
-        initial = runtime_plugin_catalog.package_dependency_checksum(
-            "root",
-            dependency_graph,
-            local_packages,
-            workspace_inputs,
-        )
+    def test_package_build_checksum_ignores_unrelated_workspace_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            plugin_dir = workspace / "plugins" / "data_source" / "s3"
+            self.write_workspace_file(
+                workspace,
+                "plugins/data_source/s3/Cargo.toml",
+                "[package]\nname = 'skippr-plugin-data-source-s3'\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "plugins/data_source/s3/src/main.rs",
+                "fn main() {}\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "plugins/shared/parquet_util.rs",
+                "pub fn helper() {}\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "Cargo.lock",
+                "unrelated lock contents\n",
+            )
 
-        local_packages["dep"]["dir_checksum"] = "dep-b"
-        updated = runtime_plugin_catalog.package_dependency_checksum(
-            "root",
-            dependency_graph,
-            local_packages,
-            workspace_inputs,
-        )
+            initial = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
 
-        self.assertNotEqual(initial, updated)
+            self.write_workspace_file(
+                workspace,
+                "Cargo.lock",
+                "changed unrelated lock contents\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "crates/skippr-runtime-sdk/src/lib.rs",
+                "pub fn unrelated() {}\n",
+            )
+            updated = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
+
+            self.assertEqual(initial, updated)
 
     def test_manifest_names_are_derived_from_plugin_dir_and_kind(self) -> None:
         self.assertEqual(

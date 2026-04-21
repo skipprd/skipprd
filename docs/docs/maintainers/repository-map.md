@@ -33,7 +33,7 @@ The important architectural split is:
 The plugin catalog is Cargo-driven:
 
 - each runtime plugin crate defines `[package.metadata.skippr-plugin]` in its own `Cargo.toml`
-- `.github/scripts/runtime_plugin_catalog.py` reads Cargo metadata and computes per-plugin checksums
+- `.github/scripts/runtime_plugin_catalog.py` reads Cargo metadata and computes per-plugin build checksums from the plugin crate plus `plugins/shared/`
 - generated manifests and binaries are published under versioned paths on `install.skippr.io`
 
 There are no committed runtime manifest templates, and there is no aggregate `skippr-plugin-runtime-link` crate anymore.

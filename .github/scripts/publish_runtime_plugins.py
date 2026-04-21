@@ -180,6 +180,7 @@ def main() -> None:
                         args.subdir,
                         staged_relative_path.as_posix(),
                     ),
+                    # This is the release/download integrity checksum for the staged binary.
                     "sha256": sha256(source_binary),
                 }
                 continue
@@ -225,6 +226,7 @@ def main() -> None:
             )
 
         manifest_payload["artifacts"] = artifacts
+        # build_checksum tracks source provenance for semver clobber decisions.
         manifest_payload["build_checksum"] = entry["checksum"]
         manifest_payload["protocol_version"] = protocol_version
 

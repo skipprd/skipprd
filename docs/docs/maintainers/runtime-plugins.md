@@ -26,7 +26,7 @@ That Cargo metadata is the source of truth for:
 - human-facing plugin name
 - manifest filename and manifest name
 - per-plugin package version
-- release checksum inputs
+- build checksum inputs for semver clobber decisions
 - capability descriptors
 
 The release scripts no longer read committed JSON manifest templates.
@@ -39,6 +39,11 @@ The runtime plugin release toolchain is:
 2. `.github/scripts/runtime_plugin_release_plan.py` compares the workspace catalog to the latest published manifest index.
 3. platform build jobs produce the selected plugin binaries.
 4. `.github/scripts/publish_runtime_plugins.py` generates versioned JSON manifests plus `latest/manifest-index.json`.
+
+Manifest checksum split:
+
+- `build_checksum` tracks source provenance for deciding whether reusing the current plugin semver requires a clobber
+- `artifacts[*].sha256` verifies the published binary bytes after download
 
 Published layout uses versioned paths like:
 
@@ -120,6 +125,8 @@ Use pins sparingly. The intended steady state is:
 Small connector-agnostic helpers live under `plugins/shared/`.
 
 Important rule: consuming plugin crates must still declare their own direct dependencies for whatever those shared modules use. Shared modules are source includes, not an implicit dependency bundle.
+
+Those shared helper files are also part of the per-plugin `build_checksum`, so changing `plugins/shared/` is treated like changing plugin source for release planning.
 
 In practice, sink crates that include shared CDC and parquet helpers usually need direct access to crates such as:
 

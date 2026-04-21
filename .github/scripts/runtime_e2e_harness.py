@@ -783,12 +783,6 @@ def verify_runtime_release_artifacts(
                 f"manifest {manifest_filename} declares protocol version {actual_protocol!r}, "
                 f"expected {expected_protocol_version!r}"
             )
-        actual_build_checksum = downloaded.payload.get("build_checksum")
-        if actual_build_checksum != expected_metadata["checksum"]:
-            raise HarnessError(
-                f"manifest {manifest_filename} declares build checksum {actual_build_checksum!r}, "
-                f"expected {expected_metadata['checksum']!r}"
-            )
         artifact = resolve_target_artifact(downloaded.payload.get("artifacts", {}), target)
         if not artifact:
             if manifest_filename in source_manifests or manifest_filename in full_download_manifests:

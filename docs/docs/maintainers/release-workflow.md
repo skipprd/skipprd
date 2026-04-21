@@ -29,9 +29,11 @@ A plugin package is selected when:
 
 - it has never been published
 - its crate version changed
-- its computed checksum changed for the existing published version
+- its build checksum changed for the existing published version
 
 This is why plugin versions live in each plugin crate's `Cargo.toml`, not in a shared bundle version.
+
+`build_checksum` is intentionally narrow: it tracks the plugin crate source tree plus `plugins/shared/`, so semver clobber decisions follow plugin code changes rather than unrelated workspace churn.
 
 ## 2. Build the selected host and plugin artifacts
 
@@ -85,6 +87,8 @@ After runtime plugins are published, the workflow runs the release-style accepta
 - `deadletters_test`
 
 These are the final gates for exactly-once, deadletters, runtime download behavior, and the current release topology.
+
+The post-publish acceptance path verifies artifact download behavior with `artifacts[*].sha256`. It does not re-check `build_checksum` after publish.
 
 ## 6. Publish the host binary
 

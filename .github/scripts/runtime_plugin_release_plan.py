@@ -116,7 +116,7 @@ def main() -> int:
         if published_checksum != plugin["checksum"]:
             selected.append(plugin["package_name"])
             decision_reasons[plugin["package_name"]] = (
-                "checksum changed for existing plugin version"
+                "build checksum changed for existing plugin version"
             )
 
     selected = sorted(set(selected))
@@ -124,9 +124,9 @@ def main() -> int:
     if not published_manifests:
         reason = "no published runtime plugin baseline found; build every runtime plugin"
     elif not selected:
-        reason = "all runtime plugins already published at matching version and checksum"
+        reason = "all runtime plugins already published at matching version and build checksum"
     else:
-        reason = "build runtime plugins whose published version/checksum is stale"
+        reason = "build runtime plugins whose published version/build checksum is stale"
 
     json.dump(
         {
