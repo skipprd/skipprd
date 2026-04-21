@@ -81,12 +81,13 @@ Only after that validation does CI upload the staged runtime plugin tree to the 
 
 After runtime plugins are published, the workflow runs the release-style acceptance jobs:
 
-- `linux_x86_test` using the `bike_hire` scenario plus runtime plugin release download checks
+- `published_runtime_plugins_smoke_test` to verify published runtime plugin download behavior
+- `bike_hire_test` using the baseline `bike_hire` scenario
 - `chaos_mode_test` using `bike_hire_many`
 - `s3_wal_test` using `bike_hire_s3_wal_many`
 - `deadletters_test`
 
-These are the final gates for exactly-once, deadletters, runtime download behavior, and the current release topology.
+Together these cover baseline runtime execution, exactly-once behavior under load, deadletters, runtime download behavior, and the current release topology. The baseline `bike_hire` run remains useful because it exercises the simplest release-shaped path without the extra load, WAL, or deadletter variations layered on top.
 
 The post-publish acceptance path verifies artifact download behavior with `artifacts[*].sha256`. It does not re-check `build_checksum` after publish.
 
