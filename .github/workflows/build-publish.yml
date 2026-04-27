@@ -389,10 +389,18 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          $version = "23.4"
+          $archive = Join-Path $env:RUNNER_TEMP "protoc-$version-win64.zip"
+          $installDir = Join-Path $env:RUNNER_TEMP "protoc-$version"
+          Invoke-WebRequest `
+            -Uri "https://github.com/protocolbuffers/protobuf/releases/download/v$version/protoc-$version-win64.zip" `
+            -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath $installDir -Force
+          "$installDir\bin" >> $env:GITHUB_PATH
+          & "$installDir\bin\protoc.exe" --version
       - name: Install sccache
         if: env.SCCACHE_BUCKET != ''
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -639,10 +647,18 @@ jobs:
           echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          $version = "23.4"
+          $archive = Join-Path $env:RUNNER_TEMP "protoc-$version-win64.zip"
+          $installDir = Join-Path $env:RUNNER_TEMP "protoc-$version"
+          Invoke-WebRequest `
+            -Uri "https://github.com/protocolbuffers/protobuf/releases/download/v$version/protoc-$version-win64.zip" `
+            -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath $installDir -Force
+          "$installDir\bin" >> $env:GITHUB_PATH
+          & "$installDir\bin\protoc.exe" --version
       - name: Install sccache
         if: env.SCCACHE_BUCKET != ''
         uses: mozilla-actions/sccache-action@v0.0.9
