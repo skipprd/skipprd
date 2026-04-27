@@ -32,6 +32,7 @@ runs:
 
         $workdir = Join-Path $env:RUNNER_TEMP ("mssql-snowflake-" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Force -Path $workdir | Out-Null
+        $composePath = ".\.github\actions\e2e\mssql_snowflake\compose.yaml"
 
         try {
           Write-Host "Writing Snowflake private key"
@@ -44,12 +45,12 @@ runs:
           $env:SNOWFLAKE_PRIVATE_KEY_PATH = $keyPath
 
           Write-Host "Starting MSSQL seed services"
-          docker compose -f test/el-integration/docker-compose.yml up -d
+          docker compose -f $composePath up -d
           $seedCompleted = $false
           for ($i = 1; $i -le 120; $i++) {
-            $seedStatusRaw = docker compose -f test/el-integration/docker-compose.yml ps --format json seed 2>$null
+            $seedStatusRaw = docker compose -f $composePath ps --format json seed 2>$null
             if ($seedStatusRaw -match '"exited"') {
-              $seedStatusAllRaw = docker compose -f test/el-integration/docker-compose.yml ps -a --format json seed 2>$null
+              $seedStatusAllRaw = docker compose -f $composePath ps -a --format json seed 2>$null
               $seedStatus = $seedStatusAllRaw | ConvertFrom-Json
               if ($seedStatus -is [array]) {
                 $seedExit = $seedStatus[0].ExitCode
@@ -63,13 +64,13 @@ runs:
                 $seedCompleted = $true
                 break
               }
-              docker compose -f test/el-integration/docker-compose.yml logs
+              docker compose -f $composePath logs
               Write-Error "::error::MSSQL seed failed with exit code $seedExit"
             }
             Start-Sleep -Seconds 3
           }
           if (-not $seedCompleted) {
-            docker compose -f test/el-integration/docker-compose.yml logs
+            docker compose -f $composePath logs
             Write-Error "::error::Timed out waiting for MSSQL seed"
           }
 
@@ -111,6 +112,6 @@ runs:
             Write-Error "::error::skippr run exited successfully but did not print final Done line. This catches the silent-exit regression where the wrapper returns right after printing the run id."
           }
         } finally {
-          docker compose -f test/el-integration/docker-compose.yml down -v 2>$null
+          docker compose -f $composePath down -v 2>$null
           Remove-Item -Recurse -Force $workdir -ErrorAction SilentlyContinue
         }

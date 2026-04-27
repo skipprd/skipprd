@@ -1,0 +1,23 @@
+services:
+  mssql:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Skippr!Test123"
+    ports:
+      - "1433:1433"
+
+  seed:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    depends_on:
+      - mssql
+    volumes:
+      - ./seed.sql:/seed.sql:ro
+      - ./entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: /bin/bash
+    command: /entrypoint.sh
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: "Skippr!Test123"
+      MSSQL_HOST: mssql
