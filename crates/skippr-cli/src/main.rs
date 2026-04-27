@@ -1,5 +1,6 @@
 mod api_client;
 mod auth;
+mod feedback_diagnostics;
 mod public_config;
 mod react_host;
 mod skippr_bin;
@@ -65,6 +66,9 @@ enum Cmd {
         /// Feedback comment. When omitted, the CLI prompts for a single-line message.
         #[arg(long)]
         comment: Option<String>,
+        /// Do not attach a redacted support diagnostics bundle.
+        #[arg(long, default_value_t = false)]
+        no_diagnostics: bool,
     },
 
     /// User account management (signup, login, balance, etc.).
@@ -1643,13 +1647,14 @@ async fn cmd_run(log: Option<String>, explicit_config: &Option<PathBuf>) {
         ])
         .await;
 
-    let resolved = match react_host::resolve_config(internal_file, react::config::ServeOverrides::default()) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let resolved =
+        match react_host::resolve_config(internal_file, react::config::ServeOverrides::default()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        };
 
     let thread_id = match find_latest_thread_for_resolved_config(&resolved).await {
         Ok(thread_id) => thread_id,
@@ -1683,6 +1688,7 @@ async fn cmd_feedback(
     good: bool,
     bad: bool,
     comment: Option<String>,
+    include_diagnostics: bool,
     explicit_config: &Option<PathBuf>,
 ) {
     let cfg = match load_config(explicit_config) {
@@ -1729,15 +1735,36 @@ async fn cmd_feedback(
             std::process::exit(1);
         }
     };
-    let store = match build_feedback_store(project, &srv_creds).await {
+    let feedback_store = match build_feedback_store(project, &srv_creds).await {
         Ok(store) => store,
         Err(e) => {
             eprintln!("[skippr] ERROR: {e}");
             std::process::exit(1);
         }
     };
-    match store.submit(&thread_id, verdict, comment).await {
+    match feedback_store
+        .store
+        .submit(&thread_id, verdict, comment)
+        .await
+    {
         Ok(feedback) => {
+            if include_diagnostics {
+                let diagnostics = feedback_diagnostics::collect(
+                    &cfg,
+                    &config_path(explicit_config),
+                    &feedback.thread_id,
+                    &feedback.feedback_id,
+                );
+                match submit_feedback_diagnostics(&feedback_store, &feedback, diagnostics).await {
+                    Ok(_) => eprintln!(
+                        "[skippr] attached redacted diagnostics for thread {} ({})",
+                        feedback.thread_id, feedback.feedback_id
+                    ),
+                    Err(e) => eprintln!(
+                        "[skippr] WARNING: feedback stored but diagnostics upload failed: {e}"
+                    ),
+                }
+            }
             eprintln!(
                 "[skippr] stored {:?} feedback for thread {} ({})",
                 feedback.verdict, feedback.thread_id, feedback.feedback_id
@@ -1748,6 +1775,13 @@ async fn cmd_feedback(
             std::process::exit(1);
         }
     }
+}
+
+struct FeedbackStoreBundle {
+    store: react_core::thread_feedback::ThreadFeedbackStore,
+    storage: Arc<dyn react_core::storage::StorageAdapter>,
+    scope: react_core::scope::RequestScope,
+    keyspace: Arc<dyn react_core::keyspace::Keyspace>,
 }
 
 fn find_latest_thread_in_skippr_dir(skippr_dir: &std::path::Path, project: &str) -> Option<String> {
@@ -1843,7 +1877,7 @@ fn normalize_feedback_comment(comment: &str) -> Result<String, String> {
 async fn build_feedback_store(
     project: &str,
     srv_creds: &api_client::CredentialsResponse,
-) -> Result<react_core::thread_feedback::ThreadFeedbackStore, String> {
+) -> Result<FeedbackStoreBundle, String> {
     let (bucket, s3_creds, _prefix, _remote_desc) =
         build_remote_reset_target(project, &working_dir(), &srv_creds)?;
     let storage = Arc::new(
@@ -1860,9 +1894,38 @@ async fn build_feedback_store(
         .map_err(|e| format!("invalid feedback scope: {e}"))?;
     let keyspace = Arc::new(react_core::keyspace::DefaultKeyspace::new(bucket))
         as Arc<dyn react_core::keyspace::Keyspace>;
-    Ok(react_core::thread_feedback::ThreadFeedbackStore::new(
-        storage, scope, keyspace,
-    ))
+    let store = react_core::thread_feedback::ThreadFeedbackStore::new(
+        Arc::clone(&storage),
+        scope.clone(),
+        Arc::clone(&keyspace),
+    );
+    Ok(FeedbackStoreBundle {
+        store,
+        storage,
+        scope,
+        keyspace,
+    })
+}
+
+async fn submit_feedback_diagnostics(
+    bundle: &FeedbackStoreBundle,
+    feedback: &react_core::thread_feedback::ThreadFeedback,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let file_name = format!("{}.diagnostics.json", feedback.feedback_id);
+    let key = bundle.keyspace.scoped_key(
+        &bundle.scope,
+        &["feedback", &feedback.thread_id, &file_name],
+    );
+    let value = serde_json::json!({
+        "feedback_id": feedback.feedback_id,
+        "thread_id": feedback.thread_id,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "payload": payload,
+    });
+    react_core::storage::retry_put_json(bundle.storage.as_ref(), &key, &value)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn resolve_feedback_runtime_config(
@@ -2024,7 +2087,12 @@ async fn main() {
         },
         Cmd::Doctor => cmd_doctor(&cli.config),
         Cmd::Run => cmd_run(cli.log, &cli.config).await,
-        Cmd::Feedback { good, bad, comment } => cmd_feedback(good, bad, comment, &cli.config).await,
+        Cmd::Feedback {
+            good,
+            bad,
+            comment,
+            no_diagnostics,
+        } => cmd_feedback(good, bad, comment, !no_diagnostics, &cli.config).await,
         Cmd::User { action } => match action {
             UserAction::Login => cmd_user_login().await,
             UserAction::Logout => cmd_user_logout(),
@@ -2618,10 +2686,36 @@ mod tests {
         ])
         .expect("parse feedback args");
         match cli.cmd {
-            Cmd::Feedback { good, bad, comment } => {
+            Cmd::Feedback {
+                good,
+                bad,
+                comment,
+                no_diagnostics,
+            } => {
                 assert!(!good);
                 assert!(bad);
                 assert_eq!(comment.as_deref(), Some("timed out in repair loop"));
+                assert!(!no_diagnostics);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn feedback_cli_accepts_no_diagnostics_flag() {
+        let cli = Cli::try_parse_from(["skippr", "feedback", "--bad", "--no-diagnostics"])
+            .expect("parse feedback args");
+        match cli.cmd {
+            Cmd::Feedback {
+                good,
+                bad,
+                comment,
+                no_diagnostics,
+            } => {
+                assert!(!good);
+                assert!(bad);
+                assert!(comment.is_none());
+                assert!(no_diagnostics);
             }
             other => panic!("unexpected command: {other:?}"),
         }

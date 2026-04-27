@@ -30,13 +30,8 @@ impl react::host::HostComposition for SkipprHost {
     ) -> Result<(), String> {
         let keyspace = suite_ctx.keyspace().clone();
         let (lance_uri_prefix, lance_storage_opts) = lance_storage(cfg)?;
-        data_engineer::wire_providers(
-            suite_ctx,
-            &keyspace,
-            &lance_uri_prefix,
-            lance_storage_opts,
-        )
-        .await?;
+        data_engineer::wire_providers(suite_ctx, &keyspace, &lance_uri_prefix, lance_storage_opts)
+            .await?;
 
         let mut debug_reg = DebugProviderRegistry::new();
         debug_reg.register(react_suite_data_engineer::debug::DataEngineerDebugProvider);
@@ -78,7 +73,10 @@ fn lance_storage(cfg: &ReactResolvedConfig) -> Result<(String, Vec<(String, Stri
             let mut options = Vec::new();
             if let Some(creds) = cfg.storage.s3_credentials.as_ref() {
                 options.push(("aws_access_key_id".into(), creds.access_key_id.clone()));
-                options.push(("aws_secret_access_key".into(), creds.secret_access_key.clone()));
+                options.push((
+                    "aws_secret_access_key".into(),
+                    creds.secret_access_key.clone(),
+                ));
                 options.push(("aws_region".into(), creds.region.clone()));
                 if let Some(token) = creds.session_token.as_ref() {
                     options.push(("aws_session_token".into(), token.clone()));

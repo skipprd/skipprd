@@ -1414,10 +1414,7 @@ mod tests {
             wh["staging_uri"],
             "azure://acct.blob.core.windows.net/container/prefix"
         );
-        assert_eq!(
-            wh["staging_storage_integration"],
-            "SNOWFLAKE_AZURE_INT"
-        );
+        assert_eq!(wh["staging_storage_integration"], "SNOWFLAKE_AZURE_INT");
         assert_eq!(wh["staging_azure_sas_token"], "${AZURE_STORAGE_SAS_TOKEN}");
     }
 
