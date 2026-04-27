@@ -899,6 +899,7 @@ jobs:
 
   published_runtime_plugins_smoke_test:
     needs:
+      - linux_x86
       - publish_runtime_plugins
     name: smoke test published runtime plugins (linux x86)
     runs-on:
@@ -919,6 +920,11 @@ jobs:
         uses: ./.github/actions/setup-builder
         with:
           rust-version: stable
+
+      - name: Download linux host artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: skipprd-linux_x86
 
       - name: Test runtime plugin release downloads
         uses: ./.github/actions/e2e/runtime_plugins
