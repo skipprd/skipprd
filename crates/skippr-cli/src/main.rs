@@ -1721,13 +1721,6 @@ async fn cmd_feedback(
             std::process::exit(1);
         }
     };
-    let thread_id = match resolve_feedback_thread_id(&resolved_cfg).await {
-        Ok(thread_id) => thread_id,
-        Err(e) => {
-            eprintln!("[skippr] ERROR: {e}");
-            std::process::exit(1);
-        }
-    };
     let comment = match resolve_feedback_comment(comment) {
         Ok(comment) => comment,
         Err(e) => {
@@ -1741,6 +1734,46 @@ async fn cmd_feedback(
             eprintln!("[skippr] ERROR: {e}");
             std::process::exit(1);
         }
+    };
+    let thread_id = match resolve_feedback_thread_id(&resolved_cfg).await {
+        Ok(thread_id) => Some(thread_id),
+        Err(e) if include_diagnostics => {
+            eprintln!("[skippr] WARNING: {e}. Sending diagnostics without thread-linked feedback.");
+            None
+        }
+        Err(e) => {
+            eprintln!("[skippr] ERROR: {e}");
+            std::process::exit(1);
+        }
+    };
+    let Some(thread_id) = thread_id else {
+        let diagnostics_id = uuid::Uuid::new_v4().to_string();
+        let diagnostics = feedback_diagnostics::collect(
+            &cfg,
+            &config_path(explicit_config),
+            "unavailable",
+            &diagnostics_id,
+        );
+        match submit_support_diagnostics(
+            &feedback_store,
+            &diagnostics_id,
+            verdict,
+            &comment,
+            diagnostics,
+        )
+        .await
+        {
+            Ok(_) => {
+                eprintln!(
+                    "[skippr] uploaded redacted diagnostics without a thread ({diagnostics_id})"
+                );
+            }
+            Err(e) => {
+                eprintln!("[skippr] ERROR: failed to upload diagnostics: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
     };
     match feedback_store
         .store
@@ -1926,6 +1959,38 @@ async fn submit_feedback_diagnostics(
     react_core::storage::retry_put_json(bundle.storage.as_ref(), &key, &value)
         .await
         .map_err(|e| e.to_string())
+}
+
+async fn submit_support_diagnostics(
+    bundle: &FeedbackStoreBundle,
+    diagnostics_id: &str,
+    verdict: react_core::thread_feedback::ThreadFeedbackVerdict,
+    comment: &str,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let key = support_diagnostics_key(bundle.keyspace.as_ref(), &bundle.scope, diagnostics_id);
+    let value = serde_json::json!({
+        "diagnostics_id": diagnostics_id,
+        "thread_id": null,
+        "verdict": verdict,
+        "comment": comment,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "payload": payload,
+    });
+    react_core::storage::retry_put_json(bundle.storage.as_ref(), &key, &value)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn support_diagnostics_key(
+    keyspace: &dyn react_core::keyspace::Keyspace,
+    scope: &react_core::scope::RequestScope,
+    diagnostics_id: &str,
+) -> String {
+    keyspace.scoped_key(
+        scope,
+        &["support", "diagnostics", &format!("{diagnostics_id}.json")],
+    )
 }
 
 fn resolve_feedback_runtime_config(
@@ -2719,6 +2784,17 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn support_diagnostics_key_is_outside_thread_feedback_prefix() {
+        let scope = react_core::scope::RequestScope::parse("tenant", "dev", "project").unwrap();
+        let keyspace = react_core::keyspace::DefaultKeyspace::new("bucket".to_string());
+
+        let key = support_diagnostics_key(&keyspace, &scope, "diag-123");
+
+        assert_eq!(key, "tenant/dev/project/support/diagnostics/diag-123.json");
+        assert!(!key.contains("/feedback/"));
     }
 
     #[test]
