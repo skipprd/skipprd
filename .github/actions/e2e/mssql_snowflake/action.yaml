@@ -1,123 +1,116 @@
 name: MSSQL to Snowflake E2E
 inputs:
   architecture_name:
-    description: 'Artifact architecture name, e.g. linux_x86'
+    description: 'Artifact architecture name, e.g. windows_x86'
     required: true
 runs:
   using: "composite"
   steps:
     - name: Run MSSQL to Snowflake via skippr
-      shell: bash
+      shell: pwsh
       run: |
-        set -euo pipefail
+        $ErrorActionPreference = "Stop"
 
-        required_env=(
-          SKIPPR_API_KEY
-          SNOWFLAKE_ACCOUNT
-          SNOWFLAKE_USER
-          SNOWFLAKE_PRIVATE_KEY_PEM
-          SNOWFLAKE_WAREHOUSE
-          SNOWFLAKE_DATABASE
-          SNOWFLAKE_SCHEMA
+        $requiredEnv = @(
+          "SKIPPR_API_KEY",
+          "SNOWFLAKE_ACCOUNT",
+          "SNOWFLAKE_USER",
+          "SNOWFLAKE_PRIVATE_KEY_PEM",
+          "SNOWFLAKE_WAREHOUSE",
+          "SNOWFLAKE_DATABASE",
+          "SNOWFLAKE_SCHEMA"
         )
-        for key in "${required_env[@]}"; do
-          if [ -z "${!key:-}" ]; then
-            echo "::error::Required environment variable ${key} is not set"
-            exit 1
-          fi
-        done
-
-        skippr_bin="./skippr-${{ inputs.architecture_name }}/skippr"
-        skipprd_bin="./skipprd-${{ inputs.architecture_name }}/skipprd"
-        chmod +x "$skippr_bin" "$skipprd_bin"
-        export PATH="$(pwd)/skipprd-${{ inputs.architecture_name }}:$(pwd)/skippr-${{ inputs.architecture_name }}:$PATH"
-
-        workdir="$(mktemp -d)"
-        cleanup() {
-          docker compose -f test/el-integration/docker-compose.yml down -v 2>/dev/null || true
-          rm -rf "$workdir"
+        foreach ($key in $requiredEnv) {
+          if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($key))) {
+            Write-Error "::error::Required environment variable $key is not set"
+          }
         }
-        trap cleanup EXIT
 
-        echo "Writing Snowflake private key"
-        python3 - <<'PY' > "$workdir/snowflake_key.p8"
-        import os
-        pem = os.environ["SNOWFLAKE_PRIVATE_KEY_PEM"]
-        if "\\n" in pem and "\n" not in pem:
-            pem = pem.replace("\\n", "\n")
-        print(pem.rstrip())
-        PY
-        chmod 600 "$workdir/snowflake_key.p8"
-        export SNOWFLAKE_PRIVATE_KEY_PATH="$workdir/snowflake_key.p8"
+        $skipprBin = (Resolve-Path ".\skippr-${{ inputs.architecture_name }}\skippr.exe").Path
+        $skipprdBin = (Resolve-Path ".\skipprd-${{ inputs.architecture_name }}\skipprd.exe").Path
+        $env:PATH = "$(Split-Path $skipprdBin);$(Split-Path $skipprBin);$env:PATH"
 
-        echo "Starting MSSQL seed services"
-        docker compose -f test/el-integration/docker-compose.yml up -d
-        for i in $(seq 1 120); do
-          seed_status="$(docker compose -f test/el-integration/docker-compose.yml ps --format json seed 2>/dev/null || echo "")"
-          if echo "$seed_status" | grep -q '"exited"' 2>/dev/null; then
-            seed_exit="$(docker compose -f test/el-integration/docker-compose.yml ps -a --format json seed 2>/dev/null \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ExitCode', d.get('exit_code', -1)) if isinstance(d,dict) else d[0].get('ExitCode', d[0].get('exit_code', -1)))" 2>/dev/null || echo "-1")"
-            if [ "$seed_exit" = "0" ]; then
-              echo "MSSQL seed completed"
-              break
-            fi
-            echo "::error::MSSQL seed failed with exit code ${seed_exit}"
+        $workdir = Join-Path $env:RUNNER_TEMP ("mssql-snowflake-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Force -Path $workdir | Out-Null
+
+        try {
+          Write-Host "Writing Snowflake private key"
+          $pem = $env:SNOWFLAKE_PRIVATE_KEY_PEM
+          if ($pem.Contains("\n") -and -not $pem.Contains("`n")) {
+            $pem = $pem.Replace("\n", "`n")
+          }
+          $keyPath = Join-Path $workdir "snowflake_key.p8"
+          Set-Content -Path $keyPath -Value $pem.TrimEnd() -NoNewline -Encoding ascii
+          $env:SNOWFLAKE_PRIVATE_KEY_PATH = $keyPath
+
+          Write-Host "Starting MSSQL seed services"
+          docker compose -f test/el-integration/docker-compose.yml up -d
+          $seedCompleted = $false
+          for ($i = 1; $i -le 120; $i++) {
+            $seedStatusRaw = docker compose -f test/el-integration/docker-compose.yml ps --format json seed 2>$null
+            if ($seedStatusRaw -match '"exited"') {
+              $seedStatusAllRaw = docker compose -f test/el-integration/docker-compose.yml ps -a --format json seed 2>$null
+              $seedStatus = $seedStatusAllRaw | ConvertFrom-Json
+              if ($seedStatus -is [array]) {
+                $seedExit = $seedStatus[0].ExitCode
+                if ($null -eq $seedExit) { $seedExit = $seedStatus[0].exit_code }
+              } else {
+                $seedExit = $seedStatus.ExitCode
+                if ($null -eq $seedExit) { $seedExit = $seedStatus.exit_code }
+              }
+              if ("$seedExit" -eq "0") {
+                Write-Host "MSSQL seed completed"
+                $seedCompleted = $true
+                break
+              }
+              docker compose -f test/el-integration/docker-compose.yml logs
+              Write-Error "::error::MSSQL seed failed with exit code $seedExit"
+            }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $seedCompleted) {
             docker compose -f test/el-integration/docker-compose.yml logs
-            exit 1
-          fi
-          if [ "$i" -eq 120 ]; then
-            echo "::error::Timed out waiting for MSSQL seed"
-            docker compose -f test/el-integration/docker-compose.yml logs
-            exit 1
-          fi
-          sleep 3
-        done
+            Write-Error "::error::Timed out waiting for MSSQL seed"
+          }
 
-        export MSSQL_CONNECTION_STRING="server=tcp:127.0.0.1,1433;database=testdb;user id=sa;password=Skippr!Test123;TrustServerCertificate=true"
-        project_name="mssql_snowflake_e2e_${GITHUB_RUN_ID:-local}_${GITHUB_RUN_ATTEMPT:-1}"
-        cat > "$workdir/skippr.yaml" <<EOF
-        project: ${project_name}
-        warehouse:
-          kind: snowflake
-          database: \${SNOWFLAKE_DATABASE}
-          schema: \${SNOWFLAKE_SCHEMA}
-          warehouse: \${SNOWFLAKE_WAREHOUSE}
-        source:
-          kind: mssql
-          connection_string: \${MSSQL_CONNECTION_STRING}
-        dbt:
-          target_schema: ${project_name}
-          silver_suffix: silver
-          gold_suffix: gold
-        schema_sink: null
-        EOF
-        if [ -n "${SNOWFLAKE_ROLE:-}" ]; then
-          python3 - "$workdir/skippr.yaml" <<'PY'
-        import sys
-        path = sys.argv[1]
-        text = open(path, encoding="utf-8").read()
-        text = text.replace(
-            "          warehouse: ${SNOWFLAKE_WAREHOUSE}\n",
-            "          warehouse: ${SNOWFLAKE_WAREHOUSE}\n          role: ${SNOWFLAKE_ROLE}\n",
-        )
-        open(path, "w", encoding="utf-8").write(text)
-        PY
-        fi
+          $env:MSSQL_CONNECTION_STRING = "server=tcp:127.0.0.1,1433;database=testdb;user id=sa;password=Skippr!Test123;TrustServerCertificate=true"
+          $runId = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { "local" }
+          $runAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "1" }
+          $projectName = "mssql_snowflake_e2e_${runId}_${runAttempt}"
+          $configPath = Join-Path $workdir "skippr.yaml"
+          $configLines = @(
+            "project: $projectName",
+            "warehouse:",
+            "  kind: snowflake",
+            "  database: $env:SNOWFLAKE_DATABASE",
+            "  schema: $env:SNOWFLAKE_SCHEMA",
+            "  warehouse: $env:SNOWFLAKE_WAREHOUSE",
+            "  role: $env:SNOWFLAKE_ROLE",
+            "source:",
+            "  kind: mssql",
+            "  connection_string: ${env:MSSQL_CONNECTION_STRING}",
+            "dbt:",
+            "  target_schema: $projectName",
+            "  silver_suffix: silver",
+            "  gold_suffix: gold",
+            "schema_sink: null"
+          )
+          Set-Content -Path $configPath -Value ($configLines -join "`n") -Encoding utf8
 
-        echo "Running skippr doctor"
-        "$skippr_bin" --config "$workdir/skippr.yaml" doctor
+          Write-Host "Running skippr doctor"
+          & $skipprBin --config $configPath doctor
 
-        echo "Running skippr MSSQL to Snowflake e2e"
-        set +e
-        "$skippr_bin" --config "$workdir/skippr.yaml" run --log trace 2>&1 | tee "$workdir/skippr-run.log"
-        status="${PIPESTATUS[0]}"
-        set -e
-        if [ "$status" -ne 0 ]; then
-          echo "::error::skippr run failed with exit code ${status}"
-          exit "$status"
-        fi
-        if ! grep -q '^Done\.$' "$workdir/skippr-run.log"; then
-          echo "::error::skippr run exited successfully but did not print final Done line"
-          echo "This catches the silent-exit regression where the wrapper returns right after printing the run id."
-          exit 1
-        fi
+          Write-Host "Running skippr MSSQL to Snowflake e2e"
+          $logPath = Join-Path $workdir "skippr-run.log"
+          & $skipprBin --config $configPath run --log trace 2>&1 | Tee-Object -FilePath $logPath
+          $status = $LASTEXITCODE
+          if ($status -ne 0) {
+            Write-Error "::error::skippr run failed with exit code $status"
+          }
+          if (-not (Select-String -Path $logPath -Pattern '^Done\.$' -Quiet)) {
+            Write-Error "::error::skippr run exited successfully but did not print final Done line. This catches the silent-exit regression where the wrapper returns right after printing the run id."
+          }
+        } finally {
+          docker compose -f test/el-integration/docker-compose.yml down -v 2>$null
+          Remove-Item -Recurse -Force $workdir -ErrorAction SilentlyContinue
+        }
