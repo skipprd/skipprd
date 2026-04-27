@@ -131,7 +131,7 @@ class Scenario:
 @dataclass
 class ScenarioContext:
     scenario: Scenario
-    skippr_el: Path
+    skipprd: Path
     runtime_plugin_dir: Path
     base_env: dict[str, str]
     assertion_output: str
@@ -179,7 +179,7 @@ BIKE_HIRE_MANY_CHAOS_ENV = (
 SCENARIOS = {
     "bike_hire": Scenario(
         name="bike_hire",
-        config_path=scenario_config(".github/actions/e2e/bike_hire/skippr-el.yml"),
+        config_path=scenario_config(".github/actions/e2e/bike_hire/skipprd.yml"),
         smoke_runs=(
             SyncRun(
                 pipeline="bike_hire",
@@ -217,7 +217,7 @@ SCENARIOS = {
     ),
     "bike_hire_many": Scenario(
         name="bike_hire_many",
-        config_path=scenario_config(".github/actions/e2e/bike_hire_many/skippr-el.yml"),
+        config_path=scenario_config(".github/actions/e2e/bike_hire_many/skipprd.yml"),
         smoke_runs=(
             SyncRun(
                 pipeline="bike_hire_many",
@@ -262,7 +262,7 @@ SCENARIOS = {
     "bike_hire_s3_wal_many": Scenario(
         name="bike_hire_s3_wal_many",
         config_path=scenario_config(
-            ".github/actions/e2e/bike_hire_s3_wal_many/skippr-el.yml"
+            ".github/actions/e2e/bike_hire_s3_wal_many/skipprd.yml"
         ),
         smoke_runs=(
             SyncRun(
@@ -334,7 +334,7 @@ SCENARIOS = {
     ),
     "deadletters_test": Scenario(
         name="deadletters_test",
-        config_path=scenario_config(".github/actions/e2e/deadletters/skippr-el.yml"),
+        config_path=scenario_config(".github/actions/e2e/deadletters/skipprd.yml"),
         smoke_runs=(SyncRun(pipeline="deadletters_test"),),
         full_runs=(SyncRun(pipeline="deadletters_test"),),
         smoke_verifiers=("deadletters_athena_routing",),
@@ -407,31 +407,31 @@ def capture_json(command: list[str], *, env: dict[str, str] | None = None) -> di
     return json.loads(stdout) if stdout else {}
 
 
-def resolve_skippr_el(path_arg: str | None) -> Path:
+def resolve_skipprd(path_arg: str | None) -> Path:
     candidates: list[Path] = []
     if path_arg:
         candidates.append(Path(path_arg))
-    env_path = os.environ.get("SKIPPR_E2E_SKIPPR_EL_BIN")
+    env_path = os.environ.get("SKIPPR_E2E_SKIPPRD_BIN")
     if env_path:
         candidates.append(Path(env_path))
     candidates.extend(
         [
-            REPO_ROOT / "skippr-el-linux_x86" / "skippr-el",
-            REPO_ROOT / "skippr-el-macos_arm64" / "skippr-el",
-            REPO_ROOT / "skippr-el-windows_x86" / "skippr-el.exe",
-            REPO_ROOT / "target" / "release" / "skippr-el",
-            REPO_ROOT / "target" / "debug" / "skippr-el",
+            REPO_ROOT / "skipprd-linux_x86" / "skipprd",
+            REPO_ROOT / "skipprd-macos_arm64" / "skipprd",
+            REPO_ROOT / "skipprd-windows_x86" / "skipprd.exe",
+            REPO_ROOT / "target" / "release" / "skipprd",
+            REPO_ROOT / "target" / "debug" / "skipprd",
         ]
     )
 
     for candidate in candidates:
         candidate = candidate.expanduser().resolve()
         if candidate.is_dir():
-            nested = candidate / "skippr-el"
+            nested = candidate / "skipprd"
             if nested.exists():
                 candidate = nested
             else:
-                nested_exe = candidate / "skippr-el.exe"
+                nested_exe = candidate / "skipprd.exe"
                 if nested_exe.exists():
                     candidate = nested_exe
         if candidate.is_file():
@@ -439,16 +439,16 @@ def resolve_skippr_el(path_arg: str | None) -> Path:
             return candidate
 
     searched = "\n".join(f"  - {candidate}" for candidate in candidates)
-    raise HarnessError(f"could not find skippr-el binary; searched:\n{searched}")
+    raise HarnessError(f"could not find skipprd binary; searched:\n{searched}")
 
 
-def assert_no_bundled_runtime_plugins(skippr_el: Path) -> None:
-    artifact_dir = skippr_el.parent
+def assert_no_bundled_runtime_plugins(skipprd: Path) -> None:
+    artifact_dir = skipprd.parent
     bundled = sorted(artifact_dir.glob("skippr-plugin-*"))
     if bundled:
         joined = ", ".join(path.name for path in bundled)
         raise HarnessError(
-            "skippr-el artifact unexpectedly contains runtime plugin binaries: "
+            "skipprd artifact unexpectedly contains runtime plugin binaries: "
             f"{joined}"
         )
 
@@ -498,7 +498,7 @@ def assert_runtime_plugin_patterns_downloaded(
 
 def base_environment(
     *,
-    skippr_el: Path,
+    skipprd: Path,
     config_path: Path,
     runtime_plugin_dir: Path,
     extra_env: dict[str, str] | None = None,
@@ -508,19 +508,19 @@ def base_environment(
     env["SKIPPR_CONFIG_FILE"] = str(config_path)
     env["SKIPPR_RUNTIME_PLUGIN_DIR"] = str(runtime_plugin_dir)
     env["SKIPPR_RUNTIME_LOG_LEVEL"] = env.get("SKIPPR_RUNTIME_LOG_LEVEL", "info")
-    env["SKIPPR_E2E_SKIPPR_EL_BIN"] = str(skippr_el)
+    env["SKIPPR_E2E_SKIPPRD_BIN"] = str(skipprd)
     if extra_env:
         env.update(extra_env)
     return env
 
 
-def run_sync(skippr_el: Path, sync_run: SyncRun, base_env: dict[str, str]) -> None:
+def run_sync(skipprd: Path, sync_run: SyncRun, base_env: dict[str, str]) -> None:
     env = base_env.copy()
     for key, value in sync_run.extra_env:
         env[key] = value
     run_command(
         [
-            str(skippr_el),
+            str(skipprd),
             "sync",
             "--log",
             "--pipeline",
@@ -816,15 +816,15 @@ def verify_runtime_release_artifacts(
             assert_remote_url_exists(artifact_url)
 
 
-def runtime_acceptance_test_env(skippr_el: Path) -> dict[str, str]:
+def runtime_acceptance_test_env(skipprd: Path) -> dict[str, str]:
     env = os.environ.copy()
-    env["SKIPPR_E2E_SKIPPR_EL_BIN"] = str(skippr_el)
+    env["SKIPPR_E2E_SKIPPRD_BIN"] = str(skipprd)
     env["CARGO_BUILD_JOBS"] = env.get("CARGO_BUILD_JOBS", "2")
     return env
 
 
-def skippr_el_build_profile(skippr_el: Path) -> str:
-    return "debug" if skippr_el.parent.name == "debug" else "release"
+def skipprd_build_profile(skipprd: Path) -> str:
+    return "debug" if skipprd.parent.name == "debug" else "release"
 
 
 def current_rust_target_triple() -> str:
@@ -842,7 +842,7 @@ def target_binary_name(binary_name: str, target_triple: str) -> str:
 
 def stage_local_runtime_release(
     *,
-    skippr_el: Path,
+    skipprd: Path,
     output_dir: Path,
 ) -> LocalStagedRuntimeManifests:
     ensure_tool("cargo")
@@ -852,7 +852,7 @@ def stage_local_runtime_release(
     }
     protocol_version = workspace_runtime_protocol_version(REPO_ROOT)
     target_triple = current_rust_target_triple()
-    profile = skippr_el_build_profile(skippr_el)
+    profile = skipprd_build_profile(skipprd)
     build_target_dir = output_dir.expanduser().resolve() / "build-target"
 
     packages_to_build: list[str] = []
@@ -1086,7 +1086,7 @@ def materialize_scenario_config(
 
 def run_runtime_file_release_smoke(
     *,
-    skippr_el: Path,
+    skipprd: Path,
     runtime_plugin_dir: Path,
     manifests: dict[str, DownloadedRuntimeManifest],
 ) -> None:
@@ -1094,7 +1094,7 @@ def run_runtime_file_release_smoke(
     cleanup = True
     try:
         pipeline_name = "runtime_release_file_smoke"
-        config_path = data_dir / "skippr-el.yml"
+        config_path = data_dir / "skipprd.yml"
         config_path.write_text(
             f"""skippr:
   workspace: {RUNTIME_ACCEPTANCE_WORKSPACE}
@@ -1127,14 +1127,14 @@ pipelines:
             encoding="utf-8",
         )
         env = base_environment(
-            skippr_el=skippr_el,
+            skipprd=skipprd,
             config_path=config_path,
             runtime_plugin_dir=runtime_plugin_dir,
         )
         env["DATA_DIR"] = str(data_dir)
         env["DATA_DIR_MIN_FREE_BYTES"] = "0"
         run_command(
-            [str(skippr_el), "sync", "--log", "--pipeline", pipeline_name],
+            [str(skipprd), "sync", "--log", "--pipeline", pipeline_name],
             env=env,
         )
         parquet_files = sorted(data_dir.rglob("*.parquet"))
@@ -1202,7 +1202,7 @@ def docker_compose_psql(service: str, sql: str, *, capture: bool = False) -> str
 
 def run_runtime_postgres_release_smoke(
     *,
-    skippr_el: Path,
+    skipprd: Path,
     runtime_plugin_dir: Path,
     manifests: dict[str, DownloadedRuntimeManifest],
 ) -> None:
@@ -1236,7 +1236,7 @@ CREATE SCHEMA public;
         )
 
         pipeline_name = "runtime_release_postgres_smoke"
-        config_path = data_dir / "skippr-el.yml"
+        config_path = data_dir / "skipprd.yml"
         config_path.write_text(
             f"""skippr:
   workspace: {RUNTIME_ACCEPTANCE_WORKSPACE}
@@ -1290,14 +1290,14 @@ pipelines:
             encoding="utf-8",
         )
         env = base_environment(
-            skippr_el=skippr_el,
+            skipprd=skipprd,
             config_path=config_path,
             runtime_plugin_dir=runtime_plugin_dir,
         )
         env["DATA_DIR"] = str(data_dir)
         env["DATA_DIR_MIN_FREE_BYTES"] = "0"
         run_command(
-            [str(skippr_el), "sync", "--log", "--pipeline", pipeline_name],
+            [str(skipprd), "sync", "--log", "--pipeline", pipeline_name],
             env=env,
         )
         table_names = [
@@ -1351,7 +1351,7 @@ pipelines:
 
 def run_runtime_plugin_acceptance(
     *,
-    skippr_el_arg: str | None,
+    skipprd_arg: str | None,
     mode: str,
     architecture_name: str,
     releases_bucket: str,
@@ -1359,8 +1359,8 @@ def run_runtime_plugin_acceptance(
     runtime_plugin_release_subdir: str,
 ) -> None:
     ensure_tool("cargo")
-    skippr_el = resolve_skippr_el(skippr_el_arg)
-    assert_no_bundled_runtime_plugins(skippr_el)
+    skipprd = resolve_skipprd(skipprd_arg)
+    assert_no_bundled_runtime_plugins(skipprd)
 
     latest_index_url = published_latest_manifest_index_url(
         releases_bucket,
@@ -1451,7 +1451,7 @@ def run_runtime_plugin_acceptance(
             download_dir=temp_root / "verified-artifacts",
         )
 
-        test_env = runtime_acceptance_test_env(skippr_el)
+        test_env = runtime_acceptance_test_env(skipprd)
         run_command(
             ["cargo", "test", "--test", "runtime_host_contracts", "--", "--nocapture"],
             env=test_env,
@@ -1463,13 +1463,13 @@ def run_runtime_plugin_acceptance(
             )
 
         run_runtime_file_release_smoke(
-            skippr_el=skippr_el,
+            skipprd=skipprd,
             runtime_plugin_dir=runtime_plugin_dir,
             manifests=manifests,
         )
         if mode == "full":
             run_runtime_postgres_release_smoke(
-                skippr_el=skippr_el,
+                skipprd=skipprd,
                 runtime_plugin_dir=runtime_plugin_dir,
                 manifests=manifests,
             )
@@ -1953,7 +1953,7 @@ def run_scenario(
     scenario: Scenario,
     *,
     mode: str,
-    skippr_el: Path,
+    skipprd: Path,
     prepare: bool,
     skip_dynamodb: bool,
     runtime_plugin_versions: dict[str, str] | None,
@@ -1977,13 +1977,13 @@ def run_scenario(
             local_runtime_manifests,
         )
         base_env = base_environment(
-            skippr_el=skippr_el,
+            skipprd=skipprd,
             config_path=config_path,
             runtime_plugin_dir=runtime_plugin_dir_path,
         )
         context = ScenarioContext(
             scenario=scenario,
-            skippr_el=skippr_el,
+            skipprd=skipprd,
             runtime_plugin_dir=runtime_plugin_dir_path,
             base_env=base_env,
             assertion_output=DEFAULT_ASSERTION_OUTPUT,
@@ -1992,7 +1992,7 @@ def run_scenario(
         sync_runs = scenario.smoke_runs if mode == "smoke" else scenario.full_runs
         print_step(f"Running scenario {scenario.name} in {mode} mode")
         for sync_run in sync_runs:
-            run_sync(skippr_el, sync_run, base_env)
+            run_sync(skipprd, sync_run, base_env)
 
         if local_runtime_manifests is None:
             assert_runtime_plugins_downloaded(runtime_plugin_dir_path)
@@ -2017,8 +2017,8 @@ def run_scenario(
 
 def add_common_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--skippr-el",
-        help="Path to the skippr-el binary or artifact directory containing it",
+        "--skipprd",
+        help="Path to the skipprd binary or artifact directory containing it",
     )
     parser.add_argument(
         "--mode",
@@ -2095,8 +2095,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Stage the current S3/Athena/Glue runtime plugin binaries into a local release-like manifest tree",
     )
     stage_runtime_release_parser.add_argument(
-        "--skippr-el",
-        help="Path to the skippr-el binary or artifact directory containing it; used to match debug vs release plugin builds",
+        "--skipprd",
+        help="Path to the skipprd binary or artifact directory containing it; used to match debug vs release plugin builds",
     )
     stage_runtime_release_parser.add_argument(
         "--output-dir",
@@ -2109,8 +2109,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Verify published runtime plugin manifests and smoke-test released manifests",
     )
     runtime_plugins_parser.add_argument(
-        "--skippr-el",
-        help="Path to the skippr-el binary or artifact directory containing it",
+        "--skipprd",
+        help="Path to the skipprd binary or artifact directory containing it",
     )
     runtime_plugins_parser.add_argument(
         "--mode",
@@ -2157,8 +2157,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "run":
-            skippr_el = resolve_skippr_el(args.skippr_el)
-            assert_no_bundled_runtime_plugins(skippr_el)
+            skipprd = resolve_skipprd(args.skipprd)
+            assert_no_bundled_runtime_plugins(skipprd)
             runtime_plugin_versions = parse_runtime_plugin_versions(
                 args.runtime_plugin_version
             )
@@ -2175,7 +2175,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_scenario(
                     SCENARIOS[scenario_name],
                     mode=args.mode,
-                    skippr_el=skippr_el,
+                    skipprd=skipprd,
                     prepare=args.prepare_aws_state,
                     skip_dynamodb=args.skip_dynamodb_purge,
                     runtime_plugin_versions=runtime_plugin_versions,
@@ -2184,14 +2184,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "stage-local-runtime-release":
-            skippr_el = resolve_skippr_el(args.skippr_el)
+            skipprd = resolve_skipprd(args.skipprd)
             output_dir = (
                 Path(args.output_dir)
                 if args.output_dir
                 else Path(tempfile.mkdtemp(prefix="skippr_local_runtime_release_"))
             )
             local_runtime_manifests = stage_local_runtime_release(
-                skippr_el=skippr_el,
+                skipprd=skipprd,
                 output_dir=output_dir,
             )
             print(local_runtime_manifests.manifest_dir)
@@ -2199,7 +2199,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "runtime-plugins":
             run_runtime_plugin_acceptance(
-                skippr_el_arg=args.skippr_el,
+                skipprd_arg=args.skipprd,
                 mode=args.mode,
                 architecture_name=args.architecture_name,
                 releases_bucket=args.releases_bucket,

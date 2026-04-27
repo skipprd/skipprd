@@ -26,6 +26,17 @@ runs:
         rustup toolchain install ${{ inputs.rust-version }}
         rustup default ${{ inputs.rust-version }}
         rustup component add rustfmt
+    - name: Configure CodeArtifact Cargo access
+      shell: bash
+      run: |
+        token="$(aws codeartifact get-authorization-token \
+          --domain skippr \
+          --domain-owner 132355036174 \
+          --region us-east-1 \
+          --query authorizationToken \
+          --output text)"
+        echo "::add-mask::$token"
+        echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
     - name: Install sccache
       if: env.SCCACHE_BUCKET != ''
       uses: mozilla-actions/sccache-action@v0.0.9

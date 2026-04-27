@@ -12,7 +12,7 @@ SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 def replace_root_manifest_version(cargo_toml_path: Path, version: str) -> None:
     text = cargo_toml_path.read_text(encoding="utf-8")
     updated, count = re.subn(
-        r'(?ms)^(\[package\]\s+name\s*=\s*"skippr"\s+version\s*=\s*")[^"]+(")',
+        r'(?ms)^(\[package\]\s+name\s*=\s*"skipprd"\s+version\s*=\s*")[^"]+(")',
         rf"\g<1>{version}\g<2>",
         text,
         count=1,
@@ -34,7 +34,7 @@ def replace_lockfile_package_version(cargo_lock_path: Path, package_name: str, v
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Set the checked-in root skippr package version.")
+    parser = argparse.ArgumentParser(description="Set the checked-in root skipprd package version.")
     parser.add_argument("--workspace", required=True, help="Workspace root containing Cargo.toml and Cargo.lock")
     parser.add_argument("--version", required=True, help="Semver version to write")
     args = parser.parse_args()
@@ -44,7 +44,7 @@ def main() -> None:
 
     workspace = Path(args.workspace).resolve()
     replace_root_manifest_version(workspace / "Cargo.toml", args.version)
-    replace_lockfile_package_version(workspace / "Cargo.lock", "skippr", args.version)
+    replace_lockfile_package_version(workspace / "Cargo.lock", "skipprd", args.version)
 
 
 if __name__ == "__main__":

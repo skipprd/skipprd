@@ -5,7 +5,7 @@ This repository is a Cargo workspace with one crate:
 - `skippr`: ingest + plugins + `sqlrt`
 
 
-Usage: skippr-el convert <INPUT> <OUTPUT> [OPTIONS]
+Usage: skipprd convert <INPUT> <OUTPUT> [OPTIONS]
 
 Arguments:
   <INPUT>   Input format
@@ -19,13 +19,13 @@ Options:
 
 
 
-skippr-el init
+skipprd init
 
 
-skippr-el discover DATA_SOURCE
+skipprd discover DATA_SOURCE
 
 
-skippr-el sync DATA_SOURCE DATA_DEST
+skipprd sync DATA_SOURCE DATA_DEST
 	--schema 
 	--data 
 
@@ -33,17 +33,17 @@ Global options:
 - `--log` Enable diagnostic logs (disabled by default). Respect `RUST_LOG` for level (e.g., `RUST_LOG=debug`).
 
 
-skippr-el validate DATA_SOURCE
+skipprd validate DATA_SOURCE
 	--schema-version		- Validate source data against schema version (defaults to latest approved schema)
 
 
-skippr-el diff DATA_SOURCE
+skipprd diff DATA_SOURCE
 	--schema-version 		- Schema version to compare (defaults to latest approved schema)
 	--previous-version  	- Schema version to generate diff against
 
 
 
-skippr-el destroy DATA_SOURCE
+skipprd destroy DATA_SOURCE
 
 
 

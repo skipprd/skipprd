@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_MANIFESTS = sorted(REPO_ROOT.glob("plugins/**/Cargo.toml"))
 
 # These crates are connector-specific and must not leak back into the host
-# dependency closure for the root `skippr` crate, including test-only edges.
+# dependency closure for the root `skipprd` crate, including test-only edges.
 FORBIDDEN_PACKAGES = {
     "aws-sdk-athena",
     "aws-sdk-dynamodb",
@@ -45,7 +45,7 @@ EDGE_KINDS = "normal,build,dev"
 
 
 def collect_leaked_host_packages(*, all_features: bool) -> set[str]:
-    command = ["cargo", "tree", "-p", "skippr", "-e", EDGE_KINDS, "--prefix", "none"]
+    command = ["cargo", "tree", "-p", "skipprd", "-e", EDGE_KINDS, "--prefix", "none"]
     if all_features:
         command.append("--all-features")
     result = subprocess.run(
@@ -88,21 +88,21 @@ def main() -> int:
         )
         if leaked_default:
             print(
-                f"  root `skippr` leaked forbidden packages (edges: {EDGE_KINDS}):",
+                f"  root `skipprd` leaked forbidden packages (edges: {EDGE_KINDS}):",
                 file=sys.stderr,
             )
             for name in sorted(leaked_default):
                 print(f"    - {name}", file=sys.stderr)
         if leaked_all_features:
             print(
-                f"  root `skippr` leaked forbidden packages under --all-features (edges: {EDGE_KINDS}):",
+                f"  root `skipprd` leaked forbidden packages under --all-features (edges: {EDGE_KINDS}):",
                 file=sys.stderr,
             )
             for name in sorted(leaked_all_features):
                 print(f"    - {name}", file=sys.stderr)
         if manifest_violations:
             print(
-                "  plugin manifests must depend on `skippr-core`, never root `skippr`:",
+                "  plugin manifests must depend on `skippr-core`, never root `skipprd`:",
                 file=sys.stderr,
             )
             for path in manifest_violations:

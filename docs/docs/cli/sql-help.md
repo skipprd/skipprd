@@ -1,11 +1,11 @@
-# skippr-el sql-help
+# skipprd sql-help
 
 Display documentation for supported SQL statements, or export it to a file.
 
 ## Usage
 
 ```bash
-skippr-el sql-help [--command "<SQL>"] [--output <path>] [--format md|html|json]
+skipprd sql-help [--command "<SQL>"] [--output <path>] [--format md|html|json]
 ```
 
 ## Flags
@@ -21,17 +21,17 @@ skippr-el sql-help [--command "<SQL>"] [--output <path>] [--format md|html|json]
 List all supported SQL commands:
 
 ```bash
-skippr-el sql-help
+skipprd sql-help
 ```
 
 Get help for a specific command:
 
 ```bash
-skippr-el sql-help --command "ENABLE PIPELINE"
+skipprd sql-help --command "ENABLE PIPELINE"
 ```
 
 Export docs to markdown:
 
 ```bash
-skippr-el sql-help --output sql-docs.md --format md
+skipprd sql-help --output sql-docs.md --format md
 ```

@@ -12,13 +12,13 @@ use datafusion::physical_plan::{RecordBatchStream, SendableRecordBatchStream};
 use futures::Stream;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use skippr::discover::OutputMetadata;
-use skippr::plugins::{DataSink, SchemaSink};
-use skippr::runtime_plugins::host::{
+use skipprd::discover::OutputMetadata;
+use skipprd::plugins::{DataSink, SchemaSink};
+use skipprd::runtime_plugins::host::{
     ResolvedRuntimePlugin, RuntimeDataSinkPlugin, RuntimeSchemaSinkPlugin,
 };
-use skippr::runtime_plugins::manifest::RuntimePluginManifest;
-use skippr::runtime_plugins::protocol::{
+use skipprd::runtime_plugins::manifest::RuntimePluginManifest;
+use skipprd::runtime_plugins::protocol::{
     RuntimeBinding, RuntimePluginConfigEnvelope, RuntimeSchemaConfig, RuntimeSinkConfig,
     RUNTIME_PROTOCOL_VERSION,
 };

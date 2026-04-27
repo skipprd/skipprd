@@ -6,16 +6,20 @@ on:
       - '*'
 
 env:
-  COMPONENT_NAME: skippr-el
-  CONTAINER_IMAGE: skippr-el:v${{ github.ref_name }}
-  CONTAINER_LATEST_IMAGE: skippr-el:latest
-  DOCKER_HUB_REPO: skippr-el
+  COMPONENT_NAME: skipprd
+  CONTAINER_IMAGE: skipprd:v${{ github.ref_name }}
+  CONTAINER_LATEST_IMAGE: skipprd:latest
+  DOCKER_HUB_REPO: skipprd
   ECR_HOST: 536671797322.dkr.ecr.us-east-1.amazonaws.com
   AWS_ECR_REGISTRY: $ECR_HOST/$COMPONENT_NAME
   RELEASES_BUCKET: skippr-web-install-site-prod
-  SKIPPR_EL_RELEASE_SUBDIR: skippr-el
+  SKIPPRD_RELEASE_SUBDIR: skipprd
+  SKIPPR_RELEASE_SUBDIR: skippr
+  SKIPPR_ADMIN_RELEASE_SUBDIR: skippr-admin
   RUNTIME_PLUGIN_RELEASE_SUBDIR: runtime-plugins
-  SKIPPR_EL_LATEST_POINTER: latest-skippr-el.txt
+  SKIPPRD_LATEST_POINTER: latest-skipprd.txt
+  SKIPPR_LATEST_POINTER: latest-skippr.txt
+  SKIPPR_ADMIN_LATEST_POINTER: latest-skippr-admin.txt
   RUST_BUILD_CACHE_BUCKET: skippr-web-rust-cache-prod
   RUST_BUILD_CACHE_REGION: us-east-1
 
@@ -177,11 +181,102 @@ jobs:
       - name: Run root host test suite
         shell: bash
         run: |
-          cargo test -p skippr -- --nocapture
+          cargo test -p skipprd -- --nocapture
       - name: Run postgres plugin tests
         shell: bash
         run: |
           cargo test -p skippr-plugin-data-sink-postgres -- --nocapture
+
+  data_engineer_test_suite:
+    name: cargo test (data-engineer suite/providers)
+    needs:
+      - plan_runtime_plugin_release
+    runs-on:
+      - ubuntu-latest-32-cores
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      SCCACHE_BUCKET: skippr-web-rust-cache-prod
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_KEY_PREFIX: skipprd-react
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_USE_SSL: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Prepare Rust builder
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+      - name: Run data-engineer suite tests
+        shell: bash
+        run: |
+          cargo test -p react-suite-data-engineer data_engineer::tests::control_state_thread_log_read_guardrails_are_enforced_in_rust_tests -- --nocapture
+          cargo test -p react-suite-data-engineer --test sql_cte -- --nocapture
+      - name: Run provider parity tests
+        shell: bash
+        run: |
+          cargo test -p react-module-provider-catalog --test catalog_provider_parity -- --nocapture
+
+  skippr_cli_test_suite:
+    name: cargo test (skippr cli)
+    needs:
+      - data_engineer_test_suite
+    runs-on:
+      - ubuntu-latest-32-cores
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      SCCACHE_BUCKET: skippr-web-rust-cache-prod
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_KEY_PREFIX: skipprd-skippr
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_USE_SSL: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Prepare Rust builder
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+      - name: Build and test skippr CLI
+        shell: bash
+        run: |
+          cargo build -p skippr-cli
+          cargo test -p skippr-cli -- --nocapture
+
+  skippr_admin_test_suite:
+    name: cargo test (skippr-admin)
+    needs:
+      - data_engineer_test_suite
+    runs-on:
+      - ubuntu-latest-32-cores
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      SCCACHE_BUCKET: skippr-web-rust-cache-prod
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_KEY_PREFIX: skipprd-admin
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_USE_SSL: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Prepare Rust builder
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+      - name: Build and test skippr-admin
+        shell: bash
+        run: |
+          cargo build -p skippr-admin
+          cargo test -p skippr-admin -- --nocapture
 
   macos_arm64_test_compile:
     name: cargo test --no-run (macos arm64)
@@ -214,6 +309,17 @@ jobs:
           rustup toolchain install stable
           rustup default stable
           rustup component add rustfmt
+      - name: Configure CodeArtifact Cargo access
+        shell: bash
+        run: |
+          token="$(aws codeartifact get-authorization-token \
+            --domain skippr \
+            --domain-owner 132355036174 \
+            --region us-east-1 \
+            --query authorizationToken \
+            --output text)"
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
       - name: Install sccache
         if: env.SCCACHE_BUCKET != ''
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -243,7 +349,7 @@ jobs:
       - name: Compile root host tests
         shell: bash
         run: |
-          cargo test -p skippr --no-run
+          cargo test -p skipprd --no-run
       - name: Compile postgres plugin tests
         shell: bash
         run: |
@@ -267,6 +373,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+
+      - name: Configure CodeArtifact Cargo access
+        shell: bash
+        run: |
+          token="$(aws codeartifact get-authorization-token \
+            --domain skippr \
+            --domain-owner 132355036174 \
+            --region us-east-1 \
+            --query authorizationToken \
+            --output text)"
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -408,7 +526,7 @@ jobs:
             )
           }
 
-          cargo build --release --bin skippr-el
+          cargo build --release --bin skipprd --bin skippr --bin skippr-admin
           if ($pluginPackages.Count -gt 0) {
             $buildArgs = @('build', '--release')
             foreach ($package in $pluginPackages) {
@@ -417,9 +535,13 @@ jobs:
             cargo @buildArgs
           }
 
-          New-Item -ItemType Directory -Force -Path skippr-el-windows_x86
+          New-Item -ItemType Directory -Force -Path skipprd-windows_x86
+          New-Item -ItemType Directory -Force -Path skippr-windows_x86
+          New-Item -ItemType Directory -Force -Path skippr-admin-windows_x86
           New-Item -ItemType Directory -Force -Path runtime-plugin-binaries-windows_x86
-          Copy-Item target\release\skippr-el.exe skippr-el-windows_x86\skippr-el.exe
+          Copy-Item target\release\skipprd.exe skipprd-windows_x86\skipprd.exe
+          Copy-Item target\release\skippr.exe skippr-windows_x86\skippr.exe
+          Copy-Item target\release\skippr-admin.exe skippr-admin-windows_x86\skippr-admin.exe
           foreach ($package in $pluginPackages) {
             $pluginBinary = "target\release\$package.exe"
             if (-not (Test-Path $pluginBinary)) {
@@ -427,7 +549,9 @@ jobs:
             }
             Copy-Item $pluginBinary "runtime-plugin-binaries-windows_x86\$package.exe"
           }
-          Get-ChildItem skippr-el-windows_x86
+          Get-ChildItem skipprd-windows_x86
+          Get-ChildItem skippr-windows_x86
+          Get-ChildItem skippr-admin-windows_x86
           Get-ChildItem runtime-plugin-binaries-windows_x86
         env:
           RUSTFLAGS: "-C debuginfo=0"
@@ -436,8 +560,8 @@ jobs:
       - name: Verify compiled version
         shell: pwsh
         run: |
-          $version = (.\target\release\skippr-el.exe --version 2>&1) -replace '^skippr\s+', ''
-          Write-Host "skippr-el version: $version"
+          $version = (.\target\release\skipprd.exe --version 2>&1) -replace '^skipprd\s+', ''
+          Write-Host "skipprd version: $version"
           if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
             Write-Error "Version was not plain semver"
             exit 1
@@ -450,8 +574,20 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: skippr-el-windows_x86
-          path: skippr-el-windows_x86
+          name: skipprd-windows_x86
+          path: skipprd-windows_x86
+          retention-days: 30
+      - name: Upload skippr Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skippr-windows_x86
+          path: skippr-windows_x86
+          retention-days: 30
+      - name: Upload skippr-admin Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skippr-admin-windows_x86
+          path: skippr-admin-windows_x86
           retention-days: 30
 
       - name: Upload Runtime Plugin Binaries Artifact
@@ -479,6 +615,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - name: Configure CodeArtifact Cargo access
+        shell: bash
+        run: |
+          token="$(aws codeartifact get-authorization-token \
+            --domain skippr \
+            --domain-owner 132355036174 \
+            --region us-east-1 \
+            --query authorizationToken \
+            --output text)"
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Setup protoc
@@ -585,7 +732,7 @@ jobs:
       - name: Compile root host tests
         shell: pwsh
         run: |
-          cargo test -p skippr --no-run
+          cargo test -p skipprd --no-run
       - name: Compile postgres plugin tests
         shell: pwsh
         run: |
@@ -760,7 +907,7 @@ jobs:
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: skippr-el-linux_x86
+          pattern: skipprd-linux_x86
 
       - name: Test linux x86 release
         uses: ./.github/actions/e2e/runtime_scenario
@@ -785,7 +932,7 @@ jobs:
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: skippr-el-linux_x86
+          pattern: skipprd-linux_x86
 
       - name: Test linux x86 release
         uses: ./.github/actions/e2e/runtime_scenario
@@ -810,7 +957,7 @@ jobs:
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: skippr-el-linux_x86
+          pattern: skipprd-linux_x86
 
       - name: Test linux x86 release
         uses: ./.github/actions/e2e/runtime_scenario
@@ -835,7 +982,7 @@ jobs:
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: skippr-el-linux_x86
+          pattern: skipprd-linux_x86
 
       - name: Test linux x86 release
         uses: ./.github/actions/e2e/runtime_scenario
@@ -846,7 +993,7 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
 
-  publish_skippr_el:
+  publish_skipprd:
     name: Publish Release
     if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
     needs:
@@ -858,6 +1005,9 @@ jobs:
      - windows_x86
      - windows_x86_test_compile
      - linux_test_suite
+     - data_engineer_test_suite
+     - skippr_cli_test_suite
+     - skippr_admin_test_suite
     runs-on: ubuntu-latest
     steps:
      - name: Check out code
@@ -865,12 +1015,18 @@ jobs:
      - name: Download Artifacts
        uses: actions/download-artifact@v4
        with:
-         pattern: skippr-el-*
+         pattern: "*"
      - name: Compress Release Artifacts
        run: |
-         tar -czvf skippr-el-linux_x86.tar.gz skippr-el-linux_x86/
-         tar -czvf skippr-el-macos_arm64.tar.gz skippr-el-macos_arm64/
-         tar -czvf skippr-el-windows_x86.tar.gz skippr-el-windows_x86/
+         tar -czvf skipprd-linux_x86.tar.gz skipprd-linux_x86/
+         tar -czvf skipprd-macos_arm64.tar.gz skipprd-macos_arm64/
+         tar -czvf skipprd-windows_x86.tar.gz skipprd-windows_x86/
+         tar -czvf skippr-linux_x86.tar.gz skippr-linux_x86/
+         tar -czvf skippr-macos_arm64.tar.gz skippr-macos_arm64/
+         tar -czvf skippr-windows_x86.tar.gz skippr-windows_x86/
+         tar -czvf skippr-admin-linux_x86.tar.gz skippr-admin-linux_x86/
+         tar -czvf skippr-admin-macos_arm64.tar.gz skippr-admin-macos_arm64/
+         tar -czvf skippr-admin-windows_x86.tar.gz skippr-admin-windows_x86/
      - name: Create or update GitHub Release
        env:
          GH_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
@@ -889,12 +1045,17 @@ jobs:
              --notes-file CHANGELOG.txt
          fi
          # Upload assets — --clobber overwrites same-name files
-         # but never deletes other assets (e.g. skippr-* from react CI)
          gh release upload "$TAG" \
            install.sh \
-           skippr-el-linux_x86.tar.gz \
-           skippr-el-macos_arm64.tar.gz \
-           skippr-el-windows_x86.tar.gz \
+           skipprd-linux_x86.tar.gz \
+           skipprd-macos_arm64.tar.gz \
+           skipprd-windows_x86.tar.gz \
+           skippr-linux_x86.tar.gz \
+           skippr-macos_arm64.tar.gz \
+           skippr-windows_x86.tar.gz \
+           skippr-admin-linux_x86.tar.gz \
+           skippr-admin-macos_arm64.tar.gz \
+           skippr-admin-windows_x86.tar.gz \
            --repo skipprd/skipprd \
            --clobber
      - name: Configure AWS credentials for release upload
@@ -907,13 +1068,23 @@ jobs:
        run: |
          TAG="${{ github.ref_name }}"
          BUCKET="${{ env.RELEASES_BUCKET }}"
-         RELEASE_SUBDIR="${{ env.SKIPPR_EL_RELEASE_SUBDIR }}"
-         LATEST_POINTER="${{ env.SKIPPR_EL_LATEST_POINTER }}"
-         for f in skippr-el-*.tar.gz; do
+         RELEASE_SUBDIR="${{ env.SKIPPRD_RELEASE_SUBDIR }}"
+         LATEST_POINTER="${{ env.SKIPPRD_LATEST_POINTER }}"
+         for f in skipprd-*.tar.gz; do
            aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
          done
          printf '%s' "$TAG" > "$LATEST_POINTER"
          aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
+         for f in skippr-linux_x86.tar.gz skippr-macos_arm64.tar.gz skippr-windows_x86.tar.gz; do
+           aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPR_RELEASE_SUBDIR }}/${TAG}/${f}"
+         done
+         printf '%s' "$TAG" > "${{ env.SKIPPR_LATEST_POINTER }}"
+         aws s3 cp "${{ env.SKIPPR_LATEST_POINTER }}" "s3://${BUCKET}/releases/${{ env.SKIPPR_LATEST_POINTER }}" --cache-control "no-cache, no-store, must-revalidate"
+         for f in skippr-admin-linux_x86.tar.gz skippr-admin-macos_arm64.tar.gz skippr-admin-windows_x86.tar.gz; do
+           aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPR_ADMIN_RELEASE_SUBDIR }}/${TAG}/${f}"
+         done
+         printf '%s' "$TAG" > "${{ env.SKIPPR_ADMIN_LATEST_POINTER }}"
+         aws s3 cp "${{ env.SKIPPR_ADMIN_LATEST_POINTER }}" "s3://${BUCKET}/releases/${{ env.SKIPPR_ADMIN_LATEST_POINTER }}" --cache-control "no-cache, no-store, must-revalidate"
 
 
 

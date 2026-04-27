@@ -19,8 +19,8 @@ use std::sync::atomic::Ordering;
 use std::thread::sleep;
 use std::time::Instant;
 
-use skippr::cli::{Cli, Mode, CLI_MODE};
-use skippr::discover::PipelineMetadata;
+use skipprd::cli::{Cli, Mode, CLI_MODE};
+use skipprd::discover::PipelineMetadata;
 
 extern crate clap;
 extern crate core;
@@ -29,36 +29,36 @@ use clap::Parser;
 
 use std::string::ToString;
 
-use skippr::buffer::BufferChunker;
-use skippr::helpers::configuration::{Config, PIPELINE_NAME};
-use skippr::helpers::logging::init_logging;
-use skippr::helpers::sync_reporter::SyncReporter;
+use skipprd::buffer::BufferChunker;
+use skipprd::helpers::configuration::{Config, PIPELINE_NAME};
+use skipprd::helpers::logging::init_logging;
+use skipprd::helpers::sync_reporter::SyncReporter;
 use tracing::{error, info, warn};
 
-use skippr::helpers::logger::LogLevel;
-use skippr::helpers::offsets::Offsets;
+use skipprd::helpers::logger::LogLevel;
+use skipprd::helpers::offsets::Offsets;
 
-use skippr::metrics::{Metrics, MetricsStatus};
-use skippr::{LOGGER, METADATA, METRICS, RUNNING};
+use skipprd::metrics::{Metrics, MetricsStatus};
+use skipprd::{LOGGER, METADATA, METRICS, RUNNING};
 
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::*;
-use skippr::benchmark::PerformanceBenchmark;
-use skippr::buffer::ingest_buffer::{wal_recover, Buffers};
-use skippr::ingest::deadletter;
-use skippr::ingest_work::Ingest;
-use skippr::plugins::DataSink;
-use skippr::runtime_plugins::discovery::resolve_runtime_plugin;
+use skipprd::benchmark::PerformanceBenchmark;
+use skipprd::buffer::ingest_buffer::{wal_recover, Buffers};
+use skipprd::ingest::deadletter;
+use skipprd::ingest_work::Ingest;
+use skipprd::plugins::DataSink;
+use skipprd::runtime_plugins::discovery::resolve_runtime_plugin;
 #[cfg(unix)]
-use skippr::runtime_plugins::host::terminate_runtime_plugin_children;
-use skippr::runtime_plugins::host::{
+use skipprd::runtime_plugins::host::terminate_runtime_plugin_children;
+use skipprd::runtime_plugins::host::{
     sync_runtime_input_plugin, ResolvedRuntimePlugin, RuntimeDataSinkPlugin,
 };
-use skippr::runtime_plugins::protocol::{RuntimeBinding, RuntimePluginKind, RuntimeSinkConfig};
-use skippr::runtime_plugins::schema_state::clear_runtime_source_schema_state;
-use skippr::sqlrt::doc_parser::SqlDocParser;
-use skippr::sqlrt::docs::{get_docs_in_format, DocFormat};
-use skippr::sqlrt::query::query;
+use skipprd::runtime_plugins::protocol::{RuntimeBinding, RuntimePluginKind, RuntimeSinkConfig};
+use skipprd::runtime_plugins::schema_state::clear_runtime_source_schema_state;
+use skipprd::sqlrt::doc_parser::SqlDocParser;
+use skipprd::sqlrt::docs::{get_docs_in_format, DocFormat};
+use skipprd::sqlrt::query::query;
 use std::io::IsTerminal as _;
 
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
@@ -80,7 +80,7 @@ impl DataSink for OutputRouter {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
-        cdc_ctx: Option<&skippr::plugins::cdc::SyncContext>,
+        cdc_ctx: Option<&skipprd::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         let sink_ref = BufferChunker::decode_file_sink_ref(&filename);
         let target_sink_ref = if sink_ref.is_empty() {
@@ -100,7 +100,7 @@ impl DataSink for OutputRouter {
     async fn install_schema_state(
         &self,
         schema_version: u64,
-        namespaces: &std::collections::BTreeMap<String, skippr::discover::OutputMetadata>,
+        namespaces: &std::collections::BTreeMap<String, skipprd::discover::OutputMetadata>,
     ) -> Result<(), std::io::Error> {
         for plugin in self.sinks.values() {
             plugin
@@ -451,10 +451,10 @@ async fn main() {
                 }
 
                 println!("For more details on a specific command, use:");
-                println!("  skippr-el sql-help --command \"<SQL COMMAND>\"");
+                println!("  skipprd sql-help --command \"<SQL COMMAND>\"");
                 println!();
                 println!("To generate documentation, use:");
-                println!("  skippr-el sql-help --output <FILE_PATH> [--format md|html|json]");
+                println!("  skipprd sql-help --output <FILE_PATH> [--format md|html|json]");
             }
         }
         Mode::Benchmark(options) => {
@@ -571,7 +571,7 @@ async fn discover(output_mode: &str) -> io::Result<()> {
     let start_time = Instant::now();
 
     let stdout_is_tty = std::io::stdout().is_terminal();
-    let logs_enabled = skippr::helpers::logging::cli_logs_enabled();
+    let logs_enabled = skipprd::helpers::logging::cli_logs_enabled();
     let reporter = SyncReporter::new(output_mode, stdout_is_tty, logs_enabled);
     if reporter.enabled() {
         reporter.add_tasks(&["Discovering"]);
@@ -610,8 +610,8 @@ async fn discover(output_mode: &str) -> io::Result<()> {
 
     let offsets_db = Arc::new(offsets);
 
-    let noop_output: Box<dyn skippr::plugins::DataSink + Send + Sync> =
-        Box::new(skippr::plugins::NoopOutputPlugin);
+    let noop_output: Box<dyn skipprd::plugins::DataSink + Send + Sync> =
+        Box::new(skipprd::plugins::NoopOutputPlugin);
     let shared_output = Arc::new(noop_output);
 
     {
@@ -697,7 +697,7 @@ async fn sync(output_mode: &str) -> io::Result<()> {
     let reporter = SyncReporter::new(
         output_mode,
         stdout_is_tty,
-        skippr::helpers::logging::cli_logs_enabled(),
+        skipprd::helpers::logging::cli_logs_enabled(),
     );
     if reporter.enabled() {
         reporter.add_tasks(&["Ingesting", "Finalising"]);
@@ -799,7 +799,7 @@ async fn sync(output_mode: &str) -> io::Result<()> {
 
     // CDC compatibility validation at startup
     {
-        use skippr::plugins::cdc::{
+        use skipprd::plugins::cdc::{
             derive_and_validate, set_global_cdc_contract, CompatibilityResult,
         };
         let pipeline = Config::get_pipeline_config();
@@ -955,10 +955,10 @@ async fn sync(output_mode: &str) -> io::Result<()> {
                 tokio::select! {
                     _ = interval.tick() => {
                         use std::sync::atomic::Ordering::Relaxed;
-                        let msgs = skippr::metrics::counters::MESSAGES_TOTAL.load(Relaxed);
-                        let bytes = skippr::metrics::counters::SOURCE_BYTES_TOTAL.load(Relaxed);
-                        let rows = skippr::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(Relaxed);
-                        let uploads = skippr::metrics::counters::UPLOADS_IN_FLIGHT.load(Relaxed) as u64;
+                        let msgs = skipprd::metrics::counters::MESSAGES_TOTAL.load(Relaxed);
+                        let bytes = skipprd::metrics::counters::SOURCE_BYTES_TOTAL.load(Relaxed);
+                        let rows = skipprd::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(Relaxed);
+                        let uploads = skipprd::metrics::counters::UPLOADS_IN_FLIGHT.load(Relaxed) as u64;
                         let elapsed = heartbeat_started.elapsed().as_millis() as u64;
                         let r = SyncReporter::Json;
                         r.sync_status(&heartbeat_pipeline, msgs, bytes, rows, elapsed, uploads);
@@ -1033,12 +1033,12 @@ async fn sync(output_mode: &str) -> io::Result<()> {
     {
         use std::sync::atomic::Ordering as AO;
         let uploaded_rows =
-            skippr::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(AO::Relaxed);
-        let expected_msgs = skippr::metrics::counters::MESSAGES_TOTAL.load(AO::Relaxed);
-        let expected_deadletters = skippr::metrics::counters::DEADLETTERS_TOTAL.load(AO::Relaxed);
+            skipprd::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(AO::Relaxed);
+        let expected_msgs = skipprd::metrics::counters::MESSAGES_TOTAL.load(AO::Relaxed);
+        let expected_deadletters = skipprd::metrics::counters::DEADLETTERS_TOTAL.load(AO::Relaxed);
         let expected_uploaded_rows = expected_msgs.saturating_add(expected_deadletters);
         let quarantined_parts =
-            skippr::metrics::counters::QUARANTINED_PARTITIONS_TOTAL.load(AO::Relaxed);
+            skipprd::metrics::counters::QUARANTINED_PARTITIONS_TOTAL.load(AO::Relaxed);
         info!(
             "Compactor: summary uploaded_rows={} expected_msgs={} expected_deadletters={} expected_uploaded_rows={} quarantined_parts={}",
             uploaded_rows, expected_msgs, expected_deadletters, expected_uploaded_rows, quarantined_parts
@@ -1048,7 +1048,7 @@ async fn sync(output_mode: &str) -> io::Result<()> {
         }
     }
 
-    skippr::converters::parquet_ordering::log_unmatched_order_fields();
+    skipprd::converters::parquet_ordering::log_unmatched_order_fields();
 
     {
         METRICS.write().status = if source_sync_result.is_ok() {
@@ -1084,7 +1084,7 @@ async fn sync(output_mode: &str) -> io::Result<()> {
 
     // Final concise metrics
     {
-        use skippr::metrics::counters;
+        use skipprd::metrics::counters;
         let m = METRICS.read();
         let messages_total =
             m.messages_total + counters::MESSAGES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
@@ -1116,7 +1116,7 @@ async fn sync(output_mode: &str) -> io::Result<()> {
     info!("Pipeline sync complete");
 
     {
-        use skippr::metrics::counters;
+        use skipprd::metrics::counters;
         let namespaces_synced = pipeline_metadata.metadata.len();
         let total_rows =
             counters::PARQUET_PERSISTED_ROWS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
@@ -1209,11 +1209,11 @@ pub async fn sync_deadletter_plugin(
 }
 
 fn build_cdc_contract(
-    cfg: &skippr::helpers::configuration::CdcPipelineConfig,
+    cfg: &skipprd::helpers::configuration::CdcPipelineConfig,
     namespace: &str,
-    effective_guarantee: skippr::plugins::cdc::EffectiveGuarantee,
-) -> skippr::plugins::cdc::NamespaceContract {
-    skippr::plugins::cdc::NamespaceContract {
+    effective_guarantee: skipprd::plugins::cdc::EffectiveGuarantee,
+) -> skipprd::plugins::cdc::NamespaceContract {
+    skipprd::plugins::cdc::NamespaceContract {
         namespace: namespace.to_string(),
         business_key_columns: cfg.business_key_columns.clone(),
         effective_guarantee,
@@ -1222,7 +1222,7 @@ fn build_cdc_contract(
 
 fn runtime_source_capability_for_manifest(
     resolved: &ResolvedRuntimePlugin,
-) -> Option<skippr::plugins::cdc::SourceCapability> {
+) -> Option<skipprd::plugins::cdc::SourceCapability> {
     resolved
         .manifest
         .source_capability
@@ -1232,7 +1232,7 @@ fn runtime_source_capability_for_manifest(
 
 fn runtime_sink_capability_for_manifest(
     resolved: &ResolvedRuntimePlugin,
-) -> Option<skippr::plugins::cdc::SinkCapability> {
+) -> Option<skipprd::plugins::cdc::SinkCapability> {
     resolved
         .manifest
         .sink_capability
@@ -1254,8 +1254,8 @@ fn resolve_runtime_sink_config(binding: RuntimeBinding) -> Result<RuntimeSinkCon
 
 fn source_capability_for_plugin(
     name: &str,
-) -> Option<&'static skippr::plugins::cdc::SourceCapability> {
-    use skippr::plugins::cdc::source_capabilities;
+) -> Option<&'static skipprd::plugins::cdc::SourceCapability> {
+    use skipprd::plugins::cdc::source_capabilities;
     match name {
         "Postgres" => Some(&source_capabilities::POSTGRES),
         "Mysql" => Some(&source_capabilities::MYSQL),
@@ -1286,8 +1286,8 @@ fn source_capability_for_plugin(
     }
 }
 
-fn sink_capability_for_plugin(name: &str) -> Option<&'static skippr::plugins::cdc::SinkCapability> {
-    use skippr::plugins::cdc::sink_capabilities;
+fn sink_capability_for_plugin(name: &str) -> Option<&'static skipprd::plugins::cdc::SinkCapability> {
+    use skipprd::plugins::cdc::sink_capabilities;
     match name {
         "Postgres" => Some(&sink_capabilities::POSTGRES),
         "Snowflake" => Some(&sink_capabilities::SNOWFLAKE),

@@ -16,8 +16,8 @@ use serde_json::json;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
-use skippr::plugins::cdc;
-use skippr::runtime_plugins::protocol::{
+use skipprd::plugins::cdc;
+use skipprd::runtime_plugins::protocol::{
     HandshakeResponse, HostDataFrame, HostFrame, PluginDataFrame, PluginFrame,
     RuntimeCheckpointUpdate, RuntimePluginKind, RuntimeRequestAck, RuntimeSchemaInstallRequest,
     RuntimeSchemaRefreshRequest, RuntimeSchemaStateInstallRequest, RuntimeSessionHello,
@@ -25,8 +25,8 @@ use skippr::runtime_plugins::protocol::{
     SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
-use skippr::runtime_plugins::sdk::{decode_record_batch_stream, encode_record_batch_stream};
-use skippr::runtime_plugins::wire::{read_frame_or_eof, write_frame};
+use skipprd::runtime_plugins::sdk::{decode_record_batch_stream, encode_record_batch_stream};
+use skipprd::runtime_plugins::wire::{read_frame_or_eof, write_frame};
 
 #[derive(Debug, Parser)]
 struct TestHelperCli {
@@ -524,7 +524,7 @@ async fn read_sink_payload(reader: &mut OwnedReadHalf, request_id: u64) -> io::R
 
 async fn write_sink_request_to_output_buffer(
     arrow_stream_bytes: Vec<u8>,
-    context: &skippr::runtime_plugins::protocol::RuntimeExecutionContext,
+    context: &skipprd::runtime_plugins::protocol::RuntimeExecutionContext,
 ) -> io::Result<()> {
     let mut stream = decode_record_batch_stream(arrow_stream_bytes)?;
     let schema = stream.schema();

@@ -23,7 +23,7 @@ runs:
       run: |
         set -euo pipefail
 
-        chmod +x "./skippr-el-${{ inputs.architecture_name }}/skippr-el"
+        chmod +x "./skipprd-${{ inputs.architecture_name }}/skipprd"
         runtime_plugin_args=()
         while IFS= read -r runtime_plugin_version; do
           runtime_plugin_version="${runtime_plugin_version#"${runtime_plugin_version%%[![:space:]]*}"}"
@@ -37,7 +37,7 @@ runs:
           )
         done <<< "${{ inputs.runtime_plugin_versions }}"
         python3 .github/scripts/runtime_e2e_harness.py runtime-plugins \
-          --skippr-el "$PWD/skippr-el-${{ inputs.architecture_name }}/skippr-el" \
+          --skipprd "$PWD/skipprd-${{ inputs.architecture_name }}/skipprd" \
           --mode full \
           --architecture-name "${{ inputs.architecture_name }}" \
           --releases-bucket "${{ inputs.releases_bucket }}" \

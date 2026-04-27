@@ -40,6 +40,17 @@ runs:
         rustup toolchain install stable
         rustup default stable
         rustup component add rustfmt
+    - name: Configure CodeArtifact Cargo access
+      shell: bash
+      run: |
+        token="$(aws codeartifact get-authorization-token \
+          --domain skippr \
+          --domain-owner 132355036174 \
+          --region us-east-1 \
+          --query authorizationToken \
+          --output text)"
+        echo "::add-mask::$token"
+        echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
     - name: Install sccache
       if: env.SCCACHE_BUCKET != ''
       uses: mozilla-actions/sccache-action@v0.0.9
@@ -79,7 +90,7 @@ runs:
             print(package)
         PY
 
-        cargo build --release --bin skippr-el
+        cargo build --release --bin skipprd --bin skippr --bin skippr-admin
         if [ -s "${plugin_packages_file}" ]; then
           cargo_args=()
           while IFS= read -r package; do
@@ -89,9 +100,13 @@ runs:
           cargo build --release "${cargo_args[@]}"
         fi
 
-        mkdir -p skippr-el-${{ inputs.architecture_name }}
+        mkdir -p skipprd-${{ inputs.architecture_name }}
+        mkdir -p skippr-${{ inputs.architecture_name }}
+        mkdir -p skippr-admin-${{ inputs.architecture_name }}
         mkdir -p runtime-plugin-binaries-${{ inputs.architecture_name }}
-        cp target/release/skippr-el skippr-el-${{ inputs.architecture_name }}/skippr-el
+        cp target/release/skipprd skipprd-${{ inputs.architecture_name }}/skipprd
+        cp target/release/skippr skippr-${{ inputs.architecture_name }}/skippr
+        cp target/release/skippr-admin skippr-admin-${{ inputs.architecture_name }}/skippr-admin
         while IFS= read -r package; do
           [ -n "${package}" ] || continue
           plugin_bin="target/release/${package}"
@@ -102,7 +117,9 @@ runs:
           cp "${plugin_bin}" "runtime-plugin-binaries-${{ inputs.architecture_name }}/$(basename "${plugin_bin}")"
         done < "${plugin_packages_file}"
         rm -f "${plugin_packages_file}"
-        ls -la skippr-el-${{ inputs.architecture_name }}
+        ls -la skipprd-${{ inputs.architecture_name }}
+        ls -la skippr-${{ inputs.architecture_name }}
+        ls -la skippr-admin-${{ inputs.architecture_name }}
         ls -la runtime-plugin-binaries-${{ inputs.architecture_name }}
       env:
         # do not produce debug symbols to keep memory usage down
@@ -110,8 +127,8 @@ runs:
     - name: Verify compiled version
       shell: bash
       run: |
-        VERSION=$(target/release/skippr-el --version 2>&1 | awk '{print $2}')
-        echo "skippr-el version: $VERSION"
+        VERSION=$(target/release/skipprd --version 2>&1 | awk '{print $2}')
+        echo "skipprd version: $VERSION"
         if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
           echo "::error::Version was not plain semver"
           exit 1
@@ -123,8 +140,20 @@ runs:
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: skippr-el-${{ inputs.architecture_name }}
-        path: skippr-el-${{ inputs.architecture_name }}
+        name: skipprd-${{ inputs.architecture_name }}
+        path: skipprd-${{ inputs.architecture_name }}
+        retention-days: 30
+    - name: Upload skippr Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: skippr-${{ inputs.architecture_name }}
+        path: skippr-${{ inputs.architecture_name }}
+        retention-days: 30
+    - name: Upload skippr-admin Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: skippr-admin-${{ inputs.architecture_name }}
+        path: skippr-admin-${{ inputs.architecture_name }}
         retention-days: 30
     - name: Upload Runtime Plugin Binaries Artifact
       uses: actions/upload-artifact@v4

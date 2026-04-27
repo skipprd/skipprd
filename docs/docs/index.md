@@ -15,7 +15,7 @@ This docs site is now organized for repository maintainers first. Operator-facin
 
 ## Current operating model
 
-- **Single host binary**: `skippr-el` runs discovery, sync, query, WAL replay, compaction, and schema coordination.
+- **Single host binary**: `skipprd` runs discovery, sync, query, WAL replay, compaction, and schema coordination.
 - **Published runtime plugins**: source, sink, and schema plugins are resolved from the latest published manifest index by default, with optional per-plugin version pins.
 - **Host-owned offsets**: the durable `sled` offsets database lives in the host process only; runtime source plugins read resume state from the host over the TCP runtime protocol.
 - **Generated plugin manifests**: plugin metadata comes from each plugin crate's `Cargo.toml`, not committed manifest templates.
@@ -25,7 +25,7 @@ This docs site is now organized for repository maintainers first. Operator-facin
 
 ```bash
 cargo check --workspace
-cargo test -p skippr -- --nocapture
+cargo test -p skipprd -- --nocapture
 python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 mkdocs build -f docs/mkdocs.yml --strict
 ```

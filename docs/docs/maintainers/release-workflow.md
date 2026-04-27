@@ -9,7 +9,7 @@ The main release pipeline is `.github/workflows/build-publish.yml`. It is tag-dr
 3. host and package test/compile jobs
 4. `publish_runtime_plugins`
 5. runtime e2e scenario jobs
-6. `publish_skippr_el`
+6. `publish_skipprd`
 
 ## 1. Plan which plugins need rebuilding
 
@@ -43,7 +43,7 @@ Platform build jobs produce the host binary plus the runtime plugin binaries nee
 - `macos_arm64`
 - `windows_x86`
 
-On tag builds, `set_root_package_version.py` stamps the root host package version from the tag name before packaging `skippr-el`.
+On tag builds, `set_root_package_version.py` stamps the root host package version from the tag name before packaging `skipprd`.
 
 ## 3. Compile and test the important boundaries
 
@@ -93,7 +93,7 @@ The post-publish acceptance path verifies artifact download behavior with `artif
 
 ## 6. Publish the host binary
 
-`publish_skippr_el` then:
+`publish_skipprd` then:
 
 - uploads host archives plus `install.sh` to the GitHub release
 - copies host tarballs into the install releases bucket
@@ -107,7 +107,7 @@ Use these rules when preparing a release:
 
 - bump an individual plugin crate version when its behavior changes in a way that should force republishing
 - do not reintroduce committed runtime manifest templates
-- do not bundle runtime plugin binaries beside `skippr-el`
+- do not bundle runtime plugin binaries beside `skipprd`
 - prefer the latest registry index by default; only pin individual plugin versions when intentionally testing or rolling a plugin
 
 That keeps the runtime plugin system behaving like a package manager rather than a monolithic host bundle.

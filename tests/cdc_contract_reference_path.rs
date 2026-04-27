@@ -5,9 +5,9 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use skippr::buffer::segment_file::{PartitionKey, SegmentFile};
-use skippr::helpers::offsets::OffsetKey;
-use skippr::plugins::cdc::*;
+use skipprd::buffer::segment_file::{PartitionKey, SegmentFile};
+use skipprd::helpers::offsets::OffsetKey;
+use skipprd::plugins::cdc::*;
 
 fn temp_dir() -> std::path::PathBuf {
     let base = std::env::temp_dir().join(format!("skippr_cdc_ref_{}", std::process::id()));

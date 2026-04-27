@@ -1,0 +1,494 @@
+use crate::plan_progress::{
+    checklist_status, is_runnable_checklist_status, missing_required_checklist_items,
+    required_checklist_item_ids, work_groups_cover_task_checklist, CHECKLIST_SQL_MODEL,
+    MAX_BATCH_SIZE,
+};
+use crate::plan_types::{CleansePlan, ModelPlan, Plan, PlanTask, PlanWorkGroup};
+
+#[derive(Clone, Debug)]
+pub struct PlanSemanticValidation {
+    pub ok: bool,
+    pub errors: Vec<String>,
+    pub issues: Vec<PlanSemanticIssue>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanSemanticIssueCode {
+    MissingPlanKey,
+    MissingTasks,
+    DuplicateTaskId,
+    InvalidBatch,
+    MissingImplementationSpec,
+    MissingChecklistItems,
+    UnknownTaskReference,
+    MissingWorkGroups,
+    MissingWorkGroupCoverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanSemanticIssue {
+    pub code: PlanSemanticIssueCode,
+    pub task_id: Option<String>,
+    pub message: String,
+}
+
+impl PlanSemanticValidation {
+    pub fn messages(&self) -> Vec<String> {
+        if !self.errors.is_empty() {
+            return self.errors.clone();
+        }
+        self.issues.iter().map(|i| i.message.clone()).collect()
+    }
+}
+
+fn sem(code: PlanSemanticIssueCode, message: impl Into<String>) -> PlanSemanticIssue {
+    PlanSemanticIssue {
+        code,
+        task_id: None,
+        message: message.into(),
+    }
+}
+
+fn sem_task(
+    code: PlanSemanticIssueCode,
+    task_id: &str,
+    message: impl Into<String>,
+) -> PlanSemanticIssue {
+    PlanSemanticIssue {
+        code,
+        task_id: Some(task_id.to_string()),
+        message: message.into(),
+    }
+}
+
+fn duplicate_values(values: &[String]) -> Vec<String> {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for v in values.iter() {
+        let t = v.trim();
+        if t.is_empty() {
+            continue;
+        }
+        *counts.entry(t.to_string()).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .filter_map(|(k, n)| if n > 1 { Some(k) } else { None })
+        .collect()
+}
+
+fn duplicate_workgroup_refs(groups: &[PlanWorkGroup]) -> Vec<(String, String)> {
+    let mut counts = std::collections::BTreeMap::<(String, String), usize>::new();
+    for g in groups.iter() {
+        for it in g.items.iter() {
+            let tid = it.task_id.trim();
+            let cid = it.checklist_item_id.trim();
+            if tid.is_empty() || cid.is_empty() {
+                continue;
+            }
+            *counts
+                .entry((tid.to_string(), cid.to_string()))
+                .or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(k, n)| if n > 1 { Some(k) } else { None })
+        .collect()
+}
+
+fn validation_result(issues: Vec<PlanSemanticIssue>) -> PlanSemanticValidation {
+    let errors: Vec<String> = issues.iter().map(|i| i.message.clone()).collect();
+    PlanSemanticValidation {
+        ok: errors.is_empty(),
+        issues,
+        errors,
+    }
+}
+
+/// Structural validation shared by all plan types.
+///
+/// `task_id_label` is used for human-readable error messages (e.g. "dataset_id", "name").
+/// `batch_id_label` is the noun for batch id references (e.g. "dataset_id", "model name").
+/// `wg_qualifier` is the noun for task references in work_group errors (e.g. "dataset_id", "model").
+fn validate_plan_structure<T: PlanTask>(
+    plan: &Plan<T>,
+    task_id_label: &str,
+    batch_id_label: &str,
+    wg_qualifier: &str,
+) -> Vec<PlanSemanticIssue> {
+    use PlanSemanticIssueCode::*;
+    let mut issues: Vec<PlanSemanticIssue> = Vec::new();
+    if plan.plan_key.trim().is_empty() {
+        issues.push(sem(MissingPlanKey, "plan_key is missing"));
+    }
+    if plan.tasks.is_empty() {
+        issues.push(sem(MissingTasks, "tasks is empty"));
+    }
+    let task_ids: Vec<String> = plan.tasks.iter().map(|t| t.task_id().to_string()).collect();
+    for dup in duplicate_values(&task_ids) {
+        issues.push(sem(
+            DuplicateTaskId,
+            format!("duplicate task.{} is not allowed: {}", task_id_label, dup),
+        ));
+    }
+    for (bi, b) in plan.batches.iter().enumerate() {
+        if b.len() > MAX_BATCH_SIZE {
+            issues.push(sem(
+                InvalidBatch,
+                format!(
+                    "batches[{bi}] has >{MAX_BATCH_SIZE} items (len={})",
+                    b.len()
+                ),
+            ));
+        }
+        for dup in duplicate_values(b) {
+            issues.push(sem(
+                InvalidBatch,
+                format!(
+                    "batches[{bi}] contains duplicate {} '{}' (duplicates are forbidden)",
+                    batch_id_label, dup
+                ),
+            ));
+        }
+    }
+
+    for t in plan.tasks.iter() {
+        let tid = t.task_id();
+        if tid.trim().is_empty() {
+            issues.push(sem(
+                MissingTasks,
+                format!("task.{} is empty", task_id_label),
+            ));
+            continue;
+        }
+        let missing = missing_required_checklist_items(t.checklist());
+        if !missing.is_empty() {
+            issues.push(sem_task(
+                MissingChecklistItems,
+                tid,
+                format!(
+                    "{}: missing required checklist items: {}",
+                    tid,
+                    missing.join(", ")
+                ),
+            ));
+        }
+        let sql_status = checklist_status(t.checklist(), CHECKLIST_SQL_MODEL);
+        if is_runnable_checklist_status(sql_status) {
+            let missing_path = t
+                .expected_model_path()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true);
+            if missing_path {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!("{}: expected_model_path missing for runnable task", tid),
+                ));
+            }
+        }
+    }
+
+    for (bi, b) in plan.batches.iter().enumerate() {
+        for item in b.iter() {
+            if !plan.tasks.iter().any(|t| t.task_id() == item.as_str()) {
+                issues.push(sem(
+                    InvalidBatch,
+                    format!(
+                        "batches[{bi}] references {} not present in tasks: {item}",
+                        batch_id_label
+                    ),
+                ));
+            }
+        }
+    }
+
+    if plan.work_groups.is_empty() {
+        issues.push(sem(MissingWorkGroups, "work_groups is empty"));
+    }
+    for (task_id, checklist_item_id) in duplicate_workgroup_refs(&plan.work_groups) {
+        issues.push(sem(MissingWorkGroupCoverage, format!(
+            "work_groups contains duplicate task/checklist ref: task_id='{}' checklist_item_id='{}'",
+            task_id, checklist_item_id
+        )));
+    }
+    for g in plan.work_groups.iter() {
+        if g.items.len() > MAX_BATCH_SIZE {
+            issues.push(sem(
+                InvalidBatch,
+                format!(
+                    "work_group {} has >{MAX_BATCH_SIZE} items (len={})",
+                    g.group_id,
+                    g.items.len()
+                ),
+            ));
+        }
+        for it in g.items.iter() {
+            if !plan
+                .tasks
+                .iter()
+                .any(|t| t.task_id() == it.task_id.as_str())
+            {
+                issues.push(sem(
+                    UnknownTaskReference,
+                    format!(
+                        "work_group {} references unknown {} task_id={}",
+                        g.group_id, wg_qualifier, it.task_id
+                    ),
+                ));
+            }
+            let cid = it.checklist_item_id.trim();
+            if cid.is_empty() {
+                issues.push(sem(
+                    MissingChecklistItems,
+                    format!(
+                        "work_group {} item for task_id={} is missing checklist_item_id",
+                        g.group_id, it.task_id
+                    ),
+                ));
+                continue;
+            }
+            if let Some(t) = plan
+                .tasks
+                .iter()
+                .find(|t| t.task_id() == it.task_id.as_str())
+            {
+                let exists = t.checklist().iter().any(|x| x.checklist_item_id == cid);
+                if !exists {
+                    issues.push(sem(UnknownTaskReference, format!(
+                        "work_group {} references checklist_item_id '{}' not present in task checklist: {}",
+                        g.group_id, cid, it.task_id
+                    )));
+                }
+            }
+        }
+    }
+    for t in plan.tasks.iter() {
+        for checklist_id in required_checklist_item_ids() {
+            if !work_groups_cover_task_checklist(&plan.work_groups, t.task_id(), checklist_id) {
+                issues.push(sem_task(
+                    MissingWorkGroupCoverage,
+                    t.task_id(),
+                    format!(
+                        "task {} checklist '{}' is not scheduled in work_groups",
+                        t.task_id(),
+                        checklist_id
+                    ),
+                ));
+            }
+        }
+    }
+    issues
+}
+
+pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValidation {
+    use PlanSemanticIssueCode::*;
+    let mut issues = validate_plan_structure(plan, "dataset_id", "dataset_id", "dataset_id");
+
+    for t in plan.tasks.iter() {
+        let tid = &t.dataset_id;
+        if tid.trim().is_empty() {
+            continue;
+        }
+        let Some(spec) = t.implementation_spec.as_ref() else {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!("{}: missing implementation_spec", tid),
+            ));
+            continue;
+        };
+        if spec.spec_version <= 0 {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!("{}: implementation_spec.spec_version must be >0", tid),
+            ));
+        }
+        if !spec.row_preserving {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: implementation_spec.row_preserving must be true for cleanse/silver",
+                    tid
+                ),
+            ));
+        }
+        if spec.output_fields.is_empty() {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: implementation_spec.output_fields is empty (design detail required)",
+                    tid
+                ),
+            ));
+        }
+        if !t.source_schema.is_empty() {
+            let known: std::collections::BTreeSet<String> =
+                t.source_schema.iter().map(|c| c.name.clone()).collect();
+            for field in &spec.output_fields {
+                for sc in &field.source_columns {
+                    if !known.contains(sc.as_str()) {
+                        issues.push(sem_task(MissingImplementationSpec, tid, format!(
+                            "{}: output_fields[{}].source_columns references '{}' which is not in the task's authoritative source_schema (available: {})",
+                            tid,
+                            field.name,
+                            sc,
+                            known.iter().cloned().collect::<Vec<_>>().join(", ")
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    validation_result(issues)
+}
+
+pub fn validate_model_plan_semantics(
+    plan: &ModelPlan,
+    allowed_staging_models: Option<&std::collections::BTreeSet<String>>,
+) -> PlanSemanticValidation {
+    use PlanSemanticIssueCode::*;
+    let mut issues = validate_plan_structure(plan, "name", "model name", "model");
+
+    let plan_task_names: std::collections::BTreeSet<&str> = plan
+        .tasks
+        .iter()
+        .map(|t| t.name.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for t in plan.tasks.iter() {
+        let tid = &t.name;
+        if tid.trim().is_empty() {
+            continue;
+        }
+        let Some(spec) = t.implementation_spec.as_ref() else {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!("{}: missing implementation_spec", tid),
+            ));
+            continue;
+        };
+        if spec.spec_version <= 0 {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!("{}: implementation_spec.spec_version must be >0", tid),
+            ));
+        }
+        if spec.grain.trim().is_empty() {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: implementation_spec.grain is empty (design detail required)",
+                    tid
+                ),
+            ));
+        }
+        if spec.output_fields.is_empty() && spec.metrics.is_empty() {
+            issues.push(sem_task(MissingImplementationSpec, tid, format!(
+                "{}: implementation_spec must include output_fields and/or metrics (design detail required)", tid
+            )));
+        }
+        let sql_status = checklist_status(&t.checklist, CHECKLIST_SQL_MODEL);
+        if is_runnable_checklist_status(sql_status) {
+            if t.goal.trim().is_empty() {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!("{}: goal is empty for runnable task", tid),
+                ));
+            }
+            let nonempty_inputs: Vec<String> = t
+                .inputs
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if nonempty_inputs.is_empty() {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!("{}: inputs is empty for runnable task", tid),
+                ));
+            }
+            let grounded_input_names: std::collections::BTreeSet<String> = t
+                .grounded_inputs
+                .iter()
+                .map(|g| g.input_name.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            for inp in nonempty_inputs.iter() {
+                if !grounded_input_names.contains(inp) {
+                    issues.push(sem_task(MissingImplementationSpec, tid, format!(
+                        "{}: grounded_inputs is missing authoritative relation facts for input '{}'",
+                        tid, inp
+                    )));
+                }
+            }
+            for grounded in &t.grounded_inputs {
+                if grounded.relation_fqn.trim().is_empty() {
+                    issues.push(sem_task(
+                        MissingImplementationSpec,
+                        tid,
+                        format!(
+                            "{}: grounded_inputs[{}].relation_fqn is empty",
+                            tid, grounded.input_name
+                        ),
+                    ));
+                }
+                if grounded.model_rel_path.trim().is_empty() {
+                    issues.push(sem_task(
+                        MissingImplementationSpec,
+                        tid,
+                        format!(
+                            "{}: grounded_inputs[{}].model_rel_path is empty",
+                            tid, grounded.input_name
+                        ),
+                    ));
+                }
+                if grounded.source_schema.is_empty() {
+                    tracing::warn!(
+                        "{}: grounded_inputs[{}].source_schema is empty (warehouse schema not yet available)",
+                        tid, grounded.input_name
+                    );
+                }
+            }
+            if let Some(allowed) = allowed_staging_models {
+                for inp in nonempty_inputs.iter() {
+                    if !allowed.contains(inp) && !plan_task_names.contains(inp.as_str()) {
+                        issues.push(sem_task(
+                            UnknownTaskReference,
+                            tid,
+                            format!(
+                                "{}: input '{}' not grounded in known staging models or plan tasks",
+                                tid, inp
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    validation_result(issues)
+}
+
+pub fn ensure_cleanse_plan_semantically_valid_or_repaired(
+    plan: &mut CleansePlan,
+) -> PlanSemanticValidation {
+    crate::plan_grounding::normalize_cleanse_plan_defaults(plan);
+    validate_cleanse_plan_semantics(plan)
+}
+
+pub fn ensure_model_plan_semantically_valid_or_repaired(
+    plan: &mut ModelPlan,
+    allowed_staging_models: &std::collections::BTreeSet<String>,
+) -> PlanSemanticValidation {
+    crate::plan_grounding::ensure_expected_model_paths_model(plan);
+    validate_model_plan_semantics(plan, Some(allowed_staging_models))
+}

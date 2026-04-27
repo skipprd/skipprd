@@ -13,11 +13,25 @@ CI also installs additional platform-specific dependencies on macOS and Windows 
 
 ## Fast feedback loop
 
+`skipprd` consumes generic React crates from the private CodeArtifact Cargo registry `skippr/react-cargo`.
+Before local builds that need to resolve those crates, authenticate Cargo:
+
+```bash
+export CARGO_REGISTRIES_REACT_CARGO_TOKEN="$(
+  AWS_PROFILE=skippr-prod aws codeartifact get-authorization-token \
+    --domain skippr \
+    --domain-owner 132355036174 \
+    --region us-east-1 \
+    --query authorizationToken \
+    --output text
+)"
+```
+
 Use these commands as the default local loop:
 
 ```bash
 cargo check --workspace
-cargo test -p skippr -- --nocapture
+cargo test -p skipprd -- --nocapture
 python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 ```
 
@@ -26,8 +40,8 @@ Add these when relevant:
 ```bash
 cargo check --all-features
 cargo test -p skippr-plugin-data-sink-postgres -- --nocapture
-cargo test -p skippr --test runtime_plugin_global_guards -- --nocapture
-cargo test -p skippr --test runtime_source_plugin_guards -- --nocapture
+cargo test -p skipprd --test runtime_plugin_global_guards -- --nocapture
+cargo test -p skipprd --test runtime_source_plugin_guards -- --nocapture
 ```
 
 `cargo check --all-features` matters whenever you touch feature-gated code or shared crates that fan out into many plugin builds.
@@ -69,15 +83,15 @@ Stage a local release-like manifest tree for the current S3/Athena/Glue runtime 
 
 ```bash
 python3 .github/scripts/runtime_e2e_harness.py stage-local-runtime-release \
-  --skippr-el target/debug/skippr-el
+  --skipprd target/debug/skipprd
 ```
 
-The `run` command rejects a host binary that lives next to runtime plugin executables, because the host is not supposed to ship bundled plugins. For local runs, copy `skippr-el` into a clean directory first:
+The `run` command rejects a host binary that lives next to runtime plugin executables, because the host is not supposed to ship bundled plugins. For local runs, copy `skipprd` into a clean directory first:
 
 ```bash
 tmpdir="$(mktemp -d)"
 mkdir -p "$tmpdir/debug"
-cp target/debug/skippr-el "$tmpdir/debug/skippr-el"
+cp target/debug/skipprd "$tmpdir/debug/skipprd"
 ```
 
 Then run a fast smoke:
@@ -85,7 +99,7 @@ Then run a fast smoke:
 ```bash
 python3 .github/scripts/runtime_e2e_harness.py run bike_hire \
   --mode smoke \
-  --skippr-el "$tmpdir/debug/skippr-el" \
+  --skipprd "$tmpdir/debug/skipprd" \
   --local-runtime-manifest-dir /path/to/staged-local-runtime-release
 ```
 

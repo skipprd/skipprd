@@ -342,7 +342,7 @@ async fn fetch_metadata_bytes(client: &reqwest::Client, url: &str) -> io::Result
     let refreshed_url = append_metadata_refresh_query(url, &refresh_token)?;
     let response = client
         .get(refreshed_url)
-        .header(USER_AGENT, "skippr-el")
+        .header(USER_AGENT, "skipprd")
         .header(CACHE_CONTROL, "no-cache, no-store, max-age=0")
         .header(PRAGMA, "no-cache")
         .send()

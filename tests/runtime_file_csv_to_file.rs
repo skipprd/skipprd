@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use serial_test::serial;
 use sha2::{Digest, Sha256};
-use skippr::helpers::offsets::SLED_NAME;
-use skippr::plugins::cdc::CheckpointEnvelope;
-use skippr::runtime_plugins::manifest::RuntimePluginManifest;
-use skippr::runtime_plugins::protocol::RUNTIME_PROTOCOL_VERSION;
+use skipprd::helpers::offsets::SLED_NAME;
+use skipprd::plugins::cdc::CheckpointEnvelope;
+use skipprd::runtime_plugins::manifest::RuntimePluginManifest;
+use skipprd::runtime_plugins::protocol::RUNTIME_PROTOCOL_VERSION;
 use tempfile::tempdir;
 
 use support::batch_e2e::{
@@ -71,7 +71,7 @@ fn write_helper_manifest(
 }
 
 fn run_sync_with_logs(harness: &BatchE2eHarness, timeout: Duration) -> Output {
-    let mut child = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_skippr-el")))
+    let mut child = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_skipprd")))
         .args([
             "sync",
             "--pipeline",
@@ -88,7 +88,7 @@ fn run_sync_with_logs(harness: &BatchE2eHarness, timeout: Duration) -> Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn skippr-el");
+        .expect("failed to spawn skipprd");
     let deadline = Instant::now() + timeout;
 
     loop {
@@ -99,7 +99,7 @@ fn run_sync_with_logs(harness: &BatchE2eHarness, timeout: Duration) -> Output {
                 let _ = child.kill();
                 let output = child.wait_with_output().expect("failed to collect output");
                 panic!(
-                    "skippr-el sync with logs timed out after {:?}\nstdout:\n{}\nstderr:\n{}",
+                    "skipprd sync with logs timed out after {:?}\nstdout:\n{}\nstderr:\n{}",
                     timeout,
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
@@ -324,7 +324,7 @@ pipelines:
     let output = harness.run_sync(Duration::from_secs(60));
     assert!(
         !output.status.success(),
-        "skippr-el sync unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        "skipprd sync unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

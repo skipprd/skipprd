@@ -16,16 +16,16 @@ runs:
     - name: Run Skippr Tests
       shell: bash
       run: |
-        chmod +x ./skippr-el-${{ inputs.architecture_name }}/skippr-el
+        chmod +x ./skipprd-${{ inputs.architecture_name }}/skipprd
         
-        cp .github/actions/e2e/event_types/skippr-el.yml ./skippr-el.yml
+        cp .github/actions/e2e/event_types/skipprd.yml ./skipprd.yml
         
-        SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline event_types
-        SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline event_types
-        SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline event_types
-        SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline event_types
+        SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd sync --log --pipeline event_types
+        SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd sync --log --pipeline event_types
+        SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd sync --log --pipeline event_types
+        SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd sync --log --pipeline event_types
 
-        SKIPPR_CHAOS_MODE=no AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline event_types
+        SKIPPR_CHAOS_MODE=no AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd sync --log --pipeline event_types
 
     - name: Asset Athena
       shell: bash

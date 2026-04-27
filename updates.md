@@ -12,10 +12,10 @@ This document covers the new features added to support `skippr-dbt` EL orchestra
 | Snowflake Output Plugin | `DATA_OUTPUT_PLUGIN_NAME=Snowflake` | Write compacted Parquet to Snowflake |
 | `LOAD SCHEMA` DDL | `LOAD SCHEMA '<path>' INTO <pipeline>` | Pre-define destination schemas from a JSON file |
 | `SHOW PIPELINE` DDL | `SHOW PIPELINE <name>` | Return structured pipeline status with field details |
-| `--output json` / `--output text` | `skippr-el sync --output json` | Structured output for programmatic parsing |
-| `--once` flag | `skippr-el sync --once` | Single sync pass (bounded execution) |
+| `--output json` / `--output text` | `skipprd sync --output json` | Structured output for programmatic parsing |
+| `--once` flag | `skipprd sync --once` | Single sync pass (bounded execution) |
 | Local Metadata Persistence | `SKIPPR_STORAGE_MODE=local` | Read/write metadata and stats to local disk |
-| Discover Mode Enhancements | `skippr-el discover --output json` | Schema-only mode with structured output, no output plugin |
+| Discover Mode Enhancements | `skipprd discover --output json` | Schema-only mode with structured output, no output plugin |
 
 ---
 
@@ -185,7 +185,7 @@ LOAD SCHEMA '/path/to/schema.json' INTO my_pipeline
 
 1. Generate the schema JSON from the destination (e.g., Snowflake `DESCRIBE TABLE` or MSSQL `INFORMATION_SCHEMA.COLUMNS`).
 2. Write JSON to a temp file.
-3. Execute: `skippr-el query --sql "LOAD SCHEMA '/tmp/schema.json' INTO el_mssql" --plain`
+3. Execute: `skipprd query --sql "LOAD SCHEMA '/tmp/schema.json' INTO el_mssql" --plain`
 
 ---
 
@@ -226,7 +226,7 @@ When `SKIPPR_STORAGE_MODE=local`, the `metadata_location` field shows the local 
 ### Usage from skippr-dbt
 
 ```bash
-skippr-el query --sql "SHOW PIPELINE el_mssql" --plain
+skipprd query --sql "SHOW PIPELINE el_mssql" --plain
 ```
 
 Parse the JSON output to determine pipeline status and read the full discovered schema including field names and inferred types. This is how skippr-dbt retrieves source schemas for the LLM mapping phase.
@@ -238,9 +238,9 @@ Parse the JSON output to determine pipeline status and read the full discovered 
 ### Flags
 
 ```bash
-skippr-el sync --pipeline el_mssql --output json   # JSON lines to stdout
-skippr-el sync --pipeline el_mssql --output text   # Plain text to stdout
-skippr-el sync --pipeline el_mssql --output progress  # Default interactive spinner
+skipprd sync --pipeline el_mssql --output json   # JSON lines to stdout
+skipprd sync --pipeline el_mssql --output text   # Plain text to stdout
+skipprd sync --pipeline el_mssql --output progress  # Default interactive spinner
 ```
 
 ### JSON event schema
@@ -277,7 +277,7 @@ Read stdout line by line, parse each as JSON, switch on the `event` field:
 import json, subprocess
 
 proc = subprocess.Popen(
-    ["skippr-el", "sync", "--pipeline", "el_mssql", "--once", "--output", "json"],
+    ["skipprd", "sync", "--pipeline", "el_mssql", "--once", "--output", "json"],
     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
 )
 for line in proc.stdout:
@@ -293,7 +293,7 @@ for line in proc.stdout:
 ### Usage
 
 ```bash
-skippr-el sync --pipeline el_mssql --once
+skipprd sync --pipeline el_mssql --once
 ```
 
 When `--once` is set:
@@ -305,7 +305,7 @@ When `--once` is set:
 ### skippr-dbt invocation pattern
 
 ```bash
-skippr-el sync --pipeline el_mssql --once --output json
+skipprd sync --pipeline el_mssql --once --output json
 ```
 
 This is the canonical invocation for orchestrated EL: a single bounded pass with structured output for monitoring.
@@ -316,7 +316,7 @@ This is the canonical invocation for orchestrated EL: a single bounded pass with
 
 ### Problem
 
-`Config::get_metadata()`, `Config::set_metadata()`, and related functions were S3-only. skippr-dbt runs skippr-el in local disk mode with no S3 bucket configured.
+`Config::get_metadata()`, `Config::set_metadata()`, and related functions were S3-only. skippr-dbt runs skipprd in local disk mode with no S3 bucket configured.
 
 ### Solution
 
@@ -352,7 +352,7 @@ Storage mode only controls where internal state is persisted. All destination op
 ```bash
 SKIPPR_STORAGE_MODE=local \
 DATA_DIR=./data \
-skippr-el discover --pipeline el_mssql --output json
+skipprd discover --pipeline el_mssql --output json
 ```
 
 Or via YAML:
@@ -368,7 +368,7 @@ skippr:
 
 ### 8a. Output plugin removed from discover
 
-`skippr-el discover` no longer initializes or syncs to any output plugin. It uses a no-op output internally. The discover flow is now:
+`skipprd discover` no longer initializes or syncs to any output plugin. It uses a no-op output internally. The discover flow is now:
 
 1. Load/create pipeline metadata (local or S3)
 2. Initialize offsets
@@ -381,7 +381,7 @@ skippr:
 The `--verbose` flag has been replaced by `--output`:
 
 ```bash
-skippr-el discover --pipeline el_mssql --output json
+skipprd discover --pipeline el_mssql --output json
 ```
 
 | Mode | Description |
@@ -423,23 +423,23 @@ The `fields` array in `namespace_discovered` includes the inferred field names a
 }
 ```
 
-This is how skippr-dbt retrieves the discovered source schemas to feed into the LLM mapping phase after running `skippr-el discover`.
+This is how skippr-dbt retrieves the discovered source schemas to feed into the LLM mapping phase after running `skipprd discover`.
 
 ### skippr-dbt orchestration with discover
 
 ```bash
 # Step 1: Discover schemas
-skippr-el discover --pipeline el_mssql --output json
+skipprd discover --pipeline el_mssql --output json
 
 # Step 2: Read discovered schemas
-skippr-el query --sql "SHOW PIPELINE el_mssql" --plain
+skipprd query --sql "SHOW PIPELINE el_mssql" --plain
 
 # Step 3: Feed schemas to LLM mapper (skippr-dbt logic)
 # Step 4: Generate and load destination schema
-skippr-el query --sql "LOAD SCHEMA '/tmp/schema.json' INTO el_mssql" --plain
+skipprd query --sql "LOAD SCHEMA '/tmp/schema.json' INTO el_mssql" --plain
 
 # Step 5: Run sync
-skippr-el sync --pipeline el_mssql --once --output json
+skipprd sync --pipeline el_mssql --once --output json
 ```
 
 ---
@@ -454,13 +454,13 @@ The following illustrates a full EL cycle driven by `skippr-dbt` using local sto
 SKIPPR_STORAGE_MODE=local \
 DATA_SOURCE_PLUGIN_NAME=Mssql \
 MSSQL_CONNECTION_STRING="Server=tcp:myserver,1433;Database=SalesDB;User Id=sa;Password=pass;" \
-skippr-el discover --pipeline el_mssql --output json
+skipprd discover --pipeline el_mssql --output json
 ```
 
 After discover, read the schemas:
 
 ```bash
-skippr-el query --sql "SHOW PIPELINE el_mssql" --plain
+skipprd query --sql "SHOW PIPELINE el_mssql" --plain
 ```
 
 ### Step 1: Generate and load schema
@@ -493,14 +493,14 @@ cat > /tmp/schema.json << 'EOF'
 }
 EOF
 
-# Load the schema with skippr-el
-skippr-el query --sql "LOAD SCHEMA '/tmp/schema.json' INTO el_mssql" --plain
+# Load the schema with skipprd
+skipprd query --sql "LOAD SCHEMA '/tmp/schema.json' INTO el_mssql" --plain
 ```
 
 ### Step 2: Run sync
 
 ```bash
-skippr-el sync --pipeline el_mssql --once --output json 2>/dev/null | while read -r line; do
+skipprd sync --pipeline el_mssql --once --output json 2>/dev/null | while read -r line; do
   event=$(echo "$line" | jq -r '.event')
   case "$event" in
     sync_start)
@@ -522,7 +522,7 @@ done
 ### Step 3: Check pipeline status
 
 ```bash
-skippr-el query --sql "SHOW PIPELINE el_mssql" --plain
+skipprd query --sql "SHOW PIPELINE el_mssql" --plain
 ```
 
 This returns a JSON summary that `skippr-dbt` can parse to verify the pipeline state, namespace counts, and schema integrity.

@@ -24,23 +24,23 @@ runs:
         docker run --rm \
           -v `pwd`/.github/actions/e2e-docker/bike_hire_many/:/foo/ \
           alpine ls -la /foo/
-        docker run --name skippr-el \
+        docker run --name skipprd \
           -e AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} \
           -e AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} \
           -e AWS_DEFAULT_REGION=us-east-1 \
-          -e SKIPPR_CONFIG_FILE=/foo/skippr-el.yml \
+          -e SKIPPR_CONFIG_FILE=/foo/skipprd.yml \
           -v `pwd`/.github/actions/e2e-docker/bike_hire_many/:/foo/ \
-          ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline bike_hire_many
-         docker run --name skippr-el \
+          ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire_many
+         docker run --name skipprd \
           -e AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} \
           -e AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} \
           -e AWS_DEFAULT_REGION=us-east-1 \
-          -e SKIPPR_CONFIG_FILE=/foo/skippr-el.yml \
+          -e SKIPPR_CONFIG_FILE=/foo/skipprd.yml \
           -v `pwd`/.github/actions/e2e-docker/bike_hire_many/:/foo/ \
           skippr/skippr:latest sync --pipeline bike_hire_many
-        docker logs skippr-el
-        docker container wait skippr-el
-        docker container rm skippr-el
+        docker logs skipprd
+        docker container wait skipprd
+        docker container rm skipprd
     - name: Asset Athena
       shell: bash
       run: |

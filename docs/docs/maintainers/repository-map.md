@@ -23,7 +23,7 @@ This repository is a Cargo workspace with a single host binary and many separate
 
 The important architectural split is:
 
-- `skippr-el` owns orchestration, WAL indexing, schema state, and the durable offsets database.
+- `skipprd` owns orchestration, WAL indexing, schema state, and the durable offsets database.
 - Runtime plugins are child processes discovered from published manifests or explicit local manifest overrides.
 - Runtime plugins talk to the host over TCP control/data channels, and runtime source plugins never open the durable offsets database directly.
 - Plugin crates own connector-specific code; the host must not take direct dependencies on connector implementation crates.
@@ -43,9 +43,9 @@ There are no committed runtime manifest templates, and there is no aggregate `sk
 When working on architecture boundaries, the highest-value checks are:
 
 - `python3 .github/scripts/check_host_dependency_boundaries.py`
-- `cargo test -p skippr --test runtime_plugin_global_guards -- --nocapture`
-- `cargo test -p skippr --test runtime_source_plugin_guards -- --nocapture`
-- `cargo test -p skippr --test runtime_host_contracts --test runtime_file_csv_to_file -- --nocapture`
+- `cargo test -p skipprd --test runtime_plugin_global_guards -- --nocapture`
+- `cargo test -p skipprd --test runtime_source_plugin_guards -- --nocapture`
+- `cargo test -p skipprd --test runtime_host_contracts --test runtime_file_csv_to_file -- --nocapture`
 - `cargo check --workspace`
 
 These catch most regressions around host/plugin coupling, deleted legacy paths, and source-plugin protocol usage.

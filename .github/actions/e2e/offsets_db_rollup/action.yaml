@@ -16,41 +16,41 @@ runs:
     - name: Run Skippr Tests
       shell: bash
       run: |
-        chmod +x ./skippr-el-${{ inputs.architecture_name }}/skippr-el
+        chmod +x ./skipprd-${{ inputs.architecture_name }}/skipprd
         
-        cp .github/actions/e2e/offsets_db_rollup/skippr-el.yml ./skippr-el.yml
+        cp .github/actions/e2e/offsets_db_rollup/skipprd.yml ./skipprd.yml
         
         ls -la ./
         
         echo "#########################"
         echo "Running Skippr Discover\n"
         echo "#########################"
-        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el discover --pipeline offsets_db_rollup
-        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el query --sql "ENABLE PIPELINE offsets_db_rollup"
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline offsets_db_rollup
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd query --sql "ENABLE PIPELINE offsets_db_rollup"
         
         echo "#########################"
         echo "Running Skippr, Run: 1\n"
         echo "#########################"
-        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline offsets_db_rollup
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd sync --log --pipeline offsets_db_rollup
         
         echo "#########################"
         echo "Running Skippr, Run: 2\n"
         echo "#########################"
-        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline offsets_db_rollup
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd sync --log --pipeline offsets_db_rollup
         
         echo "#########################"
         echo "Running Skippr, Run: 3\n"
         echo "#########################"
-        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline offsets_db_rollup
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd sync --log --pipeline offsets_db_rollup
         
         echo "#########################"
         echo "Running Skippr, Run: 4\n"
         echo "#########################"
-        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline offsets_db_rollup
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd sync --log --pipeline offsets_db_rollup
         
         echo "#########################"
         echo "Running Skippr, Run: 4\n"
         echo "#########################"
-        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-el-${{ inputs.architecture_name }}/skippr-el sync --log --pipeline offsets_db_rollup
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd sync --log --pipeline offsets_db_rollup
 
 

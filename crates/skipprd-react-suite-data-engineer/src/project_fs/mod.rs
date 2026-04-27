@@ -1,0 +1,509 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+use react_core::agent::AgentCtx;
+use react_core::storage::{
+    retry_delete_object, retry_get_bytes, retry_list_prefix, retry_put_bytes,
+};
+
+pub mod diff;
+pub mod patch;
+pub mod yaml;
+
+pub use patch::*;
+pub use yaml::*;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceListEdit {
+    pub start_line: usize,
+    pub end_line: usize,
+    pub new_text: String,
+}
+
+pub fn join_storage_key(ctx: &AgentCtx, rel: &str) -> String {
+    let base = ctx
+        .keyspace()
+        .scoped_prefix(ctx.scope(), &["dbt"])
+        .trim_end_matches('/')
+        .to_string();
+    format!("{}/{}", base, rel)
+}
+
+pub async fn list_files(ctx: &AgentCtx, prefix: &str, limit: usize) -> Result<Value, String> {
+    let rel_prefix = if prefix.trim().is_empty() {
+        "models/".to_string()
+    } else {
+        normalize_rel_path(prefix)?
+    };
+    let key_prefix = join_storage_key(ctx, &rel_prefix.trim_start_matches('/'));
+    let mut keys = retry_list_prefix(ctx.storage().as_ref(), &key_prefix)
+        .await
+        .unwrap_or_default();
+    keys.sort();
+    let mut out: Vec<Value> = Vec::new();
+    for k in keys.into_iter().take(limit) {
+        let rel = k
+            .strip_prefix(
+                &(ctx
+                    .keyspace()
+                    .scoped_prefix(ctx.scope(), &["dbt"])
+                    .trim_end_matches('/')
+                    .to_string()
+                    + "/"),
+            )
+            .unwrap_or(&k)
+            .to_string();
+        out.push(serde_json::json!({"path": rel, "key": k}));
+    }
+    Ok(serde_json::json!({"ok": true, "items": out}))
+}
+
+pub async fn get_file(ctx: &AgentCtx, path: &str, max_chars: usize) -> Result<Value, String> {
+    let rel = normalize_rel_path(path)?;
+    let key = join_storage_key(ctx, &rel);
+    match retry_get_bytes(ctx.storage().as_ref(), &key).await {
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            let base_sha256 = {
+                use sha2::Digest;
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(text.as_bytes());
+                hex::encode(hasher.finalize())
+            };
+            let existing_line_count = if text.is_empty() {
+                0
+            } else {
+                text.lines().count()
+            };
+            let existing_had_trailing_newline = text.ends_with('\n');
+            let content = if max_chars > 0 && text.len() > max_chars {
+                let mut s = text.chars().take(max_chars).collect::<String>();
+                s.push_str("\n... (truncated; use file op=get with higher max_chars for additional content)\n");
+                s
+            } else {
+                text
+            };
+            Ok(serde_json::json!({
+                "ok": true,
+                "path": rel,
+                "key": key,
+                "base_sha256": base_sha256,
+                "existing_line_count": existing_line_count,
+                "existing_had_trailing_newline": existing_had_trailing_newline,
+                "content": content
+            }))
+        }
+        Err(e) => {
+            let err_text = e.to_string();
+            let bootstrap_missing = (rel == PACKAGES_YML || rel == MODELS_SCHEMA_YML)
+                && is_missing_storage_error(&err_text);
+            if bootstrap_missing {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "path": rel,
+                    "key": key,
+                    "exists": false,
+                    "missing": true,
+                    "base_sha256": "",
+                    "existing_line_count": 0,
+                    "existing_had_trailing_newline": false,
+                    "content": "",
+                }));
+            }
+            Ok(serde_json::json!({
+                "ok": false,
+                "path": rel,
+                "key": key,
+                "error": format!("not found or failed to fetch: {}", err_text),
+            }))
+        }
+    }
+}
+
+pub async fn remove_file(
+    ctx: &AgentCtx,
+    path: &str,
+    expected_sha256: Option<&str>,
+) -> Result<Value, String> {
+    let rel = normalize_rel_path(path)?;
+    let key = join_storage_key(ctx, &rel);
+
+    let existing = retry_get_bytes(ctx.storage().as_ref(), &key).await.ok();
+    let existed = existing.is_some();
+    let base_sha256 = existing
+        .as_ref()
+        .map(|b| sha256_hex(String::from_utf8_lossy(b).as_ref()))
+        .unwrap_or_default();
+
+    if let Some(expected) = expected_sha256 {
+        if existed && expected != base_sha256 {
+            return Err(format!(
+                "expected_sha256 mismatch for {}: expected {}, current {}",
+                rel, expected, base_sha256
+            ));
+        }
+    }
+
+    if existed {
+        retry_delete_object(ctx.storage().as_ref(), &key)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "mutated": existed,
+        "results": [{
+            "op": "rm",
+            "path": rel,
+            "key": key,
+            "existed": existed,
+            "mutated": existed,
+            "base_sha256": base_sha256
+        }]
+    }))
+}
+
+pub async fn move_file(
+    ctx: &AgentCtx,
+    from_path: &str,
+    to_path: &str,
+    expected_sha256: Option<&str>,
+) -> Result<Value, String> {
+    let from_rel = normalize_rel_path(from_path)?;
+    let to_rel = normalize_rel_path(to_path)?;
+    if from_rel == to_rel {
+        return Err("mv requires from != to".to_string());
+    }
+    let from_key = join_storage_key(ctx, &from_rel);
+    let to_key = join_storage_key(ctx, &to_rel);
+
+    let bytes = retry_get_bytes(ctx.storage().as_ref(), &from_key)
+        .await
+        .map_err(|_| format!("not found: {}", from_rel))?;
+    let base_sha256 = sha256_hex(String::from_utf8_lossy(&bytes).as_ref());
+    if let Some(expected) = expected_sha256 {
+        if expected != base_sha256 {
+            return Err(format!(
+                "expected_sha256 mismatch for {}: expected {}, current {}",
+                from_rel, expected, base_sha256
+            ));
+        }
+    }
+
+    if retry_get_bytes(ctx.storage().as_ref(), &to_key)
+        .await
+        .is_ok()
+    {
+        return Err(format!("destination already exists: {}", to_rel));
+    }
+
+    retry_put_bytes(ctx.storage().as_ref(), &to_key, &bytes, "text/plain")
+        .await
+        .map_err(|e| e.to_string())?;
+    retry_delete_object(ctx.storage().as_ref(), &from_key)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "mutated": true,
+        "results": [{
+            "op": "mv",
+            "from": from_rel,
+            "to": to_rel,
+            "path": to_rel,
+            "from_key": from_key,
+            "key": to_key,
+            "mutated": true,
+            "base_sha256": base_sha256,
+            "new_sha256": base_sha256
+        }]
+    }))
+}
+
+pub async fn write_file(
+    ctx: &AgentCtx,
+    datasets: Option<&std::sync::Arc<dyn crate::providers::DatasetCatalogProvider>>,
+    path: &str,
+    content: &str,
+) -> Result<Value, String> {
+    let rel = normalize_rel_path(path)?;
+    let key = join_storage_key(ctx, &rel);
+
+    let final_content = yaml::postprocess_content(ctx, datasets, &rel, content).await?;
+
+    let existing = retry_get_bytes(ctx.storage().as_ref(), &key).await.ok();
+    let existed = existing.is_some();
+    let old_content = existing
+        .as_ref()
+        .map(|b| String::from_utf8_lossy(b).to_string())
+        .unwrap_or_default();
+    let base_sha256 = sha256_hex(&old_content);
+    let new_sha256 = sha256_hex(&final_content);
+    let mutated = base_sha256 != new_sha256;
+
+    if mutated {
+        retry_put_bytes(
+            ctx.storage().as_ref(),
+            &key,
+            final_content.as_bytes(),
+            "text/plain",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "mutated": mutated,
+        "results": [{
+            "op": "write",
+            "path": rel,
+            "key": key,
+            "existed": existed,
+            "mutated": mutated,
+            "base_sha256": base_sha256,
+            "new_sha256": new_sha256
+        }]
+    }))
+}
+
+pub(crate) fn sha256_hex(s: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    let out = hasher.finalize();
+    hex::encode(out)
+}
+
+fn is_allowed_rel_path(rel: &str) -> bool {
+    let rel = rel.trim();
+    if rel.is_empty() {
+        return false;
+    }
+    if rel.starts_with('/') || rel.starts_with('\\') {
+        return false;
+    }
+    if rel.contains("..") {
+        return false;
+    }
+    true
+}
+
+fn is_missing_storage_error(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("nosuchkey")
+        || e.contains("no such key")
+        || e.contains("not found")
+        || e.contains("404")
+}
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use super::*;
+    use crate::providers::{DatasetId, QueryProvider, QueryResult};
+    use async_trait::async_trait;
+    use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::llm::{ChatMessage, LargeLanguageModel};
+    use react_core::scope::RequestScope;
+    use react_core::storage::StorageAdapter;
+    use std::collections::HashMap;
+    pub use std::sync::Arc;
+
+    #[derive(Default)]
+    pub struct DummyLlm;
+
+    impl LargeLanguageModel for DummyLlm {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(vec![])
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct MockDatasets {
+        pub items: Vec<DatasetId>,
+    }
+
+    #[async_trait]
+    impl crate::providers::DatasetCatalogProvider for MockDatasets {
+        async fn list_datasets(&self) -> Result<Vec<DatasetId>, String> {
+            Ok(self.items.clone())
+        }
+        async fn get_dataset_schema(
+            &self,
+            _dataset: &DatasetId,
+        ) -> Result<Vec<(String, String)>, String> {
+            Ok(vec![])
+        }
+        async fn get_dataset_stats(
+            &self,
+            _dataset: &DatasetId,
+            _max_fields: usize,
+        ) -> Result<
+            (
+                crate::providers::DatasetFieldStats,
+                crate::providers::DatasetStats,
+            ),
+            String,
+        > {
+            Err("not implemented".to_string())
+        }
+    }
+
+    pub fn minimal_cfg() -> Arc<react_core::resolved_config::ReactResolvedConfig> {
+        Arc::new(react_core::resolved_config::ReactResolvedConfig {
+            server: react_core::resolved_config::ServerResolved { port: 1 },
+            storage: react_core::resolved_config::StorageResolved {
+                mode: react_core::resolved_config::StorageMode::Local,
+                bucket: None,
+                path: None,
+                s3_credentials: None,
+            },
+            scope: RequestScope::parse("t", "w", "p").expect("valid test scope"),
+            llm: react_core::resolved_config::LlmResolved::default(),
+            suite_config: serde_json::json!({
+                "warehouse": { "kind": "athena", "container": "AwsDataCatalog", "namespace": "test_raw", "extras": {"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"} },
+                "catalog": { "enabled": false, "refresh_secs": 60, "max_concurrency": 8 },
+                "dbt": { "enabled": true, "target": "athena", "naming": { "target_schema": "test", "silver_suffix": "silver", "gold_suffix": "gold" }, "runner": "host" },
+                "vector": { "enabled": false }
+            }),
+        })
+    }
+
+    #[derive(Clone, Default)]
+    pub struct MockQuery {
+        pub schemas: Arc<std::sync::Mutex<HashMap<String, Vec<(String, String)>>>>,
+    }
+
+    #[async_trait]
+    impl QueryProvider for MockQuery {
+        async fn query(&self, _sql: &str) -> Result<QueryResult, String> {
+            Err("not implemented".to_string())
+        }
+        async fn schema(&self, dataset_fqn: &str) -> Result<Vec<(String, String)>, String> {
+            let m = self.schemas.lock().unwrap();
+            m.get(dataset_fqn)
+                .cloned()
+                .ok_or_else(|| format!("not found: {}", dataset_fqn))
+        }
+        async fn sample(
+            &self,
+            _dataset_fqn: &str,
+            _limit: usize,
+        ) -> Result<Vec<Vec<String>>, String> {
+            Err("not implemented".to_string())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    pub struct MockWarehouse {
+        pub schemas: Arc<std::sync::Mutex<HashMap<String, Vec<(String, String)>>>>,
+    }
+
+    #[async_trait]
+    impl QueryProvider for MockWarehouse {
+        async fn query(&self, _sql: &str) -> Result<QueryResult, String> {
+            Err("not implemented".to_string())
+        }
+        async fn schema(&self, dataset_fqn: &str) -> Result<Vec<(String, String)>, String> {
+            let m = self.schemas.lock().unwrap();
+            m.get(dataset_fqn)
+                .cloned()
+                .ok_or_else(|| format!("not found: {}", dataset_fqn))
+        }
+        async fn sample(
+            &self,
+            _dataset_fqn: &str,
+            _limit: usize,
+        ) -> Result<Vec<Vec<String>>, String> {
+            Err("not implemented".to_string())
+        }
+        fn max_concurrency(&self) -> usize {
+            1
+        }
+    }
+
+    #[async_trait]
+    impl crate::providers::DatasetCatalogProvider for MockWarehouse {
+        async fn list_datasets(&self) -> Result<Vec<DatasetId>, String> {
+            Ok(vec![])
+        }
+        async fn get_dataset_schema(
+            &self,
+            dataset: &DatasetId,
+        ) -> Result<Vec<(String, String)>, String> {
+            self.schema(&dataset.fqn()).await
+        }
+        async fn get_dataset_stats(
+            &self,
+            _dataset: &DatasetId,
+            _max_fields: usize,
+        ) -> Result<
+            (
+                crate::providers::DatasetFieldStats,
+                crate::providers::DatasetStats,
+            ),
+            String,
+        > {
+            Err("not implemented".to_string())
+        }
+    }
+
+    impl crate::providers::WarehouseNaming for MockWarehouse {
+        fn kind(&self) -> crate::de_config::WarehouseKind {
+            crate::de_config::WarehouseKind::default()
+        }
+        fn parse_dataset_fqn(&self, dataset_fqn: &str) -> Result<DatasetId, String> {
+            let raw = dataset_fqn.trim().trim_matches('"').trim_matches('`');
+            let parts: Vec<&str> = raw.split('.').collect();
+            if parts.len() != 3 {
+                return Err("mock dataset id must be <catalog>.<schema>.<table>".to_string());
+            }
+            Ok(DatasetId {
+                catalog: parts[0].to_string(),
+                database: parts[1].to_string(),
+                table: parts[2].to_string(),
+            })
+        }
+        fn quote_ident(&self, ident: &str) -> String {
+            format!("\"{}\"", ident.replace('"', "\"\""))
+        }
+    }
+
+    pub fn make_ctx(
+        storage: Arc<dyn StorageAdapter>,
+        query: Option<Arc<dyn QueryProvider>>,
+    ) -> AgentCtx {
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope::parse("t", "w", "p").expect("valid test scope");
+        let warehouse: Arc<dyn crate::providers::WarehouseProvider> =
+            Arc::new(crate::providers::warehouse::NullWarehouseProvider::default());
+        let mut actx = react_core::agent::AgentCtxBuilder::new(
+            Arc::new(DummyLlm::default()),
+            storage,
+            scope.clone(),
+            keyspace,
+            Arc::new(react_core::agent::DefaultPolicy),
+        )
+        .top_k(1)
+        .per_step_timeout_secs(1)
+        .max_steps(1)
+        .agent_name("test".to_string())
+        .resolved_config(Some(minimal_cfg()))
+        .build();
+        actx.set_capability(Arc::new(crate::ctx_ext::WarehouseCap(warehouse)));
+        if let Some(q) = query {
+            actx.set_capability(Arc::new(crate::ctx_ext::QueryCap(q)));
+        }
+        actx
+    }
+}

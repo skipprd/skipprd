@@ -33,25 +33,25 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             ],
         )
 
-    def test_resolve_skippr_el_accepts_binary_path(self) -> None:
+    def test_resolve_skipprd_accepts_binary_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            binary = Path(temp_dir) / "skippr-el"
+            binary = Path(temp_dir) / "skipprd"
             binary.write_text("#!/bin/sh\n", encoding="utf-8")
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
 
-            resolved = runtime_e2e_harness.resolve_skippr_el(str(binary))
+            resolved = runtime_e2e_harness.resolve_skipprd(str(binary))
 
             self.assertEqual(resolved, binary.resolve())
 
-    def test_resolve_skippr_el_accepts_artifact_directory(self) -> None:
+    def test_resolve_skipprd_accepts_artifact_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            artifact_dir = Path(temp_dir) / "skippr-el-linux_x86"
+            artifact_dir = Path(temp_dir) / "skipprd-linux_x86"
             artifact_dir.mkdir()
-            binary = artifact_dir / "skippr-el"
+            binary = artifact_dir / "skipprd"
             binary.write_text("#!/bin/sh\n", encoding="utf-8")
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
 
-            resolved = runtime_e2e_harness.resolve_skippr_el(str(artifact_dir))
+            resolved = runtime_e2e_harness.resolve_skipprd(str(artifact_dir))
 
             self.assertEqual(resolved, binary.resolve())
 
@@ -61,7 +61,7 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             matching = plugin_root / "nested" / "skippr-plugin-data-sink-athena"
             matching.parent.mkdir(parents=True)
             matching.write_text("", encoding="utf-8")
-            non_matching = plugin_root / "skippr-el"
+            non_matching = plugin_root / "skipprd"
             non_matching.write_text("", encoding="utf-8")
 
             found = runtime_e2e_harness.find_downloaded_plugins(plugin_root)
@@ -71,7 +71,7 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
     def test_assert_no_bundled_runtime_plugins_rejects_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             artifact_dir = Path(temp_dir)
-            binary = artifact_dir / "skippr-el"
+            binary = artifact_dir / "skipprd"
             binary.write_text("#!/bin/sh\n", encoding="utf-8")
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
             (artifact_dir / "skippr-plugin-data-sink-athena").write_text(
@@ -485,7 +485,7 @@ schema_sinks:
 
     def test_run_command_allows_signal_exit_when_shell_code_is_whitelisted(self) -> None:
         killed = subprocess.CompletedProcess(
-            args=["skippr-el", "sync"],
+            args=["skipprd", "sync"],
             returncode=-9,
             stdout="",
             stderr="",
@@ -495,7 +495,7 @@ schema_sinks:
             runtime_e2e_harness.subprocess, "run", return_value=killed
         ):
             completed = runtime_e2e_harness.run_command(
-                ["skippr-el", "sync"], allow_exit_codes=(137,)
+                ["skipprd", "sync"], allow_exit_codes=(137,)
             )
 
         self.assertEqual(completed.returncode, -9)

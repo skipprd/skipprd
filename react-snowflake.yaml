@@ -1,0 +1,56 @@
+version: 1
+
+storage:
+  mode: local
+  path: ./.react
+
+scope:
+  tenant: local
+  workspace: dev
+  project_id: mssql_migration
+
+llm:
+  provider: OPENAI_COMPAT
+  base_url: https://api.openai.com
+  reason_model: gpt-5.4
+  task_model: gpt-5.4
+  embed_model: text-embedding-3-small
+  context_length: 8192
+  http_timeout_secs: 120
+  max_tokens: 8192
+  temperature: 0.2
+  top_p: 1.0
+
+providers:
+  warehouse:
+    kind: snowflake
+    account: RSSKNWT-KC53195
+    user: paulhudson
+    private_key_path: ./snowflake_key.p8
+    database: ANALYTICS
+    schema: RAW
+    warehouse: COMPUTE_WH
+    role: ACCOUNTADMIN
+
+  el:
+    enabled: true
+    skippr_input:
+      kind: mssql
+      connection_string: "${MSSQL_CONNECTION_STRING}"
+
+  catalog:
+    enabled: true
+    refresh_secs: 3600
+    max_concurrency: 8
+
+  dbt:
+    enabled: true
+    runner: host
+    target: snowflake
+    naming:
+      target_schema: mssql_migration
+      silver_suffix: silver
+      gold_suffix: gold
+
+  vector:
+    enabled: true

@@ -1,0 +1,1568 @@
+use async_trait::async_trait;
+use serde::de::Deserializer;
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+
+use crate::providers::DatasetCatalogProvider;
+use react_core::agent::AgentCtx;
+use react_core::storage::{retry_delete_object, retry_get_bytes, retry_put_bytes};
+use react_core::tools::Tool;
+
+use crate::patch_contract::{normalize_hunks_only_patch_text, SingleFilePatchArgs};
+use crate::project_fs;
+
+pub struct FilesTool {
+    pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
+}
+
+fn select_terms_from_paths(paths: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in paths {
+        let t = p.trim();
+        if t.is_empty() {
+            continue;
+        }
+        out.push(format!("path:{}", t));
+        if t.ends_with(".sql") {
+            if let Some(name) = t.rsplit('/').next().and_then(|f| f.strip_suffix(".sql")) {
+                if !name.trim().is_empty() {
+                    out.push(name.trim().to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+async fn was_recently_removed_in_repair(ctx: &AgentCtx, rel_path: &str) -> bool {
+    let (Some(store), Some(thread_id)) = (ctx.thread_store().as_ref(), ctx.thread_id().as_deref())
+    else {
+        return false;
+    };
+    let want = project_fs::normalize_rel_path(rel_path)
+        .ok()
+        .unwrap_or_else(|| rel_path.trim().to_string());
+    match crate::state_manager::load_execution_state_strict(&store.control_store(), thread_id).await
+    {
+        Ok(Some(st)) => {
+            if !st.hard_mutation_repair_mode() {
+                return false;
+            }
+            st.telemetry
+                .last_mutation_summary
+                .and_then(|m| {
+                    if m.op != crate::progress_controller::MutationOp::Remove {
+                        return None;
+                    }
+                    let matched = m.affected_paths.into_iter().any(|p| {
+                        project_fs::normalize_rel_path(&p)
+                            .ok()
+                            .map(|n| n == want)
+                            .unwrap_or_else(|| p.trim() == want)
+                    });
+                    Some(matched)
+                })
+                .unwrap_or(false)
+        }
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(
+                "failed to load strict execution state for dbt_files remove guard: {}",
+                e
+            );
+            false
+        }
+    }
+}
+
+fn deserialize_opt_nonempty_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v: Option<String> = Option::deserialize(deserializer)?;
+    Ok(v.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    }))
+}
+
+pub(crate) use super::dbt_sql_parser::extract_final_select_output_columns;
+
+fn extract_idents_ending_with_raw(s: &str) -> Vec<String> {
+    // Tokenize on non-identifier chars; return tokens ending with _raw.
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in s.chars() {
+        let is_ident = ch.is_ascii_alphanumeric() || ch == '_';
+        if is_ident {
+            cur.push(ch);
+        } else {
+            let t = cur.trim();
+            if !t.is_empty() && t.to_ascii_lowercase().ends_with("_raw") {
+                out.push(t.to_string());
+            }
+            cur.clear();
+        }
+    }
+    let t = cur.trim();
+    if !t.is_empty() && t.to_ascii_lowercase().ends_with("_raw") {
+        out.push(t.to_string());
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn yaml_collect_model_section<'a>(
+    root: &'a serde_yaml::Value,
+    model_name: &str,
+) -> Vec<&'a serde_yaml::Mapping> {
+    let mut out: Vec<&'a serde_yaml::Mapping> = Vec::new();
+    let Some(models) = root
+        .as_mapping()
+        .and_then(|m| m.get(serde_yaml::Value::String("models".to_string())))
+        .and_then(|v| v.as_sequence())
+    else {
+        return out;
+    };
+    for it in models.iter() {
+        let Some(mm) = it.as_mapping() else { continue };
+        let name = mm
+            .get(serde_yaml::Value::String("name".to_string()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if name == model_name {
+            out.push(mm);
+        }
+    }
+    out
+}
+
+fn yaml_collect_model_names(root: &serde_yaml::Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Some(models) = root
+        .as_mapping()
+        .and_then(|m| m.get(serde_yaml::Value::String("models".to_string())))
+        .and_then(|v| v.as_sequence())
+    else {
+        return out;
+    };
+    for it in models.iter() {
+        let Some(mm) = it.as_mapping() else { continue };
+        let name = mm
+            .get(serde_yaml::Value::String("name".to_string()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if !name.is_empty() {
+            out.push(name.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn yaml_collect_column_names(model: &serde_yaml::Mapping) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Some(cols) = model
+        .get(serde_yaml::Value::String("columns".to_string()))
+        .and_then(|v| v.as_sequence())
+    else {
+        return out;
+    };
+    for c in cols.iter() {
+        let Some(cm) = c.as_mapping() else { continue };
+        if let Some(n) = cm
+            .get(serde_yaml::Value::String("name".to_string()))
+            .and_then(|v| v.as_str())
+        {
+            let t = n.trim();
+            if !t.is_empty() {
+                out.push(t.to_string());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn yaml_collect_where_strings(v: &serde_yaml::Value, out: &mut Vec<String>) {
+    match v {
+        serde_yaml::Value::Mapping(m) => {
+            for (k, val) in m.iter() {
+                if k.as_str().map(|s| s == "where").unwrap_or(false) {
+                    if let Some(s) = val.as_str() {
+                        let t = s.trim();
+                        if !t.is_empty() {
+                            out.push(t.to_string());
+                        }
+                    }
+                }
+                yaml_collect_where_strings(val, out);
+            }
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for it in seq.iter() {
+                yaml_collect_where_strings(it, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) async fn validate_staging_schema_ymls(
+    ctx: &AgentCtx,
+    outcomes: &[project_fs::PatchOutcome],
+) -> Result<(), String> {
+    // Build a rel_path -> new content map so we validate against the content that will be written.
+    let mut new_by_rel: HashMap<String, String> = HashMap::new();
+    for o in outcomes.iter() {
+        new_by_rel.insert(o.rel_path.clone(), o.content.clone());
+    }
+
+    for o in outcomes.iter() {
+        let rel = o.rel_path.as_str();
+        if !(rel.starts_with("models/staging/") && rel.ends_with(".yml")) {
+            continue;
+        }
+        let yml_root: serde_yaml::Value = serde_yaml::from_str(&o.content)
+            .map_err(|e| format!("invalid YAML in {}: {}", rel, e.to_string().trim()))?;
+
+        // Validate each staging model declared by name in this YAML file.
+        // We intentionally do NOT require a sibling SQL for the YAML file's own stem,
+        // since dbt allows aggregating docs/tests for many models into one YAML file.
+        let model_names = yaml_collect_model_names(&yml_root);
+        if model_names.is_empty() {
+            continue;
+        }
+
+        fn yaml_model_contract_enforced(model: &serde_yaml::Mapping) -> bool {
+            // Expected dbt schema.yml shape:
+            // models:
+            //   - name: ...
+            //     config:
+            //       contract:
+            //         enforced: true
+            let cfg = model
+                .get(serde_yaml::Value::String("config".to_string()))
+                .and_then(|v| v.as_mapping());
+            let enforced = cfg
+                .and_then(|m| m.get(serde_yaml::Value::String("contract".to_string())))
+                .and_then(|v| v.as_mapping())
+                .and_then(|m| m.get(serde_yaml::Value::String("enforced".to_string())));
+            enforced.and_then(|v| v.as_bool()).unwrap_or(false)
+        }
+
+        fn yaml_collect_column_name_and_type(
+            model: &serde_yaml::Mapping,
+        ) -> Vec<(String, Option<String>)> {
+            let mut out: Vec<(String, Option<String>)> = Vec::new();
+            let Some(cols) = model
+                .get(serde_yaml::Value::String("columns".to_string()))
+                .and_then(|v| v.as_sequence())
+            else {
+                return out;
+            };
+            for c in cols.iter() {
+                let Some(cm) = c.as_mapping() else { continue };
+                let name = cm
+                    .get(serde_yaml::Value::String("name".to_string()))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                let dt = cm
+                    .get(serde_yaml::Value::String("data_type".to_string()))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                out.push((name, dt));
+            }
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        }
+
+        for model_name in model_names.iter() {
+            let models = yaml_collect_model_section(&yml_root, model_name);
+            if models.is_empty() {
+                continue;
+            }
+
+            let sql_rel = format!("models/staging/{}.sql", model_name);
+            let sql_text = if let Some(s) = new_by_rel.get(&sql_rel) {
+                s.clone()
+            } else {
+                // Fall back to existing staging SQL in storage.
+                let key = project_fs::join_storage_key(ctx, &sql_rel);
+                let bytes = retry_get_bytes(ctx.storage().as_ref(), &key)
+                    .await
+                    .map_err(|_| {
+                        format!(
+                            "cannot validate {}: missing staging model SQL {} (for model '{}')",
+                            rel, sql_rel, model_name
+                        )
+                    })?;
+                String::from_utf8_lossy(&bytes).to_string()
+            };
+
+            let allowed_cols = extract_final_select_output_columns(&sql_text).map_err(|e| {
+                format!(
+                    "cannot validate {} against {} (model '{}'): {}",
+                    rel,
+                    sql_rel,
+                    model_name,
+                    e.trim()
+                )
+            })?;
+
+            // Contract enforcement is disabled by suite policy.
+            // We still validate that schema YAML references only columns produced by staging SQL
+            // (prevents obvious COLUMN_NOT_FOUND and reduces drift), but we do not require full
+            // contract completeness or data_type coverage.
+            let contract_enforced_any = models.iter().any(|m| yaml_model_contract_enforced(m));
+            let mut missing_cols: BTreeSet<String> = BTreeSet::new();
+            let mut missing_data_type: BTreeSet<String> = BTreeSet::new();
+            if contract_enforced_any {
+                // Consolidate across all declarations for this model name in the file (best-effort).
+                let mut declared: HashMap<String, Option<String>> = HashMap::new();
+                let mut duplicates: BTreeSet<String> = BTreeSet::new();
+                for mm in models.iter() {
+                    for (name, dt) in yaml_collect_column_name_and_type(mm).into_iter() {
+                        if declared.contains_key(&name) {
+                            duplicates.insert(name.clone());
+                        }
+                        declared.insert(name, dt);
+                    }
+                }
+                if !duplicates.is_empty() {
+                    let mut msg = format!(
+                        "schema contract has duplicate column entries for staging model '{}'.\nFile: {}\n",
+                        model_name, rel
+                    );
+                    msg.push_str(&format!(
+                        "\nDuplicate columns under models[].columns[]:\n- {}\n",
+                        duplicates.into_iter().collect::<Vec<_>>().join("\n- ")
+                    ));
+                    msg.push_str(
+                        "\nFix: de-duplicate YAML columns so each output column appears once.\n",
+                    );
+                    return Err(msg);
+                }
+
+                for c in allowed_cols.iter() {
+                    if !declared.contains_key(c) {
+                        missing_cols.insert(c.clone());
+                    }
+                }
+                for (name, dt) in declared.iter() {
+                    if allowed_cols.contains(name) && dt.is_none() {
+                        missing_data_type.insert(name.clone());
+                    }
+                }
+            }
+
+            // (1) Validate declared columns exist in the staging SQL output.
+            let mut unknown_cols: BTreeSet<String> = BTreeSet::new();
+            for mm in models.iter() {
+                for c in yaml_collect_column_names(mm).into_iter() {
+                    if !allowed_cols.contains(&c) {
+                        unknown_cols.insert(c);
+                    }
+                }
+            }
+
+            // (2) Validate any where: predicates that reference *_raw also exist in the staging output.
+            let mut unknown_raw: BTreeSet<String> = BTreeSet::new();
+            for mm in models.iter() {
+                let mut where_strs: Vec<String> = Vec::new();
+                yaml_collect_where_strings(
+                    &serde_yaml::Value::Mapping((*mm).clone()),
+                    &mut where_strs,
+                );
+                where_strs.sort();
+                where_strs.dedup();
+                for ws in where_strs.iter() {
+                    for tok in extract_idents_ending_with_raw(ws).into_iter() {
+                        if !allowed_cols.contains(&tok) {
+                            unknown_raw.insert(tok);
+                        }
+                    }
+                }
+            }
+
+            if !unknown_cols.is_empty() || !unknown_raw.is_empty() {
+                let mut msg = format!(
+                    "schema contract references unknown columns for staging model '{}'.\n\
+File: {}\n\
+Staging SQL (defines allowed output columns): {}\n",
+                    model_name, rel, sql_rel
+                );
+                if !unknown_cols.is_empty() {
+                    msg.push_str(&format!(
+                        "\nUnknown columns declared under models[].columns[].name:\n- {}\n",
+                        unknown_cols.into_iter().collect::<Vec<_>>().join("\n- ")
+                    ));
+                }
+                if !unknown_raw.is_empty() {
+                    msg.push_str(&format!(
+                        "\nUnknown *_raw identifiers referenced in where: clauses:\n- {}\n",
+                        unknown_raw.into_iter().collect::<Vec<_>>().join("\n- ")
+                    ));
+                }
+                msg.push_str("\nFix: either (a) update the staging SQL to actually output these columns, or (b) remove/rename the YAML references to match the staging model output. Do NOT invent new column names.\n");
+                return Err(msg);
+            }
+
+            if contract_enforced_any && (!missing_cols.is_empty() || !missing_data_type.is_empty())
+            {
+                let mut msg = format!(
+                    "schema contract is incomplete for contracted staging model '{}'.\n\
+File: {}\n\
+Staging SQL (defines required output columns): {}\n",
+                    model_name, rel, sql_rel
+                );
+                if !missing_cols.is_empty() {
+                    msg.push_str(&format!(
+                        "\nMissing required columns (must declare every output column when contract is enforced):\n- {}\n",
+                        missing_cols.into_iter().collect::<Vec<_>>().join("\n- ")
+                    ));
+                }
+                if !missing_data_type.is_empty() {
+                    msg.push_str(&format!(
+                        "\nMissing data_type for columns (required when contract is enforced):\n- {}\n",
+                        missing_data_type.into_iter().collect::<Vec<_>>().join("\n- ")
+                    ));
+                }
+                msg.push_str(
+                    "\nFix: declare every output column under models[].columns and set data_type for each column.\n",
+                );
+                return Err(msg);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_sql_model_folder_policy(rel: &str) -> Result<(), String> {
+    let rl = rel.to_ascii_lowercase();
+    if !rl.starts_with("models/") || !rl.ends_with(".sql") {
+        return Ok(());
+    }
+    let ok = rl.starts_with("models/staging/")
+        || rl.starts_with("models/core/")
+        || rl.starts_with("models/marts/");
+    if ok {
+        return Ok(());
+    }
+    if rl.starts_with("models/silver/")
+        || rl.starts_with("models/gold/")
+        || rl.starts_with("models/stage/")
+        || rl.starts_with("models/warehouse/")
+    {
+        return Err(format!(
+            "invalid model folder '{}': this suite uses canonical tier folders only. Silver models must be under models/staging/, and gold models must be under models/core/ or models/marts/.",
+            rel
+        ));
+    }
+    Err(format!(
+        "invalid model folder '{}': SQL models must be written under models/staging/ (silver) or models/core/|models/marts/ (gold).",
+        rel
+    ))
+}
+
+fn canonicalize_silver_folder_alias(rel: &str) -> (String, Option<String>) {
+    // Some prompts historically used "models/silver/" or "models/stage/" for silver.
+    // Hard cutover: we store silver models under models/staging/ only.
+    let low = rel.to_ascii_lowercase();
+    for bad_prefix in ["models/silver/", "models/stage/"] {
+        if low.starts_with(bad_prefix) {
+            let suffix = &rel[bad_prefix.len()..];
+            let canon = format!("models/staging/{}", suffix);
+            if canon != rel {
+                return (canon, Some(rel.to_string()));
+            }
+        }
+    }
+    (rel.to_string(), None)
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoveFileArgs {
+    #[serde(rename = "op")]
+    _op: String,
+    path: String,
+    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
+    expected_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MoveFileArgs {
+    #[serde(rename = "op")]
+    _op: String,
+    from: String,
+    to: String,
+    #[serde(default, deserialize_with = "deserialize_opt_nonempty_string")]
+    expected_sha256: Option<String>,
+}
+
+#[async_trait]
+impl Tool for FilesTool {
+    fn name(&self) -> &'static str {
+        "file"
+    }
+
+    async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
+        let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
+        match op {
+            "list" => {
+                let prefix = args
+                    .get("prefix")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim();
+                let limit = args
+                    .get("limit")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(200)
+                    .min(2000) as usize;
+                project_fs::list_files(ctx, prefix, limit).await
+            }
+            "get" => {
+                let path = args
+                    .get("path")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| "path required".to_string())?;
+                if was_recently_removed_in_repair(ctx, path).await {
+                    return Err(format!(
+                        "file op=get for '{}' is blocked: this path was removed in hard mutation repair mode; apply a mutating fix (patch/mv/rm) on the target model path instead of re-reading the removed file",
+                        path.trim()
+                    ));
+                }
+                let max_chars =
+                    args.get("max_chars").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                project_fs::get_file(ctx, path, max_chars).await
+            }
+            "rm" => {
+                let parsed = serde_json::from_value::<RemoveFileArgs>(args.clone()).map_err(|e| {
+                    format!(
+                        "file op=rm contract violation: {}\n\nExpected args: {{\"op\":\"rm\",\"path\":\"...\",\"expected_sha256?\":\"...\"}}",
+                        e
+                    )
+                })?;
+                let out =
+                    project_fs::remove_file(ctx, &parsed.path, parsed.expected_sha256.as_deref())
+                        .await?;
+                if let (Some(store), Some(thread_id)) =
+                    (ctx.thread_store().as_ref(), ctx.thread_id().as_deref())
+                {
+                    let mutated = out
+                        .get("mutated")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if mutated {
+                        let paths = vec![parsed.path.clone()];
+                        let select_terms = select_terms_from_paths(&paths);
+                        if let Err(e) = crate::state_manager::apply_execution_event(
+                            &store.control_store(),
+                            thread_id,
+                            crate::progress_controller::DataEngineerEvent::MutationRecorded {
+                                op: crate::progress_controller::MutationOp::Remove,
+                                paths: paths.clone(),
+                                select_terms: select_terms.clone(),
+                            },
+                        )
+                        .await
+                        {
+                            tracing::warn!("failed to record rm mutation: {e}");
+                        }
+                    }
+                }
+                Ok(out)
+            }
+            "mv" => {
+                let parsed = serde_json::from_value::<MoveFileArgs>(args.clone()).map_err(|e| {
+                    format!(
+                        "file op=mv contract violation: {}\n\nExpected args: {{\"op\":\"mv\",\"from\":\"...\",\"to\":\"...\",\"expected_sha256?\":\"...\"}}",
+                        e
+                    )
+                })?;
+                let out = project_fs::move_file(
+                    ctx,
+                    &parsed.from,
+                    &parsed.to,
+                    parsed.expected_sha256.as_deref(),
+                )
+                .await?;
+                if let (Some(store), Some(thread_id)) =
+                    (ctx.thread_store().as_ref(), ctx.thread_id().as_deref())
+                {
+                    let paths = vec![parsed.to.clone()];
+                    let select_terms = select_terms_from_paths(&paths);
+                    if let Err(e) = crate::state_manager::apply_execution_event(
+                        &store.control_store(),
+                        thread_id,
+                        crate::progress_controller::DataEngineerEvent::MutationRecorded {
+                            op: crate::progress_controller::MutationOp::Move,
+                            paths: paths.clone(),
+                            select_terms: select_terms.clone(),
+                        },
+                    )
+                    .await
+                    {
+                        tracing::warn!("failed to record mv mutation: {e}");
+                    }
+                }
+                Ok(out)
+            }
+            "patch" => {
+                // Hard cutover: ONE patch input shape.
+                // args MUST be {op:"patch", path:"<single file>", patch_text:"<Cursor/Aider hunks-only>"}.
+                if args.get("replace_file").is_some()
+                    || args.get("replace_range").is_some()
+                    || args.get("replace_list").is_some()
+                    || args.get("new_text").is_some()
+                    || args.get("files").is_some()
+                {
+                    return Err("file op=patch contract violation: patch primitives and new_text/files overwrites are not supported. Provide {op:\"patch\", path:\"<single file>\", patch_text:\"<Cursor/Aider hunks-only unified diff>\"}.".to_string());
+                }
+                if args.get("unified_git_style_patch").is_some() {
+                    return Err("file op=patch contract violation: unified_git_style_patch is not supported. Use patch_text (Cursor/Aider hunks-only).".to_string());
+                }
+                if args.get("preview_diff").is_some() {
+                    return Err("file op=patch contract violation: preview_diff is not supported. Use patch_text (Cursor/Aider hunks-only).".to_string());
+                }
+
+                let args_wo_op = args
+                    .as_object()
+                    .cloned()
+                    .map(|mut m| {
+                        m.remove("op");
+                        Value::Object(m)
+                    })
+                    .unwrap_or_else(|| args.clone());
+
+                let parsed = serde_json::from_value::<SingleFilePatchArgs>(args_wo_op.clone()).map_err(|e| {
+                    format!(
+                        "file op=patch contract violation: {}\n\nExpected args: {{\"op\":\"patch\",\"path\":\"...\",\"patch_text\":\"...\"}}",
+                        e
+                    )
+                })?;
+                let want0 = project_fs::normalize_rel_path(parsed.path.as_str())?;
+                let (want_rel, from_opt) = canonicalize_silver_folder_alias(&want0);
+                let mut path_rewrites: Vec<(String, String)> = Vec::new();
+                if let Some(from) = from_opt {
+                    if from != want_rel {
+                        path_rewrites.push((from, want_rel.clone()));
+                    }
+                }
+
+                let normalized =
+                    normalize_hunks_only_patch_text(parsed.patch_text.as_str(), &want_rel)
+                        .map_err(|e| format!("file op=patch contract violation: {}", e))?;
+                let patch_in = normalized.patch_text;
+
+                validate_sql_model_folder_policy(&want_rel)?;
+
+                let base_state = crate::patch_protocol::read_patch_base_state(ctx, &want_rel).await;
+                let outcome = match crate::patch_protocol::apply_single_file_patch_with_base(
+                    ctx,
+                    self.datasets.as_ref(),
+                    &want_rel,
+                    patch_in.as_str(),
+                    &base_state,
+                )
+                .await
+                {
+                    Ok(o) => o,
+                    Err(e) if e.contains("patch_hunk_context_miss") => {
+                        let key = crate::project_fs::join_storage_key(ctx, &want_rel);
+                        let current = ctx
+                            .storage()
+                            .get_bytes(&key)
+                            .await
+                            .ok()
+                            .and_then(|b| String::from_utf8(b.to_vec()).ok())
+                            .unwrap_or_default();
+                        let preview_len = current.len().min(6000);
+                        let preview = &current[..preview_len];
+                        return Err(format!(
+                            "{e}\n\nCurrent file content for '{want_rel}':\n```\n{preview}\n```\n\n\
+                             Re-read this content carefully and produce a patch whose context lines \
+                             match the actual file, or use op=write with the complete corrected content.",
+                        ));
+                    }
+                    Err(e) => return Err(e),
+                };
+
+                if outcome.base_sha256 == outcome.new_sha256
+                    && (outcome.lines_added + outcome.lines_removed) == 0
+                {
+                    return Err("patch produced no file changes".to_string());
+                }
+
+                if want_rel.ends_with(".yml") || want_rel.ends_with(".yaml") {
+                    if let Err(e) = serde_yaml::from_str::<serde_yaml::Value>(&outcome.content) {
+                        let preview_len = outcome.content.len().min(4000);
+                        let preview = &outcome.content[..preview_len];
+                        return Err(format!(
+                            "patch produced invalid YAML for '{}': {}. \
+                             Read the current file content and produce a valid YAML patch, \
+                             or use op=write with the complete correct YAML content.\n\n\
+                             Current file content:\n```yaml\n{}\n```",
+                            want_rel, e, preview
+                        ));
+                    }
+                }
+
+                let is_additive_only =
+                    outcome.existed && outcome.lines_removed == 0 && outcome.lines_added > 0;
+
+                // Safety: reject staging schema YAML that references columns not produced by
+                // the sibling staging SQL output (prevents COLUMN_NOT_FOUND runtime errors).
+                validate_staging_schema_ymls(ctx, std::slice::from_ref(&outcome)).await?;
+
+                retry_put_bytes(
+                    ctx.storage().as_ref(),
+                    &outcome.key,
+                    outcome.content.as_bytes(),
+                    "text/plain",
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+                // Best-effort cleanup: if the patch targeted an alias path like models/silver/,
+                // delete the alias object after writing the canonical object.
+                let mut rewrites_json: Vec<Value> = Vec::new();
+                path_rewrites.sort();
+                path_rewrites.dedup();
+                for (from, to) in path_rewrites.iter() {
+                    rewrites_json.push(serde_json::json!({ "from": from, "to": to }));
+                    if from != to {
+                        let old_key = project_fs::join_storage_key(ctx, from);
+                        let _ = retry_delete_object(ctx.storage().as_ref(), &old_key).await;
+                    }
+                }
+
+                let response = serde_json::json!({
+                    "ok": true,
+                    "mutated": outcome.base_sha256 != outcome.new_sha256,
+                    "applied_patch_text": outcome.git_patch.trim_end().to_string(),
+                    "written_keys": [outcome.key.clone()],
+                    "patch_normalization": {
+                        "line_number_headers_rewritten": normalized.line_number_headers_rewritten,
+                        "git_headers_stripped": normalized.git_headers_stripped,
+                        "git_metadata_lines_dropped": normalized.git_metadata_lines_dropped
+                    },
+                    "path_rewrites": rewrites_json,
+                    "results": [{
+                        "path": outcome.rel_path,
+                        "key": outcome.key,
+                        "exists": outcome.existed,
+                        "mutated": outcome.base_sha256 != outcome.new_sha256,
+                        "base_sha256": outcome.base_sha256,
+                        "new_sha256": outcome.new_sha256,
+                        "git_patch": outcome.git_patch,
+                        "diff": outcome.diff,
+                        "lines_added": outcome.lines_added,
+                        "lines_removed": outcome.lines_removed,
+                        "apply_result_code": outcome.apply_result_code,
+                        "apply_repairs": outcome.apply_repairs
+                    }]
+                });
+                if let (Some(store), Some(thread_id)) =
+                    (ctx.thread_store().as_ref(), ctx.thread_id().as_deref())
+                {
+                    if is_additive_only {
+                        tracing::warn!(
+                            "data_engineer: patch on existing file was additive-only (lines_added={}, lines_removed=0); not recording as mutation progress to prevent stall masking",
+                            outcome.lines_added
+                        );
+                    } else {
+                        let paths = vec![outcome.rel_path.clone()];
+                        let select_terms = select_terms_from_paths(&paths);
+                        if let Err(e) = crate::state_manager::apply_execution_event(
+                            &store.control_store(),
+                            thread_id,
+                            crate::progress_controller::DataEngineerEvent::MutationRecorded {
+                                op: crate::progress_controller::MutationOp::Patch,
+                                paths: paths.clone(),
+                                select_terms: select_terms.clone(),
+                            },
+                        )
+                        .await
+                        {
+                            tracing::warn!("failed to record patch mutation: {e}");
+                        }
+                    }
+                }
+                Ok(response)
+            }
+            "write" => {
+                let path = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "file op=write: path is required".to_string())?;
+                let content = args
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "file op=write: content is required".to_string())?;
+
+                let rel = project_fs::normalize_rel_path(path)?;
+                let (want_rel, _from_opt) = canonicalize_silver_folder_alias(&rel);
+
+                validate_sql_model_folder_policy(&want_rel)?;
+
+                let out =
+                    project_fs::write_file(ctx, self.datasets.as_ref(), &want_rel, content).await?;
+
+                let mutated = out
+                    .get("mutated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if let (Some(store), Some(thread_id)) =
+                    (ctx.thread_store().as_ref(), ctx.thread_id().as_deref())
+                {
+                    if mutated {
+                        let paths = vec![want_rel.clone()];
+                        let select_terms = select_terms_from_paths(&paths);
+                        if let Err(e) = crate::state_manager::apply_execution_event(
+                            &store.control_store(),
+                            thread_id,
+                            crate::progress_controller::DataEngineerEvent::MutationRecorded {
+                                op: crate::progress_controller::MutationOp::Patch,
+                                paths: paths.clone(),
+                                select_terms: select_terms.clone(),
+                            },
+                        )
+                        .await
+                        {
+                            tracing::warn!("failed to record write mutation: {e}");
+                        }
+                    }
+                }
+                Ok(out)
+            }
+            _ => Err(
+                "unsupported op; use 'list', 'get', 'patch', 'write', 'rm', or 'mv'".to_string(),
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::progress_controller::ExecutionState;
+    use crate::project_fs;
+    use crate::state_manager;
+    use react_core::agent::DefaultPolicy;
+    use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::llm::NullModel;
+    use react_core::resolved_config as config;
+    use react_core::scope::RequestScope;
+    use react_core::session::ThreadStore;
+    use react_core::storage::StorageAdapter;
+    use react_module_storage_memory::InMemoryStorageAdapter;
+    type DbtFilesTool = FilesTool;
+
+    fn minimal_cfg() -> Arc<config::ReactResolvedConfig> {
+        Arc::new(config::ReactResolvedConfig {
+            server: config::ServerResolved { port: 1 },
+            storage: config::StorageResolved {
+                mode: react_core::resolved_config::StorageMode::Local,
+                bucket: None,
+                path: None,
+                s3_credentials: None,
+            },
+            scope: RequestScope::parse("t", "w", "p").expect("valid test scope"),
+            llm: config::LlmResolved::default(),
+            suite_config: serde_json::json!({}),
+        })
+    }
+
+    fn make_ctx(storage: Arc<dyn StorageAdapter>) -> AgentCtx {
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope::parse("t", "w", "p").expect("valid test scope");
+        react_core::agent::AgentCtxBuilder::new(
+            Arc::new(NullModel::new()),
+            storage,
+            scope,
+            keyspace,
+            Arc::new(DefaultPolicy),
+        )
+        .top_k(1)
+        .per_step_timeout_secs(1)
+        .max_steps(1)
+        .agent_name("test".to_string())
+        .resolved_config(Some(minimal_cfg()))
+        .build()
+    }
+
+    #[tokio::test]
+    async fn dbt_files_rm_deletes_existing_file() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone());
+        let tool = DbtFilesTool { datasets: None };
+
+        let key = project_fs::join_storage_key(&ctx, "models/x.sql");
+        storage
+            .put_bytes(&key, b"select 1\n", "text/plain")
+            .await
+            .expect("preload");
+
+        let obs = tool
+            .call(serde_json::json!({"op":"rm","path":"models/x.sql"}), &ctx)
+            .await
+            .expect("rm ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(obs.get("mutated").and_then(|v| v.as_bool()), Some(true));
+        assert!(
+            storage.get_bytes(&key).await.is_err(),
+            "file should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn dbt_files_rm_is_idempotent_when_missing() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let obs = tool
+            .call(
+                serde_json::json!({"op":"rm","path":"models/missing.sql"}),
+                &ctx,
+            )
+            .await
+            .expect("rm ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(obs.get("mutated").and_then(|v| v.as_bool()), Some(false));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_rm_missing_does_not_record_mutation_summary() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let mut ctx = make_ctx(storage.clone());
+        let store = ThreadStore::new(
+            storage,
+            ctx.scope().clone(),
+            Arc::new(DefaultKeyspace::new("b".to_string())),
+        );
+        let tid = "tid-rm-missing-no-mutation-summary".to_string();
+        state_manager::replace_execution_state(&store.control_store(), &tid, ExecutionState::new())
+            .await
+            .expect("seed execution state");
+        ctx.set_thread_store(Some(store.clone()));
+        ctx.set_thread_id(Some(tid.clone()));
+        let tool = DbtFilesTool { datasets: None };
+
+        let obs = tool
+            .call(
+                serde_json::json!({"op":"rm","path":"models/missing.sql"}),
+                &ctx,
+            )
+            .await
+            .expect("rm ok");
+
+        assert_eq!(obs.get("mutated").and_then(|v| v.as_bool()), Some(false));
+        let stored = state_manager::load_execution_state(&store.control_store(), &tid)
+            .await
+            .expect("load execution state")
+            .expect("execution state exists");
+        assert!(
+            stored.telemetry.last_mutation_summary.is_none(),
+            "missing rm should not look like authoring progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn dbt_files_mv_moves_file_and_rejects_overwrite() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone());
+        let tool = DbtFilesTool { datasets: None };
+
+        let from_key = project_fs::join_storage_key(&ctx, "models/from.sql");
+        let to_key = project_fs::join_storage_key(&ctx, "models/to.sql");
+        storage
+            .put_bytes(&from_key, b"select 1\n", "text/plain")
+            .await
+            .expect("preload from");
+
+        let obs = tool
+            .call(
+                serde_json::json!({"op":"mv","from":"models/from.sql","to":"models/to.sql"}),
+                &ctx,
+            )
+            .await
+            .expect("mv ok");
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(obs.get("mutated").and_then(|v| v.as_bool()), Some(true));
+
+        assert!(
+            storage.get_bytes(&from_key).await.is_err(),
+            "from should be removed"
+        );
+        let bytes = storage.get_bytes(&to_key).await.expect("to exists");
+        assert_eq!(String::from_utf8_lossy(&bytes), "select 1\n");
+
+        // Reject overwrite
+        storage
+            .put_bytes(&from_key, b"select 2\n", "text/plain")
+            .await
+            .expect("restore from");
+        let err = tool
+            .call(
+                serde_json::json!({"op":"mv","from":"models/from.sql","to":"models/to.sql"}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("destination already exists"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_rejects_new_text_key() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/x.sql",
+                    "new_text": "select 1\n"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("contract violation"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_get_blocked_for_recently_removed_path_in_hard_mutation_repair_mode() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let mut ctx = make_ctx(storage.clone());
+        let store = ThreadStore::new(
+            storage,
+            ctx.scope().clone(),
+            Arc::new(DefaultKeyspace::new("b".to_string())),
+        );
+        let tid = "tid-hard-mutation-files-get-blocked".to_string();
+        let mut es = ExecutionState::new();
+        es.repair.status = crate::progress_controller::RepairStatus::Pending { cycle: 1 };
+        es.set_last_mutation_summary(
+            crate::progress_controller::MutationOp::Remove,
+            vec!["models/staging/m.sql".to_string()],
+            vec!["path:models/staging/m.sql".to_string()],
+        );
+        state_manager::replace_execution_state(&store.control_store(), &tid, es)
+            .await
+            .expect("seed execution state");
+        ctx.set_thread_store(Some(store));
+        ctx.set_thread_id(Some(tid));
+
+        let tool = DbtFilesTool { datasets: None };
+        let err = tool
+            .call(
+                serde_json::json!({"op":"get","path":"models/staging/m.sql","max_chars":200}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("was removed in hard mutation repair mode"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dbt_files_list_allowed_in_hard_mutation_repair_mode() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let mut ctx = make_ctx(storage.clone());
+        let store = ThreadStore::new(
+            storage,
+            ctx.scope().clone(),
+            Arc::new(DefaultKeyspace::new("b".to_string())),
+        );
+        let tid = "tid-hard-mutation-files-list-allowed".to_string();
+        let mut es = ExecutionState::new();
+        es.repair.status = crate::progress_controller::RepairStatus::Pending { cycle: 1 };
+        es.set_last_mutation_summary(
+            crate::progress_controller::MutationOp::Remove,
+            vec!["models/staging/m.sql".to_string()],
+            vec!["path:models/staging/m.sql".to_string()],
+        );
+        state_manager::replace_execution_state(&store.control_store(), &tid, es)
+            .await
+            .expect("seed execution state");
+        ctx.set_thread_store(Some(store));
+        ctx.set_thread_id(Some(tid));
+
+        let tool = DbtFilesTool { datasets: None };
+        let out = tool
+            .call(
+                serde_json::json!({"op":"list","prefix":"models/","limit":10}),
+                &ctx,
+            )
+            .await
+            .expect("list should be allowed");
+        assert_eq!(out.get("ok").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_rejects_unified_git_style_patch_key() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "unified_git_style_patch": "diff --git a/models/x.sql b/models/x.sql\n--- /dev/null\n+++ b/models/x.sql\n@@\n+select 1\n"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("contract violation"));
+        assert!(err.to_lowercase().contains("unified_git_style_patch"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_writes_and_returns_canonical_patch() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone());
+        let tool = DbtFilesTool { datasets: None };
+
+        let obs = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/core/x.sql",
+                    "patch_text": "@@ ... @@\n+select 1\n"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("patch ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        let applied = obs
+            .get("applied_patch_text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(applied.contains("diff --git a/models/core/x.sql b/models/core/x.sql"));
+
+        let written = obs
+            .get("written_keys")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(written.len(), 1);
+        let key = written[0].as_str().unwrap_or("");
+        let bytes = storage.get_bytes(key).await.expect("written");
+        let content = String::from_utf8_lossy(&bytes).to_string();
+        // Hard-cutover portability: do not inject `schema=` into model configs (dbt_project.yml governs schema).
+        assert!(!content.contains("config(schema="));
+        assert!(content.contains("alias=\"x\""));
+        assert!(content.to_ascii_lowercase().contains("select 1"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_normalizes_line_number_hunk_headers() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let obs = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/core/y.sql",
+                    "patch_text": "@@ -1,0 +1,1 @@\n+select 1\n"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("patch ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        let rewrites = obs
+            .get("patch_normalization")
+            .and_then(|v| v.get("line_number_headers_rewritten"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert_eq!(rewrites, 1);
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_strips_git_headers_and_records_telemetry() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let obs = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/core/z.sql",
+                    "patch_text": "diff --git a/models/core/z.sql b/models/core/z.sql\nindex 123..456 100644\n--- a/models/core/z.sql\n+++ b/models/core/z.sql\n@@ -1,0 +1,1 @@\n+select 1\n"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("patch ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        let norm = obs
+            .get("patch_normalization")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        assert_eq!(
+            norm.get("git_headers_stripped").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            norm.get("git_metadata_lines_dropped")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            2
+        );
+        let rewrites = norm
+            .get("line_number_headers_rewritten")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert_eq!(rewrites, 1);
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_rejects_preview_diff_anywhere() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/core/x.sql",
+                    "patch_text": "@@ ... @@\n+select 1\n",
+                    "preview_diff": true
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("contract violation"));
+        assert!(err.to_lowercase().contains("preview_diff"));
+        assert!(err.to_lowercase().contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_rejects_patch_primitives_after_cutover() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "replace_file": "models/x.sql"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("contract violation"));
+        assert!(err.to_lowercase().contains("patch primitives"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_rejects_base_sha256_after_cutover() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/core/x.sql",
+                    "patch_text": "@@ ... @@\n+select 1\n",
+                    "base_sha256": "deadbeef"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("contract violation"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_requires_patch_text() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/core/x.sql"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("contract violation"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_rejects_staging_yml_referencing_unknown_columns() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        // Seed sibling staging SQL (explicit select list).
+        tool.call(
+            serde_json::json!({
+                "op": "patch",
+                "path": "models/staging/stg_test_raw_raw_orders.sql",
+                "patch_text": r#"@@ ... @@
++with source as (
++  select
++    '2020-01-01 00:00:00' as placed_at_raw,
++    try_cast('2020-01-01 00:00:00' as timestamp) as placed_at
++  from {{ source('test_raw','raw_orders') }}
++)
++
++select
++  placed_at_raw,
++  placed_at
++from source
+"#
+            }),
+            &ctx,
+        )
+        .await
+        .expect("sql patch ok");
+
+        // Patch YAML that invents created_at_raw / updated_at_raw.
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/staging/stg_test_raw_raw_orders.yml",
+                    "patch_text": r#"@@ ... @@
++version: 2
++models:
++  - name: stg_test_raw_raw_orders
++    columns:
++      - name: created_at_raw
++        tests:
++          - not_null
++      - name: placed_at
++        tests:
++          - not_null:
++              where: "updated_at_raw is not null"
+"#
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("stg_test_raw_raw_orders"));
+        assert!(err.contains("models/staging/stg_test_raw_raw_orders.yml"));
+        assert!(err.contains("models/staging/stg_test_raw_raw_orders.sql"));
+        assert!(err.contains("created_at_raw"));
+        assert!(err.contains("updated_at_raw"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_allows_staging_yml_when_columns_match_sibling_sql() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        tool.call(
+            serde_json::json!({
+                "op": "patch",
+                "path": "models/staging/stg_test_raw_raw_orders.sql",
+                "patch_text": r#"@@ ... @@
++with source as (
++  select
++    '2020-01-01 00:00:00' as placed_at_raw,
++    try_cast('2020-01-01 00:00:00' as timestamp) as placed_at
++  from {{ source('test_raw','raw_orders') }}
++)
++
++select
++  placed_at_raw,
++  placed_at
++from source
+"#
+            }),
+            &ctx,
+        )
+        .await
+        .expect("sql patch ok");
+
+        let obs = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "path": "models/staging/stg_test_raw_raw_orders.yml",
+                    "patch_text": r#"@@ ... @@
++version: 2
++models:
++  - name: stg_test_raw_raw_orders
++    columns:
++      - name: placed_at_raw
++        tests: []
++      - name: placed_at
++        tests:
++          - not_null:
++              where: "placed_at_raw is not null"
+"#
+                }),
+                &ctx,
+            )
+            .await
+            .expect("yml patch ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn extract_final_select_output_columns_infers_from_cte_when_final_select_star() {
+        let sql = r#"
+with source as (
+  select
+    a as a_raw,
+    b as b_raw
+  from some_table
+),
+cleaned as (
+  select
+    a_raw,
+    b_raw,
+    try_cast(nullif(trim(b_raw), '') as double) as b_num
+  from source
+)
+select *
+from cleaned
+"#;
+        let cols = extract_final_select_output_columns(sql).expect("should infer from cleaned CTE");
+        let got = cols.into_iter().collect::<Vec<_>>();
+        assert_eq!(got, vec!["a_raw", "b_num", "b_raw"]);
+    }
+
+    #[test]
+    fn extract_final_select_output_columns_infers_from_cte_when_final_select_alias_star() {
+        let sql = r#"
+with cleaned as (
+  select
+    x as x_raw,
+    y as y_raw,
+    x + y as z
+  from t
+)
+select c.*
+from cleaned as c
+"#;
+        let cols = extract_final_select_output_columns(sql)
+            .expect("should infer from cleaned CTE via alias.*");
+        let got = cols.into_iter().collect::<Vec<_>>();
+        assert_eq!(got, vec!["x_raw", "y_raw", "z"]);
+    }
+
+    #[test]
+    fn extract_final_select_output_columns_still_errors_on_mixed_star_and_explicit() {
+        let sql = r#"
+with cleaned as (
+  select
+    x as x_raw,
+    y as y_raw
+  from t
+)
+select
+  *,
+  x_raw
+from cleaned
+"#;
+        let err = extract_final_select_output_columns(sql).unwrap_err();
+        assert!(err.to_ascii_lowercase().contains("uses '*'"));
+    }
+
+    #[test]
+    fn extract_final_select_output_columns_still_errors_on_non_cte_star_from_dotted_target() {
+        let sql = r#"
+select *
+from schema.table
+"#;
+        let err = extract_final_select_output_columns(sql).unwrap_err();
+        assert!(err.to_ascii_lowercase().contains("uses '*'"));
+    }
+
+    #[test]
+    fn extract_final_select_output_columns_ignores_line_comments_in_select_list() {
+        let sql = r#"
+with t as (
+  select
+    'a' as customer_id,
+    'x@example.com' as email_raw
+)
+select
+  customer_id,
+  -- Email hygiene: trimmed
+  email_raw,
+  lower(email_raw) as email
+from t
+"#;
+        let cols = extract_final_select_output_columns(sql).expect("should parse select list");
+        let got = cols.into_iter().collect::<Vec<_>>();
+        assert_eq!(got, vec!["customer_id", "email", "email_raw"]);
+    }
+
+    #[test]
+    fn extract_final_select_output_columns_ignores_commas_in_line_comments() {
+        let sql = r#"
+with t as (
+  select
+    1 as a,
+    2 as b
+  from some_table
+)
+select
+  a, -- harmless comment, with commas, should not split into phantom columns
+  b
+from t
+"#;
+        let cols = extract_final_select_output_columns(sql).expect("should parse select list");
+        let got = cols.into_iter().collect::<Vec<_>>();
+        assert_eq!(got, vec!["a", "b"]);
+    }
+}

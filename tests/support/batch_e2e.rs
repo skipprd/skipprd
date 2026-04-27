@@ -11,10 +11,10 @@ use walkdir::WalkDir;
 
 pub const TEST_WORKSPACE: &str = "batch-tests";
 
-fn skippr_el_bin() -> PathBuf {
-    std::env::var_os("SKIPPR_E2E_SKIPPR_EL_BIN")
+fn skipprd_bin() -> PathBuf {
+    std::env::var_os("SKIPPR_E2E_SKIPPRD_BIN")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_skippr-el")))
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_skipprd")))
 }
 
 pub fn fixture_path(name: &str) -> PathBuf {
@@ -35,7 +35,7 @@ impl BatchE2eHarness {
         let data_dir = std::env::temp_dir().join(format!("skippr_batch_e2e_{}", id));
         std::fs::create_dir_all(&data_dir).unwrap();
 
-        let config_path = data_dir.join("skippr-el.yml");
+        let config_path = data_dir.join("skipprd.yml");
         std::fs::write(&config_path, config_yaml).unwrap();
 
         Self {
@@ -50,7 +50,7 @@ impl BatchE2eHarness {
     }
 
     pub fn spawn_sync(&self) -> Child {
-        let bin = skippr_el_bin();
+        let bin = skipprd_bin();
         Command::new(&bin)
             .args(["sync", "--pipeline", &self.pipeline_name])
             .env("SKIPPR_CONFIG_FILE", &self.config_path)
@@ -80,7 +80,7 @@ impl BatchE2eHarness {
                     let _ = child.kill();
                     let output = child.wait_with_output().expect("failed to collect output");
                     panic!(
-                        "skippr-el sync timed out after {:?}\nstdout:\n{}\nstderr:\n{}",
+                        "skipprd sync timed out after {:?}\nstdout:\n{}\nstderr:\n{}",
                         timeout,
                         String::from_utf8_lossy(&output.stdout),
                         String::from_utf8_lossy(&output.stderr)
@@ -108,7 +108,7 @@ impl Drop for BatchE2eHarness {
 pub fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
-        "skippr-el sync failed\nstdout:\n{}\nstderr:\n{}",
+        "skipprd sync failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -118,7 +118,7 @@ pub fn assert_no_main_panic(output: &Output) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("thread 'main' panicked"),
-        "skippr-el panicked\nstdout:\n{}\nstderr:\n{}",
+        "skipprd panicked\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         stderr
     );

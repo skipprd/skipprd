@@ -38,4 +38,4 @@ runs:
             "${runtime_plugin_version}"
           )
         done <<< "${{ inputs.runtime_plugin_versions }}"
-        python3 .github/scripts/runtime_e2e_harness.py run "${{ inputs.scenario }}" --mode full --skippr-el "./skippr-el-${{ inputs.architecture_name }}/skippr-el" "${runtime_plugin_args[@]}"
+        python3 .github/scripts/runtime_e2e_harness.py run "${{ inputs.scenario }}" --mode full --skipprd "./skipprd-${{ inputs.architecture_name }}/skipprd" "${runtime_plugin_args[@]}"

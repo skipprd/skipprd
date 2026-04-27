@@ -100,7 +100,7 @@ hyper=warn,reqwest=warn,rustls=warn,h2=warn";
 fn build_file_appender() -> Option<tracing_appender::rolling::RollingFileAppender> {
     let log_dir = resolve_log_dir()?;
     if std::fs::create_dir_all(&log_dir).is_err() {
-        eprintln!("skippr-el: could not create log directory {:?}", log_dir);
+        eprintln!("skipprd: could not create log directory {:?}", log_dir);
         return None;
     }
 
@@ -108,7 +108,7 @@ fn build_file_appender() -> Option<tracing_appender::rolling::RollingFileAppende
 
     tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix("skippr-el")
+        .filename_prefix("skipprd")
         .filename_suffix("log")
         .max_log_files(MAX_LOG_FILES)
         .build(&log_dir)
@@ -125,7 +125,7 @@ fn resolve_log_dir() -> Option<std::path::PathBuf> {
     Some(cwd.join(LOG_DIR_NAME))
 }
 
-/// Remove old skippr-el log files beyond the retention limit.
+/// Remove old skipprd log files beyond the retention limit.
 /// `tracing-appender` handles rotation but not cleanup of files it no longer
 /// manages (e.g. leftover from previous config). Belt-and-suspenders.
 fn purge_old_logs(dir: &std::path::Path, keep: usize) {
@@ -139,7 +139,7 @@ fn purge_old_logs(dir: &std::path::Path, keep: usize) {
             e.path()
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("skippr-el") && n.ends_with(".log"))
+                .map(|n| n.starts_with("skipprd") && n.ends_with(".log"))
                 .unwrap_or(false)
         })
         .filter_map(|e| {

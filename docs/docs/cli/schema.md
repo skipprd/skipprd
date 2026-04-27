@@ -1,11 +1,11 @@
-# skippr-el schema
+# skipprd schema
 
 Display the discovered schema for a pipeline.
 
 ## Usage
 
 ```bash
-skippr-el schema --pipeline <name> [--log [LEVEL]]
+skipprd schema --pipeline <name> [--log [LEVEL]]
 ```
 
 ## Flags

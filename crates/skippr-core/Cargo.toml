@@ -8,4 +8,4 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-skippr = { path = "../.." }
+skipprd = { path = "../.." }

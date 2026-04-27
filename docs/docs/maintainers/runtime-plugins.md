@@ -142,9 +142,9 @@ Use these checks after changing runtime plugin structure:
 
 ```bash
 python3 .github/scripts/check_host_dependency_boundaries.py
-cargo test -p skippr --test runtime_plugin_global_guards -- --nocapture
-cargo test -p skippr --test runtime_source_plugin_guards -- --nocapture
-cargo test -p skippr --test runtime_host_contracts --test runtime_file_csv_to_file -- --nocapture
+cargo test -p skipprd --test runtime_plugin_global_guards -- --nocapture
+cargo test -p skipprd --test runtime_source_plugin_guards -- --nocapture
+cargo test -p skipprd --test runtime_host_contracts --test runtime_file_csv_to_file -- --nocapture
 cargo check --workspace
 ```
 

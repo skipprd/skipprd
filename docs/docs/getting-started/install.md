@@ -8,7 +8,7 @@ curl -sL "https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh" | s
 
 This detects your platform (macOS x86/arm64, Linux x86/arm64), downloads the latest release from GitHub, and installs the binary to `/usr/local/bin`. The version is printed on success.
 
-The install script only installs the host binary, `skippr-el`. Runtime plugins are resolved on demand the first time a pipeline needs them.
+The install script only installs the host binary, `skipprd`. Runtime plugins are resolved on demand the first time a pipeline needs them.
 
 ### Install a specific version
 
@@ -27,14 +27,14 @@ curl -sL "https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh" | S
 ## Verify
 
 ```bash
-skippr-el --version
+skipprd --version
 ```
 
 ## Runtime plugin downloads
 
 Skippr no longer ships connector binaries beside the host. Instead:
 
-- `skippr-el` resolves runtime plugins from the latest published manifest index by default
+- `skipprd` resolves runtime plugins from the latest published manifest index by default
 - plugin manifests and binaries are downloaded from `install.skippr.io`
 - downloaded artifacts are cached under `~/.skippr/runtime_plugins` unless `SKIPPR_RUNTIME_PLUGIN_DIR` is set
 - connector configs can optionally pin an individual plugin `version`

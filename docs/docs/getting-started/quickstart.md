@@ -8,7 +8,7 @@ This guide walks through ingesting JSON data from S3 into Athena-queryable Parqu
 curl -sL "https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh" | sudo bash
 ```
 
-The install script places `skippr-el` on your machine. Runtime source, sink, and schema plugins are downloaded automatically the first time the pipeline needs them.
+The install script places `skipprd` on your machine. Runtime source, sink, and schema plugins are downloaded automatically the first time the pipeline needs them.
 
 ## 2. Set your environment
 
@@ -39,7 +39,7 @@ export SKIPPR_S3_BUCKET=your-state-bucket
 Skippr connects to the source, samples records, and infers the full nested schema:
 
 ```bash
-skippr-el discover --pipeline bikehire --log
+skipprd discover --pipeline bikehire --log
 ```
 
 You'll see output showing discovered namespaces and fields. The schema is persisted to S3 as pipeline metadata.
@@ -49,8 +49,8 @@ You'll see output showing discovered namespaces and fields. The schema is persis
 Enable the pipeline, then run sync to ingest data:
 
 ```bash
-skippr-el query --sql "ENABLE PIPELINE bikehire"
-skippr-el sync --pipeline bikehire --log
+skipprd query --sql "ENABLE PIPELINE bikehire"
+skipprd sync --pipeline bikehire --log
 ```
 
 Sync reads from the source, buffers through the WAL, compacts into Parquet, uploads to S3, and registers Glue partitions. Watch the logs for:
@@ -62,7 +62,7 @@ Sync reads from the source, buffers through the WAL, compacts into Parquet, uplo
 ## 5. Query the data
 
 ```bash
-skippr-el query --sql "SELECT COUNT(*) FROM bikehire"
+skipprd query --sql "SELECT COUNT(*) FROM bikehire"
 ```
 
 Your data is now in Athena. You can also query directly from the AWS Athena console.

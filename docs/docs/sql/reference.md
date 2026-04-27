@@ -1,6 +1,6 @@
 # SQL Reference
 
-Skippr includes a built-in SQL engine for querying destination tables, managing pipelines, and managing schemas. Execute SQL via `skippr-el query --sql "<statement>"`.
+Skippr includes a built-in SQL engine for querying destination tables, managing pipelines, and managing schemas. Execute SQL via `skipprd query --sql "<statement>"`.
 
 ## Query operations
 

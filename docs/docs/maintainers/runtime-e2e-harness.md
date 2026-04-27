@@ -45,7 +45,7 @@ Stage a local release-like manifest tree for the current S3/Athena/Glue runtime 
 
 ```bash
 python3 .github/scripts/runtime_e2e_harness.py stage-local-runtime-release \
-  --skippr-el target/debug/skippr-el
+  --skipprd target/debug/skipprd
 ```
 
 Validate published runtime plugin releases directly:
@@ -68,24 +68,24 @@ For day-to-day development, start with `bike_hire --mode smoke`. Use the chaos s
 
 The fastest realistic maintainer loop is:
 
-1. build `skippr-el`
+1. build `skipprd`
 2. run `stage-local-runtime-release`
-3. copy `skippr-el` into a clean directory
+3. copy `skipprd` into a clean directory
 4. run a smoke scenario with `--local-runtime-manifest-dir`
 
 Example:
 
 ```bash
 python3 .github/scripts/runtime_e2e_harness.py stage-local-runtime-release \
-  --skippr-el target/debug/skippr-el
+  --skipprd target/debug/skipprd
 
 tmpdir="$(mktemp -d)"
 mkdir -p "$tmpdir/debug"
-cp target/debug/skippr-el "$tmpdir/debug/skippr-el"
+cp target/debug/skipprd "$tmpdir/debug/skipprd"
 
 python3 .github/scripts/runtime_e2e_harness.py run bike_hire \
   --mode smoke \
-  --skippr-el "$tmpdir/debug/skippr-el" \
+  --skipprd "$tmpdir/debug/skipprd" \
   --local-runtime-manifest-dir /path/to/staged-local-runtime-release
 ```
 

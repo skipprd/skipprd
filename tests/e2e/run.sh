@@ -16,7 +16,7 @@ export AWS_ACCESS_KEY_ID=test
 export AWS_SECRET_ACCESS_KEY=test
 export AWS_DEFAULT_REGION=us-east-1
 
-SKIPPR_BIN="$PROJECT_ROOT/target/debug/skippr-el"
+SKIPPR_BIN="$PROJECT_ROOT/target/debug/skipprd"
 VENV_DIR="$SCRIPT_DIR/.venv"
 VENV_PYTHON="$VENV_DIR/bin/python"
 VENV_PIP="$VENV_DIR/bin/pip"
@@ -64,29 +64,29 @@ bash "$SCRIPT_DIR/seed-sns.sh"
 echo "Seeding EventBridge..."
 bash "$SCRIPT_DIR/seed-eventbridge.sh"
 
-echo "Building local skippr-el binary..."
-cargo build --bin skippr-el
+echo "Building local skipprd binary..."
+cargo build --bin skipprd
 
 # ── Standard source → postgres pipelines ──────────────────────────
 echo "Running standard pipelines..."
 for pipeline in test_mysql test_mssql test_dynamodb test_kinesis test_sqs test_s3 test_file test_http_client; do
   echo "  -> $pipeline"
-  "$SKIPPR_BIN" sync --pipeline "$pipeline" --config "$SCRIPT_DIR/skippr-el.yml"
+  "$SKIPPR_BIN" sync --pipeline "$pipeline" --config "$SCRIPT_DIR/skipprd.yml"
 done
 
 echo "  -> test_stdin (piped)"
-cat "$SCRIPT_DIR/testdata/seed.json" | "$SKIPPR_BIN" sync --pipeline test_stdin --config "$SCRIPT_DIR/skippr-el.yml"
+cat "$SCRIPT_DIR/testdata/seed.json" | "$SKIPPR_BIN" sync --pipeline test_stdin --config "$SCRIPT_DIR/skipprd.yml"
 
 # ── New source plugins (push-based, batch mode) ──────────────────
 echo "Running new source pipelines..."
 for pipeline in test_mongodb test_amqp test_mqtt test_kafka test_sftp_in test_postgres_in test_sns test_eventbridge; do
   echo "  -> $pipeline"
-  "$SKIPPR_BIN" sync --pipeline "$pipeline" --config "$SCRIPT_DIR/skippr-el.yml"
+  "$SKIPPR_BIN" sync --pipeline "$pipeline" --config "$SCRIPT_DIR/skipprd.yml"
 done
 
 # ── Listener-based sources (skippr runs in background) ────────────
 echo "Testing HttpServer source..."
-"$SKIPPR_BIN" sync --pipeline test_http_server --config "$SCRIPT_DIR/skippr-el.yml" &
+"$SKIPPR_BIN" sync --pipeline test_http_server --config "$SCRIPT_DIR/skipprd.yml" &
 SKIPPR_PID=$!
 sleep 3
 curl -sf -X POST http://127.0.0.1:18082/ \
@@ -100,7 +100,7 @@ wait "$SKIPPR_PID" 2>/dev/null || true
 echo "Running output sink pipelines..."
 for pipeline in test_sink_azure test_sink_sftp test_sink_amqp; do
   echo "  -> $pipeline"
-  "$SKIPPR_BIN" sync --pipeline "$pipeline" --config "$SCRIPT_DIR/skippr-el.yml"
+  "$SKIPPR_BIN" sync --pipeline "$pipeline" --config "$SCRIPT_DIR/skipprd.yml"
 done
 
 echo "Running soda checks..."

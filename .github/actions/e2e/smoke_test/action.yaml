@@ -14,7 +14,7 @@ runs:
     - name: Run Skippr Tests
       shell: bash
       run: |        
-        cp .github/actions/e2e/smoke_test/skippr-el.yml ./skippr-el.yml
+        cp .github/actions/e2e/smoke_test/skipprd.yml ./skipprd.yml
                 
         SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 cargo run sync --pipeline smoke_test
         

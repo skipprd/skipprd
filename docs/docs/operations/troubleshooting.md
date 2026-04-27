@@ -6,7 +6,7 @@
 
 **Cause:** `ENABLE PIPELINE` or `DISABLE PIPELINE` was called before the pipeline metadata exists.
 
-**Fix:** Run `skippr-el discover --pipeline <name>` first to create the metadata, then enable the pipeline.
+**Fix:** Run `skipprd discover --pipeline <name>` first to create the metadata, then enable the pipeline.
 
 ### `TABLE_NOT_FOUND`
 
@@ -24,11 +24,11 @@
 3. Verify the plugin crate has been published and appears in `latest/manifest-index.json`
 4. If you are testing local artifacts, switch to an explicit manifest override or `--local-runtime-manifest-dir` in the runtime e2e harness
 
-### `skippr-el artifact unexpectedly contains runtime plugin binaries`
+### `skipprd artifact unexpectedly contains runtime plugin binaries`
 
-**Cause:** A host artifact directory contains `skippr-plugin-*` executables beside `skippr-el`. The runtime e2e harness rejects this because the host is not supposed to ship bundled plugins anymore.
+**Cause:** A host artifact directory contains `skippr-plugin-*` executables beside `skipprd`. The runtime e2e harness rejects this because the host is not supposed to ship bundled plugins anymore.
 
-**Fix:** Copy `skippr-el` into a clean temporary directory before running the harness, or point the harness at a release artifact directory that contains only the host binary.
+**Fix:** Copy `skipprd` into a clean temporary directory before running the harness, or point the harness at a release artifact directory that contains only the host binary.
 
 ### `Compactor: integrity check mismatch`
 
@@ -84,7 +84,7 @@ No manual intervention is needed. Verify recovery by checking that `uploaded_row
 To re-ingest from scratch:
 
 ```bash
-skippr-el query --sql "RESET PIPELINE my_pipeline"
+skipprd query --sql "RESET PIPELINE my_pipeline"
 ```
 
 This clears the offsets database and WAL for the pipeline. The next `sync` will start from the beginning of the source data.
