@@ -6,6 +6,12 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Install SQL Server on Windows runner
+      uses: potatoqualitee/mssqlsuite@v1.12
+      with:
+        install: sqlengine, sqlclient
+        sa-password: "Skippr!Test123"
+
     - name: Run MSSQL to Snowflake via skippr
       shell: pwsh
       run: |
@@ -32,7 +38,6 @@ runs:
 
         $workdir = Join-Path $env:RUNNER_TEMP ("mssql-snowflake-" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Force -Path $workdir | Out-Null
-        $composePath = ".\.github\actions\e2e\mssql_snowflake\compose.yaml"
 
         try {
           Write-Host "Writing Snowflake private key"
@@ -44,34 +49,16 @@ runs:
           Set-Content -Path $keyPath -Value $pem.TrimEnd() -NoNewline -Encoding ascii
           $env:SNOWFLAKE_PRIVATE_KEY_PATH = $keyPath
 
-          Write-Host "Starting MSSQL seed services"
-          docker compose -f $composePath up -d
-          $seedCompleted = $false
-          for ($i = 1; $i -le 120; $i++) {
-            $seedStatusRaw = docker compose -f $composePath ps --format json seed 2>$null
-            if ($seedStatusRaw -match '"exited"') {
-              $seedStatusAllRaw = docker compose -f $composePath ps -a --format json seed 2>$null
-              $seedStatus = $seedStatusAllRaw | ConvertFrom-Json
-              if ($seedStatus -is [array]) {
-                $seedExit = $seedStatus[0].ExitCode
-                if ($null -eq $seedExit) { $seedExit = $seedStatus[0].exit_code }
-              } else {
-                $seedExit = $seedStatus.ExitCode
-                if ($null -eq $seedExit) { $seedExit = $seedStatus.exit_code }
-              }
-              if ("$seedExit" -eq "0") {
-                Write-Host "MSSQL seed completed"
-                $seedCompleted = $true
-                break
-              }
-              docker compose -f $composePath logs
-              Write-Error "::error::MSSQL seed failed with exit code $seedExit"
-            }
-            Start-Sleep -Seconds 3
+          Write-Host "Seeding local SQL Server"
+          $sqlcmd = (Get-Command sqlcmd -ErrorAction Stop).Source
+          & $sqlcmd -S localhost -U sa -P "Skippr!Test123" -C -Q "IF DB_ID('testdb') IS NOT NULL BEGIN ALTER DATABASE testdb SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE testdb; END; CREATE DATABASE testdb;"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "::error::Failed to create MSSQL test database"
           }
-          if (-not $seedCompleted) {
-            docker compose -f $composePath logs
-            Write-Error "::error::Timed out waiting for MSSQL seed"
+          $seedPath = ".\.github\actions\e2e\mssql_snowflake\seed.sql"
+          & $sqlcmd -S localhost -U sa -P "Skippr!Test123" -C -d testdb -i $seedPath
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "::error::Failed to seed MSSQL test database"
           }
 
           $env:MSSQL_CONNECTION_STRING = "server=tcp:127.0.0.1,1433;database=testdb;user id=sa;password=Skippr!Test123;TrustServerCertificate=true"
@@ -112,6 +99,5 @@ runs:
             Write-Error "::error::skippr run exited successfully but did not print final Done line. This catches the silent-exit regression where the wrapper returns right after printing the run id."
           }
         } finally {
-          docker compose -f $composePath down -v 2>$null
           Remove-Item -Recurse -Force $workdir -ErrorAction SilentlyContinue
         }
