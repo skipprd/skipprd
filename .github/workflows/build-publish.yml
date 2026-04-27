@@ -418,6 +418,10 @@ jobs:
       - name: Restore vcpkg cache
         shell: pwsh
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:VCPKG_BINARY_CACHE_DIR)) {
+            Write-Warning "VCPKG_BINARY_CACHE_DIR is not set; skipping vcpkg cache restore"
+            exit 0
+          }
           $cachePrefix = "$env:SCCACHE_S3_KEY_PREFIX/vcpkg/$env:VCPKG_DEFAULT_TRIPLET"
           $archiveUri = "s3://$env:RUST_BUILD_CACHE_BUCKET/$cachePrefix/cache.zip"
           $archivePath = Join-Path $env:RUNNER_TEMP "vcpkg-cache-$env:VCPKG_DEFAULT_TRIPLET.zip"
@@ -450,6 +454,10 @@ jobs:
         if: always()
         shell: pwsh
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:VCPKG_BINARY_CACHE_DIR)) {
+            Write-Warning "VCPKG_BINARY_CACHE_DIR is not set; skipping vcpkg cache persist"
+            exit 0
+          }
           $cachePrefix = "$env:SCCACHE_S3_KEY_PREFIX/vcpkg/$env:VCPKG_DEFAULT_TRIPLET"
           $archiveUri = "s3://$env:RUST_BUILD_CACHE_BUCKET/$cachePrefix/cache.zip"
           $archivePath = Join-Path $env:RUNNER_TEMP "vcpkg-cache-$env:VCPKG_DEFAULT_TRIPLET.zip"
@@ -526,7 +534,10 @@ jobs:
             )
           }
 
-          cargo build --release --bin skipprd --bin skippr --bin skippr-admin
+          cargo build --release `
+            -p skipprd --bin skipprd `
+            -p skippr-cli --bin skippr `
+            -p skippr-admin --bin skippr-admin
           if ($pluginPackages.Count -gt 0) {
             $buildArgs = @('build', '--release')
             foreach ($package in $pluginPackages) {
@@ -655,6 +666,10 @@ jobs:
       - name: Restore vcpkg cache
         shell: pwsh
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:VCPKG_BINARY_CACHE_DIR)) {
+            Write-Warning "VCPKG_BINARY_CACHE_DIR is not set; skipping vcpkg cache restore"
+            exit 0
+          }
           $cachePrefix = "$env:SCCACHE_S3_KEY_PREFIX/vcpkg/$env:VCPKG_DEFAULT_TRIPLET"
           $archiveUri = "s3://$env:RUST_BUILD_CACHE_BUCKET/$cachePrefix/cache.zip"
           $archivePath = Join-Path $env:RUNNER_TEMP "vcpkg-cache-$env:VCPKG_DEFAULT_TRIPLET.zip"
@@ -685,6 +700,10 @@ jobs:
         if: always()
         shell: pwsh
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:VCPKG_BINARY_CACHE_DIR)) {
+            Write-Warning "VCPKG_BINARY_CACHE_DIR is not set; skipping vcpkg cache persist"
+            exit 0
+          }
           $cachePrefix = "$env:SCCACHE_S3_KEY_PREFIX/vcpkg/$env:VCPKG_DEFAULT_TRIPLET"
           $archiveUri = "s3://$env:RUST_BUILD_CACHE_BUCKET/$cachePrefix/cache.zip"
           $archivePath = Join-Path $env:RUNNER_TEMP "vcpkg-cache-$env:VCPKG_DEFAULT_TRIPLET.zip"

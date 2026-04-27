@@ -90,7 +90,10 @@ runs:
             print(package)
         PY
 
-        cargo build --release --bin skipprd --bin skippr --bin skippr-admin
+        cargo build --release \
+          -p skipprd --bin skipprd \
+          -p skippr-cli --bin skippr \
+          -p skippr-admin --bin skippr-admin
         if [ -s "${plugin_packages_file}" ]; then
           cargo_args=()
           while IFS= read -r package; do
