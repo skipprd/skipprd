@@ -1027,6 +1027,39 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
+  mssql_snowflake_test:
+    needs:
+      - linux_x86
+    name: MSSQL to Snowflake (linux x86)
+    runs-on:
+      - ubuntu-latest
+    env:
+      SKIPPR_API_KEY: ${{ secrets.SKIPPR_API_KEY }}
+      SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT || secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER || secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PEM }}
+      SNOWFLAKE_WAREHOUSE: COMPUTE_WH
+      SNOWFLAKE_DATABASE: ANALYTICS
+      SNOWFLAKE_SCHEMA: RAW
+      SNOWFLAKE_ROLE: ACCOUNTADMIN
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download skipprd artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: skipprd-linux_x86
+
+      - name: Download skippr artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: skippr-linux_x86
+
+      - name: Test MSSQL to Snowflake
+        uses: ./.github/actions/e2e/mssql_snowflake
+        with:
+          architecture_name: linux_x86
+
 
   publish_skipprd:
     name: Publish Release
@@ -1035,6 +1068,7 @@ jobs:
      - chaos_mode_test
      - s3_wal_test
      - deadletters_test
+     - mssql_snowflake_test
      - macos_arm64
      - macos_arm64_test_compile
      - windows_x86
