@@ -1825,6 +1825,7 @@ mod flattern_tests {
                 determined_type: SkipprDataType::String,
                 determined_type_values: None,
                 repetition_count: 1,
+                ..Metadata::new().unwrap()
             },
         );
         metadata.insert(
@@ -1843,6 +1844,7 @@ mod flattern_tests {
                 determined_type: SkipprDataType::Record,
                 determined_type_values: None,
                 repetition_count: 1,
+                ..Metadata::new().unwrap()
             },
         );
         metadata.get_mut("contact").unwrap().fields.insert(
@@ -1861,6 +1863,7 @@ mod flattern_tests {
                 determined_type: SkipprDataType::String,
                 determined_type_values: None,
                 repetition_count: 1,
+                ..Metadata::new().unwrap()
             },
         );
         metadata.get_mut("contact").unwrap().fields.insert(
@@ -1879,6 +1882,7 @@ mod flattern_tests {
                 determined_type: SkipprDataType::Integer,
                 determined_type_values: None,
                 repetition_count: 1,
+                ..Metadata::new().unwrap()
             },
         );
         let flattened = Helpers::flatten(&json, &metadata);
@@ -1922,6 +1926,7 @@ mod flattern_tests {
                 determined_type: SkipprDataType::String,
                 determined_type_values: None,
                 repetition_count: 1,
+                ..Metadata::new().unwrap()
             },
         );
         metadata.insert(
@@ -1940,6 +1945,7 @@ mod flattern_tests {
                 determined_type: SkipprDataType::Array,
                 determined_type_values: None,
                 repetition_count: 1,
+                ..Metadata::new().unwrap()
             },
         );
         metadata.get_mut("contacts").unwrap().fields.insert(
@@ -1958,6 +1964,7 @@ mod flattern_tests {
                 determined_type: SkipprDataType::String,
                 determined_type_values: None,
                 repetition_count: 1,
+                ..Metadata::new().unwrap()
             },
         );
         metadata
@@ -1983,6 +1990,7 @@ mod flattern_tests {
                     determined_type: SkipprDataType::String,
                     determined_type_values: None,
                     repetition_count: 1,
+                    ..Metadata::new().unwrap()
                 },
             );
         metadata
@@ -2008,6 +2016,7 @@ mod flattern_tests {
                     determined_type: SkipprDataType::Integer,
                     determined_type_values: None,
                     repetition_count: 1,
+                    ..Metadata::new().unwrap()
                 },
             );
         let flattened = Helpers::flatten(&json, &metadata);

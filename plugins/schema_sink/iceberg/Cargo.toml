@@ -1,0 +1,21 @@
+[package]
+name = "skippr-plugin-schema-sink-iceberg"
+version = "0.1.2"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-schema-sink-iceberg"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+clap.workspace = true
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
+tokio.workspace = true
+skippr-plugin-data-sink-iceberg = { path = "../../data_sink/iceberg" }
+
+[package.metadata.skippr-plugin]
+kind = "SchemaSink"
+plugin_name = "Iceberg"
+supports_schema = true

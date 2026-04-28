@@ -669,10 +669,11 @@ async fn discover(output_mode: &str) -> io::Result<()> {
         let fields: Vec<serde_json::Value> = ns_metadata
             .field_details()
             .into_iter()
-            .map(|(name, type_name, _nullable)| {
+            .map(|(name, type_name, nullable)| {
                 serde_json::json!({
                     "name": name,
                     "type": type_name,
+                    "nullable": nullable,
                 })
             })
             .collect();
@@ -800,8 +801,10 @@ async fn sync(output_mode: &str) -> io::Result<()> {
     // CDC compatibility validation at startup
     {
         use skipprd::plugins::cdc::{
-            derive_and_validate, set_global_cdc_contract, CompatibilityResult,
+            derive_and_validate, set_global_cdc_contract, set_namespace_cdc_contracts,
+            CompatibilityResult,
         };
+        use std::collections::BTreeMap;
         let pipeline = Config::get_pipeline_config();
         if let Some(ref cdc_cfg) = pipeline.cdc {
             let input_name = Config::get_pipeline_input_plugin_name();
@@ -852,27 +855,56 @@ async fn sync(output_mode: &str) -> io::Result<()> {
                 .and_then(runtime_sink_capability_for_manifest)
                 .or_else(|| sink_capability_for_plugin(&output_plugin_name).cloned());
             if let (Some(src), Some(snk)) = (src_cap.as_ref(), sink_cap.as_ref()) {
-                match derive_and_validate(src, snk, "default", &cdc_cfg.business_key_columns) {
-                    CompatibilityResult::Compatible(guarantee) => {
-                        info!(
-                            "CDC validation passed: source={} sink={} enforced_guarantee={:?}",
-                            src.name, snk.name, guarantee
-                        );
-                        let contract = build_cdc_contract(cdc_cfg, "default", guarantee);
-                        set_global_cdc_contract(Some(contract));
-                    }
-                    CompatibilityResult::Incompatible(reasons) => {
-                        for r in &reasons {
-                            error!("CDC incompatibility: {}", r);
+                let mut contracts = BTreeMap::new();
+                let default_contract = cdc_cfg.default_contract();
+                let namespace_configs: Vec<(String, Vec<String>)> = if cdc_cfg.namespaces.is_empty()
+                {
+                    vec![(
+                        "*".to_string(),
+                        default_contract.business_key_columns.clone(),
+                    )]
+                } else {
+                    cdc_cfg
+                        .namespaces
+                        .iter()
+                        .map(|(namespace, cfg)| {
+                            let keys = if cfg.business_key_columns.is_empty() {
+                                default_contract.business_key_columns.clone()
+                            } else {
+                                cfg.business_key_columns.clone()
+                            };
+                            (namespace.clone(), keys)
+                        })
+                        .collect()
+                };
+                for (namespace, business_key_columns) in namespace_configs {
+                    match derive_and_validate(src, snk, &namespace, &business_key_columns) {
+                        CompatibilityResult::Compatible(guarantee) => {
+                            info!(
+                                "CDC validation passed: namespace={} source={} sink={} enforced_guarantee={:?}",
+                                namespace, src.name, snk.name, guarantee
+                            );
+                            let contract = build_cdc_contract_for_namespace(
+                                &namespace,
+                                business_key_columns,
+                                guarantee,
+                            );
+                            contracts.insert(namespace, contract);
                         }
-                        panic!(
-                            "CDC validation failed: source={} sink={} — {} reason(s)",
-                            src.name,
-                            snk.name,
-                            reasons.len()
-                        );
+                        CompatibilityResult::Incompatible(reasons) => {
+                            for r in &reasons {
+                                error!("CDC incompatibility: {}", r);
+                            }
+                            panic!(
+                                "CDC validation failed: source={} sink={} — {} reason(s)",
+                                src.name,
+                                snk.name,
+                                reasons.len()
+                            );
+                        }
                     }
                 }
+                set_namespace_cdc_contracts(contracts);
             } else {
                 warn!(
                     "CDC config present but source '{}' or sink '{}' has not declared capabilities; \
@@ -1208,15 +1240,18 @@ pub async fn sync_deadletter_plugin(
     Ok(Some((sink_ref, plugin)))
 }
 
-fn build_cdc_contract(
-    cfg: &skipprd::helpers::configuration::CdcPipelineConfig,
+fn build_cdc_contract_for_namespace(
     namespace: &str,
+    business_key_columns: Vec<String>,
     effective_guarantee: skipprd::plugins::cdc::EffectiveGuarantee,
 ) -> skipprd::plugins::cdc::NamespaceContract {
     skipprd::plugins::cdc::NamespaceContract {
         namespace: namespace.to_string(),
-        business_key_columns: cfg.business_key_columns.clone(),
+        business_key_columns,
         effective_guarantee,
+        order_token_semantics: skipprd::plugins::cdc::OrderTokenSemantics::SourceDefined,
+        null_key_policy: skipprd::plugins::cdc::NullKeyPolicy::Reject,
+        requires_skippr_system_columns: true,
     }
 }
 
@@ -1286,7 +1321,9 @@ fn source_capability_for_plugin(
     }
 }
 
-fn sink_capability_for_plugin(name: &str) -> Option<&'static skipprd::plugins::cdc::SinkCapability> {
+fn sink_capability_for_plugin(
+    name: &str,
+) -> Option<&'static skipprd::plugins::cdc::SinkCapability> {
     use skipprd::plugins::cdc::sink_capabilities;
     match name {
         "Postgres" => Some(&sink_capabilities::POSTGRES),
@@ -1303,6 +1340,7 @@ fn sink_capability_for_plugin(name: &str) -> Option<&'static skipprd::plugins::c
         "File" => Some(&sink_capabilities::FILE),
         "Sftp" | "SFTP" => Some(&sink_capabilities::SFTP),
         "Athena" => Some(&sink_capabilities::ATHENA),
+        "Iceberg" => Some(&sink_capabilities::ICEBERG),
         "Stdout" => Some(&sink_capabilities::STDOUT),
         "Amqp" | "AMQP" => Some(&sink_capabilities::AMQP),
         _ => None,

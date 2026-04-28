@@ -1,17 +1,46 @@
 use serde_derive::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::RwLock;
 
-static CDC_NAMESPACE_CONTRACT: RwLock<Option<NamespaceContract>> = RwLock::new(None);
+const DEFAULT_CONTRACT_NAMESPACE: &str = "*";
 
-/// Store the pipeline's CDC contract so the compactor can populate
-/// `SyncContext.contract` without passing it through every layer.
-pub fn set_global_cdc_contract(contract: Option<NamespaceContract>) {
-    *CDC_NAMESPACE_CONTRACT.write().unwrap() = contract;
+static CDC_NAMESPACE_CONTRACTS: RwLock<BTreeMap<String, NamespaceContract>> =
+    RwLock::new(BTreeMap::new());
+
+/// Store CDC contracts keyed by namespace/table.
+pub fn set_namespace_cdc_contracts(contracts: BTreeMap<String, NamespaceContract>) {
+    *CDC_NAMESPACE_CONTRACTS.write().unwrap() = contracts;
 }
 
-/// Retrieve the CDC contract for the current pipeline.
+/// Backward-compatible helper for older call sites. New code should prefer
+/// `set_namespace_cdc_contracts` and `get_namespace_cdc_contract`.
+pub fn set_global_cdc_contract(contract: Option<NamespaceContract>) {
+    let mut contracts = BTreeMap::new();
+    if let Some(contract) = contract {
+        contracts.insert(DEFAULT_CONTRACT_NAMESPACE.to_string(), contract);
+    }
+    set_namespace_cdc_contracts(contracts);
+}
+
+/// Backward-compatible helper that returns the default contract, if configured.
 pub fn get_global_cdc_contract() -> Option<NamespaceContract> {
-    CDC_NAMESPACE_CONTRACT.read().unwrap().clone()
+    get_namespace_cdc_contract(DEFAULT_CONTRACT_NAMESPACE)
+}
+
+/// Retrieve the CDC contract for a namespace/table. A default contract is only
+/// used for legacy configs that have not yet moved CDC settings under a
+/// namespace key.
+pub fn get_namespace_cdc_contract(namespace: &str) -> Option<NamespaceContract> {
+    let guard = CDC_NAMESPACE_CONTRACTS.read().unwrap();
+    guard.get(namespace).cloned().or_else(|| {
+        guard
+            .get(DEFAULT_CONTRACT_NAMESPACE)
+            .cloned()
+            .map(|mut contract| {
+                contract.namespace = namespace.to_string();
+                contract
+            })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +339,12 @@ pub struct NamespaceContract {
     pub namespace: String,
     pub business_key_columns: Vec<String>,
     pub effective_guarantee: EffectiveGuarantee,
+    #[serde(default)]
+    pub order_token_semantics: OrderTokenSemantics,
+    #[serde(default)]
+    pub null_key_policy: NullKeyPolicy,
+    #[serde(default)]
+    pub requires_skippr_system_columns: bool,
 }
 
 /// The strongest CDC semantics the runtime will enforce for this pipeline.
@@ -318,6 +353,31 @@ pub struct NamespaceContract {
 pub enum EffectiveGuarantee {
     ExactOnceFinalState,
     CdcEncoded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderTokenSemantics {
+    TotalOrder,
+    KeyScopedOrder,
+    SourceDefined,
+}
+
+impl Default for OrderTokenSemantics {
+    fn default() -> Self {
+        OrderTokenSemantics::SourceDefined
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NullKeyPolicy {
+    Reject,
+    AllowEncodedOnly,
+}
+
+impl Default for NullKeyPolicy {
+    fn default() -> Self {
+        NullKeyPolicy::Reject
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -838,6 +898,15 @@ pub mod sink_capabilities {
         supports_transactions: false,
     };
 
+    pub const ICEBERG: SinkCapability = SinkCapability {
+        name: "Iceberg",
+        guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
+        can_manage_skippr_columns: true,
+        can_maintain_tombstone_tables: true,
+        can_compare_order_tokens: true,
+        supports_transactions: true,
+    };
+
     pub const S3: SinkCapability = SinkCapability {
         name: "S3",
         guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
@@ -913,6 +982,7 @@ pub mod sink_capabilities {
             "Clickhouse" => Some(&CLICKHOUSE),
             "Synapse" => Some(&SYNAPSE),
             "Athena" => Some(&ATHENA),
+            "Iceberg" => Some(&ICEBERG),
             "S3" => Some(&S3),
             "Gcs" => Some(&GCS),
             "AzureBlob" => Some(&AZURE_BLOB),
@@ -984,6 +1054,7 @@ mod tests {
             "Clickhouse",
             "Synapse",
             "Athena",
+            "Iceberg",
             "S3",
             "Gcs",
             "AzureBlob",

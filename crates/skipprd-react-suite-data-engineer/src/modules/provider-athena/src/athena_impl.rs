@@ -71,7 +71,11 @@ impl AthenaProvider {
             ATHENA_MAX_CONCURRENCY_CAP,
         );
         let mut aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest());
-        if let Some(region) = settings.region.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(region) = settings
+            .region
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             aws_cfg = aws_cfg.region(aws_config::Region::new(region.clone()));
         }
         let aws_cfg = aws_cfg.load().await;
@@ -105,7 +109,8 @@ impl AthenaProvider {
     /// - `ATHENA_MAX_CONCURRENCY` (default: 15, cap: 20)
     /// - `ATHENA_DISCOVERY_CACHE_TTL_SECS` (default: 120)
     pub async fn from_env() -> Self {
-        let region = getenv_nonempty("AWS_REGION").or_else(|| getenv_nonempty("AWS_DEFAULT_REGION"));
+        let region =
+            getenv_nonempty("AWS_REGION").or_else(|| getenv_nonempty("AWS_DEFAULT_REGION"));
         let workgroup = getenv_nonempty("ATHENA_WORKGROUP");
         let source_schema = getenv_nonempty("ATHENA_SOURCE_SCHEMA");
         let default_catalog = getenv("ATHENA_TARGET_CATALOG", "AwsDataCatalog");

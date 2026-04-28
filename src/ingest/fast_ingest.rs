@@ -33,7 +33,8 @@ pub fn create_default_nested_message(metadata: &HashMap<String, Metadata>) -> Va
     for (field, meta_data) in metadata {
         if meta_data.enabled {
             if meta_data.fields.is_empty() {
-                message[meta_data.out_field_name.clone()] = Value::Null;
+                message[meta_data.out_field_name.clone()] =
+                    meta_data.default_value().cloned().unwrap_or(Value::Null);
             } else if meta_data.determined_type == SkipprDataType::Array {
                 if meta_data.determined_type_values == Some(SkipprDataType::Record) {
                     // message[meta_data.out_field_name.clone()] = create_default_nested_message(&meta_data.fields);
@@ -185,6 +186,8 @@ pub fn fast_path_ingest(
         }
     }
 
+    validate_required_fields(metadata, &_message)?;
+
     // Apply flattening if needed
     if flatten {
         _message = match Helpers::flatten(&_message, &metadata) {
@@ -194,6 +197,32 @@ pub fn fast_path_ingest(
     }
 
     Ok(_message)
+}
+
+pub fn validate_required_fields(
+    metadata: &HashMap<String, Metadata>,
+    message: &Value,
+) -> Result<(), Box<dyn Error>> {
+    let object = message.as_object().ok_or("Message is not an object")?;
+    for meta_data in metadata.values() {
+        if !meta_data.enabled {
+            continue;
+        }
+        let out_field_name = &meta_data.out_field_name;
+        if meta_data.fields.is_empty() {
+            let value = object.get(out_field_name).unwrap_or(&Value::Null);
+            if !meta_data.nullable() && meta_data.default_value().is_none() && value.is_null() {
+                return Err(
+                    format!("Required field '{}' is missing or null", out_field_name).into(),
+                );
+            }
+        } else if let Some(child_message) = object.get(out_field_name) {
+            if child_message.is_object() {
+                validate_required_fields(&meta_data.fields, child_message)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Optimized version of fast_set_value that uses the DataType enum
@@ -973,6 +1002,7 @@ mod tests {
                 determined_type: SkipprDataType::Date,
                 determined_type_values: None,
                 repetition_count: 1,
+                ..Metadata::new().unwrap()
             },
         );
 

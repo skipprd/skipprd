@@ -1,0 +1,56 @@
+skippr:
+  skippr_s3_bucket: skippr-e2e-sample-data-output
+  tenant: skippr
+  workspace: iceberg-types-cdc
+
+pipelines:
+  postgres_iceberg_types_cdc:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 60
+    data_source: data_sources.postgres_types_cdc
+    data_sink: data_sinks.iceberg_types_cdc
+    cdc:
+      default:
+        business_key_columns: ["id"]
+      namespaces:
+        type_matrix_orders:
+          business_key_columns: ["id"]
+
+data_sources:
+  postgres_types_cdc:
+    Postgres:
+      host: 127.0.0.1
+      port: 5432
+      user: postgres
+      password: postgres
+      database: skippr_iceberg_e2e
+      tables: ["type_matrix_orders"]
+
+data_sinks:
+  iceberg_types_cdc:
+    Iceberg:
+      table_namespace: iceberg_e2e
+      table_prefix: skippr
+      table_location_prefix: s3://skippr-e2e-sample-data-output/iceberg-e2e
+      catalog:
+        type: glue
+        warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e
+        database: iceberg_e2e
+        catalog_id: "353855562591"
+        region: us-east-1
+    schema_sink: schema_sinks.iceberg_glue
+
+schema_sinks:
+  iceberg_glue:
+    Iceberg:
+      table_namespace: iceberg_e2e
+      table_prefix: skippr
+      table_location_prefix: s3://skippr-e2e-sample-data-output/iceberg-e2e
+      catalog:
+        type: glue
+        warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e
+        database: iceberg_e2e
+        catalog_id: "353855562591"
+        region: us-east-1

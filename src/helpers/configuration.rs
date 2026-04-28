@@ -152,9 +152,36 @@ pub struct Pipeline {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct CdcPipelineConfig {
+    /// Default CDC contract used for dynamically discovered namespaces.
+    #[serde(default)]
+    pub default: CdcNamespaceConfig,
+    /// Legacy default business key columns. Prefer `cdc.default.business_key_columns`.
+    #[serde(default)]
+    pub business_key_columns: Vec<String>,
+    /// Namespace/table-specific CDC contracts. Keys are Skippr namespaces.
+    #[serde(default)]
+    pub namespaces: HashMap<String, CdcNamespaceConfig>,
+}
+
+impl CdcPipelineConfig {
+    pub fn default_contract(&self) -> CdcNamespaceConfig {
+        let mut default = self.default.clone();
+        if default.business_key_columns.is_empty() && !self.business_key_columns.is_empty() {
+            default.business_key_columns = self.business_key_columns.clone();
+        }
+        default
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct CdcNamespaceConfig {
     /// Business key columns used for upsert/delete identity in the target.
     #[serde(default)]
     pub business_key_columns: Vec<String>,
+    /// How exact-final-state sinks should handle rows with null business keys.
+    /// The default is to reject them for sinks that require deterministic keys.
+    #[serde(default)]
+    pub null_key_policy: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1796,6 +1823,13 @@ impl Config {
                     let keys: Vec<String> = pipeline_metadata.metadata.keys().cloned().collect();
                     info!("Loaded metadata (entries={}, keys={:?})", num_entries, keys);
                     Self::inject_flatten_flag(&mut pipeline_metadata);
+                    if pipeline_metadata.migrate_persisted_metadata() {
+                        info!(
+                            "Migrated persisted metadata to version {}",
+                            pipeline_metadata.metadata_version
+                        );
+                        Self::set_metadata(&pipeline_metadata, false).await;
+                    }
                     Ok(pipeline_metadata)
                 }
                 Err(e) => {

@@ -4,9 +4,10 @@ use arrow::error::ArrowError;
 use std::collections::{HashMap, HashSet};
 use tracing::warn;
 
-use arrow::datatypes::TimeUnit::Millisecond;
+use arrow::datatypes::TimeUnit::{Microsecond, Millisecond};
 // use arrow::datatypes::Fields;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum InferredType {
     Scalar(HashSet<DataType>),
@@ -16,6 +17,7 @@ enum InferredType {
     Any,
 }
 
+#[allow(dead_code)]
 fn coerce_data_type(dt: Vec<&DataType>) -> DataType {
     let mut dt_iter = dt.into_iter().cloned();
     let dt_init = dt_iter.next().unwrap_or(DataType::Utf8);
@@ -47,6 +49,7 @@ fn coerce_data_type(dt: Vec<&DataType>) -> DataType {
     })
 }
 
+#[allow(dead_code)]
 fn generate_datatype(t: &InferredType) -> Result<DataType, ArrowError> {
     Ok(match t {
         InferredType::Scalar(hs) => coerce_data_type(hs.iter().collect()),
@@ -77,6 +80,7 @@ fn generate_datatype(t: &InferredType) -> Result<DataType, ArrowError> {
 }
 
 // fn generate_fields(spec: &HashMap<String, InferredType>) -> Result<Vec<Field>, ArrowError> {
+#[allow(dead_code)]
 fn generate_fields(spec: &HashMap<String, InferredType>) -> Vec<Field> {
     // Deterministic field order to avoid schema hash thrash and redundant WAL prefixes
     let mut keys: Vec<&String> = spec.keys().collect();
@@ -90,10 +94,12 @@ fn generate_fields(spec: &HashMap<String, InferredType>) -> Vec<Field> {
 }
 
 /// Generate schema from JSON field names and inferred data types
+#[allow(dead_code)]
 fn generate_schema(spec: HashMap<String, InferredType>) -> Result<Schema, ArrowError> {
     Ok(Schema::new(generate_fields(&spec)))
 }
 
+#[allow(dead_code)]
 fn set_object_scalar_field_type(
     field_types: &mut HashMap<String, InferredType>,
     key: &str,
@@ -130,12 +136,21 @@ fn convert_skippr_type_to_arrow_data_type(
         SkipprDataType::Boolean => Ok(DataType::Boolean),
         SkipprDataType::Null => Ok(DataType::Null),
         SkipprDataType::Integer => Ok(DataType::Int32),
+        SkipprDataType::Short => Ok(DataType::Int16),
+        SkipprDataType::Byte => Ok(DataType::Int8),
         SkipprDataType::Long => Ok(DataType::Int64),
         SkipprDataType::Double => Ok(DataType::Float64),
+        SkipprDataType::Float => Ok(DataType::Float32),
+        SkipprDataType::Decimal => Ok(DataType::Decimal128(38, 9)),
         SkipprDataType::String => Ok(DataType::Utf8),
         SkipprDataType::Timestamp => Ok(DataType::Timestamp(Millisecond, None)),
         SkipprDataType::TimestampMilli => Ok(DataType::Timestamp(Millisecond, None)),
         SkipprDataType::Date => Ok(DataType::Timestamp(Millisecond, None)),
+        SkipprDataType::Time => Ok(DataType::Time64(Microsecond)),
+        SkipprDataType::Binary => Ok(DataType::Binary),
+        SkipprDataType::Uuid => Ok(DataType::Utf8),
+        SkipprDataType::Fixed => Ok(DataType::FixedSizeBinary(16)),
+        SkipprDataType::Json => Ok(DataType::Utf8),
         _ => Ok(DataType::Utf8),
     }
 }
@@ -143,10 +158,65 @@ fn convert_skippr_type_to_arrow_data_type(
 pub fn convert_skippr_to_arrow(
     metadata: Box<HashMap<String, OutputMetadata>>,
 ) -> Result<Schema, ArrowError> {
-    let field_types: HashMap<String, InferredType> =
-        convert_skippr_to_arrow_field_types(&metadata).unwrap();
+    Ok(Schema::new(output_metadata_fields(&metadata)?))
+}
 
-    generate_schema(field_types)
+fn output_metadata_fields(
+    metadata: &HashMap<String, OutputMetadata>,
+) -> Result<Vec<Field>, ArrowError> {
+    let mut values: Vec<&OutputMetadata> = metadata.values().collect();
+    values.sort_by(|a, b| a.out_field_name.cmp(&b.out_field_name));
+    values.into_iter().map(output_metadata_field).collect()
+}
+
+fn output_metadata_field(metadata: &OutputMetadata) -> Result<Field, ArrowError> {
+    Ok(Field::new(
+        metadata.out_field_name.clone(),
+        output_metadata_data_type(metadata)?,
+        metadata.nullable,
+    ))
+}
+
+fn output_metadata_data_type(metadata: &OutputMetadata) -> Result<DataType, ArrowError> {
+    match metadata.determined_type {
+        SkipprDataType::Record | SkipprDataType::Map => {
+            if metadata.fields.is_empty() {
+                convert_skippr_type_to_arrow_data_type(&metadata.determined_type)
+            } else {
+                Ok(DataType::Struct(
+                    output_metadata_fields(&metadata.fields)?.into(),
+                ))
+            }
+        }
+        SkipprDataType::Array => {
+            let item_type = if metadata.determined_type_values == Some(SkipprDataType::Record) {
+                metadata
+                    .fields
+                    .get("0")
+                    .map(output_metadata_data_type)
+                    .transpose()?
+                    .unwrap_or_else(|| DataType::Struct(Vec::<Field>::new().into()))
+            } else if metadata.determined_type_values == Some(SkipprDataType::Array) {
+                metadata
+                    .fields
+                    .get("0")
+                    .map(output_metadata_data_type)
+                    .transpose()?
+                    .unwrap_or_else(|| DataType::Utf8)
+            } else {
+                convert_skippr_type_to_arrow_data_type(
+                    metadata
+                        .determined_type_values
+                        .as_ref()
+                        .unwrap_or(&SkipprDataType::String),
+                )?
+            };
+            Ok(DataType::List(
+                Box::new(Field::new("item", item_type, true)).into(),
+            ))
+        }
+        _ => convert_skippr_type_to_arrow_data_type(&metadata.determined_type),
+    }
 }
 
 #[allow(dead_code)]
@@ -215,6 +285,7 @@ pub fn is_schema_superset(new_schema: &Schema, old_schema: &Schema) -> bool {
     true
 }
 
+#[allow(dead_code)]
 fn convert_skippr_to_arrow_field_types(
     metadata: &HashMap<String, OutputMetadata>,
 ) -> Result<HashMap<String, InferredType>, ArrowError> {
@@ -339,6 +410,14 @@ fn convert_skippr_to_arrow_field_types(
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int32)
                     .expect("Error setting object scalar field integer type");
             }
+            SkipprDataType::Short => {
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int16)
+                    .expect("Error setting object scalar field short type");
+            }
+            SkipprDataType::Byte => {
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int8)
+                    .expect("Error setting object scalar field byte type");
+            }
             SkipprDataType::Long => {
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int64)
                     .expect("Error setting object scalar field long type")
@@ -347,6 +426,16 @@ fn convert_skippr_to_arrow_field_types(
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Float64)
                     .expect("Error setting object scalar field double type")
             }
+            SkipprDataType::Float => {
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Float32)
+                    .expect("Error setting object scalar field float type")
+            }
+            SkipprDataType::Decimal => set_object_scalar_field_type(
+                &mut field_types,
+                &v.out_field_name,
+                DataType::Decimal128(38, 9),
+            )
+            .expect("Error setting object scalar field decimal type"),
             SkipprDataType::String => {
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Utf8)
                     .expect("Error setting object scalar field string type")
@@ -369,6 +458,30 @@ fn convert_skippr_to_arrow_field_types(
                 DataType::Timestamp(Millisecond, None),
             )
             .expect("Error setting object scalar field date type"),
+            SkipprDataType::Time => set_object_scalar_field_type(
+                &mut field_types,
+                &v.out_field_name,
+                DataType::Time64(Microsecond),
+            )
+            .expect("Error setting object scalar field time type"),
+            SkipprDataType::Binary => {
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Binary)
+                    .expect("Error setting object scalar field binary type")
+            }
+            SkipprDataType::Uuid => {
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Utf8)
+                    .expect("Error setting object scalar field uuid type")
+            }
+            SkipprDataType::Fixed => set_object_scalar_field_type(
+                &mut field_types,
+                &v.out_field_name,
+                DataType::FixedSizeBinary(16),
+            )
+            .expect("Error setting object scalar field fixed type"),
+            SkipprDataType::Json => {
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Utf8)
+                    .expect("Error setting object scalar field json type")
+            }
             other => {
                 warn!(
                     "Unhandled Skippr type {:?} for field '{}', falling back to Utf8",
@@ -389,6 +502,60 @@ mod tests {
     #[allow(unused_imports)]
     use arrow::datatypes::{DataType, Field};
     use std::collections::HashMap;
+
+    #[test]
+    fn test_skippr_type_to_arrow_matrix() {
+        let cases = vec![
+            (SkipprDataType::Boolean, DataType::Boolean),
+            (SkipprDataType::Null, DataType::Null),
+            (SkipprDataType::Byte, DataType::Int8),
+            (SkipprDataType::Short, DataType::Int16),
+            (SkipprDataType::Integer, DataType::Int32),
+            (SkipprDataType::Long, DataType::Int64),
+            (SkipprDataType::Float, DataType::Float32),
+            (SkipprDataType::Double, DataType::Float64),
+            (SkipprDataType::Decimal, DataType::Decimal128(38, 9)),
+            (SkipprDataType::String, DataType::Utf8),
+            (
+                SkipprDataType::Timestamp,
+                DataType::Timestamp(Millisecond, None),
+            ),
+            (
+                SkipprDataType::TimestampMilli,
+                DataType::Timestamp(Millisecond, None),
+            ),
+            (SkipprDataType::Date, DataType::Timestamp(Millisecond, None)),
+            (SkipprDataType::Time, DataType::Time64(Microsecond)),
+            (SkipprDataType::Binary, DataType::Binary),
+            (SkipprDataType::Uuid, DataType::Utf8),
+            (SkipprDataType::Fixed, DataType::FixedSizeBinary(16)),
+            (SkipprDataType::Json, DataType::Utf8),
+        ];
+
+        for (skippr_type, arrow_type) in cases {
+            assert_eq!(
+                convert_skippr_type_to_arrow_data_type(&skippr_type).unwrap(),
+                arrow_type,
+                "unexpected Arrow mapping for {:?}",
+                skippr_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_output_metadata_nullable_controls_arrow_field() {
+        let mut metadata = OutputMetadata::new();
+        metadata.out_field_name = "required_id".to_string();
+        metadata.determined_type = SkipprDataType::Long;
+        metadata.nullable = false;
+
+        let mut meta_map = HashMap::new();
+        meta_map.insert("required_id".to_string(), metadata);
+        let schema = convert_skippr_to_arrow(Box::new(meta_map)).unwrap();
+
+        assert_eq!(schema.fields().len(), 1);
+        assert!(!schema.field(0).is_nullable());
+    }
 
     #[test]
     fn test_convert_skippr_to_arrow_simple_array() {

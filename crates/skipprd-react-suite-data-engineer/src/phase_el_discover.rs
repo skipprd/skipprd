@@ -237,7 +237,10 @@ mod tests {
         .await
         .expect("control store read should succeed")
         .expect("execution state should be written");
-        assert_eq!(state.phase.current_phase, crate::control_flow::Phase::ElSync);
+        assert_eq!(
+            state.phase.current_phase,
+            crate::control_flow::Phase::ElSync
+        );
     }
 }
 

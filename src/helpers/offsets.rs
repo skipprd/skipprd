@@ -918,7 +918,10 @@ impl Offsets {
         match bincode::deserialize::<CheckpointEnvelope>(&value) {
             Ok(envelope) => Some(envelope),
             Err(err) => {
-                error!("Failed to deserialize checkpoint envelope '{}': {}", key, err);
+                error!(
+                    "Failed to deserialize checkpoint envelope '{}': {}",
+                    key, err
+                );
                 None
             }
         }
@@ -955,8 +958,8 @@ mod tests {
                 RuntimeOffsetOperation::Validate { .. } => {
                     Ok(RuntimeOffsetValue::Validate(Some(true)))
                 }
-                RuntimeOffsetOperation::LoadCheckpointEnvelope { .. } => Ok(
-                    RuntimeOffsetValue::LoadCheckpointEnvelope(Some(
+                RuntimeOffsetOperation::LoadCheckpointEnvelope { .. } => {
+                    Ok(RuntimeOffsetValue::LoadCheckpointEnvelope(Some(
                         CheckpointEnvelope::from_payload(
                             CheckpointAuthority::AdvisoryHint,
                             CheckpointKind::AdvisoryProgress,
@@ -964,8 +967,8 @@ mod tests {
                             &b"checkpoint".to_vec(),
                         )
                         .unwrap(),
-                    )),
-                ),
+                    )))
+                }
             }
         }
     }

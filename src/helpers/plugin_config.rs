@@ -153,7 +153,8 @@ fn plugin_entry_from_map(
 fn default_format_for_plugin(plugin_name: &str) -> &'static str {
     match plugin_name {
         "Mssql" => "row",
-        "Snowflake" | "AzureBlob" | "Gcs" | "GCS" | "Sftp" | "Databricks" | "Redshift" => "parquet",
+        "Snowflake" | "AzureBlob" | "Gcs" | "GCS" | "Sftp" | "Databricks" | "Redshift"
+        | "Iceberg" => "parquet",
         _ => "json",
     }
 }

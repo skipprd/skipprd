@@ -1,0 +1,42 @@
+[package]
+name = "skippr-plugin-data-sink-iceberg"
+version = "0.1.2"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-data-sink-iceberg"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+clap.workspace = true
+tokio.workspace = true
+skippr-core.workspace = true
+skippr-runtime-sdk.workspace = true
+arrow.workspace = true
+bytes.workspace = true
+datafusion.workspace = true
+futures.workspace = true
+hex.workspace = true
+md5.workspace = true
+parquet.workspace = true
+serde.workspace = true
+serde_derive.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+aws-config = "1.5.1"
+aws-sdk-s3 = "1.32.0"
+iceberg = "0.7.0"
+iceberg-catalog-glue = "0.7.0"
+
+[package.metadata.skippr-plugin]
+kind = "DataSink"
+plugin_name = "Iceberg"
+
+[package.metadata.skippr-plugin.sink_capability]
+name = "Iceberg"
+guarantee_tier = "ExactOnceCdcEligible"
+can_manage_skippr_columns = true
+can_maintain_tombstone_tables = true
+can_compare_order_tokens = true
+supports_transactions = true

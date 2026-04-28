@@ -420,9 +420,7 @@ impl BufferedRuntimeFrameReader {
     }
 }
 
-fn build_source_start_request_for_pipeline(
-    pipeline_name: &str,
-) -> io::Result<SourceStartRequest> {
+fn build_source_start_request_for_pipeline(pipeline_name: &str) -> io::Result<SourceStartRequest> {
     let source_config = RuntimeSourceConfig::try_from(
         Config::get_pipeline_input_plugin_config().map_err(io::Error::other)?,
     )
@@ -502,9 +500,7 @@ pub async fn sync_runtime_input_plugin(
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
 ) -> io::Result<()> {
     let mut connection = RuntimeChildConnection::spawn(resolved, pipeline_name).await?;
-    let start_request = build_source_start_request_for_pipeline(
-        &connection.pipeline_name,
-    )?;
+    let start_request = build_source_start_request_for_pipeline(&connection.pipeline_name)?;
     connection
         .send(&HostFrame::RunSource(start_request))
         .await?;
@@ -562,8 +558,10 @@ pub async fn sync_runtime_input_plugin(
                 PluginDataFrame::IngestBatches { batches } => {
                     if !batches.is_empty() {
                         if Config::debug_enabled() || Config::log_wal_enabled() {
-                            let total_bytes: usize =
-                                batches.iter().map(|batch| batch.arrow_stream_bytes.len()).sum();
+                            let total_bytes: usize = batches
+                                .iter()
+                                .map(|batch| batch.arrow_stream_bytes.len())
+                                .sum();
                             let offset_sample: Vec<String> = batches
                                 .iter()
                                 .take(3)
@@ -1175,7 +1173,9 @@ impl SchemaSink for RuntimeSchemaSinkPlugin {
 mod tests {
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    use super::{handle_runtime_offset_request, BufferedRuntimeFrameReader, MAX_RUNTIME_FRAME_BYTES};
+    use super::{
+        handle_runtime_offset_request, BufferedRuntimeFrameReader, MAX_RUNTIME_FRAME_BYTES,
+    };
     use crate::helpers::configuration::Config;
     use crate::helpers::offsets::{
         OffsetKey, OffsetTypes, Offsets, RuntimeOffsetOperation, RuntimeOffsetRpcRequest,
