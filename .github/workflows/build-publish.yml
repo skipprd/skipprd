@@ -335,6 +335,7 @@ jobs:
   #       uses: Swatinem/rust-cache@v2
   #       with:
   #         shared-key: v2-test-macos_arm64
+  #         env-vars: "CARGO_INCREMENTAL CARGO_TERM_COLOR LIBSSH2_SYS_USE_PKG_CONFIG OPENSSL_DIR PKG_CONFIG_PATH RUSTFLAGS"
   #     - name: Configure version if tag commit
   #       if: startsWith(github.ref, 'refs/tags/')
   #       shell: bash
@@ -369,6 +370,8 @@ jobs:
       SCCACHE_S3_KEY_PREFIX: skipprd
       SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
       SCCACHE_S3_USE_SSL: "true"
+      RUSTFLAGS: "-C debuginfo=0"
+      VCPKGRS_NO_ZLIB: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -496,12 +499,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: v2-release-windows_x86
+          env-vars: "CARGO_INCREMENTAL CARGO_TERM_COLOR CMAKE_PREFIX_PATH CMAKE_TOOLCHAIN_FILE OPENSSL_DIR RUSTFLAGS VCPKGRS_NO_ZLIB VCPKG_DEFAULT_TRIPLET VCPKG_TARGET_TRIPLET"
       - name: Configure sccache
         if: env.SCCACHE_BUCKET != ''
         shell: pwsh
         run: |
           "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
           "SCCACHE_IDLE_TIMEOUT=0" >> $env:GITHUB_ENV
+          sccache --zero-stats
+          sccache --show-stats
 
       - name: Configure version if tag commit
         if: startsWith(github.ref, 'refs/tags/')
@@ -572,9 +578,6 @@ jobs:
           Get-ChildItem skippr-windows_x86
           Get-ChildItem skippr-admin-windows_x86
           Get-ChildItem runtime-plugin-binaries-windows_x86
-        env:
-          RUSTFLAGS: "-C debuginfo=0"
-          VCPKGRS_NO_ZLIB: "1"
 
       - name: Verify compiled version
         shell: pwsh
@@ -749,6 +752,7 @@ jobs:
   #       uses: Swatinem/rust-cache@v2
   #       with:
   #         shared-key: v2-test-windows_x86
+  #         env-vars: "CARGO_INCREMENTAL CARGO_TERM_COLOR CMAKE_PREFIX_PATH CMAKE_TOOLCHAIN_FILE OPENSSL_DIR RUSTFLAGS VCPKGRS_NO_ZLIB VCPKG_DEFAULT_TRIPLET VCPKG_TARGET_TRIPLET"
   #     - name: Configure sccache
   #       if: env.SCCACHE_BUCKET != ''
   #       shell: pwsh

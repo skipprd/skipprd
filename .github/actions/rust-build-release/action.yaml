@@ -62,10 +62,14 @@ runs:
       run: |
         echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
         echo "SCCACHE_IDLE_TIMEOUT=0" >> $GITHUB_ENV
+    - name: Disable debuginfo generation
+      shell: bash
+      run: echo "RUSTFLAGS=-C debuginfo=0" >> $GITHUB_ENV
     - name: Rust cache
       uses: Swatinem/rust-cache@v2
       with:
         shared-key: v2-release-${{ inputs.architecture_name }}
+        env-vars: "CARGO_INCREMENTAL CARGO_TERM_COLOR RUSTFLAGS"
     - name: Configure version if tag commit
       shell: bash
       if: startsWith(github.ref, 'refs/tags/')
@@ -124,9 +128,6 @@ runs:
         ls -la skippr-${{ inputs.architecture_name }}
         ls -la skippr-admin-${{ inputs.architecture_name }}
         ls -la runtime-plugin-binaries-${{ inputs.architecture_name }}
-      env:
-        # do not produce debug symbols to keep memory usage down
-        RUSTFLAGS: "-C debuginfo=0"
     - name: Verify compiled version
       shell: bash
       run: |
