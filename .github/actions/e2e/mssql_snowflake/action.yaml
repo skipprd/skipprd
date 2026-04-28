@@ -89,6 +89,7 @@ runs:
           $runAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "1" }
           $projectName = "mssql_snowflake_e2e_${runId}_${runAttempt}"
           $env:DATA_DIR = Join-Path $workdir "data"
+          $env:SKIPPR_STORAGE_MODE = "local"
           $configPath = Join-Path $workdir "skippr.yaml"
           $configLines = @(
             "project: $projectName",

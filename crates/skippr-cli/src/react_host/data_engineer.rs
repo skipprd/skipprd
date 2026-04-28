@@ -459,11 +459,16 @@ pub(crate) async fn wire_providers(
         .expect("resolved_config must be set before wire_providers");
     let providers = de_cfg::de_config_from_resolved(cfg).unwrap_or_default();
     let wh_kind = providers.warehouse.kind;
-    let skippr_storage_mode = match cfg.storage.mode {
-        StorageMode::Local => "local",
-        StorageMode::S3 => "s3",
+    let skippr_storage_mode =
+        getenv_nonempty("SKIPPR_STORAGE_MODE").unwrap_or_else(|| match cfg.storage.mode {
+            StorageMode::Local => "local".to_string(),
+            StorageMode::S3 => "s3".to_string(),
+        });
+    let skippr_storage_bucket = if skippr_storage_mode.eq_ignore_ascii_case("s3") {
+        getenv_nonempty("SKIPPR_S3_BUCKET").or_else(|| cfg.storage.bucket.clone())
+    } else {
+        None
     };
-    let skippr_storage_bucket = cfg.storage.bucket.clone();
     let skippr_data_dir = {
         let fs_root = cfg.storage.path.as_deref().unwrap_or("./.skippr");
         std::path::PathBuf::from(fs_root)
@@ -644,7 +649,7 @@ pub(crate) async fn wire_providers(
             providers.el.clone(),
             providers.warehouse.clone(),
             skippr_data_dir,
-            Some(skippr_storage_mode.to_string()),
+            Some(skippr_storage_mode),
             skippr_storage_bucket,
         );
         sctx.set_capability(Arc::new(SkipprCap(Arc::new(skippr_provider))));
