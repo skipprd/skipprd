@@ -1061,8 +1061,22 @@ impl Buffers {
         Self::compaction_id_for_source(&SegmentSource::Disk(seg_path.clone()), idx)
     }
 
+    #[cfg(not(windows))]
     fn fsync_dir(dir: &PathBuf) -> io::Result<()> {
         let df = File::open(dir)?;
+        df.sync_all()
+    }
+
+    #[cfg(windows)]
+    fn fsync_dir(dir: &PathBuf) -> io::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+        let df = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)?;
         df.sync_all()
     }
 

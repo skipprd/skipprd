@@ -60,6 +60,7 @@ runs:
 
         $workdir = Join-Path $env:RUNNER_TEMP ("mssql-snowflake-" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Force -Path $workdir | Out-Null
+        $pushedLocation = $false
 
         try {
           Write-Host "Writing Snowflake private key"
@@ -87,6 +88,7 @@ runs:
           $runId = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { "local" }
           $runAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "1" }
           $projectName = "mssql_snowflake_e2e_${runId}_${runAttempt}"
+          $env:DATA_DIR = Join-Path $workdir "data"
           $configPath = Join-Path $workdir "skippr.yaml"
           $configLines = @(
             "project: $projectName",
@@ -107,6 +109,9 @@ runs:
           )
           Set-Content -Path $configPath -Value ($configLines -join "`n") -Encoding utf8
 
+          Push-Location $workdir
+          $pushedLocation = $true
+
           Write-Host "Running skippr doctor"
           & $skipprBin --config $configPath doctor
           if ($LASTEXITCODE -ne 0) {
@@ -115,7 +120,7 @@ runs:
 
           Write-Host "Running skippr MSSQL to Snowflake e2e"
           $logPath = Join-Path $workdir "skippr-run.log"
-          & $skipprBin --config $configPath run --log trace 2>&1 | Tee-Object -FilePath $logPath
+          & $skipprBin --config $configPath run --log info 2>&1 | Tee-Object -FilePath $logPath
           $status = $LASTEXITCODE
           if ($status -ne 0) {
             Write-Error "::error::skippr run failed with exit code $status"
@@ -124,5 +129,8 @@ runs:
             Write-Error "::error::skippr run exited successfully but did not print final Done line. This catches the silent-exit regression where the wrapper returns right after printing the run id."
           }
         } finally {
+          if ($pushedLocation) {
+            Pop-Location
+          }
           Remove-Item -Recurse -Force $workdir -ErrorAction SilentlyContinue
         }
