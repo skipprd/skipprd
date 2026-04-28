@@ -1648,7 +1648,9 @@ impl Buffers {
                         .ok()
                         .and_then(|pm| {
                             if pm.kind == WalPartKind::Cdc && !pm.rows.is_empty() {
-                                let contract = crate::plugins::cdc::get_global_cdc_contract();
+                                let contract = crate::plugins::cdc::get_namespace_cdc_contract(
+                                    &idx.key.namespace,
+                                );
                                 Some(SyncContext {
                                     part_meta: pm,
                                     contract,

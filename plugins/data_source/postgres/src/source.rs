@@ -11,8 +11,8 @@ use crate::pgoutput::{self, PgColumn, PgOutputMessage};
 use skippr_core::helpers::offsets::{OffsetKey, Offsets};
 use skippr_core::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use skippr_core::plugins::cdc::{
-    source_capabilities, CheckpointAuthority, CheckpointKind, MutationKind,
-    PostgresCheckpoint, SourceCapability, WalRowMeta,
+    source_capabilities, CheckpointAuthority, CheckpointKind, MutationKind, PostgresCheckpoint,
+    SourceCapability, WalRowMeta,
 };
 use skippr_core::plugins::{DataSink, DataSource};
 

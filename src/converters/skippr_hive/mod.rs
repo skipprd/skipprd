@@ -19,11 +19,20 @@ static MAPPINGS: phf::Map<&'static str, &'static str> = phf_map! {
     "string" => "string",
     "boolean" => "boolean",
     "integer" => "int",
+    "short" => "smallint",
+    "byte" => "tinyint",
     "double" => "double",
+    "float" => "float",
+    "decimal" => "decimal(38,9)",
     "NULL" => "null",
     "date" => "timestamp",
     "timestamp" => "timestamp",
-    "timestamp_milli" => "timestamp"
+    "timestamp_milli" => "timestamp",
+    "time" => "string",
+    "binary" => "binary",
+    "uuid" => "string",
+    "fixed" => "binary",
+    "json" => "string"
 };
 
 pub struct SkipprHive {}
@@ -199,6 +208,42 @@ mod tests {
     use super::*;
     #[allow(unused_imports)]
     use std::collections::HashMap;
+
+    #[test]
+    fn test_skippr_type_to_hive_matrix() {
+        let cases = vec![
+            (SkipprDataType::Long, "bigint"),
+            (SkipprDataType::String, "string"),
+            (SkipprDataType::Boolean, "boolean"),
+            (SkipprDataType::Integer, "int"),
+            (SkipprDataType::Short, "smallint"),
+            (SkipprDataType::Byte, "tinyint"),
+            (SkipprDataType::Double, "double"),
+            (SkipprDataType::Float, "float"),
+            (SkipprDataType::Decimal, "decimal(38,9)"),
+            (SkipprDataType::Date, "timestamp"),
+            (SkipprDataType::Timestamp, "timestamp"),
+            (SkipprDataType::TimestampMilli, "timestamp"),
+            (SkipprDataType::Time, "string"),
+            (SkipprDataType::Binary, "binary"),
+            (SkipprDataType::Uuid, "string"),
+            (SkipprDataType::Fixed, "binary"),
+            (SkipprDataType::Json, "string"),
+        ];
+
+        for (skippr_type, hive_type) in cases {
+            let mut root = OutputMetadata::new();
+            root.determined_type = SkipprDataType::Record;
+            let mut field = OutputMetadata::new();
+            field.out_field_name = format!("field_{}", skippr_type.as_str());
+            field.determined_type = skippr_type;
+            root.fields.insert(field.out_field_name.clone(), field);
+
+            let columns = SkipprHive::convert_skippr_to_hive(&root).unwrap();
+            assert_eq!(columns.len(), 1);
+            assert_eq!(columns[0].r#type().unwrap(), hive_type);
+        }
+    }
 
     #[test]
     fn test_convert_skippr_to_hive_simple_array() {

@@ -127,6 +127,16 @@ pub struct OutputMetadata {
     pub(crate) determined_type: SkipprDataType,
     #[serde(with = "serde_opt_data_type")]
     pub(crate) determined_type_values: Option<SkipprDataType>,
+    #[serde(default)]
+    pub(crate) field_id: i32,
+    #[serde(default)]
+    pub(crate) schema_id: u64,
+    #[serde(default)]
+    pub(crate) lineage_id: String,
+    #[serde(default = "crate::lineage::default_nullable")]
+    pub(crate) nullable: bool,
+    #[serde(default)]
+    pub(crate) default_value: Option<serde_json::Value>,
     pub(crate) fields: Box<HashMap<String, OutputMetadata>>,
 }
 
@@ -138,6 +148,11 @@ impl OutputMetadata {
             out_field_name: "".to_string(),
             determined_type: SkipprDataType::Unknown,
             determined_type_values: None,
+            field_id: 0,
+            schema_id: 0,
+            lineage_id: "".to_string(),
+            nullable: true,
+            default_value: None,
             fields: Box::new(HashMap::new()),
         }
     }
@@ -150,8 +165,36 @@ impl OutputMetadata {
         &self.determined_type
     }
 
+    pub fn determined_type_values(&self) -> Option<&SkipprDataType> {
+        self.determined_type_values.as_ref()
+    }
+
+    pub fn nullable(&self) -> bool {
+        self.nullable
+    }
+
+    pub fn field_id(&self) -> i32 {
+        self.field_id
+    }
+
+    pub fn schema_id(&self) -> u64 {
+        self.schema_id
+    }
+
+    pub fn lineage_id(&self) -> &str {
+        &self.lineage_id
+    }
+
+    pub fn default_value(&self) -> Option<&serde_json::Value> {
+        self.default_value.as_ref()
+    }
+
     pub fn child_fields(&self) -> impl Iterator<Item = (&String, &OutputMetadata)> {
         self.fields.iter()
+    }
+
+    pub fn fields_clone(&self) -> Box<HashMap<String, OutputMetadata>> {
+        self.fields.clone()
     }
 
     pub fn from_metadata(metadata: &Metadata) -> OutputMetadata {
@@ -160,6 +203,11 @@ impl OutputMetadata {
         output_metadata.out_field_name = metadata.out_field_name.clone();
         output_metadata.determined_type = metadata.determined_type.clone();
         output_metadata.determined_type_values = metadata.determined_type_values.clone();
+        output_metadata.field_id = metadata.field_id;
+        output_metadata.schema_id = metadata.schema_id;
+        output_metadata.lineage_id = metadata.lineage_id.clone();
+        output_metadata.nullable = metadata.nullable;
+        output_metadata.default_value = metadata.default_value.clone();
 
         let mut fields = HashMap::new();
         for (field, md) in metadata.fields.iter() {
@@ -190,6 +238,10 @@ pub struct PipelineMetadata {
     pub enabled: bool,
     #[serde(default)]
     pub flattened: bool,
+    #[serde(default)]
+    pub metadata_version: u32,
+    #[serde(default)]
+    pub schema_id: u64,
 }
 
 impl crate::discover::PipelineMetadata {
@@ -210,6 +262,8 @@ impl crate::discover::PipelineMetadata {
             sql: None,
             enabled: true,
             flattened: flatten,
+            metadata_version: CURRENT_METADATA_VERSION,
+            schema_id: DEFAULT_SCHEMA_ID,
         }
     }
 
@@ -228,6 +282,8 @@ impl crate::discover::PipelineMetadata {
             sql: None,
             enabled: true,
             flattened: flatten,
+            metadata_version: CURRENT_METADATA_VERSION,
+            schema_id: DEFAULT_SCHEMA_ID,
         })
     }
 
@@ -242,7 +298,28 @@ impl crate::discover::PipelineMetadata {
             }
         }
     }
+
+    pub fn migrate_persisted_metadata(&mut self) -> bool {
+        let mut changed = self.metadata_version < CURRENT_METADATA_VERSION;
+        if self.schema_id == 0 {
+            self.schema_id = DEFAULT_SCHEMA_ID;
+            changed = true;
+        }
+        for (namespace, metadata) in self.metadata.iter_mut() {
+            if Metadata::migrate_tree(namespace, metadata, self.schema_id, Vec::new()) {
+                changed = true;
+            }
+        }
+        if self.metadata_version < CURRENT_METADATA_VERSION {
+            self.metadata_version = CURRENT_METADATA_VERSION;
+            changed = true;
+        }
+        changed
+    }
 }
+
+const CURRENT_METADATA_VERSION: u32 = 2;
+const DEFAULT_SCHEMA_ID: u64 = 1;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Metadata {
@@ -261,6 +338,16 @@ pub struct Metadata {
     #[serde(with = "serde_opt_data_type")]
     pub(crate) determined_type_values: Option<SkipprDataType>,
     pub(crate) repetition_count: i32,
+    #[serde(default)]
+    pub(crate) field_id: i32,
+    #[serde(default)]
+    pub(crate) schema_id: u64,
+    #[serde(default)]
+    pub(crate) lineage_id: String,
+    #[serde(default = "crate::lineage::default_nullable")]
+    pub(crate) nullable: bool,
+    #[serde(default)]
+    pub(crate) default_value: Option<Value>,
 }
 
 impl Metadata {
@@ -281,6 +368,11 @@ impl Metadata {
             determined_type: SkipprDataType::Unknown,
             determined_type_values: None,
             repetition_count: 5,
+            field_id: 0,
+            schema_id: 0,
+            lineage_id: "".to_string(),
+            nullable: true,
+            default_value: None,
         })
     }
 
@@ -298,6 +390,22 @@ impl Metadata {
 
     pub fn field_count(&self) -> usize {
         self.fields.len()
+    }
+
+    pub fn nullable(&self) -> bool {
+        self.nullable
+    }
+
+    pub fn default_value(&self) -> Option<&Value> {
+        self.default_value.as_ref()
+    }
+
+    pub fn field_id(&self) -> i32 {
+        self.field_id
+    }
+
+    pub fn schema_id(&self) -> u64 {
+        self.schema_id
     }
 
     /// Resolve `out_field_name` and `determined_type` for all child fields.
@@ -322,9 +430,48 @@ impl Metadata {
                     m.determined_type.as_str().to_string()
                 };
 
-                (name, type_name, true)
+                (name, type_name, m.nullable)
             })
             .collect()
+    }
+
+    pub fn migrate_tree(
+        namespace: &str,
+        metadata: &mut Metadata,
+        schema_id: u64,
+        mut path: Vec<String>,
+    ) -> bool {
+        let mut changed = false;
+        let name = if metadata.out_field_name.is_empty() {
+            path.last().cloned().unwrap_or_default()
+        } else {
+            metadata.out_field_name.clone()
+        };
+        if !name.is_empty() && path.last() != Some(&name) {
+            path.push(name);
+        }
+        if metadata.schema_id == 0 {
+            metadata.schema_id = schema_id;
+            changed = true;
+        }
+        if metadata.field_id == 0 && !path.is_empty() {
+            metadata.field_id = crate::lineage::deterministic_field_id(namespace, &path);
+            changed = true;
+        }
+        if metadata.lineage_id.is_empty() && !path.is_empty() {
+            metadata.lineage_id = format!("{}:{}", namespace, path.join("."));
+            changed = true;
+        }
+        for (field_name, child) in metadata.fields.iter_mut() {
+            let mut child_path = path.clone();
+            if child.out_field_name.is_empty() {
+                child_path.push(field_name.clone());
+            }
+            if Metadata::migrate_tree(namespace, child, schema_id, child_path) {
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn infer_type_from_counters(types: &HashMap<SkipprDataType, u32>) -> String {
@@ -384,6 +531,11 @@ impl Metadata {
                             el.out_field_name = field_element_path.clone();
                             el.determined_type = sub_val.determined_type.clone();
                             el.determined_type_values = sub_val.determined_type_values.clone();
+                            el.field_id = sub_val.field_id;
+                            el.schema_id = sub_val.schema_id;
+                            el.lineage_id = sub_val.lineage_id.clone();
+                            el.nullable = sub_val.nullable;
+                            el.default_value = sub_val.default_value.clone();
 
                             flattened.fields.insert(field_element_path.clone(), el);
                         }
@@ -407,6 +559,11 @@ impl Metadata {
                 el.out_field_name = new_field_path.clone();
                 el.determined_type = val.determined_type.clone();
                 el.determined_type_values = val.determined_type_values.clone();
+                el.field_id = val.field_id;
+                el.schema_id = val.schema_id;
+                el.lineage_id = val.lineage_id.clone();
+                el.nullable = val.nullable;
+                el.default_value = val.default_value.clone();
 
                 flattened.fields.insert(new_field_path.clone(), el);
             } else {
@@ -431,6 +588,11 @@ impl Metadata {
                     el.out_field_name = new_field_path.clone();
                     el.determined_type = val.determined_type.clone();
                     el.determined_type_values = val.determined_type_values.clone();
+                    el.field_id = val.field_id;
+                    el.schema_id = val.schema_id;
+                    el.lineage_id = val.lineage_id.clone();
+                    el.nullable = val.nullable;
+                    el.default_value = val.default_value.clone();
 
                     flattened.fields.insert(new_field_path.clone(), el);
                 }
@@ -617,10 +779,19 @@ pub enum SkipprDataType {
     String,
     Long,
     Integer,
+    Short,
+    Byte,
     Double,
+    Float,
+    Decimal,
     Boolean,
     TimestampMilli,
     Timestamp,
+    Time,
+    Binary,
+    Uuid,
+    Fixed,
+    Json,
     Null,
     Unknown,
 }
@@ -691,10 +862,19 @@ impl SkipprDataType {
             "string" => SkipprDataType::String,
             "long" | "bigint" => SkipprDataType::Long,
             "int" | "integer" => SkipprDataType::Integer,
+            "short" | "smallint" => SkipprDataType::Short,
+            "byte" | "tinyint" => SkipprDataType::Byte,
             "double" => SkipprDataType::Double,
+            "float" => SkipprDataType::Float,
+            "decimal" | "numeric" => SkipprDataType::Decimal,
             "boolean" => SkipprDataType::Boolean,
             "timestamp_milli" => SkipprDataType::TimestampMilli,
             "timestamp" => SkipprDataType::Timestamp,
+            "time" => SkipprDataType::Time,
+            "binary" => SkipprDataType::Binary,
+            "uuid" => SkipprDataType::Uuid,
+            "fixed" => SkipprDataType::Fixed,
+            "json" => SkipprDataType::Json,
             "null" | "NULL" => SkipprDataType::Null,
             _ => SkipprDataType::Unknown,
         }
@@ -705,11 +885,20 @@ impl SkipprDataType {
             "string" => Some(SkipprDataType::String),
             "integer" | "int" => Some(SkipprDataType::Integer),
             "long" | "bigint" => Some(SkipprDataType::Long),
+            "short" | "smallint" => Some(SkipprDataType::Short),
+            "byte" | "tinyint" => Some(SkipprDataType::Byte),
             "double" => Some(SkipprDataType::Double),
+            "float" => Some(SkipprDataType::Float),
+            "decimal" | "numeric" => Some(SkipprDataType::Decimal),
             "boolean" => Some(SkipprDataType::Boolean),
             "date" => Some(SkipprDataType::Date),
             "timestamp" => Some(SkipprDataType::Timestamp),
             "timestamp_milli" => Some(SkipprDataType::TimestampMilli),
+            "time" => Some(SkipprDataType::Time),
+            "binary" => Some(SkipprDataType::Binary),
+            "uuid" => Some(SkipprDataType::Uuid),
+            "fixed" => Some(SkipprDataType::Fixed),
+            "json" => Some(SkipprDataType::Json),
             "array" => Some(SkipprDataType::Array),
             "map" => Some(SkipprDataType::Map),
             "record" | "struct" => Some(SkipprDataType::Record),
@@ -727,10 +916,19 @@ impl SkipprDataType {
             SkipprDataType::String => "string",
             SkipprDataType::Long => "long",
             SkipprDataType::Integer => "integer",
+            SkipprDataType::Short => "short",
+            SkipprDataType::Byte => "byte",
             SkipprDataType::Double => "double",
+            SkipprDataType::Float => "float",
+            SkipprDataType::Decimal => "decimal",
             SkipprDataType::Boolean => "boolean",
             SkipprDataType::TimestampMilli => "timestamp_milli",
             SkipprDataType::Timestamp => "timestamp",
+            SkipprDataType::Time => "time",
+            SkipprDataType::Binary => "binary",
+            SkipprDataType::Uuid => "uuid",
+            SkipprDataType::Fixed => "fixed",
+            SkipprDataType::Json => "json",
             SkipprDataType::Null => "null",
             SkipprDataType::Unknown => "unknown",
         }
@@ -3051,6 +3249,7 @@ mod tests_flatten_metadata {
             determined_type: SkipprDataType::String,
             determined_type_values: None,
             repetition_count: 1,
+            ..Metadata::new().unwrap()
         };
 
         fields.insert("child".to_string(), metadata_child.clone());
@@ -3069,6 +3268,7 @@ mod tests_flatten_metadata {
             determined_type: SkipprDataType::Record,
             determined_type_values: None,
             repetition_count: 1,
+            ..Metadata::new().unwrap()
         };
 
         let mut flattened: OutputMetadata = OutputMetadata::new();
@@ -3108,6 +3308,7 @@ mod tests_flatten_metadata {
                 determined_type: SkipprDataType::Unknown,
                 determined_type_values: None,
                 repetition_count: 1,
+                ..Metadata::new().unwrap()
             },
         );
         metadata.get_mut("schema").unwrap().fields.insert(
@@ -3126,6 +3327,7 @@ mod tests_flatten_metadata {
                 determined_type: SkipprDataType::Array,
                 determined_type_values: None,
                 repetition_count: 2,
+                ..Metadata::new().unwrap()
             },
         );
         metadata
@@ -3151,6 +3353,7 @@ mod tests_flatten_metadata {
                     determined_type: SkipprDataType::String,
                     determined_type_values: None,
                     repetition_count: 1,
+                    ..Metadata::new().unwrap()
                 },
             );
         metadata
@@ -3179,6 +3382,7 @@ mod tests_flatten_metadata {
                     determined_type: SkipprDataType::String,
                     determined_type_values: None,
                     repetition_count: 1,
+                    ..Metadata::new().unwrap()
                 },
             );
         metadata
@@ -3207,6 +3411,7 @@ mod tests_flatten_metadata {
                     determined_type: SkipprDataType::Integer,
                     determined_type_values: None,
                     repetition_count: 1,
+                    ..Metadata::new().unwrap()
                 },
             );
 
@@ -3341,6 +3546,40 @@ mod tests_roundtrip {
     use crate::discover::evolution::Evolution;
     use crate::ingest::ingest::discover_ingest;
     use serde_json::json;
+
+    #[test]
+    fn persisted_metadata_migration_sets_ids_and_defaults() {
+        let mut root = Metadata::new().unwrap();
+        let mut field = Metadata::new_with_type(SkipprDataType::String, "customer_id");
+        field.nullable = false;
+        root.fields.insert("customer_id".to_string(), field);
+        let mut pipeline = PipelineMetadata {
+            name: "pipeline".to_string(),
+            metadata: HashMap::from([("orders".to_string(), root)]),
+            sql: None,
+            enabled: true,
+            flattened: false,
+            metadata_version: 0,
+            schema_id: 0,
+        };
+
+        assert!(pipeline.migrate_persisted_metadata());
+        let migrated = pipeline
+            .metadata
+            .get("orders")
+            .unwrap()
+            .fields
+            .get("customer_id")
+            .unwrap();
+        assert_eq!(pipeline.metadata_version, 2);
+        assert_eq!(pipeline.schema_id, 1);
+        assert_ne!(migrated.field_id, 0);
+        assert_eq!(migrated.schema_id, 1);
+        assert_eq!(migrated.lineage_id, "orders:customer_id");
+        assert!(!migrated.nullable);
+        assert!(migrated.default_value.is_none());
+        assert!(!pipeline.migrate_persisted_metadata());
+    }
 
     fn discover_field(
         field: &str,

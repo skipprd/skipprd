@@ -180,7 +180,9 @@ async fn global_semantic_context_is_written_under_semantic_global_key() {
             "semantic",
             &format!(
                 "{}.yaml",
-                encode_key_component(react_suite_data_engineer::providers::GLOBAL_SEMANTIC_DATASET_ID)
+                encode_key_component(
+                    react_suite_data_engineer::providers::GLOBAL_SEMANTIC_DATASET_ID
+                )
             ),
         ],
     );

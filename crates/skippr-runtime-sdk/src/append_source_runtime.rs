@@ -16,9 +16,7 @@ use skippr_core::helpers::offsets::{
     CheckpointTransport, OffsetTransport, Offsets, RuntimeOffsetOperation, RuntimeOffsetRpcRequest,
     RuntimeOffsetRpcResponse, RuntimeOffsetValue,
 };
-use skippr_core::plugins::cdc::{
-    CheckpointEnvelope, SyncContext,
-};
+use skippr_core::plugins::cdc::{CheckpointEnvelope, SyncContext};
 use skippr_core::plugins::{DataSink, DataSource, RuntimeIngestRelay};
 use skippr_core::{METADATA, PIPELINE_SCHEMA_VERSION};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -268,9 +266,7 @@ impl CheckpointTransport for RuntimeSourceCheckpointTransport {
                 envelope: envelope.clone(),
             },
         };
-        block_on_handle(&self.handle, async {
-            self.data_writer.write(&frame).await
-        })
+        block_on_handle(&self.handle, async { self.data_writer.write(&frame).await })
             .map_err(|err| err.to_string())
     }
 }
@@ -568,7 +564,9 @@ pub async fn run_append_data_source_main(
             control_writer.clone(),
             control.clone(),
         )),
-        Some(Arc::new(RuntimeSourceCheckpointTransport::new(data_writer.clone()))),
+        Some(Arc::new(RuntimeSourceCheckpointTransport::new(
+            data_writer.clone(),
+        ))),
     ));
     let relay: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(
         ArrowRelayToHostSink::new(control_writer.clone(), data_writer.clone()),

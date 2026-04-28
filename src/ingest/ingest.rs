@@ -24,7 +24,7 @@ static SEEN_FIELDS_BY_NAMESPACE: Lazy<Mutex<HashMap<String, HashSet<String>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 use crate::discover::evolution::Evolution;
-use crate::ingest::fast_ingest::DEFAULT_NESTED_MESSAGE;
+use crate::ingest::fast_ingest::{validate_required_fields, DEFAULT_NESTED_MESSAGE};
 
 #[derive(Debug)]
 pub struct ResolvedFieldValue {
@@ -175,6 +175,8 @@ pub fn ingest(
     // let message = message[..];
 
     // println!("{:?}", message);
+    validate_required_fields(metadata, &message)?;
+
     if flatten {
         message = Helpers::flatten(&message, &metadata).unwrap();
     }
@@ -1346,6 +1348,7 @@ mod tests_set_date {
                 determined_type: SkipprDataType::Date,
                 determined_type_values: None,
                 repetition_count: 1,
+                ..Metadata::new().unwrap()
             },
         );
 

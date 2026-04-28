@@ -57,7 +57,10 @@ fn legacy_runtime_plugin_authoring_artifacts_are_deleted() {
 fn runtime_sink_and_schema_plugins_use_sdk_entrypoints() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let entrypoint_bans = [
-        ("RuntimeSessionHello", Regex::new(r"\bRuntimeSessionHello\b").unwrap()),
+        (
+            "RuntimeSessionHello",
+            Regex::new(r"\bRuntimeSessionHello\b").unwrap(),
+        ),
         (
             "SKIPPR_RUNTIME_CONTROL_ADDR_ENV",
             Regex::new(r"\bSKIPPR_RUNTIME_CONTROL_ADDR_ENV\b").unwrap(),
@@ -66,7 +69,10 @@ fn runtime_sink_and_schema_plugins_use_sdk_entrypoints() {
             "SKIPPR_RUNTIME_DATA_ADDR_ENV",
             Regex::new(r"\bSKIPPR_RUNTIME_DATA_ADDR_ENV\b").unwrap(),
         ),
-        ("HostFrame::RunSink", Regex::new(r"\bHostFrame::RunSink\b").unwrap()),
+        (
+            "HostFrame::RunSink",
+            Regex::new(r"\bHostFrame::RunSink\b").unwrap(),
+        ),
         (
             "HostFrame::RunSchema",
             Regex::new(r"\bHostFrame::RunSchema\b").unwrap(),

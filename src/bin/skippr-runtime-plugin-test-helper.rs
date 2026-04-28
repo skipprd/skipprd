@@ -460,9 +460,7 @@ enum SourceScenario {
 
 fn source_scenario(cli: &TestHelperCli) -> SourceScenario {
     match cli.scenario.as_str() {
-        "emit_people_sink_write_and_checkpoint" => {
-            SourceScenario::EmitPeopleSinkWriteAndCheckpoint
-        }
+        "emit_people_sink_write_and_checkpoint" => SourceScenario::EmitPeopleSinkWriteAndCheckpoint,
         "emit_people_sink_write" => SourceScenario::EmitPeopleSinkWrite,
         _ => SourceScenario::CompleteOnly,
     }
