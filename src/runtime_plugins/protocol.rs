@@ -11,6 +11,10 @@ use crate::plugins::cdc::{
 };
 use serde::{Deserialize, Serialize};
 
+// This is the in-process runtime plugin IPC contract. It is deliberately
+// separate from the skippr/React adapter's CLI subprocess JSON summaries.
+// Schema freshness is negotiated through required_schema_version plus
+// SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
 pub const RUNTIME_PROTOCOL_VERSION: u32 = 6;
 pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";

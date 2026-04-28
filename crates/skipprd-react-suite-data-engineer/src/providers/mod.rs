@@ -22,9 +22,9 @@ pub use dataset_catalog::{DatasetCatalogProvider, DatasetId};
 pub use dbt::{DbtProvider, DbtValidateArgs, DbtValidateResult};
 pub use query::{QueryProvider, QueryResult};
 pub use skippr::{
-    SchemaSinkResolvedConfig, SkipprDiscoverResult, SkipprFieldSchema, SkipprNamespaceSchema,
-    SkipprNamespaceStatus, SkipprOutputConfig, SkipprPipelineConfig, SkipprPipelineStatus,
-    SkipprProvider, SkipprSyncResult,
+    SchemaSinkResolvedConfig, SkipprDiscoverResult, SkipprFieldSchema, SkipprNamespaceStatus,
+    SkipprOutputConfig, SkipprPipelineConfig, SkipprPipelineStatus, SkipprProvider,
+    SkipprSyncResult,
 };
 pub use stats::DatasetFieldStats;
 pub use warehouse::{WarehouseNaming, WarehouseProvider};

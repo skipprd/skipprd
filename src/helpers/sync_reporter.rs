@@ -16,8 +16,6 @@ struct SyncEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     fields_added: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    fields: Option<Vec<serde_json::Value>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     rows: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bytes: Option<u64>,
@@ -30,6 +28,8 @@ struct SyncEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     namespaces_discovered: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    total_fields: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     total_rows: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     elapsed_ms: Option<u64>,
@@ -37,6 +37,8 @@ struct SyncEvent {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     uploads_in_flight: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ok: Option<bool>,
     timestamp: String,
 }
 
@@ -48,17 +50,18 @@ impl SyncEvent {
             namespace: None,
             field_count: None,
             fields_added: None,
-            fields: None,
             rows: None,
             bytes: None,
             rows_written: None,
             parquet_file: None,
             namespaces_synced: None,
             namespaces_discovered: None,
+            total_fields: None,
             total_rows: None,
             elapsed_ms: None,
             error: None,
             uploads_in_flight: None,
+            ok: None,
             timestamp: Utc::now().to_rfc3339(),
         }
     }
@@ -247,34 +250,27 @@ impl SyncReporter {
         }
     }
 
-    pub fn discover_namespace(&self, namespace: &str, fields: Vec<serde_json::Value>) {
-        match self {
-            SyncReporter::Json => {
-                let mut ev = SyncEvent::new("namespace_discovered");
-                ev.namespace = Some(namespace.to_string());
-                ev.fields = Some(fields);
-                emit_json(&ev);
-            }
-            SyncReporter::Text => {
-                println!("Namespace discovered: {}", namespace);
-            }
-            SyncReporter::Progress(_) => {}
-        }
-    }
-
-    pub fn discover_complete(&self, pipeline: &str, namespaces_discovered: usize, elapsed_ms: u64) {
+    pub fn discover_complete(
+        &self,
+        pipeline: &str,
+        namespaces_discovered: usize,
+        total_fields: u64,
+        elapsed_ms: u64,
+    ) {
         match self {
             SyncReporter::Json => {
                 let mut ev = SyncEvent::new("discover_complete");
                 ev.pipeline = Some(pipeline.to_string());
+                ev.ok = Some(true);
                 ev.namespaces_discovered = Some(namespaces_discovered);
+                ev.total_fields = Some(total_fields);
                 ev.elapsed_ms = Some(elapsed_ms);
                 emit_json(&ev);
             }
             SyncReporter::Text => {
                 println!(
-                    "Discover complete: pipeline={} namespaces={} elapsed={}ms",
-                    pipeline, namespaces_discovered, elapsed_ms
+                    "Discover complete: pipeline={} namespaces={} fields={} elapsed={}ms",
+                    pipeline, namespaces_discovered, total_fields, elapsed_ms
                 );
             }
             SyncReporter::Progress(_) => {}

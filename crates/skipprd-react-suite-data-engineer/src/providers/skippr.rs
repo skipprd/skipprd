@@ -31,14 +31,9 @@ pub struct SkipprOutputConfig {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SkipprDiscoverResult {
     pub ok: bool,
-    pub namespaces: Vec<SkipprNamespaceSchema>,
+    pub namespaces_count: usize,
+    pub total_fields: u64,
     pub errors: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SkipprNamespaceSchema {
-    pub namespace: String,
-    pub fields: Vec<SkipprFieldSchema>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -74,7 +69,12 @@ pub struct SkipprNamespaceStatus {
 pub struct SkipprSyncResult {
     pub ok: bool,
     pub tables_synced: usize,
-    pub events: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub total_rows: u64,
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default)]
+    pub rows_written: u64,
     pub errors: Vec<String>,
 }
 

@@ -1808,7 +1808,13 @@ async fn show_pipeline(pipeline_name: &str) {
     }
 
     let metadata_location = if Config::get_storage_mode() == "local" {
-        format!("{}/metadata.json", Config::get_data_dir())
+        format!(
+            "{}/{}/{}/{}/metadata/metadata.json",
+            Config::get_data_dir(),
+            Config::get_tenant(),
+            Config::get_workspace_name(),
+            pipeline_name,
+        )
     } else {
         format!(
             "s3://{}/{}/{}/{}/metadata/metadata.json",

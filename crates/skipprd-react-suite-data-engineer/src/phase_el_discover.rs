@@ -49,20 +49,17 @@ impl DataEngineerSuite {
             return Err(format!("skippr discover reported errors: {}", errs).into());
         }
 
-        // 3. Use the discover result itself to decide whether we found any source namespaces.
+        // 3. Use the compact skipprd-owned discover summary. The React adapter
+        // intentionally does not read metadata files or per-namespace stdout payloads.
         // Table materialization happens in the subsequent EL sync phase, not during discover.
-        let namespaces_count = discover_result.namespaces.len();
+        let namespaces_count = discover_result.namespaces_count;
         if namespaces_count == 0 {
             return Err("skippr discover completed but found no namespaces"
                 .to_string()
                 .into());
         }
 
-        let total_fields: u64 = discover_result
-            .namespaces
-            .iter()
-            .map(|ns| ns.fields.len() as u64)
-            .sum();
+        let total_fields = discover_result.total_fields;
 
         tracing::info!(
             namespaces = namespaces_count,
@@ -205,14 +202,8 @@ mod tests {
             MockSkipprProvider {
                 discover_result: crate::providers::SkipprDiscoverResult {
                     ok: true,
-                    namespaces: vec![crate::providers::SkipprNamespaceSchema {
-                        namespace: "trip_start".to_string(),
-                        fields: vec![crate::providers::SkipprFieldSchema {
-                            name: "rider_id".to_string(),
-                            field_type: "string".to_string(),
-                            nullable: true,
-                        }],
-                    }],
+                    namespaces_count: 1,
+                    total_fields: 1,
                     errors: vec![],
                 },
             },
@@ -237,7 +228,10 @@ mod tests {
         .await
         .expect("control store read should succeed")
         .expect("execution state should be written");
-        assert_eq!(state.phase.current_phase, crate::control_flow::Phase::ElSync);
+        assert_eq!(
+            state.phase.current_phase,
+            crate::control_flow::Phase::ElSync
+        );
     }
 }
 

@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use react_core::scope::RequestScope;
 use react_suite_data_engineer::de_config::{ElToolResolved, WarehouseKind, WarehouseResolved};
 use react_suite_data_engineer::providers::{
-    SkipprDiscoverResult, SkipprFieldSchema, SkipprNamespaceSchema, SkipprNamespaceStatus,
-    SkipprPipelineConfig, SkipprPipelineStatus, SkipprProvider, SkipprSyncResult,
+    SkipprDiscoverResult, SkipprFieldSchema, SkipprNamespaceStatus, SkipprPipelineConfig,
+    SkipprPipelineStatus, SkipprProvider, SkipprSyncResult,
 };
 
 #[derive(Clone)]
@@ -15,10 +15,18 @@ pub struct SkipprCliProvider {
     pub data_dir: PathBuf,
     pub el_config: ElToolResolved,
     pub warehouse: WarehouseResolved,
+    pub storage_mode: Option<String>,
+    pub storage_bucket: Option<String>,
 }
 
 impl SkipprCliProvider {
-    pub fn new(el_config: ElToolResolved, warehouse: WarehouseResolved, data_dir: PathBuf) -> Self {
+    pub fn new(
+        el_config: ElToolResolved,
+        warehouse: WarehouseResolved,
+        data_dir: PathBuf,
+        storage_mode: Option<String>,
+        storage_bucket: Option<String>,
+    ) -> Self {
         let binary = if el_config.skippr_binary.is_empty() {
             "skipprd".to_string()
         } else {
@@ -29,6 +37,8 @@ impl SkipprCliProvider {
             data_dir,
             el_config,
             warehouse,
+            storage_mode,
+            storage_bucket,
         }
     }
 
@@ -48,7 +58,6 @@ impl SkipprCliProvider {
 
     fn env_vars(&self) -> HashMap<String, String> {
         let mut env = HashMap::new();
-        env.insert("SKIPPR_STORAGE_MODE".into(), "local".into());
         env.insert(
             "DATA_DIR".into(),
             self.data_dir_path().to_string_lossy().to_string(),
@@ -57,6 +66,12 @@ impl SkipprCliProvider {
             "SKIPPR_CONFIG_FILE".into(),
             self.skippr_yml_path().to_string_lossy().to_string(),
         );
+        if let Some(storage_mode) = self.storage_mode.as_deref().filter(|v| !v.is_empty()) {
+            env.insert("SKIPPR_STORAGE_MODE".into(), storage_mode.to_string());
+        }
+        if let Some(bucket) = self.storage_bucket.as_deref().filter(|v| !v.is_empty()) {
+            env.insert("SKIPPR_S3_BUCKET".into(), bucket.to_string());
+        }
 
         let input = &self.el_config.skippr_input;
         if let Some(kind) = input.get("kind").and_then(|v| v.as_str()) {
@@ -527,15 +542,14 @@ impl SkipprCliProvider {
         }
     }
 
-    /// Runs skippr with streaming stdout. Instead of a fixed wall-clock timeout,
-    /// this uses an *activity* timeout: the process can run for hours as long as
-    /// it keeps emitting JSON lines (heartbeats or real events) within the
-    /// `idle_timeout` window.  Returns all collected JSON events plus any errors.
+    /// Runs skipprd with streaming stdout. This is the external CLI subprocess
+    /// contract, not the runtime plugin IPC contract in `src/runtime_plugins`.
+    /// The adapter keeps only a typed sync summary instead of retaining raw events.
     async fn run_skippr_streaming(
         &self,
         args: &[&str],
         idle_timeout: std::time::Duration,
-    ) -> Result<(Vec<serde_json::Value>, Vec<u8>, bool), String> {
+    ) -> Result<(SyncSummaryAccumulator, Vec<u8>, bool), String> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
         let env = self.env_vars();
@@ -588,13 +602,13 @@ impl SkipprCliProvider {
             .ok_or_else(|| "skippr stdout not available".to_string())?;
         let mut reader = BufReader::new(stdout_handle).lines();
 
-        let mut events: Vec<serde_json::Value> = Vec::new();
+        let mut summary = SyncSummaryAccumulator::default();
         let mut timed_out = false;
 
         loop {
             match tokio::time::timeout(idle_timeout, reader.next_line()).await {
                 Ok(Ok(Some(line))) => {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let Some(val) = parse_json_line(&line) {
                         if let Some(kind) = val.get("event").and_then(|v| v.as_str()) {
                             match kind {
                                 "sync_status" => {
@@ -626,7 +640,7 @@ impl SkipprCliProvider {
                                 }
                             }
                         }
-                        events.push(val);
+                        summary.record(&val);
                     }
                 }
                 Ok(Ok(None)) => break,
@@ -670,7 +684,7 @@ impl SkipprCliProvider {
             );
         }
 
-        Ok((events, stderr_bytes, success))
+        Ok((summary, stderr_bytes, success))
     }
 
     fn generate_skippr_yml(&self, config: &SkipprPipelineConfig) -> String {
@@ -730,10 +744,22 @@ impl SkipprCliProvider {
             dest_block["schema_sink"] = serde_json::Value::String("schema_sinks.schema".into());
         }
 
+        let mut skippr_block = serde_json::Map::new();
+        if let Some(storage_mode) = self.storage_mode.as_deref().filter(|v| !v.is_empty()) {
+            skippr_block.insert(
+                "storage_mode".to_string(),
+                serde_json::Value::String(storage_mode.to_string()),
+            );
+        }
+        if let Some(bucket) = self.storage_bucket.as_deref().filter(|v| !v.is_empty()) {
+            skippr_block.insert(
+                "skippr_s3_bucket".to_string(),
+                serde_json::Value::String(bucket.to_string()),
+            );
+        }
+
         let mut root = serde_json::json!({
-            "skippr": {
-                "storage_mode": "local"
-            },
+            "skippr": serde_json::Value::Object(skippr_block),
             "pipelines": {
                 &config.pipeline_name: pipeline_block
             },
@@ -1254,174 +1280,88 @@ fn insert_snowflake_env(wh: &WarehouseResolved, env: &mut HashMap<String, String
     }
 }
 
-fn parse_json_lines(stdout: &[u8]) -> Vec<serde_json::Value> {
+fn parse_discover_summary(stdout: &[u8]) -> Option<SkipprDiscoverResult> {
     let text = String::from_utf8_lossy(stdout);
-    text.lines()
-        .filter_map(|line| serde_json::from_str(line.trim()).ok())
-        .collect()
-}
-
-fn namespaces_from_discover_events(events: &[serde_json::Value]) -> Vec<SkipprNamespaceSchema> {
-    let mut namespaces = Vec::new();
-
-    for event in events {
-        if event.get("event").and_then(|v| v.as_str()) != Some("namespace_discovered") {
-            continue;
+    text.lines().filter_map(parse_json_line).find_map(|event| {
+        if event.get("event").and_then(|v| v.as_str()) != Some("discover_complete") {
+            return None;
         }
-        if let Some(namespace) = namespace_from_json_event(event) {
-            namespaces.push(namespace);
-        }
-    }
 
-    namespaces
-}
-
-fn namespace_from_json_event(event: &serde_json::Value) -> Option<SkipprNamespaceSchema> {
-    let ns = event.get("namespace").and_then(|v| v.as_str())?;
-    let fields = event
-        .get("fields")
-        .and_then(|v| v.as_array())
-        .map(|fields| fields_from_json_array(fields))
-        .unwrap_or_default();
-
-    Some(SkipprNamespaceSchema {
-        namespace: ns.to_string(),
-        fields,
+        Some(SkipprDiscoverResult {
+            ok: event.get("ok").and_then(|v| v.as_bool()).unwrap_or(true),
+            namespaces_count: event
+                .get("namespaces_discovered")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize,
+            total_fields: event
+                .get("total_fields")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            errors: Vec::new(),
+        })
     })
 }
 
-fn fields_from_json_array(fields: &[serde_json::Value]) -> Vec<SkipprFieldSchema> {
-    fields
-        .iter()
-        .filter_map(|f| {
-            Some(SkipprFieldSchema {
-                name: f.get("name")?.as_str()?.to_string(),
-                field_type: f.get("type")?.as_str()?.to_string(),
-                nullable: f.get("nullable").and_then(|v| v.as_bool()).unwrap_or(true),
-            })
-        })
-        .collect()
+fn parse_json_line(line: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(line.trim()).ok()
 }
 
-fn read_local_metadata_namespaces(
-    data_dir: &Path,
-    pipeline: &str,
-) -> Result<Option<Vec<SkipprNamespaceSchema>>, String> {
-    let metadata_path = local_metadata_path(data_dir, pipeline);
-    if !metadata_path.exists() {
-        return Ok(None);
+#[derive(Default)]
+struct SyncSummaryAccumulator {
+    tables_synced: usize,
+    total_rows: u64,
+    bytes: u64,
+    rows_written: u64,
+    errors: Vec<String>,
+}
+
+impl SyncSummaryAccumulator {
+    fn record(&mut self, event: &serde_json::Value) {
+        let Some(kind) = event.get("event").and_then(|v| v.as_str()) else {
+            return;
+        };
+
+        match kind {
+            "table_synced" | "namespace_synced" => {
+                self.tables_synced += 1;
+                self.update_counters(event);
+            }
+            "sync_complete" => {
+                if let Some(count) = event.get("namespaces_synced").and_then(|v| v.as_u64()) {
+                    self.tables_synced = count as usize;
+                }
+                self.update_counters(event);
+            }
+            "sync_status" | "batch_ingested" | "output_synced" => {
+                self.update_counters(event);
+            }
+            "sync_error" | "error" => {
+                if let Some(msg) = event
+                    .get("error")
+                    .or_else(|| event.get("message"))
+                    .and_then(|v| v.as_str())
+                {
+                    self.errors.push(msg.to_string());
+                }
+            }
+            _ => {}
+        }
     }
 
-    let contents = std::fs::read_to_string(&metadata_path)
-        .map_err(|e| format!("read local skipprd metadata {:?}: {}", metadata_path, e))?;
-    let value: serde_json::Value = serde_json::from_str(&contents)
-        .map_err(|e| format!("parse local skipprd metadata {:?}: {}", metadata_path, e))?;
-    Ok(Some(namespaces_from_metadata_value(&value)))
-}
-
-fn local_metadata_path(data_dir: &Path, pipeline: &str) -> PathBuf {
-    data_dir
-        .join(scope_segment_from_env("TENANT"))
-        .join(scope_segment_from_env("WORKSPACE_NAME"))
-        .join(pipeline)
-        .join("metadata")
-        .join("metadata.json")
-}
-
-fn scope_segment_from_env(key: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "default".to_string())
-}
-
-fn namespaces_from_metadata_value(value: &serde_json::Value) -> Vec<SkipprNamespaceSchema> {
-    let Some(metadata) = value.get("metadata").and_then(|v| v.as_object()) else {
-        return Vec::new();
-    };
-
-    let mut namespaces: Vec<_> = metadata
-        .iter()
-        .filter_map(|(namespace, metadata)| {
-            if metadata
-                .get("enabled")
-                .and_then(|v| v.as_bool())
-                .is_some_and(|enabled| !enabled)
-            {
-                return None;
-            }
-
-            Some(SkipprNamespaceSchema {
-                namespace: namespace.clone(),
-                fields: fields_from_metadata_value(metadata),
-            })
-        })
-        .collect();
-
-    namespaces.sort_by(|a, b| a.namespace.cmp(&b.namespace));
-    namespaces
-}
-
-fn fields_from_metadata_value(metadata: &serde_json::Value) -> Vec<SkipprFieldSchema> {
-    let Some(fields) = metadata.get("fields").and_then(|v| v.as_object()) else {
-        return Vec::new();
-    };
-
-    let mut fields: Vec<_> = fields
-        .iter()
-        .filter_map(|(field_name, field_metadata)| {
-            if field_metadata
-                .get("enabled")
-                .and_then(|v| v.as_bool())
-                .is_some_and(|enabled| !enabled)
-            {
-                return None;
-            }
-
-            let name = field_metadata
-                .get("out_field_name")
-                .and_then(|v| v.as_str())
-                .filter(|v| !v.is_empty())
-                .unwrap_or(field_name)
-                .to_string();
-            let field_type = field_type_from_metadata_value(field_metadata);
-            let nullable = field_metadata
-                .get("nullable")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-
-            Some(SkipprFieldSchema {
-                name,
-                field_type,
-                nullable,
-            })
-        })
-        .collect();
-
-    fields.sort_by(|a, b| a.name.cmp(&b.name));
-    fields
-}
-
-fn field_type_from_metadata_value(field_metadata: &serde_json::Value) -> String {
-    if let Some(data_type) = field_metadata
-        .get("determined_type")
-        .and_then(|v| v.as_str())
-        .filter(|v| !v.is_empty() && *v != "unknown")
-    {
-        return data_type.to_string();
+    fn update_counters(&mut self, event: &serde_json::Value) {
+        if let Some(total_rows) = event.get("total_rows").and_then(|v| v.as_u64()) {
+            self.total_rows = total_rows;
+        }
+        if let Some(rows) = event.get("rows").and_then(|v| v.as_u64()) {
+            self.total_rows = self.total_rows.max(rows);
+        }
+        if let Some(bytes) = event.get("bytes").and_then(|v| v.as_u64()) {
+            self.bytes = bytes;
+        }
+        if let Some(rows_written) = event.get("rows_written").and_then(|v| v.as_u64()) {
+            self.rows_written = rows_written;
+        }
     }
-
-    field_metadata
-        .get("types")
-        .and_then(|v| v.as_object())
-        .and_then(|types| {
-            types
-                .iter()
-                .filter(|(name, _)| name.as_str() != "unknown" && name.as_str() != "null")
-                .max_by_key(|(_, count)| count.as_u64().unwrap_or(0))
-                .map(|(name, _)| name.clone())
-        })
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[cfg(test)]
@@ -1466,6 +1406,8 @@ mod tests {
                 namespace: "public".to_string(),
                 extras: serde_json::json!({}),
             },
+            storage_mode: Some("local".to_string()),
+            storage_bucket: None,
         }
     }
 
@@ -1484,6 +1426,8 @@ mod tests {
                     "warehouse_id": "abc123",
                 }),
             },
+            storage_mode: Some("local".to_string()),
+            storage_bucket: None,
         }
     }
 
@@ -1506,6 +1450,8 @@ mod tests {
                     "staging_storage_integration": "SNOWFLAKE_AZURE_INT",
                 }),
             },
+            storage_mode: Some("local".to_string()),
+            storage_bucket: None,
         }
     }
 
@@ -1662,6 +1608,8 @@ mod tests {
                     "result_s3": "s3://skippr-e2e-sample-data-output/results-test3",
                 }),
             },
+            storage_mode: Some("local".to_string()),
+            storage_bucket: None,
         }
     }
 
@@ -1734,72 +1682,67 @@ mod tests {
     }
 
     #[test]
-    fn parses_discover_namespace_events() {
-        let events = parse_json_lines(
+    fn parses_compact_discover_summary() {
+        let summary = parse_discover_summary(
             br#"
 {"event":"discover_start","pipeline":"pipe","timestamp":"2026-04-28T00:00:00Z"}
-{"event":"namespace_discovered","namespace":"customers","fields":[{"name":"customer_id","type":"string","nullable":false},{"name":"created_at","type":"date","nullable":true}],"timestamp":"2026-04-28T00:00:01Z"}
-{"event":"discover_complete","pipeline":"pipe","namespaces_discovered":1,"timestamp":"2026-04-28T00:00:02Z"}
+{"event":"discover_complete","ok":true,"pipeline":"pipe","namespaces_discovered":1,"total_fields":2,"elapsed_ms":10,"timestamp":"2026-04-28T00:00:02Z"}
 "#,
-        );
+        )
+        .expect("discover summary should parse");
 
-        let namespaces = namespaces_from_discover_events(&events);
-
-        assert_eq!(namespaces.len(), 1);
-        assert_eq!(namespaces[0].namespace, "customers");
-        assert_eq!(namespaces[0].fields.len(), 2);
-        assert_eq!(namespaces[0].fields[0].name, "customer_id");
-        assert_eq!(namespaces[0].fields[0].field_type, "string");
-        assert!(!namespaces[0].fields[0].nullable);
+        assert!(summary.ok);
+        assert_eq!(summary.namespaces_count, 1);
+        assert_eq!(summary.total_fields, 2);
     }
 
     #[test]
-    fn parses_local_metadata_fallback_namespaces() {
-        let metadata = serde_json::json!({
-            "name": "pipe",
-            "metadata": {
-                "orders": {
-                    "enabled": true,
-                    "fields": {
-                        "order_id": {
-                            "enabled": true,
-                            "out_field_name": "order_id",
-                            "determined_type": "string",
-                            "nullable": false
-                        },
-                        "amount_raw": {
-                            "enabled": true,
-                            "out_field_name": "total_amount",
-                            "determined_type": "unknown",
-                            "types": {
-                                "decimal": 3,
-                                "string": 1
-                            },
-                            "nullable": true
-                        },
-                        "disabled_field": {
-                            "enabled": false,
-                            "determined_type": "string"
-                        }
-                    }
-                },
-                "disabled_namespace": {
-                    "enabled": false,
-                    "fields": {}
-                }
-            }
-        });
+    fn storage_config_is_explicit_without_forcing_local() {
+        let provider = SkipprCliProvider {
+            storage_mode: Some("s3".to_string()),
+            storage_bucket: Some("skippr-prod-metadata".to_string()),
+            ..postgres_provider()
+        };
 
-        let namespaces = namespaces_from_metadata_value(&metadata);
+        let env = provider.env_vars();
+        assert_eq!(
+            env.get("SKIPPR_STORAGE_MODE").map(String::as_str),
+            Some("s3")
+        );
+        assert_eq!(
+            env.get("SKIPPR_S3_BUCKET").map(String::as_str),
+            Some("skippr-prod-metadata")
+        );
 
-        assert_eq!(namespaces.len(), 1);
-        assert_eq!(namespaces[0].namespace, "orders");
-        assert_eq!(namespaces[0].fields.len(), 2);
-        assert_eq!(namespaces[0].fields[0].name, "order_id");
-        assert_eq!(namespaces[0].fields[0].field_type, "string");
-        assert!(!namespaces[0].fields[0].nullable);
-        assert_eq!(namespaces[0].fields[1].name, "total_amount");
-        assert_eq!(namespaces[0].fields[1].field_type, "decimal");
+        let config = SkipprPipelineConfig {
+            pipeline_name: "pipe".to_string(),
+            skippr_input: serde_json::json!({
+                "kind": "postgres",
+                "connection_string": "${POSTGRES_CONNECTION_STRING}",
+            }),
+            output_plugin: react_suite_data_engineer::providers::SkipprOutputConfig {
+                kind: "postgres".to_string(),
+                ..Default::default()
+            },
+            schema_sink: None,
+        };
+        let yml = provider.generate_skippr_yml(&config);
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yml).unwrap();
+
+        assert_eq!(
+            parsed
+                .get("skippr")
+                .and_then(|v| v.get("storage_mode"))
+                .and_then(|v| v.as_str()),
+            Some("s3")
+        );
+        assert_eq!(
+            parsed
+                .get("skippr")
+                .and_then(|v| v.get("skippr_s3_bucket"))
+                .and_then(|v| v.as_str()),
+            Some("skippr-prod-metadata")
+        );
     }
 }
 
@@ -1813,7 +1756,7 @@ impl SkipprProvider for SkipprCliProvider {
         let yml_content = self.generate_skippr_yml(config);
         let yml_path = self.skippr_yml_path();
 
-        std::fs::create_dir_all(&self.data_dir)
+        std::fs::create_dir_all(self.data_dir_path())
             .map_err(|e| format!("failed to create data dir: {}", e))?;
 
         std::fs::write(&yml_path, yml_content.as_bytes())
@@ -1832,51 +1775,18 @@ impl SkipprProvider for SkipprCliProvider {
             .run_skippr(&["discover", "--pipeline", pipeline, "--output", "json"])
             .await?;
 
-        let events = parse_json_lines(&output.stdout);
-        let mut namespaces = namespaces_from_discover_events(&events);
         let mut errors = Vec::new();
-
-        for event in &events {
-            if let Some(kind) = event.get("event").and_then(|v| v.as_str()) {
-                if kind == "error" {
-                    if let Some(msg) = event.get("message").and_then(|v| v.as_str()) {
-                        errors.push(msg.to_string());
-                    }
-                }
-            }
-        }
-
-        if output.status.success() && namespaces.is_empty() {
-            match read_local_metadata_namespaces(&self.data_dir_path(), pipeline) {
-                Ok(Some(fallback_namespaces)) if !fallback_namespaces.is_empty() => {
-                    tracing::warn!(
-                        namespaces = fallback_namespaces.len(),
-                        "skippr discover produced no namespace events; using local metadata fallback"
-                    );
-                    namespaces = fallback_namespaces;
-                }
-                Ok(Some(_)) => {
-                    tracing::warn!(
-                        "skippr discover local metadata fallback contained no namespaces"
-                    );
-                }
-                Ok(None) => {
-                    tracing::warn!("skippr discover local metadata fallback file was not found");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to read skippr discover local metadata fallback");
-                }
-            }
-        }
-
         if !output.status.success() && errors.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             errors.push(format!("skippr discover failed: {}", stderr.trim()));
         }
 
+        let summary = parse_discover_summary(&output.stdout).unwrap_or_default();
+
         Ok(SkipprDiscoverResult {
             ok: output.status.success(),
-            namespaces,
+            namespaces_count: summary.namespaces_count,
+            total_fields: summary.total_fields,
             errors,
         })
     }
@@ -1992,42 +1902,27 @@ impl SkipprProvider for SkipprCliProvider {
         pipeline: &str,
     ) -> Result<SkipprSyncResult, String> {
         let idle_timeout = std::time::Duration::from_secs(120);
-        let (events, stderr_bytes, success) = self
+        let (mut summary, stderr_bytes, success) = self
             .run_skippr_streaming(
                 &["sync", "--pipeline", pipeline, "--once", "--output", "json"],
                 idle_timeout,
             )
             .await?;
 
-        let mut tables_synced = 0usize;
-        let mut errors = Vec::new();
-
-        for event in &events {
-            if let Some(kind) = event.get("event").and_then(|v| v.as_str()) {
-                match kind {
-                    "sync_complete" | "table_synced" | "namespace_synced" => {
-                        tables_synced += 1;
-                    }
-                    "error" => {
-                        if let Some(msg) = event.get("message").and_then(|v| v.as_str()) {
-                            errors.push(msg.to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if !success && errors.is_empty() {
+        if !success && summary.errors.is_empty() {
             let stderr = String::from_utf8_lossy(&stderr_bytes);
-            errors.push(format!("skippr sync failed: {}", stderr.trim()));
+            summary
+                .errors
+                .push(format!("skippr sync failed: {}", stderr.trim()));
         }
 
         Ok(SkipprSyncResult {
             ok: success,
-            tables_synced,
-            events,
-            errors,
+            tables_synced: summary.tables_synced,
+            total_rows: summary.total_rows,
+            bytes: summary.bytes,
+            rows_written: summary.rows_written,
+            errors: summary.errors,
         })
     }
 }

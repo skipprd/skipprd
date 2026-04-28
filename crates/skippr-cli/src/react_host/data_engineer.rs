@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use react::runtime_settings::{getenv_nonempty, getenv_u64, getenv_usize};
 use react_core::keyspace::Keyspace;
+use react_core::resolved_config::StorageMode;
 use react_core::suite::SuiteCtx;
 use react_module_provider_athena::{AthenaProvider, AthenaSettings};
 use react_module_provider_bigquery::{BigQueryProvider, BigQuerySettings};
@@ -458,6 +459,11 @@ pub(crate) async fn wire_providers(
         .expect("resolved_config must be set before wire_providers");
     let providers = de_cfg::de_config_from_resolved(cfg).unwrap_or_default();
     let wh_kind = providers.warehouse.kind;
+    let skippr_storage_mode = match cfg.storage.mode {
+        StorageMode::Local => "local",
+        StorageMode::S3 => "s3",
+    };
+    let skippr_storage_bucket = cfg.storage.bucket.clone();
     let skippr_data_dir = {
         let fs_root = cfg.storage.path.as_deref().unwrap_or("./.skippr");
         std::path::PathBuf::from(fs_root)
@@ -638,6 +644,8 @@ pub(crate) async fn wire_providers(
             providers.el.clone(),
             providers.warehouse.clone(),
             skippr_data_dir,
+            Some(skippr_storage_mode.to_string()),
+            skippr_storage_bucket,
         );
         sctx.set_capability(Arc::new(SkipprCap(Arc::new(skippr_provider))));
     }

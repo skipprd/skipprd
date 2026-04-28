@@ -665,22 +665,19 @@ async fn discover(output_mode: &str) -> io::Result<()> {
     Config::set_metadata(&updated_metadata, true).await;
 
     let namespaces_discovered = updated_metadata.metadata.len();
-    for (ns_name, ns_metadata) in updated_metadata.metadata.iter() {
-        let fields: Vec<serde_json::Value> = ns_metadata
-            .field_details()
-            .into_iter()
-            .map(|(name, type_name, _nullable)| {
-                serde_json::json!({
-                    "name": name,
-                    "type": type_name,
-                })
-            })
-            .collect();
-        reporter.discover_namespace(ns_name, fields);
-    }
+    let total_fields = updated_metadata
+        .metadata
+        .values()
+        .map(|ns_metadata| ns_metadata.field_details().len() as u64)
+        .sum();
 
     let elapsed_ms = start_time.elapsed().as_millis() as u64;
-    reporter.discover_complete(&pipeline_name, namespaces_discovered, elapsed_ms);
+    reporter.discover_complete(
+        &pipeline_name,
+        namespaces_discovered,
+        total_fields,
+        elapsed_ms,
+    );
 
     if reporter.enabled() {
         reporter.finish();
