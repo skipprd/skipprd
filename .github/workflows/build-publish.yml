@@ -1037,6 +1037,100 @@ jobs:
   #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
   #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
+  postgres_iceberg_types_cdc_test:
+    needs:
+      - cleanup
+    name: Postgres to Iceberg Glue Athena e2e
+    runs-on: ubuntu-latest
+    environment: Skippr
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: skippr_iceberg_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d skippr_iceberg_e2e"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+      DATA_DIR_MIN_FREE_BYTES: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Postgres client
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Seed exhaustive type and CDC source data
+        shell: bash
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -h 127.0.0.1 -U postgres -d skippr_iceberg_e2e <<'SQL'
+          DROP TABLE IF EXISTS type_matrix_orders;
+          CREATE TABLE type_matrix_orders (
+            id BIGINT PRIMARY KEY,
+            bool_col BOOLEAN,
+            string_col TEXT,
+            int_col INTEGER,
+            long_col BIGINT,
+            float_col REAL,
+            double_col DOUBLE PRECISION,
+            decimal_col NUMERIC(18,4),
+            date_col DATE,
+            timestamp_col TIMESTAMP,
+            time_col TIME,
+            json_col JSONB,
+            nullable_col TEXT
+          );
+          INSERT INTO type_matrix_orders VALUES
+            (1, true, 'initial', 10, 10000000000, 1.5, 2.5, 12.3400, DATE '2026-01-01', TIMESTAMP '2026-01-01 12:00:00', TIME '12:00:00', '{"shape":{"nested":true},"items":[1,2]}'::jsonb, NULL),
+            (2, false, 'delete-me', 20, 20000000000, 2.5, 3.5, 22.3400, DATE '2026-01-02', TIMESTAMP '2026-01-02 12:00:00', TIME '13:00:00', '{"op":"delete"}'::jsonb, 'present'),
+            (3, true, 'insert', 30, 30000000000, 3.5, 4.5, 32.3400, DATE '2026-01-03', TIMESTAMP '2026-01-03 12:00:00', TIME '14:00:00', '{"op":"insert"}'::jsonb, 'present');
+          UPDATE type_matrix_orders SET string_col = 'updated', int_col = 11 WHERE id = 1;
+          DELETE FROM type_matrix_orders WHERE id = 2;
+          INSERT INTO type_matrix_orders VALUES
+            (4, false, 'late-insert', 40, 40000000000, 4.5, 5.5, 42.3400, DATE '2026-01-04', TIMESTAMP '2026-01-04 12:00:00', TIME '15:00:00', '{"op":"late_insert"}'::jsonb, 'present');
+          SQL
+
+      - name: Build skipprd and runtime plugins
+        shell: bash
+        run: |
+          cargo build \
+            -p skipprd \
+            -p skippr-plugin-data-source-postgres \
+            -p skippr-plugin-data-sink-iceberg \
+            -p skippr-plugin-schema-sink-iceberg
+
+      - name: Stage local runtime manifests
+        id: local_runtime
+        shell: bash
+        run: |
+          manifest_dir="$(python3 .github/scripts/runtime_e2e_harness.py stage-local-runtime-release --skipprd target/debug/skipprd)"
+          echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
+
+      - name: Run DB to Iceberg Glue Athena e2e
+        shell: bash
+        run: |
+          python3 .github/scripts/runtime_e2e_harness.py run postgres_iceberg_types_cdc \
+            --mode full \
+            --skipprd target/debug/skipprd \
+            --prepare-aws-state \
+            --skip-dynamodb-purge \
+            --local-runtime-manifest-dir "${{ steps.local_runtime.outputs.manifest_dir }}"
+
   mssql_snowflake_test:
     needs:
       - windows_x86

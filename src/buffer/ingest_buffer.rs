@@ -1068,16 +1068,10 @@ impl Buffers {
     }
 
     #[cfg(windows)]
-    fn fsync_dir(dir: &PathBuf) -> io::Result<()> {
-        use std::os::windows::fs::OpenOptionsExt;
-
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-
-        let df = OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(dir)?;
-        df.sync_all()
+    fn fsync_dir(_dir: &PathBuf) -> io::Result<()> {
+        // Windows can return ERROR_ACCESS_DENIED when flushing directory
+        // handles. The commit marker file itself is fsynced before this call.
+        Ok(())
     }
 
     pub fn write_seg_commit(
@@ -1093,7 +1087,13 @@ impl Buffers {
             total_bytes,
             sha256,
         );
-        std::fs::write(&commit_path, &buf)?;
+        let mut commit_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&commit_path)?;
+        commit_file.write_all(&buf)?;
+        commit_file.sync_all()?;
         if let Some(parent) = commit_path.parent() {
             Self::fsync_dir(&parent.to_path_buf())?;
         }

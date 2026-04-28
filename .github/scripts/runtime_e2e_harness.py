@@ -35,19 +35,26 @@ DEFAULT_ASSERTION_OUTPUT = (
 )
 EXPECTED_RUNTIME_PLUGIN_PATTERNS = (
     "skippr-plugin-data-source-s3*",
+    "skippr-plugin-data-source-postgres*",
     "skippr-plugin-data-sink-athena*",
+    "skippr-plugin-data-sink-iceberg*",
     "skippr-plugin-schema-sink-glue*",
+    "skippr-plugin-schema-sink-iceberg*",
 )
 LOCAL_SCENARIO_RUNTIME_MANIFESTS = (
     ("runtime_s3_source", "s3-source.json"),
     ("runtime_athena_sink", "athena-sink.json"),
     ("runtime_glue_schema", "glue-schema.json"),
+    ("runtime_postgres_source", "postgres-source.json"),
+    ("runtime_iceberg_sink", "iceberg-sink.json"),
+    ("runtime_iceberg_schema", "iceberg-schema.json"),
 )
 LOCAL_SCENARIO_RUNTIME_PIPELINE_ANCHORS = {
     "bike_hire": "    data_sink: data_sinks.test_datalake\n",
     "bike_hire_many": "    data_sink: data_sinks.test_datalake\n",
     "bike_hire_s3_wal_many": "    data_sink: data_sinks.test_datalake\n",
     "deadletters_test": "    data_sink: data_sinks.test_datalake\n",
+    "postgres_iceberg_types_cdc": "    data_sink: data_sinks.iceberg_types_cdc\n",
 }
 BIKE_HIRE_RUNTIME_VERSION_ANCHORS = (
     ("  s3_bike_hire:\n    S3:\n", "S3"),
@@ -66,6 +73,11 @@ SCENARIO_RUNTIME_VERSION_ANCHORS = {
     "bike_hire_many": BIKE_HIRE_RUNTIME_VERSION_ANCHORS,
     "bike_hire_s3_wal_many": BIKE_HIRE_RUNTIME_VERSION_ANCHORS,
     "deadletters_test": DEADLETTERS_RUNTIME_VERSION_ANCHORS,
+    "postgres_iceberg_types_cdc": (
+        ("  postgres_types_cdc:\n    Postgres:\n", "Postgres"),
+        ("  iceberg_types_cdc:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+    ),
 }
 RUNTIME_PLUGIN_SMOKE_SUPPORT_MANIFESTS = (
     "file-sink.json",
@@ -339,6 +351,16 @@ SCENARIOS = {
         full_runs=(SyncRun(pipeline="deadletters_test"),),
         smoke_verifiers=("deadletters_athena_routing",),
         full_verifiers=("soda_deadletters",),
+    ),
+    "postgres_iceberg_types_cdc": Scenario(
+        name="postgres_iceberg_types_cdc",
+        config_path=scenario_config(
+            ".github/actions/e2e/postgres_iceberg_types_cdc/skipprd.yml"
+        ),
+        smoke_runs=(SyncRun(pipeline="postgres_iceberg_types_cdc"),),
+        full_runs=(SyncRun(pipeline="postgres_iceberg_types_cdc"),),
+        smoke_verifiers=("postgres_iceberg_types_cdc_final_state",),
+        full_verifiers=("postgres_iceberg_types_cdc_final_state",),
     ),
 }
 
@@ -1031,20 +1053,33 @@ def local_runtime_config_text(
             f"expected to find anchor {anchor!r} exactly once in scenario {scenario_name}, found {count}"
         )
 
-    runtime_lines = (
-        "    runtime_input: runtime_plugins.runtime_s3_source\n"
-        "    runtime_output: runtime_plugins.runtime_athena_sink\n"
-        "    runtime_schema: runtime_plugins.runtime_glue_schema\n"
-    )
+    if scenario_name == "postgres_iceberg_types_cdc":
+        runtime_lines = (
+            "    runtime_input: runtime_plugins.runtime_postgres_source\n"
+            "    runtime_output: runtime_plugins.runtime_iceberg_sink\n"
+            "    runtime_schema: runtime_plugins.runtime_iceberg_schema\n"
+        )
+        runtime_plugins_block = (
+            "\nruntime_plugins:\n"
+            f'  runtime_postgres_source:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_postgres_source"]}"\n'
+            f'  runtime_iceberg_sink:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_iceberg_sink"]}"\n'
+            f'  runtime_iceberg_schema:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_iceberg_schema"]}"\n'
+        )
+    else:
+        runtime_lines = (
+            "    runtime_input: runtime_plugins.runtime_s3_source\n"
+            "    runtime_output: runtime_plugins.runtime_athena_sink\n"
+            "    runtime_schema: runtime_plugins.runtime_glue_schema\n"
+        )
+        runtime_plugins_block = (
+            "\nruntime_plugins:\n"
+            f'  runtime_s3_source:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_s3_source"]}"\n'
+            f'  runtime_athena_sink:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_athena_sink"]}"\n'
+            f'  runtime_glue_schema:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_glue_schema"]}"\n'
+        )
     rewritten = config_text.replace(anchor, anchor + runtime_lines, 1)
     if not rewritten.endswith("\n"):
         rewritten += "\n"
-    runtime_plugins_block = (
-        "\nruntime_plugins:\n"
-        f'  runtime_s3_source:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_s3_source"]}"\n'
-        f'  runtime_athena_sink:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_athena_sink"]}"\n'
-        f'  runtime_glue_schema:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_glue_schema"]}"\n'
-    )
     print_step(
         f"Using local staged runtime manifests for {scenario_name} from {local_runtime_manifests.manifest_dir}"
     )
@@ -1802,6 +1837,43 @@ def verify_soda_deadletters(context: ScenarioContext) -> None:
     )
 
 
+def verify_postgres_iceberg_types_cdc_final_state(context: ScenarioContext) -> None:
+    table = "skippr_type_matrix_orders"
+    database = "iceberg_e2e"
+    row_count = int(
+        athena_scalar(
+            f'SELECT COUNT(*) FROM "{table}"',
+            database=database,
+            env=context.base_env,
+            output_location=context.assertion_output,
+        )
+    )
+    if row_count != 3:
+        raise HarnessError(
+            f"expected Iceberg final state to contain 3 rows, got {row_count}"
+        )
+    deleted = int(
+        athena_scalar(
+            f"SELECT COUNT(*) FROM \"{table}\" WHERE id = 2",
+            database=database,
+            env=context.base_env,
+            output_location=context.assertion_output,
+        )
+    )
+    if deleted != 0:
+        raise HarnessError("expected CDC delete for id=2 to be reflected in Iceberg")
+    type_probe = int(
+        athena_scalar(
+            f"SELECT COUNT(*) FROM \"{table}\" WHERE id = 1 AND bool_col = true AND string_col = 'updated'",
+            database=database,
+            env=context.base_env,
+            output_location=context.assertion_output,
+        )
+    )
+    if type_probe != 1:
+        raise HarnessError("expected updated type-matrix row for id=1 to be queryable")
+
+
 VERIFIERS: dict[str, Callable[[ScenarioContext], None]] = {
     "bike_hire_rows": verify_bike_hire_rows,
     "bike_hire_many_rows": verify_bike_hire_many_rows,
@@ -1812,6 +1884,7 @@ VERIFIERS: dict[str, Callable[[ScenarioContext], None]] = {
     "soda_bike_hire_many": verify_soda_bike_hire_many,
     "soda_bike_hire_s3_wal_many": verify_soda_bike_hire_s3_wal_many,
     "soda_deadletters": verify_soda_deadletters,
+    "postgres_iceberg_types_cdc_final_state": verify_postgres_iceberg_types_cdc_final_state,
 }
 
 
