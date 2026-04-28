@@ -360,7 +360,8 @@ jobs:
     name: cargo build (windows x86)
     needs:
       - plan_runtime_plugin_release
-    runs-on: windows-latest
+    runs-on:
+      labels: windows-2022-16core
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -518,10 +519,6 @@ jobs:
       - name: Build release
         shell: pwsh
         run: |
-          # libz-sys consults VCPKGRS_NO_ZLIB at runtime, so force a targeted
-          # rebuild when the cached target dir is restored.
-          cargo clean -p libz-sys -p rdkafka-sys -p rdkafka
-
           $rawPluginPackages = @'
           ${{ needs.plan_runtime_plugin_release.outputs.runtime_plugin_packages_json }}
           '@
