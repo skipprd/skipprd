@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use react_core::scope::RequestScope;
 use react_suite_data_engineer::de_config::{ElToolResolved, WarehouseKind, WarehouseResolved};
@@ -32,8 +32,18 @@ impl SkipprCliProvider {
         }
     }
 
+    fn data_dir_path(&self) -> PathBuf {
+        if self.data_dir.is_absolute() {
+            return self.data_dir.clone();
+        }
+
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&self.data_dir))
+            .unwrap_or_else(|_| self.data_dir.clone())
+    }
+
     fn skippr_yml_path(&self) -> PathBuf {
-        self.data_dir.join("skipprd.yaml")
+        self.data_dir_path().join("skipprd.yaml")
     }
 
     fn env_vars(&self) -> HashMap<String, String> {
@@ -41,7 +51,7 @@ impl SkipprCliProvider {
         env.insert("SKIPPR_STORAGE_MODE".into(), "local".into());
         env.insert(
             "DATA_DIR".into(),
-            self.data_dir.to_string_lossy().to_string(),
+            self.data_dir_path().to_string_lossy().to_string(),
         );
         env.insert(
             "SKIPPR_CONFIG_FILE".into(),
@@ -425,11 +435,12 @@ impl SkipprCliProvider {
         timeout: std::time::Duration,
     ) -> Result<std::process::Output, String> {
         let env = self.env_vars();
+        let data_dir = self.data_dir_path();
         let mut cmd = tokio::process::Command::new(&self.binary);
         cmd.arg("--log");
         cmd.arg("info");
         cmd.args(args);
-        cmd.current_dir(&self.data_dir);
+        cmd.current_dir(&data_dir);
         cmd.env("RUST_BACKTRACE", "1");
         for (k, v) in &env {
             cmd.env(k, v);
@@ -440,7 +451,7 @@ impl SkipprCliProvider {
         tracing::info!(
             binary = %self.binary,
             args = ?args,
-            data_dir = %self.data_dir.display(),
+            data_dir = %data_dir.display(),
             timeout_secs = timeout.as_secs(),
             "spawning skippr"
         );
@@ -528,11 +539,12 @@ impl SkipprCliProvider {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
         let env = self.env_vars();
+        let data_dir = self.data_dir_path();
         let mut cmd = tokio::process::Command::new(&self.binary);
         cmd.arg("--log");
         cmd.arg("info");
         cmd.args(args);
-        cmd.current_dir(&self.data_dir);
+        cmd.current_dir(&data_dir);
         cmd.env("RUST_BACKTRACE", "1");
         for (k, v) in &env {
             cmd.env(k, v);
@@ -543,7 +555,7 @@ impl SkipprCliProvider {
         tracing::info!(
             binary = %self.binary,
             args = ?args,
-            data_dir = %self.data_dir.display(),
+            data_dir = %data_dir.display(),
             idle_timeout_secs = idle_timeout.as_secs(),
             "spawning skippr (streaming)"
         );
@@ -781,7 +793,10 @@ impl SkipprCliProvider {
         serde_yaml::to_string(&yml).unwrap_or_default()
     }
 
-    fn build_output_config(&self, pipeline_config: Option<&SkipprPipelineConfig>) -> serde_json::Value {
+    fn build_output_config(
+        &self,
+        pipeline_config: Option<&SkipprPipelineConfig>,
+    ) -> serde_json::Value {
         fn getenv(key: &str) -> Option<String> {
             std::env::var(key).ok().filter(|v| !v.trim().is_empty())
         }
@@ -811,7 +826,8 @@ impl SkipprCliProvider {
                 let workgroup = getenv("ATHENA_WORKGROUP")
                     .or_else(|| extra_str(extras, "workgroup"))
                     .unwrap_or_else(|| "primary".to_string());
-                let result_s3 = getenv("ATHENA_RESULT_S3").or_else(|| extra_str(extras, "result_s3"));
+                let result_s3 =
+                    getenv("ATHENA_RESULT_S3").or_else(|| extra_str(extras, "result_s3"));
                 let (bucket, prefix) = result_s3
                     .as_deref()
                     .and_then(parse_s3_uri)
@@ -821,7 +837,10 @@ impl SkipprCliProvider {
                     "athena_workgroup_name".into(),
                     serde_json::Value::String(workgroup),
                 );
-                cfg.insert("s3_bucket".into(), serde_json::Value::String(bucket.clone()));
+                cfg.insert(
+                    "s3_bucket".into(),
+                    serde_json::Value::String(bucket.clone()),
+                );
                 cfg.insert("s3_prefix".into(), serde_json::Value::String(prefix));
                 cfg.insert(
                     "athena_results_s3_bucket".into(),
@@ -1238,8 +1257,171 @@ fn insert_snowflake_env(wh: &WarehouseResolved, env: &mut HashMap<String, String
 fn parse_json_lines(stdout: &[u8]) -> Vec<serde_json::Value> {
     let text = String::from_utf8_lossy(stdout);
     text.lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter_map(|line| serde_json::from_str(line.trim()).ok())
         .collect()
+}
+
+fn namespaces_from_discover_events(events: &[serde_json::Value]) -> Vec<SkipprNamespaceSchema> {
+    let mut namespaces = Vec::new();
+
+    for event in events {
+        if event.get("event").and_then(|v| v.as_str()) != Some("namespace_discovered") {
+            continue;
+        }
+        if let Some(namespace) = namespace_from_json_event(event) {
+            namespaces.push(namespace);
+        }
+    }
+
+    namespaces
+}
+
+fn namespace_from_json_event(event: &serde_json::Value) -> Option<SkipprNamespaceSchema> {
+    let ns = event.get("namespace").and_then(|v| v.as_str())?;
+    let fields = event
+        .get("fields")
+        .and_then(|v| v.as_array())
+        .map(|fields| fields_from_json_array(fields))
+        .unwrap_or_default();
+
+    Some(SkipprNamespaceSchema {
+        namespace: ns.to_string(),
+        fields,
+    })
+}
+
+fn fields_from_json_array(fields: &[serde_json::Value]) -> Vec<SkipprFieldSchema> {
+    fields
+        .iter()
+        .filter_map(|f| {
+            Some(SkipprFieldSchema {
+                name: f.get("name")?.as_str()?.to_string(),
+                field_type: f.get("type")?.as_str()?.to_string(),
+                nullable: f.get("nullable").and_then(|v| v.as_bool()).unwrap_or(true),
+            })
+        })
+        .collect()
+}
+
+fn read_local_metadata_namespaces(
+    data_dir: &Path,
+    pipeline: &str,
+) -> Result<Option<Vec<SkipprNamespaceSchema>>, String> {
+    let metadata_path = local_metadata_path(data_dir, pipeline);
+    if !metadata_path.exists() {
+        return Ok(None);
+    }
+
+    let contents = std::fs::read_to_string(&metadata_path)
+        .map_err(|e| format!("read local skipprd metadata {:?}: {}", metadata_path, e))?;
+    let value: serde_json::Value = serde_json::from_str(&contents)
+        .map_err(|e| format!("parse local skipprd metadata {:?}: {}", metadata_path, e))?;
+    Ok(Some(namespaces_from_metadata_value(&value)))
+}
+
+fn local_metadata_path(data_dir: &Path, pipeline: &str) -> PathBuf {
+    data_dir
+        .join(scope_segment_from_env("TENANT"))
+        .join(scope_segment_from_env("WORKSPACE_NAME"))
+        .join(pipeline)
+        .join("metadata")
+        .join("metadata.json")
+}
+
+fn scope_segment_from_env(key: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn namespaces_from_metadata_value(value: &serde_json::Value) -> Vec<SkipprNamespaceSchema> {
+    let Some(metadata) = value.get("metadata").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut namespaces: Vec<_> = metadata
+        .iter()
+        .filter_map(|(namespace, metadata)| {
+            if metadata
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .is_some_and(|enabled| !enabled)
+            {
+                return None;
+            }
+
+            Some(SkipprNamespaceSchema {
+                namespace: namespace.clone(),
+                fields: fields_from_metadata_value(metadata),
+            })
+        })
+        .collect();
+
+    namespaces.sort_by(|a, b| a.namespace.cmp(&b.namespace));
+    namespaces
+}
+
+fn fields_from_metadata_value(metadata: &serde_json::Value) -> Vec<SkipprFieldSchema> {
+    let Some(fields) = metadata.get("fields").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut fields: Vec<_> = fields
+        .iter()
+        .filter_map(|(field_name, field_metadata)| {
+            if field_metadata
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .is_some_and(|enabled| !enabled)
+            {
+                return None;
+            }
+
+            let name = field_metadata
+                .get("out_field_name")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+                .unwrap_or(field_name)
+                .to_string();
+            let field_type = field_type_from_metadata_value(field_metadata);
+            let nullable = field_metadata
+                .get("nullable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            Some(SkipprFieldSchema {
+                name,
+                field_type,
+                nullable,
+            })
+        })
+        .collect();
+
+    fields.sort_by(|a, b| a.name.cmp(&b.name));
+    fields
+}
+
+fn field_type_from_metadata_value(field_metadata: &serde_json::Value) -> String {
+    if let Some(data_type) = field_metadata
+        .get("determined_type")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty() && *v != "unknown")
+    {
+        return data_type.to_string();
+    }
+
+    field_metadata
+        .get("types")
+        .and_then(|v| v.as_object())
+        .and_then(|types| {
+            types
+                .iter()
+                .filter(|(name, _)| name.as_str() != "unknown" && name.as_str() != "null")
+                .max_by_key(|(_, count)| count.as_u64().unwrap_or(0))
+                .map(|(name, _)| name.clone())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[cfg(test)]
@@ -1439,7 +1621,10 @@ mod tests {
                     Some("ANALYTICS")
                 );
                 assert_eq!(cfg.get("schema").and_then(|v| v.as_str()), Some("RAW"));
-                assert_eq!(cfg.get("stage").and_then(|v| v.as_str()), Some("@skippr_stage"));
+                assert_eq!(
+                    cfg.get("stage").and_then(|v| v.as_str()),
+                    Some("@skippr_stage")
+                );
                 assert_eq!(
                     cfg.get("staging_uri").and_then(|v| v.as_str()),
                     Some("azure://acct.blob.core.windows.net/container/prefix")
@@ -1450,8 +1635,7 @@ mod tests {
                     Some("SNOWFLAKE_AZURE_INT")
                 );
                 assert_eq!(
-                    cfg.get("staging_azure_sas_token")
-                        .and_then(|v| v.as_str()),
+                    cfg.get("staging_azure_sas_token").and_then(|v| v.as_str()),
                     Some("sas-token")
                 );
                 assert_eq!(
@@ -1513,8 +1697,7 @@ mod tests {
             Some("bikehire")
         );
         assert_eq!(
-            cfg.get("athena_results_s3_bucket")
-                .and_then(|v| v.as_str()),
+            cfg.get("athena_results_s3_bucket").and_then(|v| v.as_str()),
             Some("skippr-e2e-sample-data-output")
         );
         assert_eq!(
@@ -1549,6 +1732,75 @@ mod tests {
         assert!(source.contains_key(&serde_yaml::Value::String("DeltaLake".to_string())));
         assert!(!source.contains_key(&serde_yaml::Value::String("Delta_lake".to_string())));
     }
+
+    #[test]
+    fn parses_discover_namespace_events() {
+        let events = parse_json_lines(
+            br#"
+{"event":"discover_start","pipeline":"pipe","timestamp":"2026-04-28T00:00:00Z"}
+{"event":"namespace_discovered","namespace":"customers","fields":[{"name":"customer_id","type":"string","nullable":false},{"name":"created_at","type":"date","nullable":true}],"timestamp":"2026-04-28T00:00:01Z"}
+{"event":"discover_complete","pipeline":"pipe","namespaces_discovered":1,"timestamp":"2026-04-28T00:00:02Z"}
+"#,
+        );
+
+        let namespaces = namespaces_from_discover_events(&events);
+
+        assert_eq!(namespaces.len(), 1);
+        assert_eq!(namespaces[0].namespace, "customers");
+        assert_eq!(namespaces[0].fields.len(), 2);
+        assert_eq!(namespaces[0].fields[0].name, "customer_id");
+        assert_eq!(namespaces[0].fields[0].field_type, "string");
+        assert!(!namespaces[0].fields[0].nullable);
+    }
+
+    #[test]
+    fn parses_local_metadata_fallback_namespaces() {
+        let metadata = serde_json::json!({
+            "name": "pipe",
+            "metadata": {
+                "orders": {
+                    "enabled": true,
+                    "fields": {
+                        "order_id": {
+                            "enabled": true,
+                            "out_field_name": "order_id",
+                            "determined_type": "string",
+                            "nullable": false
+                        },
+                        "amount_raw": {
+                            "enabled": true,
+                            "out_field_name": "total_amount",
+                            "determined_type": "unknown",
+                            "types": {
+                                "decimal": 3,
+                                "string": 1
+                            },
+                            "nullable": true
+                        },
+                        "disabled_field": {
+                            "enabled": false,
+                            "determined_type": "string"
+                        }
+                    }
+                },
+                "disabled_namespace": {
+                    "enabled": false,
+                    "fields": {}
+                }
+            }
+        });
+
+        let namespaces = namespaces_from_metadata_value(&metadata);
+
+        assert_eq!(namespaces.len(), 1);
+        assert_eq!(namespaces[0].namespace, "orders");
+        assert_eq!(namespaces[0].fields.len(), 2);
+        assert_eq!(namespaces[0].fields[0].name, "order_id");
+        assert_eq!(namespaces[0].fields[0].field_type, "string");
+        assert!(!namespaces[0].fields[0].nullable);
+        assert_eq!(namespaces[0].fields[1].name, "total_amount");
+        assert_eq!(namespaces[0].fields[1].field_type, "decimal");
+    }
 }
 
 #[async_trait]
@@ -1581,40 +1833,38 @@ impl SkipprProvider for SkipprCliProvider {
             .await?;
 
         let events = parse_json_lines(&output.stdout);
-        let mut namespaces = Vec::new();
+        let mut namespaces = namespaces_from_discover_events(&events);
         let mut errors = Vec::new();
 
         for event in &events {
             if let Some(kind) = event.get("event").and_then(|v| v.as_str()) {
-                if kind == "namespace_discovered" {
-                    if let Some(ns) = event.get("namespace").and_then(|v| v.as_str()) {
-                        let fields = event
-                            .get("fields")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|f| {
-                                        Some(SkipprFieldSchema {
-                                            name: f.get("name")?.as_str()?.to_string(),
-                                            field_type: f.get("type")?.as_str()?.to_string(),
-                                            nullable: f
-                                                .get("nullable")
-                                                .and_then(|v| v.as_bool())
-                                                .unwrap_or(true),
-                                        })
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        namespaces.push(SkipprNamespaceSchema {
-                            namespace: ns.to_string(),
-                            fields,
-                        });
-                    }
-                } else if kind == "error" {
+                if kind == "error" {
                     if let Some(msg) = event.get("message").and_then(|v| v.as_str()) {
                         errors.push(msg.to_string());
                     }
+                }
+            }
+        }
+
+        if output.status.success() && namespaces.is_empty() {
+            match read_local_metadata_namespaces(&self.data_dir_path(), pipeline) {
+                Ok(Some(fallback_namespaces)) if !fallback_namespaces.is_empty() => {
+                    tracing::warn!(
+                        namespaces = fallback_namespaces.len(),
+                        "skippr discover produced no namespace events; using local metadata fallback"
+                    );
+                    namespaces = fallback_namespaces;
+                }
+                Ok(Some(_)) => {
+                    tracing::warn!(
+                        "skippr discover local metadata fallback contained no namespaces"
+                    );
+                }
+                Ok(None) => {
+                    tracing::warn!("skippr discover local metadata fallback file was not found");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to read skippr discover local metadata fallback");
                 }
             }
         }
