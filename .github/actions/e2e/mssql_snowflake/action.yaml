@@ -6,17 +6,10 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Install SQL Server on Windows runner
-      uses: potatoqualitee/mssqlsuite@v1.12
-      with:
-        install: sqlengine, sqlclient
-        sa-password: "Skippr!Test123"
-
-    - name: Run MSSQL to Snowflake via skippr
+    - name: Validate e2e secrets
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
-
         $requiredEnv = @(
           "SKIPPR_API_KEY",
           "SNOWFLAKE_ACCOUNT",
@@ -31,6 +24,35 @@ runs:
             Write-Error "::error::Required environment variable $key is not set"
           }
         }
+
+        $apiKey = $env:SKIPPR_API_KEY.Trim()
+        if (-not $apiKey.StartsWith("sk_live_")) {
+          Write-Error "::error::SKIPPR_API_KEY must be a Skippr API key created by 'skippr user create-api-key' and start with sk_live_. Check the Skippr GitHub environment secret."
+        }
+
+    - name: Set up Python for dbt
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install dbt for Snowflake
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        python -m pip install --upgrade pip
+        python -m pip install dbt-core dbt-snowflake
+        dbt --version
+
+    - name: Install SQL Server on Windows runner
+      uses: potatoqualitee/mssqlsuite@v1.12
+      with:
+        install: sqlengine, sqlclient
+        sa-password: "Skippr!Test123"
+
+    - name: Run MSSQL to Snowflake via skippr
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
 
         $skipprBin = (Resolve-Path ".\skippr-${{ inputs.architecture_name }}\skippr.exe").Path
         $skipprdBin = (Resolve-Path ".\skipprd-${{ inputs.architecture_name }}\skipprd.exe").Path
@@ -87,6 +109,9 @@ runs:
 
           Write-Host "Running skippr doctor"
           & $skipprBin --config $configPath doctor
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "::error::skippr doctor failed with exit code $LASTEXITCODE"
+          }
 
           Write-Host "Running skippr MSSQL to Snowflake e2e"
           $logPath = Join-Path $workdir "skippr-run.log"
