@@ -59,6 +59,16 @@ fn configure_runtime_input_config(config: &RuntimePluginConfigEnvelope) {
     std::env::set_var("SKIPPR_RUNTIME_INPUT_CONFIG_JSON", &config.raw_config_json);
 }
 
+fn suppress_runtime_source_data_relay() -> bool {
+    matches!(
+        std::env::var("SKIPPR_RUNTIME_SOURCE_SUPPRESS_DATA_RELAY")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 fn current_runtime_schema_state_from_core() -> RuntimeSchemaState {
     let metadata = METADATA.load();
     let namespaces = metadata
@@ -260,6 +270,9 @@ impl RuntimeSourceCheckpointTransport {
 
 impl CheckpointTransport for RuntimeSourceCheckpointTransport {
     fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String> {
+        if suppress_runtime_source_data_relay() {
+            return Ok(());
+        }
         let frame = PluginDataFrame::CheckpointUpdate {
             update: RuntimeCheckpointUpdate {
                 key: key.to_string(),
@@ -327,6 +340,9 @@ impl DataSink for ArrowRelayToHostSink {
         cdc_ctx: Option<&SyncContext>,
     ) -> Result<(), io::Error> {
         self.send_schema_state_if_needed().await?;
+        if suppress_runtime_source_data_relay() {
+            return Ok(());
+        }
         let arrow_stream_bytes = encode_record_batch_stream(stream).await?;
         self.data_writer
             .write(&PluginDataFrame::SinkWrite(RuntimeSourceSinkWrite {
@@ -350,6 +366,9 @@ impl RuntimeIngestRelay for ArrowRelayToHostSink {
     ) -> Result<(), std::io::Error> {
         block_on_handle(&self.control_writer.handle, async {
             self.send_schema_state_if_needed().await?;
+            if suppress_runtime_source_data_relay() {
+                return Ok(());
+            }
             self.data_writer
                 .write(&PluginDataFrame::IngestBatches { batches })
                 .await
@@ -361,6 +380,9 @@ impl RuntimeIngestRelay for ArrowRelayToHostSink {
         offsets: Vec<RuntimeOffsetMaterializationHint>,
     ) -> Result<(), std::io::Error> {
         block_on_handle(&self.control_writer.handle, async {
+            if suppress_runtime_source_data_relay() {
+                return Ok(());
+            }
             self.data_writer
                 .write(&PluginDataFrame::OffsetMaterializationHints { hints: offsets })
                 .await

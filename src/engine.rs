@@ -230,7 +230,13 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     if reporter.enabled() {
         reporter.start("Discovering");
     }
+    let previous_suppress_relay = std::env::var_os("SKIPPR_RUNTIME_SOURCE_SUPPRESS_DATA_RELAY");
+    std::env::set_var("SKIPPR_RUNTIME_SOURCE_SUPPRESS_DATA_RELAY", "1");
     let discover_result = sync_input_plugin(offsets_db.clone(), shared_output).await;
+    match previous_suppress_relay {
+        Some(value) => std::env::set_var("SKIPPR_RUNTIME_SOURCE_SUPPRESS_DATA_RELAY", value),
+        None => std::env::remove_var("SKIPPR_RUNTIME_SOURCE_SUPPRESS_DATA_RELAY"),
+    }
     if let Err(err) = discover_result {
         if reporter.enabled() {
             reporter.finish();
