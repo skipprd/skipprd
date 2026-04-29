@@ -1,4 +1,5 @@
 name: MSSQL to Snowflake E2E
+description: Run the Windows MSSQL to Snowflake skippr E2E scenario.
 inputs:
   architecture_name:
     description: 'Artifact architecture name, e.g. windows_x86'
@@ -97,7 +98,7 @@ runs:
             "  tenant: _",
             "  storage_mode: local",
             "pipelines:",
-            "  $projectName:",
+            "  ${projectName}:",
             "    data_source: data_sources.mssql",
             "    data_sink: data_sinks.snowflake",
             "data_sources:",
