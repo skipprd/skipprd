@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 6;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 7;
 pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
 pub const SKIPPR_RUNTIME_SESSION_TOKEN_ENV: &str = "SKIPPR_RUNTIME_SESSION_TOKEN";
@@ -196,11 +196,20 @@ pub struct RuntimeOutputLayout {
     pub time_partition_granularity: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum RuntimeExecutionMode {
+    Discover,
+    #[default]
+    Sync,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeExecutionContext {
     pub pipeline_name: String,
     pub workspace_name: String,
     pub data_dir: String,
+    #[serde(default)]
+    pub execution_mode: RuntimeExecutionMode,
     #[serde(default)]
     pub output_layout: RuntimeOutputLayout,
 }

@@ -35,12 +35,12 @@ use crate::runtime_plugins::artifact::resolve_plugin_executable;
 use crate::runtime_plugins::manifest::RuntimePluginManifest;
 use crate::runtime_plugins::protocol::{
     HandshakeRequest, HostDataFrame, HostFrame, PluginDataFrame, PluginFrame, RuntimeBinding,
-    RuntimeCheckpointUpdate, RuntimeExecutionContext, RuntimeOffsetMaterializationHint,
-    RuntimeOutputLayout, RuntimeRequestAck, RuntimeSchemaConfig, RuntimeSchemaInstallRequest,
-    RuntimeSchemaState, RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkConfig,
-    RuntimeSinkInstallRequest, RuntimeSinkPayload, RuntimeSourceConfig, SchemaRunRequest,
-    SinkRunRequest, SourceEvent, SourceStartRequest, RUNTIME_PROTOCOL_VERSION,
-    SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
+    RuntimeCheckpointUpdate, RuntimeExecutionContext, RuntimeExecutionMode,
+    RuntimeOffsetMaterializationHint, RuntimeOutputLayout, RuntimeRequestAck, RuntimeSchemaConfig,
+    RuntimeSchemaInstallRequest, RuntimeSchemaState, RuntimeSchemaStateInstallRequest,
+    RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkInstallRequest, RuntimeSinkPayload,
+    RuntimeSourceConfig, SchemaRunRequest, SinkRunRequest, SourceEvent, SourceStartRequest,
+    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::runtime_plugins::schema_state::{
@@ -432,14 +432,17 @@ fn is_runtime_channel_eof(err: &io::Error) -> bool {
     )
 }
 
-fn build_source_start_request_for_pipeline(pipeline_name: &str) -> io::Result<SourceStartRequest> {
+fn build_source_start_request_for_pipeline(
+    pipeline_name: &str,
+    execution_mode: RuntimeExecutionMode,
+) -> io::Result<SourceStartRequest> {
     let source_config = RuntimeSourceConfig::try_from(
         Config::get_pipeline_input_plugin_config().map_err(io::Error::other)?,
     )
     .map_err(io::Error::other)?;
 
     Ok(SourceStartRequest {
-        context: runtime_execution_context(pipeline_name),
+        context: runtime_execution_context(pipeline_name, execution_mode),
         config: source_config,
     })
 }
@@ -596,11 +599,13 @@ async fn drain_runtime_source_tasks(pending_tasks: &mut JoinSet<io::Result<()>>)
 pub async fn sync_runtime_input_plugin(
     resolved: ResolvedRuntimePlugin,
     pipeline_name: String,
+    execution_mode: RuntimeExecutionMode,
     offsets: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
 ) -> io::Result<()> {
     let mut connection = RuntimeChildConnection::spawn(resolved, pipeline_name).await?;
-    let start_request = build_source_start_request_for_pipeline(&connection.pipeline_name)?;
+    let start_request =
+        build_source_start_request_for_pipeline(&connection.pipeline_name, execution_mode)?;
     connection
         .send(&HostFrame::RunSource(start_request))
         .await?;
@@ -797,7 +802,10 @@ pub async fn sync_runtime_input_plugin(
     Ok(())
 }
 
-fn runtime_execution_context(pipeline_name: &str) -> RuntimeExecutionContext {
+fn runtime_execution_context(
+    pipeline_name: &str,
+    execution_mode: RuntimeExecutionMode,
+) -> RuntimeExecutionContext {
     let partition_fields = Config::get_transform_batch_partition_fields()
         .split(',')
         .map(str::trim)
@@ -819,6 +827,7 @@ fn runtime_execution_context(pipeline_name: &str) -> RuntimeExecutionContext {
         pipeline_name: pipeline_name.to_string(),
         workspace_name: Config::get_workspace_name(),
         data_dir: Config::get_data_dir(),
+        execution_mode,
         output_layout: RuntimeOutputLayout {
             partition_fields,
             order_fields,
@@ -865,7 +874,7 @@ impl RuntimeDataSinkPlugin {
         config: RuntimeSinkConfig,
     ) -> io::Result<Self> {
         let install_request = RuntimeSinkInstallRequest {
-            context: runtime_execution_context(&pipeline_name),
+            context: runtime_execution_context(&pipeline_name, RuntimeExecutionMode::Sync),
             binding,
             config,
         };
@@ -1107,7 +1116,7 @@ impl RuntimeSchemaSinkPlugin {
         config: RuntimeSchemaConfig,
     ) -> io::Result<Self> {
         let install_request = RuntimeSchemaInstallRequest {
-            context: runtime_execution_context(&pipeline_name),
+            context: runtime_execution_context(&pipeline_name, RuntimeExecutionMode::Sync),
             binding,
             config,
         };

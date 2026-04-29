@@ -33,7 +33,9 @@ use crate::runtime_plugins::host::terminate_runtime_plugin_children;
 use crate::runtime_plugins::host::{
     sync_runtime_input_plugin, ResolvedRuntimePlugin, RuntimeDataSinkPlugin,
 };
-use crate::runtime_plugins::protocol::{RuntimeBinding, RuntimePluginKind, RuntimeSinkConfig};
+use crate::runtime_plugins::protocol::{
+    RuntimeBinding, RuntimeExecutionMode, RuntimePluginKind, RuntimeSinkConfig,
+};
 use crate::runtime_plugins::schema_state::clear_runtime_source_schema_state;
 use crate::sqlrt::query::query;
 use crate::{LOGGER, METADATA, METRICS, RUNNING};
@@ -230,15 +232,14 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     if reporter.enabled() {
         reporter.start("Discovering");
     }
-    let previous_suppress_relay = std::env::var_os("SKIPPR_RUNTIME_SOURCE_SUPPRESS_DATA_RELAY");
     let previous_ingest_threads = std::env::var_os("INGEST_THREADS");
-    std::env::set_var("SKIPPR_RUNTIME_SOURCE_SUPPRESS_DATA_RELAY", "1");
     std::env::set_var("INGEST_THREADS", "1");
-    let discover_result = sync_input_plugin(offsets_db.clone(), shared_output).await;
-    match previous_suppress_relay {
-        Some(value) => std::env::set_var("SKIPPR_RUNTIME_SOURCE_SUPPRESS_DATA_RELAY", value),
-        None => std::env::remove_var("SKIPPR_RUNTIME_SOURCE_SUPPRESS_DATA_RELAY"),
-    }
+    let discover_result = sync_input_plugin(
+        offsets_db.clone(),
+        shared_output,
+        RuntimeExecutionMode::Discover,
+    )
+    .await;
     match previous_ingest_threads {
         Some(value) => std::env::set_var("INGEST_THREADS", value),
         None => std::env::remove_var("INGEST_THREADS"),
@@ -603,7 +604,12 @@ pub async fn run_sync(output_mode: &str) -> io::Result<()> {
         });
     }
 
-    let source_sync_result = sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
+    let source_sync_result = sync_input_plugin(
+        offsets_db.clone(),
+        shared_output_clone,
+        RuntimeExecutionMode::Sync,
+    )
+    .await;
     match &source_sync_result {
         Ok(()) => {
             if reporter.enabled() {
@@ -950,6 +956,7 @@ fn sink_capability_for_plugin(name: &str) -> Option<&'static crate::plugins::cdc
 pub async fn sync_input_plugin(
     offsets_clone: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+    execution_mode: RuntimeExecutionMode,
 ) -> io::Result<()> {
     let plugin_name = Config::get_pipeline_input_plugin_name();
     let runtime_entry = Config::get_pipeline_runtime_input_plugin().map_err(|err| {
@@ -977,6 +984,7 @@ pub async fn sync_input_plugin(
     sync_runtime_input_plugin(
         resolved,
         Config::get_pipeline_name(),
+        execution_mode,
         offsets_clone,
         shared_output,
     )

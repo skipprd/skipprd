@@ -9,6 +9,7 @@ use std::sync::Mutex as StdMutex;
 use async_trait::async_trait;
 use clap::Parser;
 use datafusion::execution::SendableRecordBatchStream;
+use skippr_core::cli::{DisocverOptions, Mode, SyncOptions, CLI_MODE};
 use skippr_core::discover::OutputMetadata as CoreOutputMetadata;
 use skippr_core::helpers::configuration::{Config, PIPELINE_NAME};
 use skippr_core::helpers::logging::init_logging;
@@ -26,10 +27,10 @@ use tokio::sync::{watch, Mutex};
 
 use crate::protocol::{
     HandshakeResponse, HostFrame, PluginDataFrame, PluginFrame, RuntimeCheckpointUpdate,
-    RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint, RuntimePluginConfigEnvelope,
-    RuntimePluginKind, RuntimeSchemaState, RuntimeSessionHello, RuntimeSourceCapabilityDescriptor,
-    RuntimeSourceSinkWrite, SourceEvent, SourceStartRequest, RUNTIME_PROTOCOL_VERSION,
-    SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
+    RuntimeExecutionMode, RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint,
+    RuntimePluginConfigEnvelope, RuntimePluginKind, RuntimeSchemaState, RuntimeSessionHello,
+    RuntimeSourceCapabilityDescriptor, RuntimeSourceSinkWrite, SourceEvent, SourceStartRequest,
+    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::sdk::encode_record_batch_stream;
@@ -59,14 +60,24 @@ fn configure_runtime_input_config(config: &RuntimePluginConfigEnvelope) {
     std::env::set_var("SKIPPR_RUNTIME_INPUT_CONFIG_JSON", &config.raw_config_json);
 }
 
-fn suppress_runtime_source_data_relay() -> bool {
-    matches!(
-        std::env::var("SKIPPR_RUNTIME_SOURCE_SUPPRESS_DATA_RELAY")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+fn runtime_mode_suppresses_data_relay(execution_mode: RuntimeExecutionMode) -> bool {
+    matches!(execution_mode, RuntimeExecutionMode::Discover)
+}
+
+fn configure_runtime_source_cli_mode(start: &SourceStartRequest) {
+    let pipeline = Some(start.context.pipeline_name.clone());
+    let mode = match start.context.execution_mode {
+        RuntimeExecutionMode::Discover => Mode::Discover(DisocverOptions {
+            pipeline,
+            output: "json".to_string(),
+        }),
+        RuntimeExecutionMode::Sync => Mode::Sync(SyncOptions {
+            pipeline,
+            output: "json".to_string(),
+            once: false,
+        }),
+    };
+    CLI_MODE.write().clone_from(&mode);
 }
 
 fn current_runtime_schema_state_from_core() -> RuntimeSchemaState {
@@ -257,20 +268,22 @@ impl OffsetTransport for RuntimeSourceOffsetTransport {
 struct RuntimeSourceCheckpointTransport {
     handle: Handle,
     data_writer: DataWriter,
+    suppress_data_relay: bool,
 }
 
 impl RuntimeSourceCheckpointTransport {
-    fn new(data_writer: DataWriter) -> Self {
+    fn new(data_writer: DataWriter, suppress_data_relay: bool) -> Self {
         Self {
             handle: Handle::current(),
             data_writer,
+            suppress_data_relay,
         }
     }
 }
 
 impl CheckpointTransport for RuntimeSourceCheckpointTransport {
     fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String> {
-        if suppress_runtime_source_data_relay() {
+        if self.suppress_data_relay {
             return Ok(());
         }
         let frame = PluginDataFrame::CheckpointUpdate {
@@ -287,16 +300,22 @@ impl CheckpointTransport for RuntimeSourceCheckpointTransport {
 pub struct ArrowRelayToHostSink {
     control_writer: ControlWriter,
     data_writer: DataWriter,
+    suppress_data_relay: bool,
     last_sent_schema_version: AtomicU64,
     last_sent_schema_namespace_count: AtomicU64,
     sent_schema_state: AtomicBool,
 }
 
 impl ArrowRelayToHostSink {
-    fn new(control_writer: ControlWriter, data_writer: DataWriter) -> Self {
+    fn new(
+        control_writer: ControlWriter,
+        data_writer: DataWriter,
+        suppress_data_relay: bool,
+    ) -> Self {
         Self {
             control_writer,
             data_writer,
+            suppress_data_relay,
             last_sent_schema_version: AtomicU64::new(0),
             last_sent_schema_namespace_count: AtomicU64::new(0),
             sent_schema_state: AtomicBool::new(false),
@@ -339,7 +358,7 @@ impl DataSink for ArrowRelayToHostSink {
         filename: String,
         cdc_ctx: Option<&SyncContext>,
     ) -> Result<(), io::Error> {
-        if suppress_runtime_source_data_relay() {
+        if self.suppress_data_relay {
             return Ok(());
         }
         self.send_schema_state_if_needed().await?;
@@ -365,7 +384,7 @@ impl RuntimeIngestRelay for ArrowRelayToHostSink {
         batches: Vec<RuntimeIngestPartitionBatch>,
     ) -> Result<(), std::io::Error> {
         block_on_handle(&self.control_writer.handle, async {
-            if suppress_runtime_source_data_relay() {
+            if self.suppress_data_relay {
                 return Ok(());
             }
             self.send_schema_state_if_needed().await?;
@@ -380,7 +399,7 @@ impl RuntimeIngestRelay for ArrowRelayToHostSink {
         offsets: Vec<RuntimeOffsetMaterializationHint>,
     ) -> Result<(), std::io::Error> {
         block_on_handle(&self.control_writer.handle, async {
-            if suppress_runtime_source_data_relay() {
+            if self.suppress_data_relay {
                 return Ok(());
             }
             self.data_writer
@@ -584,9 +603,11 @@ pub async fn run_append_data_source_main(
 
     configure_runtime_source_data_dir(&start.context.data_dir, plugin_name);
     configure_runtime_input_config(&start.config.0);
+    configure_runtime_source_cli_mode(&start);
     Config::reset_envcache();
     Config::build_config();
     Config::init().await;
+    let suppress_data_relay = runtime_mode_suppresses_data_relay(start.context.execution_mode);
 
     let control = RuntimeSourceControl::new();
     let mut shutdown_rx = control.subscribe_shutdown();
@@ -596,7 +617,7 @@ pub async fn run_append_data_source_main(
     });
 
     let mut source = build(start).await?;
-    let offsets = if suppress_runtime_source_data_relay() {
+    let offsets = if suppress_data_relay {
         Arc::new(Offsets::init().map_err(io::Error::other)?)
     } else {
         Arc::new(Offsets::from_runtime_transports(
@@ -606,12 +627,16 @@ pub async fn run_append_data_source_main(
             )),
             Some(Arc::new(RuntimeSourceCheckpointTransport::new(
                 data_writer.clone(),
+                suppress_data_relay,
             ))),
         ))
     };
-    let relay: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(
-        ArrowRelayToHostSink::new(control_writer.clone(), data_writer.clone()),
-    ));
+    let relay: Arc<Box<dyn DataSink + Send + Sync>> =
+        Arc::new(Box::new(ArrowRelayToHostSink::new(
+            control_writer.clone(),
+            data_writer.clone(),
+            suppress_data_relay,
+        )));
 
     let sync_result = {
         let sync_fut = source.sync(offsets.clone(), relay.clone());
@@ -633,7 +658,7 @@ pub async fn run_append_data_source_main(
 
     match sync_result {
         Ok(()) => {
-            if suppress_runtime_source_data_relay() {
+            if suppress_data_relay {
                 control_writer
                     .write(&PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(
                         current_runtime_schema_state_from_core(),
