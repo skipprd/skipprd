@@ -596,15 +596,19 @@ pub async fn run_append_data_source_main(
     });
 
     let mut source = build(start).await?;
-    let offsets = Arc::new(Offsets::from_runtime_transports(
-        Arc::new(RuntimeSourceOffsetTransport::new(
-            control_writer.clone(),
-            control.clone(),
-        )),
-        Some(Arc::new(RuntimeSourceCheckpointTransport::new(
-            data_writer.clone(),
-        ))),
-    ));
+    let offsets = if suppress_runtime_source_data_relay() {
+        Arc::new(Offsets::init().map_err(io::Error::other)?)
+    } else {
+        Arc::new(Offsets::from_runtime_transports(
+            Arc::new(RuntimeSourceOffsetTransport::new(
+                control_writer.clone(),
+                control.clone(),
+            )),
+            Some(Arc::new(RuntimeSourceCheckpointTransport::new(
+                data_writer.clone(),
+            ))),
+        ))
+    };
     let relay: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(
         ArrowRelayToHostSink::new(control_writer.clone(), data_writer.clone()),
     ));
