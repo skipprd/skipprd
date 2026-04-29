@@ -60,6 +60,15 @@ pub struct AccountResponse {
     #[serde(default)]
     pub recent_usage: Vec<serde_json::Value>,
     pub subscription: Option<Subscription>,
+    #[serde(default)]
+    pub eula: EulaAcceptance,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct EulaAcceptance {
+    pub accepted_at: Option<String>,
+    pub version: Option<String>,
+    pub accepted_via: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -257,6 +266,25 @@ impl ApiClient {
         resp.json()
             .await
             .map_err(|e| ApiError::network("Account parse failed", e))
+    }
+
+    pub async fn accept_eula(&self, version: &str) -> Result<(), ApiError> {
+        let url = format!("{}/auth/accept-eula", self.base_url);
+        let body = serde_json::json!({ "version": version });
+        let resp = self
+            .send_with_auth("EULA acceptance failed", |token| {
+                self.http
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", token))
+                    .json(&body)
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(response_error("EULA acceptance failed", resp).await);
+        }
+
+        Ok(())
     }
 
     pub async fn add_funds(&self, amount: f64) -> Result<String, ApiError> {

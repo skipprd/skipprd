@@ -13,6 +13,9 @@ use react_core::keyspace::Keyspace;
 
 use public_config::{DbtConfig, S3Transform, SkipprDbtConfig, SourceConfig, WarehouseConfig};
 
+const SKIPPR_EULA_VERSION: &str = "skippr-eula-2026-04-29";
+const SKIPPR_EULA_URL: &str = "https://skippr.io/terms/eula";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "skippr",
@@ -1315,6 +1318,9 @@ fn env_example_path_from_project_root(project_root: &std::path::Path) -> PathBuf
 }
 
 async fn load_reset_server_credentials() -> Result<api_client::CredentialsResponse, String> {
+    let authenticated_with_api_key = std::env::var("SKIPPR_API_KEY")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
     let creds = if let Ok(api_key) = std::env::var("SKIPPR_API_KEY") {
         if api_key.trim().is_empty() {
             return Err("SKIPPR_API_KEY is set but empty".to_string());
@@ -1338,6 +1344,9 @@ async fn load_reset_server_credentials() -> Result<api_client::CredentialsRespon
     let base_url = auth::auth_base_url();
     let tokens = create_token_provider(&creds);
     let client = api_client::ApiClient::authenticated(&base_url, tokens);
+    ensure_eula_accepted(&client, !authenticated_with_api_key)
+        .await
+        .map_err(|e| format!("EULA acceptance required: {e}"))?;
     client
         .get_credentials()
         .await
@@ -2388,6 +2397,9 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>) {
     };
 
     // Authentication is mandatory. SKIPPR_API_KEY env var takes priority, then credentials.json.
+    let authenticated_with_api_key = std::env::var("SKIPPR_API_KEY")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
     let creds = if let Ok(api_key) = std::env::var("SKIPPR_API_KEY") {
         if api_key.trim().is_empty() {
             eprintln!("[skippr] ERROR: SKIPPR_API_KEY is set but empty.");
@@ -2419,6 +2431,11 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>) {
     let base_url = auth::auth_base_url();
     let tokens = create_token_provider(&creds);
     let client = api_client::ApiClient::authenticated(&base_url, std::sync::Arc::clone(&tokens));
+
+    if let Err(e) = ensure_eula_accepted(&client, !authenticated_with_api_key).await {
+        eprintln!("[skippr] ERROR: {}", e);
+        std::process::exit(1);
+    }
 
     let initial_balance = match client.get_account().await {
         Ok(account) => {
@@ -3054,6 +3071,13 @@ async fn cmd_user_login() {
             match client.confirm(email, code).await {
                 Ok(tokens) => {
                     auth::save_credentials(&tokens);
+                    let token_provider = create_token_provider(&tokens);
+                    let authenticated =
+                        api_client::ApiClient::authenticated(&base_url, token_provider);
+                    if let Err(e) = ensure_eula_accepted(&authenticated, true).await {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
                     println!();
                     println!("  Logged in successfully.");
                     println!();
@@ -3140,7 +3164,52 @@ async fn authenticated_api_client() -> api_client::ApiClient {
     let unauthenticated = api_client::ApiClient::new(&base_url);
     let creds = load_authenticated_user_credentials(&unauthenticated).await;
     let tokens = create_token_provider(&creds);
-    api_client::ApiClient::authenticated(&base_url, tokens)
+    let client = api_client::ApiClient::authenticated(&base_url, tokens);
+    if let Err(e) = ensure_eula_accepted(&client, true).await {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
+    client
+}
+
+async fn ensure_eula_accepted(
+    client: &api_client::ApiClient,
+    allow_prompt: bool,
+) -> Result<(), String> {
+    let account = client
+        .get_account()
+        .await
+        .map_err(|e| format!("Could not verify EULA acceptance: {e}"))?;
+    if account.eula.version.as_deref() == Some(SKIPPR_EULA_VERSION) {
+        return Ok(());
+    }
+
+    if !allow_prompt {
+        return Err(format!(
+            "Skippr EULA acceptance is required before using SKIPPR_API_KEY. Run 'skippr user login' interactively once and accept {SKIPPR_EULA_URL}."
+        ));
+    }
+
+    println!();
+    println!("Skippr requires acceptance of the End User License Agreement:");
+    println!("  {SKIPPR_EULA_URL}");
+    println!();
+    print!("Type exactly 'yes' to accept version {SKIPPR_EULA_VERSION}: ");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| format!("Failed to read EULA acceptance: {e}"))?;
+    if answer.trim() != "yes" {
+        return Err("EULA not accepted. Aborting.".to_string());
+    }
+
+    client
+        .accept_eula(SKIPPR_EULA_VERSION)
+        .await
+        .map_err(|e| format!("Failed to record EULA acceptance: {e}"))?;
+    println!("EULA accepted.");
+    Ok(())
 }
 
 async fn cmd_user_account() {
@@ -3157,6 +3226,14 @@ async fn cmd_user_account() {
             };
             println!("  Plan:              {}", plan_label);
             println!("  Balance:           ${:.2}", account.balance.balance);
+            if account.eula.version.as_deref() == Some(SKIPPR_EULA_VERSION) {
+                let accepted_at = account.eula.accepted_at.as_deref().unwrap_or("recorded");
+                let accepted_via = account.eula.accepted_via.as_deref().unwrap_or("account");
+                println!(
+                    "  EULA:              accepted ({}, via {})",
+                    accepted_at, accepted_via
+                );
+            }
             if let Some(ref sub) = account.subscription {
                 println!("  Subscription:      {} ({})", sub.status, sub.price_id);
             }
