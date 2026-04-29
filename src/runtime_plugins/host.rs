@@ -1058,6 +1058,10 @@ impl DataSink for RuntimeDataSinkPlugin {
         schema_version: u64,
         namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> Result<(), io::Error> {
+        apply_runtime_source_schema_state(RuntimeSchemaState {
+            version: schema_version,
+            namespaces: namespaces.clone(),
+        });
         self.install_schema_state_with_retry(schema_version, namespaces)
             .await
     }

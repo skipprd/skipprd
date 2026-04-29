@@ -18,7 +18,6 @@ members = [
     "crates/skipprd-react-suite-data-engineer/src/modules/provider-catalog",
     "crates/skipprd-react-suite-data-engineer/src/modules/provider-snowflake",
     "crates/skipprd-react-suite-data-engineer/src/modules/provider-mssql",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-skippr",
     "crates/skipprd-react-suite-data-engineer/src/modules/provider-databricks",
     "crates/skipprd-react-suite-data-engineer/src/modules/provider-synapse",
     "crates/skipprd-react-suite-data-engineer/src/modules/provider-redshift",

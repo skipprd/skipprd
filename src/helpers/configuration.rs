@@ -342,6 +342,8 @@ impl Config {
         }
 
         let valid_locations = vec![
+            "./skippr.yml",
+            "./skippr.yaml",
             "./skipprd.yml",
             "./skipprd.yaml",
             "./skipprd.toml",

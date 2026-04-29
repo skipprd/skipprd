@@ -10077,21 +10077,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "react-module-provider-skippr"
-version = "0.0.0-git"
-dependencies = [
- "async-trait",
- "react-core",
- "react-suite-data-engineer",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "react-module-provider-snowflake"
 version = "0.0.0-git"
 dependencies = [
@@ -11676,7 +11661,6 @@ dependencies = [
  "react-module-provider-mssql",
  "react-module-provider-postgres",
  "react-module-provider-redshift",
- "react-module-provider-skippr",
  "react-module-provider-snowflake",
  "react-module-provider-synapse",
  "react-module-provider-vector-lance",
@@ -11687,6 +11671,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "skipprd",
  "tar",
  "tempfile",
  "tokio",

@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use react::runtime_settings::{getenv_nonempty, getenv_u64, getenv_usize};
 use react_core::keyspace::Keyspace;
-use react_core::resolved_config::StorageMode;
 use react_core::suite::SuiteCtx;
 use react_module_provider_athena::{AthenaProvider, AthenaSettings};
 use react_module_provider_bigquery::{BigQueryProvider, BigQuerySettings};
@@ -14,11 +13,10 @@ use react_module_provider_motherduck::{MotherDuckProvider, MotherDuckSettings};
 use react_module_provider_mssql::{MssqlProvider, MssqlSettings};
 use react_module_provider_postgres::{PostgresProvider, PostgresSettings};
 use react_module_provider_redshift::{RedshiftProvider, RedshiftSettings};
-use react_module_provider_skippr::SkipprCliProvider;
 use react_module_provider_snowflake::{SnowflakeProvider, SnowflakeSettings};
 use react_module_provider_synapse::{SynapseProvider, SynapseSettings};
 use react_suite_data_engineer::ctx_ext::{
-    CatalogCap, DatasetsCap, DbtCap, ProvidersCfgCap, QueryCap, SkipprCap, WarehouseCap,
+    CatalogCap, DatasetsCap, DbtCap, ProvidersCfgCap, QueryCap, WarehouseCap,
 };
 use react_suite_data_engineer::de_config::{self as de_cfg, WarehouseKind};
 
@@ -459,24 +457,6 @@ pub(crate) async fn wire_providers(
         .expect("resolved_config must be set before wire_providers");
     let providers = de_cfg::de_config_from_resolved(cfg).unwrap_or_default();
     let wh_kind = providers.warehouse.kind;
-    let skippr_storage_mode =
-        getenv_nonempty("SKIPPR_STORAGE_MODE").unwrap_or_else(|| match cfg.storage.mode {
-            StorageMode::Local => "local".to_string(),
-            StorageMode::S3 => "s3".to_string(),
-        });
-    let skippr_storage_bucket = if skippr_storage_mode.eq_ignore_ascii_case("s3") {
-        getenv_nonempty("SKIPPR_S3_BUCKET").or_else(|| cfg.storage.bucket.clone())
-    } else {
-        None
-    };
-    let skippr_data_dir = {
-        let fs_root = cfg.storage.path.as_deref().unwrap_or("./.skippr");
-        std::path::PathBuf::from(fs_root)
-            .join(cfg.scope.tenant.as_str())
-            .join(cfg.scope.workspace.as_str())
-            .join(cfg.scope.project_id.as_str())
-            .join("skippr")
-    };
 
     match wh_kind {
         WarehouseKind::Athena => {
@@ -642,17 +622,6 @@ pub(crate) async fn wire_providers(
             keyspace.clone(),
             runner,
         )))));
-    }
-
-    if providers.el.enabled {
-        let skippr_provider = SkipprCliProvider::new(
-            providers.el.clone(),
-            providers.warehouse.clone(),
-            skippr_data_dir,
-            Some(skippr_storage_mode),
-            skippr_storage_bucket,
-        );
-        sctx.set_capability(Arc::new(SkipprCap(Arc::new(skippr_provider))));
     }
 
     sctx.set_capability(Arc::new(ProvidersCfgCap(providers)));

@@ -92,21 +92,50 @@ runs:
           $env:SKIPPR_STORAGE_MODE = "local"
           $configPath = Join-Path $workdir "skippr.yaml"
           $configLines = @(
-            "project: $projectName",
-            "warehouse:",
-            "  kind: snowflake",
-            "  database: $env:SNOWFLAKE_DATABASE",
-            "  schema: $env:SNOWFLAKE_SCHEMA",
-            "  warehouse: $env:SNOWFLAKE_WAREHOUSE",
-            "  role: $env:SNOWFLAKE_ROLE",
-            "source:",
-            "  kind: mssql",
-            "  connection_string: ${env:MSSQL_CONNECTION_STRING}",
-            "dbt:",
-            "  target_schema: $projectName",
-            "  silver_suffix: silver",
-            "  gold_suffix: gold",
-            "schema_sink: null"
+            "skippr:",
+            "  workspace: $projectName",
+            "  tenant: _",
+            "  storage_mode: local",
+            "pipelines:",
+            "  $projectName:",
+            "    data_source: data_sources.mssql",
+            "    data_sink: data_sinks.snowflake",
+            "data_sources:",
+            "  mssql:",
+            "    Mssql:",
+            "      connection_string: ${env:MSSQL_CONNECTION_STRING}",
+            "      tables: [dbo.customers, dbo.orders, dbo.order_items]",
+            "data_sinks:",
+            "  snowflake:",
+            "    Snowflake:",
+            "      database: $env:SNOWFLAKE_DATABASE",
+            "      schema: $env:SNOWFLAKE_SCHEMA",
+            "      warehouse: $env:SNOWFLAKE_WAREHOUSE",
+            "      role: $env:SNOWFLAKE_ROLE",
+            "schema_sinks: {}",
+            "runtime_plugins: {}",
+            "react:",
+            "  providers:",
+            "    warehouse:",
+            "      kind: snowflake",
+            "      database: $env:SNOWFLAKE_DATABASE",
+            "      schema: $env:SNOWFLAKE_SCHEMA",
+            "      warehouse: $env:SNOWFLAKE_WAREHOUSE",
+            "      role: $env:SNOWFLAKE_ROLE",
+            "    catalog:",
+            "      enabled: true",
+            "      refresh_secs: 3600",
+            "      max_concurrency: 8",
+            "    dbt:",
+            "      enabled: true",
+            "      runner: host",
+            "      target: dev",
+            "      naming:",
+            "        target_schema: $projectName",
+            "        silver_suffix: silver",
+            "        gold_suffix: gold",
+            "    vector:",
+            "      enabled: true"
           )
           Set-Content -Path $configPath -Value ($configLines -join "`n") -Encoding utf8
 
@@ -119,15 +148,23 @@ runs:
             Write-Error "::error::skippr doctor failed with exit code $LASTEXITCODE"
           }
 
-          Write-Host "Running skippr MSSQL to Snowflake e2e"
-          $logPath = Join-Path $workdir "skippr-run.log"
-          & $skipprBin --config $configPath run --log info 2>&1 | Tee-Object -FilePath $logPath
+          Write-Host "Running skippr MSSQL to Snowflake discover/sync/model e2e"
+          $logPath = Join-Path $workdir "skippr-model.log"
+          & $skipprBin --config $configPath discover --pipeline $projectName --output json
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "::error::skippr discover failed with exit code $LASTEXITCODE"
+          }
+          & $skipprBin --config $configPath sync --pipeline $projectName --once --output json
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "::error::skippr sync failed with exit code $LASTEXITCODE"
+          }
+          & $skipprBin --config $configPath model --log info 2>&1 | Tee-Object -FilePath $logPath
           $status = $LASTEXITCODE
           if ($status -ne 0) {
-            Write-Error "::error::skippr run failed with exit code $status"
+            Write-Error "::error::skippr model failed with exit code $status"
           }
           if (-not (Select-String -Path $logPath -Pattern '^Done\.$' -Quiet)) {
-            Write-Error "::error::skippr run exited successfully but did not print final Done line. This catches the silent-exit regression where the wrapper returns right after printing the run id."
+            Write-Error "::error::skippr model exited successfully but did not print final Done line."
           }
         } finally {
           if ($pushedLocation) {

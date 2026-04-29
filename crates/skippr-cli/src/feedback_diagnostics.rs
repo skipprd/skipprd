@@ -9,7 +9,6 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::public_config::SkipprDbtConfig;
-use crate::skippr_bin;
 
 const MAX_INVENTORY_FILES: usize = 80;
 const MAX_LOG_FILES: usize = 5;
@@ -220,7 +219,6 @@ fn config_diagnostics(
 }
 
 fn binary_diagnostics(normalizer: &PathNormalizer) -> Vec<BinaryDiagnostics> {
-    let managed = skippr_bin::managed_binary_path().ok();
     let legacy_managed = dirs_next::home_dir().map(|home| {
         home.join(".skippr").join("bin").join(if cfg!(windows) {
             "skippr-el.exe"
@@ -235,14 +233,6 @@ fn binary_diagnostics(normalizer: &PathNormalizer) -> Vec<BinaryDiagnostics> {
             path_results: lookup_binary("skippr", normalizer),
             managed_path: None,
             managed_exists: None,
-            lookup_error: None,
-        },
-        BinaryDiagnostics {
-            name: "skipprd".to_string(),
-            expected_version: Some(skippr_bin::SKIPPR_VERSION.to_string()),
-            path_results: lookup_binary("skipprd", normalizer),
-            managed_path: managed.as_ref().map(|p| normalizer.normalize_path(p)),
-            managed_exists: managed.as_ref().map(|p| p.is_file()),
             lookup_error: None,
         },
         BinaryDiagnostics {

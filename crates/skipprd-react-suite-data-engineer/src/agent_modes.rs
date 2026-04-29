@@ -388,12 +388,8 @@ impl DataEngineerSuite {
         crate::retry_budget::clear_subjective_retries(thread_store, thread_id, kinds).await
     }
 
-    fn el_enabled(sctx: &SuiteCtx) -> bool {
-        sctx.resolved_config()
-            .as_ref()
-            .and_then(|c| crate::de_config::de_config_from_resolved(c))
-            .map(|p| p.el.enabled)
-            .unwrap_or(false)
+    fn el_enabled(_sctx: &SuiteCtx) -> bool {
+        false
     }
 
     pub(super) fn validate_agent_type(agent_type: &str) -> Result<AgentMode, String> {

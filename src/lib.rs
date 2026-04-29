@@ -18,6 +18,7 @@ pub mod buffer;
 pub mod cli;
 pub mod converters;
 pub mod discover;
+pub mod engine;
 pub mod helpers;
 pub mod ingest;
 pub mod ingest_work;
