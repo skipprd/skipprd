@@ -3,6 +3,8 @@ use react_core::resolved_config::S3Credentials;
 
 use crate::public_config::{SkipprDbtConfig, SourceConfig, WarehouseConfig};
 
+const DEFAULT_LLM_BASE_URL: &str = "https://api.openai.com";
+
 /// Translate the public `skippr` config into the internal runtime config.
 pub fn to_internal(cfg: &SkipprDbtConfig) -> Result<ReactConfigFile, String> {
     let project = cfg.project.trim();
@@ -917,7 +919,7 @@ pub fn to_internal(cfg: &SkipprDbtConfig) -> Result<ReactConfigFile, String> {
         }),
         llm: Some(LlmFile {
             provider: Some("OPENAI_COMPAT".into()),
-            base_url: Some("https://api.openai.com".into()),
+            base_url: Some(DEFAULT_LLM_BASE_URL.into()),
             reason_model: Some("gpt-5.4".into()),
             task_model: Some("gpt-5.4".into()),
             embed_model: Some("text-embedding-3-small".into()),
@@ -969,12 +971,32 @@ pub fn apply_authenticated_overlay(
         }
     }
 
-    if !creds.llm_api_key.is_empty() {
-        let existing = std::env::var("LLM_API_KEY")
-            .ok()
-            .filter(|v| !v.trim().is_empty());
-        if existing.is_none() {
-            std::env::set_var("LLM_API_KEY", &creds.llm_api_key);
+    let llm = cfg.llm.get_or_insert_with(Default::default);
+    llm.provider.get_or_insert_with(|| "OPENAI_COMPAT".into());
+    if llm
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        llm.base_url = Some(DEFAULT_LLM_BASE_URL.into());
+    }
+    if std::env::var("LLM_BASE_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .is_none()
+    {
+        std::env::set_var("LLM_BASE_URL", DEFAULT_LLM_BASE_URL);
+    }
+
+    let existing_llm_key = std::env::var("LLM_API_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    if existing_llm_key.is_none() {
+        let server_key = creds.llm_api_key.trim();
+        if !server_key.is_empty() {
+            std::env::set_var("LLM_API_KEY", server_key);
         }
     }
 
@@ -1530,7 +1552,7 @@ mod tests {
             },
             bucket: "skippr-prod".into(),
             tenant_id: "c3471188-8965-4c52-b486-7dbbd7a2d329".into(),
-            llm_api_key: String::new(),
+            llm_api_key: "server-llm-token".into(),
             accounting_url: String::new(),
         };
 
@@ -1544,6 +1566,10 @@ mod tests {
         assert_eq!(
             internal.scope.as_ref().unwrap().tenant.as_deref(),
             Some("c3471188-8965-4c52-b486-7dbbd7a2d329")
+        );
+        assert_eq!(
+            internal.llm.as_ref().unwrap().base_url.as_deref(),
+            Some(DEFAULT_LLM_BASE_URL)
         );
     }
 }

@@ -91,9 +91,6 @@ runs:
 
           $env:MSSQL_CONNECTION_STRING = "server=tcp:127.0.0.1,1433;database=testdb;user id=sa;password=Skippr!Test123;TrustServerCertificate=true"
           $env:SKIPPR_RUNTIME_LOG_LEVEL = "debug"
-          if ([string]::IsNullOrWhiteSpace($env:LLM_BASE_URL)) {
-            $env:LLM_BASE_URL = "https://api.openai.com"
-          }
           $runId = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { "local" }
           $runAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "1" }
           $projectName = "mssql_snowflake_e2e_${runId}_${runAttempt}"
