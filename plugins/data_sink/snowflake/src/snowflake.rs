@@ -1611,6 +1611,21 @@ impl DataSinkSnowflakePlugin {
         hasher.finish()
     }
 
+    fn col_defs_for_arrow_schema(
+        arrow_schema: &datafusion::arrow::datatypes::Schema,
+    ) -> Vec<(String, String)> {
+        arrow_schema
+            .fields()
+            .iter()
+            .map(|f| {
+                (
+                    f.name().to_uppercase(),
+                    Self::arrow_type_to_snowflake_ddl(f.data_type()),
+                )
+            })
+            .collect()
+    }
+
     async fn ensure_table(
         &self,
         fq_table: &str,
@@ -1723,12 +1738,23 @@ impl DataSinkSnowflakePlugin {
 
         let namespace = BufferChunker::decode_file_namespace(&filename);
         let table_name = Self::namespace_to_table_name(&namespace);
+        let arrow_schema = stream.schema();
+        let col_defs = Self::col_defs_for_arrow_schema(&arrow_schema);
         let fq_table = format!(
             "\"{}\".\"{}\".\"{}\"",
             self.config.database,
             self.config.schema,
             table_name.to_uppercase()
         );
+
+        self.ensure_schema().await.map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
+        self.ensure_table(&fq_table, &col_defs).await.map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
 
         let parquet = match serialize_to_parquet(stream).await {
             Ok(p) => p,
@@ -1820,12 +1846,23 @@ impl DataSinkSnowflakePlugin {
 
         let namespace = BufferChunker::decode_file_namespace(&filename);
         let table_name = Self::namespace_to_table_name(&namespace);
+        let arrow_schema = stream.schema();
+        let col_defs = Self::col_defs_for_arrow_schema(&arrow_schema);
         let fq_table = format!(
             "\"{}\".\"{}\".\"{}\"",
             self.config.database,
             self.config.schema,
             table_name.to_uppercase()
         );
+
+        self.ensure_schema().await.map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
+        self.ensure_table(&fq_table, &col_defs).await.map_err(|e| {
+            counters::dec_uploads_in_flight();
+            e
+        })?;
 
         let parquet = match serialize_to_parquet(stream).await {
             Ok(p) => p,
@@ -1980,16 +2017,7 @@ impl DataSinkSnowflakePlugin {
         let table_name = Self::namespace_to_table_name(&namespace);
         let arrow_schema = stream.schema();
 
-        let col_defs: Vec<(String, String)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_uppercase(),
-                    Self::arrow_type_to_snowflake_ddl(f.data_type()),
-                )
-            })
-            .collect();
+        let col_defs = Self::col_defs_for_arrow_schema(&arrow_schema);
 
         let fq_table = format!(
             "\"{}\".\"{}\".\"{}\"",
@@ -2133,16 +2161,7 @@ impl DataSinkSnowflakePlugin {
         let table_name = Self::namespace_to_table_name(&namespace);
         let arrow_schema = stream.schema();
 
-        let col_defs: Vec<(String, String)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_uppercase(),
-                    Self::arrow_type_to_snowflake_ddl(f.data_type()),
-                )
-            })
-            .collect();
+        let col_defs = Self::col_defs_for_arrow_schema(&arrow_schema);
 
         let fq_table = format!(
             "\"{}\".\"{}\".\"{}\"",
@@ -2370,16 +2389,7 @@ impl SchemaSink for DataSinkSnowflakePlugin {
         })?;
 
         let table_name = Self::namespace_to_table_name(namespace);
-        let col_defs: Vec<(String, String)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_uppercase(),
-                    Self::arrow_type_to_snowflake_ddl(f.data_type()),
-                )
-            })
-            .collect();
+        let col_defs = Self::col_defs_for_arrow_schema(&arrow_schema);
 
         let fq_table = format!(
             "\"{}\".\"{}\".\"{}\"",
