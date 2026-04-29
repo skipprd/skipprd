@@ -2970,8 +2970,30 @@ fn postgres_schema_or_default(schema: Option<String>) -> Option<String> {
 // main
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let stack_size = std::env::var("SKIPPR_MAIN_THREAD_STACK_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(32 * 1024 * 1024);
+
+    let handle = std::thread::Builder::new()
+        .name("skippr-main".to_string())
+        .stack_size(stack_size)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build Tokio runtime");
+            runtime.block_on(async_main());
+        })
+        .expect("failed to spawn skippr main thread");
+
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn async_main() {
     let cli = Cli::parse();
 
     match cli.cmd {
