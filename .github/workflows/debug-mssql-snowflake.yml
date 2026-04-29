@@ -9,6 +9,7 @@ on:
       - '.github/workflows/debug-mssql-snowflake.yml'
       - '.github/actions/e2e/mssql_snowflake/**'
       - 'crates/skippr-cli/**'
+      - 'crates/skippr-runtime-sdk/**'
       - 'src/runtime_plugins/**'
       - 'src/engine.rs'
       - 'src/lib.rs'
