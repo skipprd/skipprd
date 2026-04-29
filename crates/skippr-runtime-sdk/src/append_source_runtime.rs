@@ -339,10 +339,10 @@ impl DataSink for ArrowRelayToHostSink {
         filename: String,
         cdc_ctx: Option<&SyncContext>,
     ) -> Result<(), io::Error> {
-        self.send_schema_state_if_needed().await?;
         if suppress_runtime_source_data_relay() {
             return Ok(());
         }
+        self.send_schema_state_if_needed().await?;
         let arrow_stream_bytes = encode_record_batch_stream(stream).await?;
         self.data_writer
             .write(&PluginDataFrame::SinkWrite(RuntimeSourceSinkWrite {
@@ -365,10 +365,10 @@ impl RuntimeIngestRelay for ArrowRelayToHostSink {
         batches: Vec<RuntimeIngestPartitionBatch>,
     ) -> Result<(), std::io::Error> {
         block_on_handle(&self.control_writer.handle, async {
-            self.send_schema_state_if_needed().await?;
             if suppress_runtime_source_data_relay() {
                 return Ok(());
             }
+            self.send_schema_state_if_needed().await?;
             self.data_writer
                 .write(&PluginDataFrame::IngestBatches { batches })
                 .await
@@ -629,6 +629,13 @@ pub async fn run_append_data_source_main(
 
     match sync_result {
         Ok(()) => {
+            if suppress_runtime_source_data_relay() {
+                control_writer
+                    .write(&PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(
+                        current_runtime_schema_state_from_core(),
+                    )))
+                    .await?;
+            }
             control_writer
                 .write(&PluginFrame::SourceEvent(SourceEvent::Completed))
                 .await?;
