@@ -2,6 +2,18 @@ name: Debug MSSQL Snowflake E2E
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - 'verify/**'
+    paths:
+      - '.github/workflows/debug-mssql-snowflake.yml'
+      - '.github/actions/e2e/mssql_snowflake/**'
+      - 'crates/skippr-cli/**'
+      - 'src/runtime_plugins/**'
+      - 'src/engine.rs'
+      - 'src/lib.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
 
 env:
   RUST_BUILD_CACHE_BUCKET: skippr-web-rust-cache-prod
