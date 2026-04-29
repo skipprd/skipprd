@@ -756,12 +756,39 @@ pub async fn sync_runtime_input_plugin(
 
         tokio::select! {
             control_ready = connection.control.readable(), if !control_completed => {
-                control_ready?;
-                control_reader.fill_from_ready(&connection.control)?;
+                match control_ready {
+                    Ok(()) => control_reader.fill_from_ready(&connection.control).map_err(|err| {
+                        io::Error::other(format!("runtime source control channel read failed: {err}"))
+                    })?,
+                    Err(err) if is_runtime_channel_eof(&err) => {
+                        pending_source_tasks.abort_all();
+                        return Err(io::Error::other(
+                            "runtime source closed control channel before sending completion",
+                        ));
+                    }
+                    Err(err) => {
+                        pending_source_tasks.abort_all();
+                        return Err(io::Error::other(format!(
+                            "runtime source control channel readiness failed: {err}"
+                        )));
+                    }
+                }
             }
             data_ready = connection.data.readable(), if !data_completed => {
-                data_ready?;
-                data_reader.fill_from_ready(&connection.data)?;
+                match data_ready {
+                    Ok(()) => data_reader.fill_from_ready(&connection.data).map_err(|err| {
+                        io::Error::other(format!("runtime source data channel read failed: {err}"))
+                    })?,
+                    Err(err) if is_runtime_channel_eof(&err) => {
+                        data_completed = true;
+                    }
+                    Err(err) => {
+                        pending_source_tasks.abort_all();
+                        return Err(io::Error::other(format!(
+                            "runtime source data channel readiness failed: {err}"
+                        )));
+                    }
+                }
             }
         }
     }
