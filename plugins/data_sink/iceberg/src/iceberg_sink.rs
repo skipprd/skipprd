@@ -3,6 +3,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll as TaskPoll};
+use std::time::Duration;
 
 use arrow::array::{Array, BooleanArray, RecordBatch, StringArray};
 use arrow::compute::filter_record_batch;
@@ -623,16 +624,8 @@ impl DataSinkIcebergPlugin {
         let catalog_namespace = self.catalog_namespace()?;
         let namespace_ident = NamespaceIdent::from_strs([catalog_namespace.as_str()])
             .map_err(|err| io::Error::other(err.to_string()))?;
-        if !catalog
-            .namespace_exists(&namespace_ident)
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))?
-        {
-            catalog
-                .create_namespace(&namespace_ident, HashMap::new())
-                .await
-                .map_err(|err| io::Error::other(err.to_string()))?;
-        }
+        self.ensure_catalog_namespace(catalog, &namespace_ident)
+            .await?;
 
         let iceberg_schema = iceberg_schema_from_output_metadata(namespace, metadata)?;
         let mut properties: HashMap<String, String> = self
@@ -661,10 +654,21 @@ impl DataSinkIcebergPlugin {
             creation
         };
 
-        catalog
-            .create_table(&namespace_ident, creation)
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))
+        match catalog.create_table(&namespace_ident, creation).await {
+            Ok(table) => Ok(table),
+            Err(err) => {
+                let message = err.to_string();
+                if message.contains("AlreadyExistsException")
+                    || message.contains("Table already exists")
+                {
+                    return catalog
+                        .load_table(&table_ident)
+                        .await
+                        .map_err(|err| io::Error::other(err.to_string()));
+                }
+                Err(io::Error::other(message))
+            }
+        }
     }
 
     fn catalog_namespace(&self) -> Result<String, io::Error> {
@@ -684,6 +688,44 @@ impl DataSinkIcebergPlugin {
         }
     }
 
+    async fn ensure_catalog_namespace(
+        &self,
+        catalog: &GlueCatalog,
+        namespace_ident: &NamespaceIdent,
+    ) -> Result<(), io::Error> {
+        for attempt in 1..=3 {
+            if catalog
+                .namespace_exists(namespace_ident)
+                .await
+                .map_err(|err| io::Error::other(err.to_string()))?
+            {
+                return Ok(());
+            }
+
+            match catalog
+                .create_namespace(namespace_ident, HashMap::new())
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(err) => {
+                    let message = err.to_string();
+                    if message.contains("AlreadyExistsException") {
+                        return Ok(());
+                    }
+                    if message.contains("ConcurrentModificationException") && attempt < 3 {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    return Err(io::Error::other(message));
+                }
+            }
+        }
+
+        Err(io::Error::other(
+            "Iceberg Glue namespace creation did not converge after retries",
+        ))
+    }
+
     fn table_ident(&self, namespace: &str) -> Result<TableIdent, io::Error> {
         let catalog_namespace = self.catalog_namespace()?;
         let table_name = self.table_name(namespace);
@@ -692,9 +734,10 @@ impl DataSinkIcebergPlugin {
     }
 
     fn table_name(&self, namespace: &str) -> String {
+        let namespace_name = iceberg_table_suffix(namespace);
         match &self.config.table_prefix {
-            Some(prefix) if !prefix.is_empty() => format!("{}_{}", prefix, namespace),
-            _ => namespace.to_string(),
+            Some(prefix) if !prefix.is_empty() => format!("{}_{}", prefix, namespace_name),
+            _ => namespace_name,
         }
     }
 
@@ -706,6 +749,24 @@ impl DataSinkIcebergPlugin {
                 self.table_name(namespace)
             )
         })
+    }
+}
+
+fn iceberg_table_suffix(namespace: &str) -> String {
+    let raw = namespace.rsplit('.').next().unwrap_or(namespace);
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches('_').to_string();
+    if trimmed.is_empty() {
+        "table".to_string()
+    } else {
+        trimmed
     }
 }
 
@@ -982,5 +1043,14 @@ mod tests {
 
         assert!(matches!(array_field.field_type.as_ref(), Type::List(_)));
         assert!(matches!(map_field.field_type.as_ref(), Type::Map(_)));
+    }
+
+    #[test]
+    fn iceberg_table_suffix_uses_last_namespace_segment_and_sanitizes() {
+        assert_eq!(
+            iceberg_table_suffix("postgres.type_matrix_orders"),
+            "type_matrix_orders"
+        );
+        assert_eq!(iceberg_table_suffix("S3.Raw-Orders"), "raw_orders");
     }
 }

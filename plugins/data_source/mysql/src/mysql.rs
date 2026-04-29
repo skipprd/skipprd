@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -28,6 +29,8 @@ pub struct DataSourceMysqlPluginConfig {
     pub batch_size_seconds: Option<i64>,
     pub cdc_enabled: Option<bool>,
     pub server_id: Option<u32>,
+    #[serde(default)]
+    pub cdc_idle_timeout_seconds: Option<u64>,
 }
 
 impl TryFrom<PluginConfigEntry> for DataSourceMysqlPluginConfig {
@@ -57,6 +60,7 @@ impl DataSourceMysqlPlugin {
                     batch_size_seconds: None,
                     cdc_enabled: None,
                     server_id: None,
+                    cdc_idle_timeout_seconds: None,
                 }
             }
         };
@@ -365,9 +369,31 @@ impl DataSourceMysqlPlugin {
         const WRITE_ROWS_V2: u8 = 30;
         const UPDATE_ROWS_V2: u8 = 31;
         const DELETE_ROWS_V2: u8 = 32;
+        let idle_timeout = self
+            .config
+            .cdc_idle_timeout_seconds
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs);
 
         // 6. Process binlog events
-        while let Some(event_result) = binlog_stream.next().await {
+        loop {
+            let event_result = if let Some(idle_timeout) = idle_timeout {
+                match tokio::time::timeout(idle_timeout, binlog_stream.next()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        info!(
+                            "MySQL CDC idle timeout reached after {}s; stopping binlog stream",
+                            idle_timeout.as_secs()
+                        );
+                        break;
+                    }
+                }
+            } else {
+                binlog_stream.next().await
+            };
+            let Some(event_result) = event_result else {
+                break;
+            };
             let event = match event_result {
                 Ok(e) => e,
                 Err(e) => {

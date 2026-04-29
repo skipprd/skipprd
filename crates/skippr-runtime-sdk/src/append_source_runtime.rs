@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -275,6 +275,8 @@ pub struct ArrowRelayToHostSink {
     control_writer: ControlWriter,
     data_writer: DataWriter,
     last_sent_schema_version: AtomicU64,
+    last_sent_schema_namespace_count: AtomicU64,
+    sent_schema_state: AtomicBool,
 }
 
 impl ArrowRelayToHostSink {
@@ -283,13 +285,23 @@ impl ArrowRelayToHostSink {
             control_writer,
             data_writer,
             last_sent_schema_version: AtomicU64::new(0),
+            last_sent_schema_namespace_count: AtomicU64::new(0),
+            sent_schema_state: AtomicBool::new(false),
         }
     }
 
     async fn send_schema_state_if_needed(&self) -> io::Result<()> {
         let schema_state = current_runtime_schema_state_from_core();
         let last_sent = self.last_sent_schema_version.load(Ordering::Acquire);
-        if schema_state.version <= last_sent {
+        let namespace_count = schema_state.namespaces.len() as u64;
+        let last_namespace_count = self
+            .last_sent_schema_namespace_count
+            .load(Ordering::Acquire);
+        let sent_schema_state = self.sent_schema_state.load(Ordering::Acquire);
+        if sent_schema_state
+            && schema_state.version <= last_sent
+            && namespace_count <= last_namespace_count
+        {
             return Ok(());
         }
         self.control_writer
@@ -299,6 +311,9 @@ impl ArrowRelayToHostSink {
             .await?;
         self.last_sent_schema_version
             .store(schema_state.version, Ordering::Release);
+        self.last_sent_schema_namespace_count
+            .store(namespace_count, Ordering::Release);
+        self.sent_schema_state.store(true, Ordering::Release);
         Ok(())
     }
 }

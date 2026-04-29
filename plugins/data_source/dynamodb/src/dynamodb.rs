@@ -488,7 +488,7 @@ impl DataSourceDynamodbPlugin {
                 .shard_iterator_type(ShardIteratorType::AfterSequenceNumber)
                 .sequence_number(seq_str);
         } else {
-            iter_builder = iter_builder.shard_iterator_type(ShardIteratorType::TrimHorizon);
+            iter_builder = iter_builder.shard_iterator_type(ShardIteratorType::Latest);
         }
 
         let iter_resp = iter_builder.send().await.map_err(|e| {

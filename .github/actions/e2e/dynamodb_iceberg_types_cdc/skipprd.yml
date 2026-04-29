@@ -1,0 +1,53 @@
+skippr:
+  skippr_s3_bucket: skippr-e2e-sample-data-output
+  tenant: skippr
+  workspace: iceberg-types-cdc-dynamodb
+
+pipelines:
+  dynamodb_iceberg_types_cdc:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 60
+    data_source: data_sources.dynamodb_types_cdc
+    data_sink: data_sinks.iceberg_types_cdc
+    cdc:
+      default:
+        business_key_columns: ["id"]
+      namespaces:
+        dynamodb.skippr_iceberg_dynamodb_types_cdc:
+          business_key_columns: ["id"]
+
+data_sources:
+  dynamodb_types_cdc:
+    Dynamodb:
+      table_name: skippr_iceberg_dynamodb_types_cdc
+      region: us-east-1
+      cdc_enabled: true
+
+data_sinks:
+  iceberg_types_cdc:
+    Iceberg:
+      table_namespace: iceberg_e2e_dynamodb
+      table_prefix: skippr
+      table_location_prefix: s3://skippr-e2e-sample-data-output/iceberg-e2e-dynamodb
+      catalog:
+        type: glue
+        warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-dynamodb
+        database: iceberg_e2e_dynamodb
+        catalog_id: "353855562591"
+        region: us-east-1
+    schema_sink: schema_sinks.iceberg_glue
+
+schema_sinks:
+  iceberg_glue:
+    Iceberg:
+      table_namespace: iceberg_e2e_dynamodb
+      table_prefix: skippr
+      table_location_prefix: s3://skippr-e2e-sample-data-output/iceberg-e2e-dynamodb
+      catalog:
+        type: glue
+        warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-dynamodb
+        database: iceberg_e2e_dynamodb
+        catalog_id: "353855562591"
+        region: us-east-1

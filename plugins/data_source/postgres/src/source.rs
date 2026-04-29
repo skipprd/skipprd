@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_derive::{Deserialize, Serialize};
@@ -33,6 +34,8 @@ pub struct DataSourcePostgresPluginConfig {
     pub cdc_enabled: Option<bool>,
     pub replication_slot_name: Option<String>,
     pub publication_name: Option<String>,
+    #[serde(default)]
+    pub cdc_idle_timeout_seconds: Option<u64>,
 }
 
 pub struct DataSourcePostgresPlugin {
@@ -216,16 +219,18 @@ impl DataSourcePostgresPlugin {
             "SELECT 1 FROM pg_publication WHERE pubname = '{}'",
             pub_name
         );
-        let pub_rows = ddl_client
-            .query(&pub_sql, &[])
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))?;
+        let pub_rows = ddl_client.query(&pub_sql, &[]).await.map_err(|err| {
+            io::Error::other(format!(
+                "checking Postgres publication {pub_name} failed: {err:?}"
+            ))
+        })?;
         if pub_rows.is_empty() {
             let create_pub = format!("CREATE PUBLICATION {} FOR ALL TABLES", pub_name);
-            ddl_client
-                .execute(&create_pub, &[])
-                .await
-                .map_err(|err| io::Error::other(err.to_string()))?;
+            ddl_client.execute(&create_pub, &[]).await.map_err(|err| {
+                io::Error::other(format!(
+                    "creating Postgres publication {pub_name} failed: {err:?}"
+                ))
+            })?;
             info!("Created publication {}", pub_name);
         }
 
@@ -261,10 +266,11 @@ impl DataSourcePostgresPlugin {
                     "SELECT lsn::text AS lsn FROM pg_create_logical_replication_slot('{}', 'pgoutput')",
                     slot_name
                 );
-                let slot_row = ddl_client
-                    .query_one(&slot_sql, &[])
-                    .await
-                    .map_err(|err| io::Error::other(err.to_string()))?;
+                let slot_row = ddl_client.query_one(&slot_sql, &[]).await.map_err(|err| {
+                    io::Error::other(format!(
+                        "creating Postgres logical replication slot {slot_name} failed: {err:?}"
+                    ))
+                })?;
 
                 let consistent_point: String = slot_row.get("lsn");
                 let lsn_val = parse_pg_lsn(&consistent_point);
@@ -374,15 +380,47 @@ impl DataSourcePostgresPlugin {
 
         let mut client = ReplicationClient::connect(repl_config)
             .await
-            .map_err(|err| io::Error::other(err.to_string()))?;
+            .map_err(|err| {
+                io::Error::other(format!(
+                    "connecting Postgres logical replication stream for slot {slot_name} failed: {err:?}"
+                ))
+            })?;
         let mut relation_map: HashMap<u32, (String, Vec<PgColumn>)> = HashMap::new();
         let mut pending_batches = Vec::new();
+        let idle_timeout = self
+            .config
+            .cdc_idle_timeout_seconds
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs);
 
-        while let Some(event) = client
-            .recv()
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))?
-        {
+        loop {
+            let next_event = if let Some(idle_timeout) = idle_timeout {
+                match tokio::time::timeout(idle_timeout, client.recv()).await {
+                    Ok(result) => result.map_err(|err| io::Error::other(err.to_string()))?,
+                    Err(_) => {
+                        info!(
+                            "Runtime Postgres CDC idle timeout reached after {}s; stopping stream",
+                            idle_timeout.as_secs()
+                        );
+                        if !pending_batches.is_empty() {
+                            self.ingest_batches(
+                                std::mem::take(&mut pending_batches),
+                                offsets.clone(),
+                                shared_output.clone(),
+                            );
+                        }
+                        break;
+                    }
+                }
+            } else {
+                client
+                    .recv()
+                    .await
+                    .map_err(|err| io::Error::other(err.to_string()))?
+            };
+            let Some(event) = next_event else {
+                break;
+            };
             match event {
                 ReplicationEvent::XLogData { data, wal_end, .. } => {
                     let Some(msg) = pgoutput::parse(&data) else {

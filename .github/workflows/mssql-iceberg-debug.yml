@@ -1,0 +1,252 @@
+name: MSSQL Iceberg Debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_linux:
+        description: Run the Linux MSSQL to Iceberg debug job
+        type: boolean
+        default: true
+      run_windows:
+        description: Run the Windows MSSQL to Iceberg debug job
+        type: boolean
+        default: true
+
+env:
+  AWS_DEFAULT_REGION: us-east-1
+  DATA_DIR_MIN_FREE_BYTES: "0"
+  RUSTFLAGS: "-C debuginfo=0"
+
+jobs:
+  linux:
+    name: MSSQL to Iceberg debug (linux)
+    if: ${{ inputs.run_linux }}
+    runs-on: depot-ubuntu-22.04-16
+    environment: Skippr
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Configure CodeArtifact Cargo access
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          token="$(aws codeartifact get-authorization-token \
+            --domain skippr \
+            --domain-owner 132355036174 \
+            --region us-east-1 \
+            --query authorizationToken \
+            --output text)"
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Start and seed SQL Server
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --name skippr-mssql-iceberg-debug \
+            -e ACCEPT_EULA=Y \
+            -e MSSQL_SA_PASSWORD='Skippr!Test123' \
+            -p 1433:1433 \
+            -d mcr.microsoft.com/mssql/server:2022-latest
+          SQLCMD="$(docker exec skippr-mssql-iceberg-debug sh -lc 'if [ -x /opt/mssql-tools18/bin/sqlcmd ]; then echo /opt/mssql-tools18/bin/sqlcmd; else echo /opt/mssql-tools/bin/sqlcmd; fi')"
+          until docker exec skippr-mssql-iceberg-debug "$SQLCMD" -S localhost -U sa -P 'Skippr!Test123' -C -Q "SELECT 1" >/dev/null 2>&1; do
+            sleep 2
+          done
+          docker exec skippr-mssql-iceberg-debug "$SQLCMD" -S localhost -U sa -P 'Skippr!Test123' -C -Q "IF DB_ID('testdb') IS NOT NULL BEGIN ALTER DATABASE testdb SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE testdb; END; CREATE DATABASE testdb;"
+          docker cp .github/actions/e2e/mssql_snowflake/seed.sql skippr-mssql-iceberg-debug:/tmp/seed.sql
+          docker exec skippr-mssql-iceberg-debug "$SQLCMD" -S localhost -U sa -P 'Skippr!Test123' -C -d testdb -i /tmp/seed.sql
+
+      - name: Build skipprd and runtime plugins
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build \
+            -p skipprd \
+            -p skippr-plugin-data-source-mssql \
+            -p skippr-plugin-data-sink-iceberg \
+            -p skippr-plugin-schema-sink-iceberg
+
+      - name: Stage local runtime manifests
+        id: local_runtime
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: target
+        run: |
+          set -euo pipefail
+          manifest_dir="$(python3 .github/scripts/runtime_e2e_harness.py stage-local-runtime-release \
+            --skipprd target/debug/skipprd \
+            --scenario mssql_iceberg_debug_linux)"
+          echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
+
+      - name: Run MSSQL to Iceberg debug scenario
+        shell: bash
+        env:
+          RUST_BACKTRACE: "1"
+          SKIPPR_RUNTIME_LOG_LEVEL: debug
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/runtime_e2e_harness.py run mssql_iceberg_debug_linux \
+            --mode full \
+            --skipprd target/debug/skipprd \
+            --prepare-aws-state \
+            --skip-dynamodb-purge \
+            --local-runtime-manifest-dir "${{ steps.local_runtime.outputs.manifest_dir }}"
+
+  windows:
+    name: MSSQL to Iceberg debug (windows)
+    if: ${{ inputs.run_windows }}
+    runs-on: depot-windows-2025-16
+    environment: Skippr
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      SCCACHE_BUCKET: skippr-web-rust-cache-prod
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_KEY_PREFIX: skipprd
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_USE_SSL: "true"
+      VCPKGRS_NO_ZLIB: "1"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Configure CodeArtifact Cargo access
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+        run: |
+          token="$(aws codeartifact get-authorization-token \
+            --domain skippr \
+            --domain-owner 132355036174 \
+            --region us-east-1 \
+            --query authorizationToken \
+            --output text)"
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install sccache
+        if: env.SCCACHE_BUCKET != ''
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.10.0
+
+      - name: Configure sccache
+        if: env.SCCACHE_BUCKET != ''
+        shell: pwsh
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
+          echo "SCCACHE_IDLE_TIMEOUT=0" >> $env:GITHUB_ENV
+          echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> $env:GITHUB_ENV
+
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "23.4"
+          $archive = Join-Path $env:RUNNER_TEMP "protoc-$version-win64.zip"
+          $installDir = Join-Path $env:RUNNER_TEMP "protoc-$version"
+          Invoke-WebRequest `
+            -Uri "https://github.com/protocolbuffers/protobuf/releases/download/v$version/protoc-$version-win64.zip" `
+            -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath $installDir -Force
+          "$installDir\bin" >> $env:GITHUB_PATH
+          & "$installDir\bin\protoc.exe" --version
+
+      - name: Configure vcpkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $triplet = "x64-windows-static-md"
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          echo "VCPKG_DEFAULT_TRIPLET=$triplet" >> $env:GITHUB_ENV
+          echo "VCPKG_TARGET_TRIPLET=$triplet" >> $env:GITHUB_ENV
+          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\$triplet" >> $env:GITHUB_ENV
+          echo "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\$triplet" >> $env:GITHUB_ENV
+          vcpkg install curl:x64-windows-static-md openssl:x64-windows-static-md zlib:x64-windows-static-md
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SQL Server on Windows runner
+        uses: potatoqualitee/mssqlsuite@v1.12
+        with:
+          install: sqlengine, sqlclient
+          sa-password: "Skippr!Test123"
+
+      - name: Seed SQL Server
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sqlcmd = (Get-Command sqlcmd -ErrorAction Stop).Source
+          & $sqlcmd -S localhost -U sa -P "Skippr!Test123" -C -Q "IF DB_ID('testdb') IS NOT NULL BEGIN ALTER DATABASE testdb SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE testdb; END; CREATE DATABASE testdb;"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to create MSSQL test database" }
+          & $sqlcmd -S localhost -U sa -P "Skippr!Test123" -C -d testdb -i ".\.github\actions\e2e\mssql_snowflake\seed.sql"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to seed MSSQL test database" }
+
+      - name: Build skipprd and runtime plugins
+        shell: pwsh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_REGION: us-east-1
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build `
+            -p skipprd `
+            -p skippr-plugin-data-source-mssql `
+            -p skippr-plugin-data-sink-iceberg `
+            -p skippr-plugin-schema-sink-iceberg
+
+      - name: Stage local runtime manifests
+        id: local_runtime
+        shell: pwsh
+        env:
+          CARGO_TARGET_DIR: target
+          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_REGION: us-east-1
+        run: |
+          $ErrorActionPreference = "Stop"
+          $manifestDir = python .github/scripts/runtime_e2e_harness.py stage-local-runtime-release `
+            --skipprd target/debug/skipprd.exe `
+            --scenario mssql_iceberg_debug_windows
+          "manifest_dir=$manifestDir" >> $env:GITHUB_OUTPUT
+
+      - name: Run MSSQL to Iceberg debug scenario
+        shell: pwsh
+        env:
+          RUST_BACKTRACE: "1"
+          SKIPPR_RUNTIME_LOG_LEVEL: debug
+        run: |
+          $ErrorActionPreference = "Stop"
+          python .github/scripts/runtime_e2e_harness.py run mssql_iceberg_debug_windows `
+            --mode full `
+            --skipprd target/debug/skipprd.exe `
+            --prepare-aws-state `
+            --skip-dynamodb-purge `
+            --local-runtime-manifest-dir "${{ steps.local_runtime.outputs.manifest_dir }}"

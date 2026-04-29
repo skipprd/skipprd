@@ -1,9 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
+use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, SchemaRef};
 use async_trait::async_trait;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
@@ -22,7 +23,7 @@ use {
 };
 
 use crate::buffer::ingest_buffer::{flush_all_segments, Buffers, IngestBufferBatch};
-use crate::discover::OutputMetadata;
+use crate::discover::{OutputMetadata, SkipprDataType};
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{
     OffsetTypes, Offsets, RuntimeOffsetOperation, RuntimeOffsetRpcRequest,
@@ -36,15 +37,15 @@ use crate::runtime_plugins::protocol::{
     HandshakeRequest, HostDataFrame, HostFrame, PluginDataFrame, PluginFrame, RuntimeBinding,
     RuntimeCheckpointUpdate, RuntimeExecutionContext, RuntimeOffsetMaterializationHint,
     RuntimeOutputLayout, RuntimeRequestAck, RuntimeSchemaConfig, RuntimeSchemaInstallRequest,
-    RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkConfig,
+    RuntimeSchemaState, RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkConfig,
     RuntimeSinkInstallRequest, RuntimeSinkPayload, RuntimeSourceConfig, SchemaRunRequest,
     SinkRunRequest, SourceEvent, SourceStartRequest, RUNTIME_PROTOCOL_VERSION,
     SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::runtime_plugins::schema_state::{
-    apply_runtime_source_schema_state, current_pipeline_schema_version,
-    current_runtime_schema_state,
+    apply_runtime_source_schema_state, bump_pipeline_schema_version,
+    current_pipeline_schema_version, current_runtime_schema_state,
 };
 use crate::runtime_plugins::sdk::{decode_record_batch_stream, encode_record_batch_stream};
 use crate::runtime_plugins::wire::{read_frame, write_frame, MAX_RUNTIME_FRAME_BYTES};
@@ -356,6 +357,10 @@ impl BufferedRuntimeFrameReader {
                 }
                 Ok(read) => self.buffer.extend_from_slice(&scratch[..read]),
                 Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(()),
+                Err(err) if is_runtime_channel_eof(&err) => {
+                    self.eof = true;
+                    return Ok(());
+                }
                 Err(err) => return Err(err),
             }
         }
@@ -420,6 +425,13 @@ impl BufferedRuntimeFrameReader {
     }
 }
 
+fn is_runtime_channel_eof(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset | ErrorKind::UnexpectedEof
+    )
+}
+
 fn build_source_start_request_for_pipeline(pipeline_name: &str) -> io::Result<SourceStartRequest> {
     let source_config = RuntimeSourceConfig::try_from(
         Config::get_pipeline_input_plugin_config().map_err(io::Error::other)?,
@@ -432,6 +444,82 @@ fn build_source_start_request_for_pipeline(pipeline_name: &str) -> io::Result<So
     })
 }
 
+fn skippr_type_for_arrow(data_type: &ArrowDataType) -> SkipprDataType {
+    match data_type {
+        ArrowDataType::Boolean => SkipprDataType::Boolean,
+        ArrowDataType::Int8 | ArrowDataType::UInt8 => SkipprDataType::Byte,
+        ArrowDataType::Int16 | ArrowDataType::UInt16 => SkipprDataType::Short,
+        ArrowDataType::Int32 | ArrowDataType::UInt32 => SkipprDataType::Integer,
+        ArrowDataType::Int64 | ArrowDataType::UInt64 => SkipprDataType::Long,
+        ArrowDataType::Float16 | ArrowDataType::Float32 => SkipprDataType::Float,
+        ArrowDataType::Float64 => SkipprDataType::Double,
+        ArrowDataType::Decimal128(_, _) | ArrowDataType::Decimal256(_, _) => {
+            SkipprDataType::Decimal
+        }
+        ArrowDataType::Date32 | ArrowDataType::Date64 => SkipprDataType::Date,
+        ArrowDataType::Timestamp(_, _) => SkipprDataType::Timestamp,
+        ArrowDataType::Time32(_) | ArrowDataType::Time64(_) => SkipprDataType::Time,
+        ArrowDataType::Binary
+        | ArrowDataType::LargeBinary
+        | ArrowDataType::FixedSizeBinary(_)
+        | ArrowDataType::BinaryView => SkipprDataType::Binary,
+        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+            SkipprDataType::String
+        }
+        ArrowDataType::List(_)
+        | ArrowDataType::LargeList(_)
+        | ArrowDataType::FixedSizeList(_, _) => SkipprDataType::Array,
+        ArrowDataType::Map(_, _) => SkipprDataType::Map,
+        ArrowDataType::Struct(_) => SkipprDataType::Record,
+        ArrowDataType::Null => SkipprDataType::Null,
+        _ => SkipprDataType::String,
+    }
+}
+
+fn output_metadata_for_arrow_field(field: &ArrowField) -> OutputMetadata {
+    let mut metadata = OutputMetadata::new();
+    metadata.out_field_name = field.name().clone();
+    metadata.determined_type = skippr_type_for_arrow(field.data_type());
+    metadata.nullable = field.is_nullable();
+    if let ArrowDataType::Struct(fields) = field.data_type() {
+        metadata.fields = Box::new(
+            fields
+                .iter()
+                .map(|child| (child.name().clone(), output_metadata_for_arrow_field(child)))
+                .collect::<HashMap<_, _>>(),
+        );
+    }
+    metadata
+}
+
+fn output_metadata_for_arrow_schema(schema: &SchemaRef) -> OutputMetadata {
+    let mut metadata = OutputMetadata::new();
+    metadata.determined_type = SkipprDataType::Record;
+    metadata.fields = Box::new(
+        schema
+            .fields()
+            .iter()
+            .map(|field| (field.name().clone(), output_metadata_for_arrow_field(field)))
+            .collect::<HashMap<_, _>>(),
+    );
+    metadata
+}
+
+fn query_value_from_runtime_filename(filename: &str, key: &str) -> Option<String> {
+    filename.split('&').find_map(|part| {
+        let (part_key, part_value) = part.split_once('=')?;
+        (part_key == key).then(|| part_value.to_string())
+    })
+}
+
+fn apply_derived_runtime_schema(namespace: String, schema: &SchemaRef) {
+    let version = bump_pipeline_schema_version();
+    apply_runtime_source_schema_state(RuntimeSchemaState {
+        version,
+        namespaces: BTreeMap::from([(namespace, output_metadata_for_arrow_schema(schema))]),
+    });
+}
+
 async fn ingest_runtime_batches_into_core(
     batches: Vec<crate::runtime_plugins::protocol::RuntimeIngestPartitionBatch>,
     offsets: Arc<Offsets>,
@@ -442,6 +530,7 @@ async fn ingest_runtime_batches_into_core(
     }
 
     let mut buffer_batches = Vec::with_capacity(batches.len());
+    let mut derived_namespaces = BTreeMap::new();
     for batch in batches {
         let mut stream = decode_record_batch_stream(batch.arrow_stream_bytes)?;
         let mut record_batches = Vec::new();
@@ -452,6 +541,10 @@ async fn ingest_runtime_batches_into_core(
             .first()
             .map(|batch| batch.schema())
             .unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty()));
+        derived_namespaces.insert(
+            batch.namespace.clone(),
+            output_metadata_for_arrow_schema(&schema),
+        );
         let offsets_map = batch
             .offsets
             .into_iter()
@@ -467,6 +560,13 @@ async fn ingest_runtime_batches_into_core(
             schema,
             record_batches: Some(record_batches),
             cdc_rows: batch.cdc_rows,
+        });
+    }
+    if !derived_namespaces.is_empty() {
+        let version = bump_pipeline_schema_version();
+        apply_runtime_source_schema_state(RuntimeSchemaState {
+            version,
+            namespaces: derived_namespaces,
         });
     }
 
@@ -597,6 +697,11 @@ pub async fn sync_runtime_input_plugin(
                     let shared_output = shared_output.clone();
                     pending_source_tasks.spawn(async move {
                         let stream = decode_record_batch_stream(write.arrow_stream_bytes)?;
+                        if let Some(namespace) =
+                            query_value_from_runtime_filename(&write.filename, "namespace")
+                        {
+                            apply_derived_runtime_schema(namespace, &stream.schema());
+                        }
                         shared_output
                             .sync(stream, write.filename, write.cdc_ctx.as_ref())
                             .await?;
@@ -926,12 +1031,18 @@ impl DataSink for RuntimeDataSinkPlugin {
         filename: String,
         cdc_ctx: Option<&cdc::SyncContext>,
     ) -> Result<(), io::Error> {
+        if let Some(namespace) = query_value_from_runtime_filename(&filename, "namespace") {
+            apply_derived_runtime_schema(namespace, &stream.schema());
+        }
+        let schema_state = current_runtime_schema_state();
+        self.install_schema_state_with_retry(schema_state.version, &schema_state.namespaces)
+            .await?;
         let arrow_stream_bytes = encode_record_batch_stream(stream).await?;
         let request = SinkRunRequest {
             request_id: next_runtime_request_id(),
             compaction_id: runtime_compaction_id(&filename),
             binding: self.install_request.binding,
-            required_schema_version: current_pipeline_schema_version(),
+            required_schema_version: schema_state.version,
             filename,
             cdc_ctx: cdc_ctx.cloned(),
         };
@@ -1268,6 +1379,21 @@ mod tests {
 
         let err = reader.take_frame::<TestFrame>().unwrap_err();
         assert!(err.to_string().contains("exceeds limit"));
+    }
+
+    #[test]
+    fn runtime_channel_reset_errors_are_treated_as_eof() {
+        for kind in [
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            let err = std::io::Error::new(kind, "closed");
+            assert!(super::is_runtime_channel_eof(&err));
+        }
+
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        assert!(!super::is_runtime_channel_eof(&err));
     }
 
     #[test]

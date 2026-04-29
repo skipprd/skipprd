@@ -36,6 +36,9 @@ DEFAULT_ASSERTION_OUTPUT = (
 EXPECTED_RUNTIME_PLUGIN_PATTERNS = (
     "skippr-plugin-data-source-s3*",
     "skippr-plugin-data-source-postgres*",
+    "skippr-plugin-data-source-mssql*",
+    "skippr-plugin-data-source-mysql*",
+    "skippr-plugin-data-source-dynamodb*",
     "skippr-plugin-data-sink-athena*",
     "skippr-plugin-data-sink-iceberg*",
     "skippr-plugin-schema-sink-glue*",
@@ -46,15 +49,54 @@ LOCAL_SCENARIO_RUNTIME_MANIFESTS = (
     ("runtime_athena_sink", "athena-sink.json"),
     ("runtime_glue_schema", "glue-schema.json"),
     ("runtime_postgres_source", "postgres-source.json"),
+    ("runtime_mssql_source", "mssql-source.json"),
+    ("runtime_mysql_source", "mysql-source.json"),
+    ("runtime_dynamodb_source", "dynamodb-source.json"),
     ("runtime_iceberg_sink", "iceberg-sink.json"),
     ("runtime_iceberg_schema", "iceberg-schema.json"),
 )
+DEFAULT_LOCAL_SCENARIO_RUNTIME_MANIFESTS = (
+    ("runtime_s3_source", "s3-source.json"),
+    ("runtime_athena_sink", "athena-sink.json"),
+    ("runtime_glue_schema", "glue-schema.json"),
+)
+LOCAL_SCENARIO_RUNTIME_MANIFESTS_BY_SCENARIO = {
+    "postgres_iceberg_types_cdc": (
+        ("runtime_postgres_source", "postgres-source.json"),
+        ("runtime_iceberg_sink", "iceberg-sink.json"),
+        ("runtime_iceberg_schema", "iceberg-schema.json"),
+    ),
+    "mysql_iceberg_types_cdc": (
+        ("runtime_mysql_source", "mysql-source.json"),
+        ("runtime_iceberg_sink", "iceberg-sink.json"),
+        ("runtime_iceberg_schema", "iceberg-schema.json"),
+    ),
+    "dynamodb_iceberg_types_cdc": (
+        ("runtime_dynamodb_source", "dynamodb-source.json"),
+        ("runtime_iceberg_sink", "iceberg-sink.json"),
+        ("runtime_iceberg_schema", "iceberg-schema.json"),
+    ),
+    "mssql_iceberg_debug_linux": (
+        ("runtime_mssql_source", "mssql-source.json"),
+        ("runtime_iceberg_sink", "iceberg-sink.json"),
+        ("runtime_iceberg_schema", "iceberg-schema.json"),
+    ),
+    "mssql_iceberg_debug_windows": (
+        ("runtime_mssql_source", "mssql-source.json"),
+        ("runtime_iceberg_sink", "iceberg-sink.json"),
+        ("runtime_iceberg_schema", "iceberg-schema.json"),
+    ),
+}
 LOCAL_SCENARIO_RUNTIME_PIPELINE_ANCHORS = {
     "bike_hire": "    data_sink: data_sinks.test_datalake\n",
     "bike_hire_many": "    data_sink: data_sinks.test_datalake\n",
     "bike_hire_s3_wal_many": "    data_sink: data_sinks.test_datalake\n",
     "deadletters_test": "    data_sink: data_sinks.test_datalake\n",
     "postgres_iceberg_types_cdc": "    data_sink: data_sinks.iceberg_types_cdc\n",
+    "mysql_iceberg_types_cdc": "    data_sink: data_sinks.iceberg_types_cdc\n",
+    "dynamodb_iceberg_types_cdc": "    data_sink: data_sinks.iceberg_types_cdc\n",
+    "mssql_iceberg_debug_linux": "    data_sink: data_sinks.iceberg_debug\n",
+    "mssql_iceberg_debug_windows": "    data_sink: data_sinks.iceberg_debug\n",
 }
 BIKE_HIRE_RUNTIME_VERSION_ANCHORS = (
     ("  s3_bike_hire:\n    S3:\n", "S3"),
@@ -76,6 +118,26 @@ SCENARIO_RUNTIME_VERSION_ANCHORS = {
     "postgres_iceberg_types_cdc": (
         ("  postgres_types_cdc:\n    Postgres:\n", "Postgres"),
         ("  iceberg_types_cdc:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+    ),
+    "mysql_iceberg_types_cdc": (
+        ("  mysql_types_cdc:\n    Mysql:\n", "Mysql"),
+        ("  iceberg_types_cdc:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+    ),
+    "dynamodb_iceberg_types_cdc": (
+        ("  dynamodb_types_cdc:\n    Dynamodb:\n", "Dynamodb"),
+        ("  iceberg_types_cdc:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+    ),
+    "mssql_iceberg_debug_linux": (
+        ("  mssql_debug:\n    Mssql:\n", "Mssql"),
+        ("  iceberg_debug:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+    ),
+    "mssql_iceberg_debug_windows": (
+        ("  mssql_debug:\n    Mssql:\n", "Mssql"),
+        ("  iceberg_debug:\n    Iceberg:\n", "Iceberg"),
         ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
     ),
 }
@@ -113,6 +175,44 @@ RUNTIME_POSTGRES_SMOKE_PLUGIN_PATTERNS = (
 RUNTIME_ACCEPTANCE_WORKSPACE = "runtime-plugin-acceptance"
 RUNTIME_ACCEPTANCE_POSTGRES_SERVICES = ("postgres", "postgres-target")
 DYNAMODB_TABLE = "Test-MetadataService-Stack-MetadataTable8CB34826-1OBKKG0QKVLJC"
+DYNAMODB_ICEBERG_CDC_TABLE = "skippr_iceberg_dynamodb_types_cdc"
+ICEBERG_CDC_SCENARIO_AWS_STATE = {
+    "postgres_iceberg_types_cdc": {
+        "database": "iceberg_e2e_postgres",
+        "s3_prefixes": (
+            "iceberg-e2e-postgres",
+            "skippr/iceberg-types-cdc/postgres_iceberg_types_cdc",
+        ),
+    },
+    "mysql_iceberg_types_cdc": {
+        "database": "iceberg_e2e_mysql",
+        "s3_prefixes": (
+            "iceberg-e2e-mysql",
+            "skippr/iceberg-types-cdc-mysql/mysql_iceberg_types_cdc",
+        ),
+    },
+    "dynamodb_iceberg_types_cdc": {
+        "database": "iceberg_e2e_dynamodb",
+        "s3_prefixes": (
+            "iceberg-e2e-dynamodb",
+            "skippr/iceberg-types-cdc-dynamodb/dynamodb_iceberg_types_cdc",
+        ),
+    },
+    "mssql_iceberg_debug_linux": {
+        "database": "iceberg_e2e_mssql_debug_linux",
+        "s3_prefixes": (
+            "iceberg-e2e-mssql-debug-linux",
+            "skippr/iceberg-debug-mssql-linux/mssql_iceberg_debug_linux",
+        ),
+    },
+    "mssql_iceberg_debug_windows": {
+        "database": "iceberg_e2e_mssql_debug_windows",
+        "s3_prefixes": (
+            "iceberg-e2e-mssql-debug-windows",
+            "skippr/iceberg-debug-mssql-windows/mssql_iceberg_debug_windows",
+        ),
+    },
+}
 
 SODA_INSTALLED = False
 SODA_VENV_DIR: Path | None = None
@@ -126,8 +226,10 @@ class HarnessError(RuntimeError):
 @dataclass(frozen=True)
 class SyncRun:
     pipeline: str
+    command: str = "sync"
     extra_env: tuple[tuple[str, str], ...] = ()
     allow_exit_codes: tuple[int, ...] = ()
+    timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -362,11 +464,89 @@ SCENARIOS = {
         smoke_verifiers=("postgres_iceberg_types_cdc_final_state",),
         full_verifiers=("postgres_iceberg_types_cdc_final_state",),
     ),
+    "mysql_iceberg_types_cdc": Scenario(
+        name="mysql_iceberg_types_cdc",
+        config_path=scenario_config(
+            ".github/actions/e2e/mysql_iceberg_types_cdc/skipprd.yml"
+        ),
+        smoke_runs=(SyncRun(pipeline="mysql_iceberg_types_cdc"),),
+        full_runs=(SyncRun(pipeline="mysql_iceberg_types_cdc"),),
+        smoke_verifiers=("mysql_iceberg_types_cdc_final_state",),
+        full_verifiers=("mysql_iceberg_types_cdc_final_state",),
+    ),
+    "dynamodb_iceberg_types_cdc": Scenario(
+        name="dynamodb_iceberg_types_cdc",
+        config_path=scenario_config(
+            ".github/actions/e2e/dynamodb_iceberg_types_cdc/skipprd.yml"
+        ),
+        smoke_runs=(SyncRun(pipeline="dynamodb_iceberg_types_cdc"),),
+        full_runs=(SyncRun(pipeline="dynamodb_iceberg_types_cdc"),),
+        smoke_verifiers=("dynamodb_iceberg_types_cdc_final_state",),
+        full_verifiers=("dynamodb_iceberg_types_cdc_final_state",),
+    ),
+    "mssql_iceberg_debug_linux": Scenario(
+        name="mssql_iceberg_debug_linux",
+        config_path=scenario_config(
+            ".github/actions/e2e/mssql_iceberg_debug_linux/skipprd.yml"
+        ),
+        smoke_runs=(
+            SyncRun(
+                pipeline="mssql_iceberg_debug_linux",
+                command="discover",
+                extra_env=(("RUST_BACKTRACE", "1"), ("SKIPPR_RUNTIME_LOG_LEVEL", "debug")),
+                timeout_seconds=180,
+            ),
+        ),
+        full_runs=(
+            SyncRun(
+                pipeline="mssql_iceberg_debug_linux",
+                command="discover",
+                extra_env=(("RUST_BACKTRACE", "1"), ("SKIPPR_RUNTIME_LOG_LEVEL", "debug")),
+                timeout_seconds=180,
+            ),
+            SyncRun(
+                pipeline="mssql_iceberg_debug_linux",
+                command="sync",
+                extra_env=(("RUST_BACKTRACE", "1"), ("SKIPPR_RUNTIME_LOG_LEVEL", "debug")),
+                timeout_seconds=600,
+            ),
+        ),
+        full_verifiers=("mssql_iceberg_debug_linux_rows",),
+    ),
+    "mssql_iceberg_debug_windows": Scenario(
+        name="mssql_iceberg_debug_windows",
+        config_path=scenario_config(
+            ".github/actions/e2e/mssql_iceberg_debug_windows/skipprd.yml"
+        ),
+        smoke_runs=(
+            SyncRun(
+                pipeline="mssql_iceberg_debug_windows",
+                command="discover",
+                extra_env=(("RUST_BACKTRACE", "1"), ("SKIPPR_RUNTIME_LOG_LEVEL", "debug")),
+                timeout_seconds=180,
+            ),
+        ),
+        full_runs=(
+            SyncRun(
+                pipeline="mssql_iceberg_debug_windows",
+                command="discover",
+                extra_env=(("RUST_BACKTRACE", "1"), ("SKIPPR_RUNTIME_LOG_LEVEL", "debug")),
+                timeout_seconds=180,
+            ),
+            SyncRun(
+                pipeline="mssql_iceberg_debug_windows",
+                command="sync",
+                extra_env=(("RUST_BACKTRACE", "1"), ("SKIPPR_RUNTIME_LOG_LEVEL", "debug")),
+                timeout_seconds=600,
+            ),
+        ),
+        full_verifiers=("mssql_iceberg_debug_windows_rows",),
+    ),
 }
 
 
 def print_step(message: str) -> None:
-    print(f"[runtime-e2e] {message}", flush=True)
+    print(f"[runtime-e2e] {message}", file=sys.stderr, flush=True)
 
 
 def ensure_tool(name: str) -> str:
@@ -383,16 +563,23 @@ def run_command(
     cwd: Path = REPO_ROOT,
     allow_exit_codes: tuple[int, ...] = (),
     capture_output: bool = False,
+    timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     print_step(f"Running: {' '.join(command)}")
-    completed = subprocess.run(
-        command,
-        cwd=cwd,
-        env=env,
-        text=True,
-        capture_output=capture_output,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            text=True,
+            capture_output=capture_output,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as err:
+        raise HarnessError(
+            f"command timed out after {timeout_seconds}s: {' '.join(command)}"
+        ) from err
     normalized_returncode = (
         128 + abs(completed.returncode)
         if completed.returncode < 0
@@ -540,16 +727,22 @@ def run_sync(skipprd: Path, sync_run: SyncRun, base_env: dict[str, str]) -> None
     env = base_env.copy()
     for key, value in sync_run.extra_env:
         env[key] = value
+    if sync_run.command not in {"discover", "sync"}:
+        raise HarnessError(f"unsupported skipprd command: {sync_run.command}")
+    command = [
+        str(skipprd),
+        sync_run.command,
+        "--log",
+        "--pipeline",
+        sync_run.pipeline,
+    ]
+    if sync_run.command == "discover":
+        command.extend(["--output", "json"])
     run_command(
-        [
-            str(skipprd),
-            "sync",
-            "--log",
-            "--pipeline",
-            sync_run.pipeline,
-        ],
+        command,
         env=env,
         allow_exit_codes=sync_run.allow_exit_codes,
+        timeout_seconds=sync_run.timeout_seconds,
     )
 
 
@@ -862,10 +1055,22 @@ def target_binary_name(binary_name: str, target_triple: str) -> str:
     return binary_name
 
 
+def local_runtime_manifest_entries_for_scenario(
+    scenario_name: str | None,
+) -> tuple[tuple[str, str], ...]:
+    if scenario_name is None:
+        return LOCAL_SCENARIO_RUNTIME_MANIFESTS
+    return LOCAL_SCENARIO_RUNTIME_MANIFESTS_BY_SCENARIO.get(
+        scenario_name,
+        DEFAULT_LOCAL_SCENARIO_RUNTIME_MANIFESTS,
+    )
+
+
 def stage_local_runtime_release(
     *,
     skipprd: Path,
     output_dir: Path,
+    scenario_name: str | None = None,
 ) -> LocalStagedRuntimeManifests:
     ensure_tool("cargo")
     catalog_entries = load_workspace_plugin_catalog(REPO_ROOT)
@@ -875,16 +1080,26 @@ def stage_local_runtime_release(
     protocol_version = workspace_runtime_protocol_version(REPO_ROOT)
     target_triple = current_rust_target_triple()
     profile = skipprd_build_profile(skipprd)
-    build_target_dir = output_dir.expanduser().resolve() / "build-target"
+    configured_target_dir = os.environ.get("CARGO_TARGET_DIR")
+    if configured_target_dir:
+        build_target_dir = Path(configured_target_dir).expanduser()
+        if not build_target_dir.is_absolute():
+            build_target_dir = REPO_ROOT / build_target_dir
+        build_target_dir = build_target_dir.resolve()
+    else:
+        build_target_dir = output_dir.expanduser().resolve() / "build-target"
+    manifest_entries = local_runtime_manifest_entries_for_scenario(scenario_name)
 
     packages_to_build: list[str] = []
-    for _, manifest_filename in LOCAL_SCENARIO_RUNTIME_MANIFESTS:
+    for _, manifest_filename in manifest_entries:
         metadata = catalog_by_manifest.get(manifest_filename)
         if metadata is None:
             raise HarnessError(
                 f"runtime plugin catalog is missing required local manifest {manifest_filename}"
             )
-        packages_to_build.append(metadata["package_name"])
+        package_name = metadata["package_name"]
+        if package_name not in packages_to_build:
+            packages_to_build.append(package_name)
 
     build_command = [ensure_tool("cargo"), "build"]
     if profile == "release":
@@ -893,6 +1108,7 @@ def stage_local_runtime_release(
         build_command.extend(["-p", package_name])
     build_env = os.environ.copy()
     build_env["CARGO_TARGET_DIR"] = str(build_target_dir)
+    build_env.setdefault("CARGO_INCREMENTAL", "0")
     run_command(build_command, env=build_env)
 
     output_dir = output_dir.expanduser().resolve()
@@ -900,7 +1116,7 @@ def stage_local_runtime_release(
     manifest_paths: dict[str, Path] = {}
     manifest_versions: dict[str, str] = {}
 
-    for config_key, manifest_filename in LOCAL_SCENARIO_RUNTIME_MANIFESTS:
+    for config_key, manifest_filename in manifest_entries:
         metadata = catalog_by_manifest[manifest_filename]
         binary_filename = target_binary_name(metadata["binary_name"], target_triple)
         built_binary = build_target_dir / profile / binary_filename
@@ -983,11 +1199,13 @@ def load_local_runtime_manifests(
             )
         manifest_path = manifest_dir / versioned_manifest_relative_path(metadata)
         if not manifest_path.exists():
-            raise HarnessError(
-                f"expected local staged runtime manifest at {manifest_path}"
-            )
+            continue
         manifest_paths[config_key] = manifest_path
         manifest_versions[config_key] = metadata["package_version"]
+    if not manifest_paths:
+        raise HarnessError(
+            f"no local staged runtime manifests were found under {manifest_dir}"
+        )
     return LocalStagedRuntimeManifests(
         manifest_dir=manifest_dir,
         manifest_paths=manifest_paths,
@@ -1031,6 +1249,10 @@ def runtime_plugin_version_config_text(
     return rewritten
 
 
+def yaml_scalar(value: Path | str) -> str:
+    return json.dumps(str(value))
+
+
 def local_runtime_config_text(
     scenario_name: str,
     config_text: str,
@@ -1053,19 +1275,55 @@ def local_runtime_config_text(
             f"expected to find anchor {anchor!r} exactly once in scenario {scenario_name}, found {count}"
         )
 
-    if scenario_name == "postgres_iceberg_types_cdc":
+    iceberg_runtime_sources = {
+        "postgres_iceberg_types_cdc": "runtime_postgres_source",
+        "mysql_iceberg_types_cdc": "runtime_mysql_source",
+        "dynamodb_iceberg_types_cdc": "runtime_dynamodb_source",
+        "mssql_iceberg_debug_linux": "runtime_mssql_source",
+        "mssql_iceberg_debug_windows": "runtime_mssql_source",
+    }
+    if scenario_name in iceberg_runtime_sources:
+        runtime_source_key = iceberg_runtime_sources[scenario_name]
+        required_runtime_keys = (
+            runtime_source_key,
+            "runtime_iceberg_sink",
+            "runtime_iceberg_schema",
+        )
+        missing = [
+            key
+            for key in required_runtime_keys
+            if key not in local_runtime_manifests.manifest_paths
+        ]
+        if missing:
+            raise HarnessError(
+                f"local staged runtime manifests for {scenario_name} are missing: {', '.join(missing)}"
+            )
         runtime_lines = (
-            "    runtime_input: runtime_plugins.runtime_postgres_source\n"
+            f"    runtime_input: runtime_plugins.{runtime_source_key}\n"
             "    runtime_output: runtime_plugins.runtime_iceberg_sink\n"
             "    runtime_schema: runtime_plugins.runtime_iceberg_schema\n"
         )
         runtime_plugins_block = (
             "\nruntime_plugins:\n"
-            f'  runtime_postgres_source:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_postgres_source"]}"\n'
-            f'  runtime_iceberg_sink:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_iceberg_sink"]}"\n'
-            f'  runtime_iceberg_schema:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_iceberg_schema"]}"\n'
+            f"  {runtime_source_key}:\n    manifest: {yaml_scalar(local_runtime_manifests.manifest_paths[runtime_source_key])}\n"
+            f"  runtime_iceberg_sink:\n    manifest: {yaml_scalar(local_runtime_manifests.manifest_paths['runtime_iceberg_sink'])}\n"
+            f"  runtime_iceberg_schema:\n    manifest: {yaml_scalar(local_runtime_manifests.manifest_paths['runtime_iceberg_schema'])}\n"
         )
     else:
+        required_runtime_keys = (
+            "runtime_s3_source",
+            "runtime_athena_sink",
+            "runtime_glue_schema",
+        )
+        missing = [
+            key
+            for key in required_runtime_keys
+            if key not in local_runtime_manifests.manifest_paths
+        ]
+        if missing:
+            raise HarnessError(
+                f"local staged runtime manifests for {scenario_name} are missing: {', '.join(missing)}"
+            )
         runtime_lines = (
             "    runtime_input: runtime_plugins.runtime_s3_source\n"
             "    runtime_output: runtime_plugins.runtime_athena_sink\n"
@@ -1073,9 +1331,9 @@ def local_runtime_config_text(
         )
         runtime_plugins_block = (
             "\nruntime_plugins:\n"
-            f'  runtime_s3_source:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_s3_source"]}"\n'
-            f'  runtime_athena_sink:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_athena_sink"]}"\n'
-            f'  runtime_glue_schema:\n    manifest: "{local_runtime_manifests.manifest_paths["runtime_glue_schema"]}"\n'
+            f"  runtime_s3_source:\n    manifest: {yaml_scalar(local_runtime_manifests.manifest_paths['runtime_s3_source'])}\n"
+            f"  runtime_athena_sink:\n    manifest: {yaml_scalar(local_runtime_manifests.manifest_paths['runtime_athena_sink'])}\n"
+            f"  runtime_glue_schema:\n    manifest: {yaml_scalar(local_runtime_manifests.manifest_paths['runtime_glue_schema'])}\n"
         )
     rewritten = config_text.replace(anchor, anchor + runtime_lines, 1)
     if not rewritten.endswith("\n"):
@@ -1838,8 +2096,76 @@ def verify_soda_deadletters(context: ScenarioContext) -> None:
 
 
 def verify_postgres_iceberg_types_cdc_final_state(context: ScenarioContext) -> None:
-    table = "skippr_type_matrix_orders"
-    database = "iceberg_e2e"
+    verify_iceberg_type_matrix_final_state(
+        context,
+        database="iceberg_e2e_postgres",
+        table="skippr_type_matrix_orders",
+    )
+
+
+def verify_mysql_iceberg_types_cdc_final_state(context: ScenarioContext) -> None:
+    verify_iceberg_type_matrix_final_state(
+        context,
+        database="iceberg_e2e_mysql",
+        table="skippr_type_matrix_orders",
+        updated_row_predicate="id = 1 AND bool_col = 1 AND string_col = 'updated'",
+    )
+
+
+def verify_dynamodb_iceberg_types_cdc_final_state(context: ScenarioContext) -> None:
+    verify_iceberg_type_matrix_final_state(
+        context,
+        database="iceberg_e2e_dynamodb",
+        table=f"skippr_{DYNAMODB_ICEBERG_CDC_TABLE}",
+    )
+
+
+def verify_mssql_iceberg_debug_linux_rows(context: ScenarioContext) -> None:
+    verify_mssql_iceberg_debug_rows(
+        context,
+        database="iceberg_e2e_mssql_debug_linux",
+    )
+
+
+def verify_mssql_iceberg_debug_windows_rows(context: ScenarioContext) -> None:
+    verify_mssql_iceberg_debug_rows(
+        context,
+        database="iceberg_e2e_mssql_debug_windows",
+    )
+
+
+def verify_mssql_iceberg_debug_rows(
+    context: ScenarioContext,
+    *,
+    database: str,
+) -> None:
+    expected_counts = {
+        "skippr_customers": 2,
+        "skippr_orders": 2,
+        "skippr_order_items": 3,
+    }
+    for table, expected_count in expected_counts.items():
+        actual_count = int(
+            athena_scalar(
+                f'SELECT COUNT(*) FROM "{table}"',
+                database=database,
+                env=context.base_env,
+                output_location=context.assertion_output,
+            )
+        )
+        if actual_count != expected_count:
+            raise HarnessError(
+                f"expected {database}.{table} to contain {expected_count} rows, got {actual_count}"
+            )
+
+
+def verify_iceberg_type_matrix_final_state(
+    context: ScenarioContext,
+    *,
+    database: str,
+    table: str,
+    updated_row_predicate: str = "id = 1 AND bool_col = true AND string_col = 'updated'",
+) -> None:
     row_count = int(
         athena_scalar(
             f'SELECT COUNT(*) FROM "{table}"',
@@ -1850,7 +2176,7 @@ def verify_postgres_iceberg_types_cdc_final_state(context: ScenarioContext) -> N
     )
     if row_count != 3:
         raise HarnessError(
-            f"expected Iceberg final state to contain 3 rows, got {row_count}"
+            f"expected Iceberg final state table {table} to contain 3 rows, got {row_count}"
         )
     deleted = int(
         athena_scalar(
@@ -1861,17 +2187,17 @@ def verify_postgres_iceberg_types_cdc_final_state(context: ScenarioContext) -> N
         )
     )
     if deleted != 0:
-        raise HarnessError("expected CDC delete for id=2 to be reflected in Iceberg")
+        raise HarnessError(f"expected CDC delete for id=2 to be reflected in {table}")
     type_probe = int(
         athena_scalar(
-            f"SELECT COUNT(*) FROM \"{table}\" WHERE id = 1 AND bool_col = true AND string_col = 'updated'",
+            f'SELECT COUNT(*) FROM "{table}" WHERE {updated_row_predicate}',
             database=database,
             env=context.base_env,
             output_location=context.assertion_output,
         )
     )
     if type_probe != 1:
-        raise HarnessError("expected updated type-matrix row for id=1 to be queryable")
+        raise HarnessError(f"expected updated type-matrix row for id=1 in {table}")
 
 
 VERIFIERS: dict[str, Callable[[ScenarioContext], None]] = {
@@ -1885,6 +2211,10 @@ VERIFIERS: dict[str, Callable[[ScenarioContext], None]] = {
     "soda_bike_hire_s3_wal_many": verify_soda_bike_hire_s3_wal_many,
     "soda_deadletters": verify_soda_deadletters,
     "postgres_iceberg_types_cdc_final_state": verify_postgres_iceberg_types_cdc_final_state,
+    "mysql_iceberg_types_cdc_final_state": verify_mysql_iceberg_types_cdc_final_state,
+    "dynamodb_iceberg_types_cdc_final_state": verify_dynamodb_iceberg_types_cdc_final_state,
+    "mssql_iceberg_debug_linux_rows": verify_mssql_iceberg_debug_linux_rows,
+    "mssql_iceberg_debug_windows_rows": verify_mssql_iceberg_debug_windows_rows,
 }
 
 
@@ -1914,6 +2244,42 @@ def delete_glue_database(name: str, env: dict[str, str]) -> None:
         return
     raise HarnessError(
         f"failed to delete Glue database {name}: {stderr or completed.stdout.strip()}"
+    )
+
+
+def delete_dynamodb_table(name: str, env: dict[str, str]) -> None:
+    command = [
+        ensure_tool("aws"),
+        "dynamodb",
+        "delete-table",
+        "--table-name",
+        name,
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode == 0:
+        run_command(
+            [ensure_tool("aws"), "dynamodb", "wait", "table-not-exists", "--table-name", name],
+            env=env,
+        )
+        return
+    stderr = completed.stderr.strip()
+    stdout = completed.stdout.strip()
+    combined = "\n".join(part for part in (stdout, stderr) if part)
+    if (
+        "ResourceNotFoundException" in combined
+        or "Cannot do operations on a non-existent table" in combined
+    ):
+        print_step(f"DynamoDB table {name} did not exist; continuing")
+        return
+    raise HarnessError(
+        f"failed to delete DynamoDB table {name}: {combined or f'exit code {completed.returncode}'}"
     )
 
 
@@ -1986,8 +2352,34 @@ def purge_dynamodb(env: dict[str, str]) -> None:
     print_step(f"Purged {deleted} DynamoDB items from {DYNAMODB_TABLE}")
 
 
-def prepare_aws_state(env: dict[str, str], *, skip_dynamodb: bool) -> None:
+def prepare_aws_state(
+    env: dict[str, str],
+    *,
+    skip_dynamodb: bool,
+    scenario_name: str | None = None,
+) -> None:
     ensure_tool("aws")
+    scenario_aws_state = (
+        ICEBERG_CDC_SCENARIO_AWS_STATE.get(scenario_name) if scenario_name else None
+    )
+    if scenario_aws_state:
+        print_step(f"Cleaning AWS e2e state for {scenario_name}")
+        for prefix in scenario_aws_state["s3_prefixes"]:
+            run_command(
+                [
+                    ensure_tool("aws"),
+                    "s3",
+                    "rm",
+                    f"s3://skippr-e2e-sample-data-output/{prefix}",
+                    "--recursive",
+                ],
+                env=env,
+            )
+        delete_glue_database(str(scenario_aws_state["database"]), env)
+        if scenario_name == "dynamodb_iceberg_types_cdc":
+            delete_dynamodb_table(DYNAMODB_ICEBERG_CDC_TABLE, env)
+        return
+
     print_step("Cleaning shared AWS e2e state")
     run_command(
         [ensure_tool("aws"), "s3", "rm", "s3://skippr-e2e-sample-data-output", "--recursive"],
@@ -1999,6 +2391,9 @@ def prepare_aws_state(env: dict[str, str], *, skip_dynamodb: bool) -> None:
     )
     delete_glue_database("bikehire", env)
     delete_glue_database("deadletters", env)
+    for state in ICEBERG_CDC_SCENARIO_AWS_STATE.values():
+        delete_glue_database(str(state["database"]), env)
+    delete_dynamodb_table(DYNAMODB_ICEBERG_CDC_TABLE, env)
     if not skip_dynamodb:
         purge_dynamodb(env)
 
@@ -2015,11 +2410,15 @@ def scenario_pipeline_name(scenario: Scenario) -> str:
 
 
 def prepare_local_state(scenario: Scenario) -> None:
-    data_dir = REPO_ROOT / "data" / f"test_{scenario_pipeline_name(scenario)}"
-    if not data_dir.exists():
-        return
-    print_step(f"Removing local scenario data dir {data_dir}")
-    shutil.rmtree(data_dir, ignore_errors=True)
+    pipeline = scenario_pipeline_name(scenario)
+    data_root = REPO_ROOT / "data"
+    candidates = [data_root / f"test_{pipeline}"]
+    if data_root.exists():
+        candidates.extend(data_root.glob(f"*_{pipeline}"))
+    for data_dir in sorted(set(candidates)):
+        if data_dir.exists():
+            print_step(f"Removing local scenario data dir {data_dir}")
+            shutil.rmtree(data_dir, ignore_errors=True)
 
 
 def run_scenario(
@@ -2041,7 +2440,11 @@ def run_scenario(
         base_env_for_setup.setdefault("AWS_DEFAULT_REGION", DEFAULT_AWS_REGION)
         if prepare:
             prepare_local_state(scenario)
-            prepare_aws_state(base_env_for_setup, skip_dynamodb=skip_dynamodb)
+            prepare_aws_state(
+                base_env_for_setup,
+                skip_dynamodb=skip_dynamodb,
+                scenario_name=scenario.name,
+            )
 
         config_path = materialize_scenario_config(
             scenario,
@@ -2148,6 +2551,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip the DynamoDB purge",
     )
+    prepare_parser.add_argument(
+        "--scenario",
+        choices=tuple(ICEBERG_CDC_SCENARIO_AWS_STATE.keys()),
+        help="Clean only the AWS state owned by one Iceberg CDC scenario",
+    )
     prepare_parser.set_defaults(handler=None)
 
     run_parser = subparsers.add_parser(
@@ -2174,6 +2582,11 @@ def main(argv: list[str] | None = None) -> int:
     stage_runtime_release_parser.add_argument(
         "--output-dir",
         help="Output directory for the staged local runtime release; defaults to a new temp directory",
+    )
+    stage_runtime_release_parser.add_argument(
+        "--scenario",
+        choices=tuple(SCENARIOS.keys()),
+        help="Only stage the local runtime manifests required by this scenario",
     )
     stage_runtime_release_parser.set_defaults(handler=None)
 
@@ -2226,12 +2639,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare-aws-state":
             env = os.environ.copy()
             env.setdefault("AWS_DEFAULT_REGION", DEFAULT_AWS_REGION)
-            prepare_aws_state(env, skip_dynamodb=args.skip_dynamodb_purge)
+            prepare_aws_state(
+                env,
+                skip_dynamodb=args.skip_dynamodb_purge,
+                scenario_name=args.scenario,
+            )
             return 0
 
         if args.command == "run":
             skipprd = resolve_skipprd(args.skipprd)
-            assert_no_bundled_runtime_plugins(skipprd)
+            if not args.local_runtime_manifest_dir:
+                assert_no_bundled_runtime_plugins(skipprd)
             runtime_plugin_versions = parse_runtime_plugin_versions(
                 args.runtime_plugin_version
             )
@@ -2266,6 +2684,7 @@ def main(argv: list[str] | None = None) -> int:
             local_runtime_manifests = stage_local_runtime_release(
                 skipprd=skipprd,
                 output_dir=output_dir,
+                scenario_name=args.scenario,
             )
             print(local_runtime_manifests.manifest_dir)
             return 0

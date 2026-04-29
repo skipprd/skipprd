@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
@@ -15,6 +16,7 @@ static RUNTIME_SOURCE_SCHEMA_STATE: Lazy<ArcSwap<RuntimeSchemaState>> = Lazy::ne
         namespaces: BTreeMap::new(),
     }))
 });
+static RUNTIME_SOURCE_SCHEMA_STATE_UPDATE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 pub fn current_pipeline_schema_version() -> u64 {
     PIPELINE_SCHEMA_VERSION.load(Ordering::Acquire)
@@ -25,6 +27,9 @@ pub fn bump_pipeline_schema_version() -> u64 {
 }
 
 pub fn clear_runtime_source_schema_state() {
+    let _guard = RUNTIME_SOURCE_SCHEMA_STATE_UPDATE_LOCK
+        .lock()
+        .expect("runtime source schema state update lock poisoned");
     RUNTIME_SOURCE_SCHEMA_STATE.store(Arc::new(RuntimeSchemaState {
         version: 0,
         namespaces: BTreeMap::new(),
@@ -32,8 +37,19 @@ pub fn clear_runtime_source_schema_state() {
 }
 
 pub fn apply_runtime_source_schema_state(schema_state: RuntimeSchemaState) {
-    let version = schema_state.version;
-    RUNTIME_SOURCE_SCHEMA_STATE.store(Arc::new(schema_state));
+    let _guard = RUNTIME_SOURCE_SCHEMA_STATE_UPDATE_LOCK
+        .lock()
+        .expect("runtime source schema state update lock poisoned");
+    let current = RUNTIME_SOURCE_SCHEMA_STATE.load();
+    let mut namespaces = current.namespaces.clone();
+    for (namespace, output) in schema_state.namespaces {
+        namespaces.insert(namespace, output);
+    }
+    let version = current.version.max(schema_state.version);
+    RUNTIME_SOURCE_SCHEMA_STATE.store(Arc::new(RuntimeSchemaState {
+        version,
+        namespaces,
+    }));
     let _ = PIPELINE_SCHEMA_VERSION.fetch_max(version, Ordering::AcqRel);
 }
 

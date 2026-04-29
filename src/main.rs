@@ -196,8 +196,30 @@ fn chaos_mode_delay() -> Duration {
     Duration::from_secs(secs)
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let stack_size = std::env::var("SKIPPR_MAIN_THREAD_STACK_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(32 * 1024 * 1024);
+
+    let handle = std::thread::Builder::new()
+        .name("skipprd-main".to_string())
+        .stack_size(stack_size)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build Tokio runtime");
+            runtime.block_on(async_main());
+        })
+        .expect("failed to spawn skipprd main thread");
+
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn async_main() {
     // let now = Instant::now();
 
     // lazy_static! {
@@ -853,26 +875,18 @@ async fn sync(output_mode: &str) -> io::Result<()> {
             if let (Some(src), Some(snk)) = (src_cap.as_ref(), sink_cap.as_ref()) {
                 let mut contracts = BTreeMap::new();
                 let default_contract = cdc_cfg.default_contract();
-                let namespace_configs: Vec<(String, Vec<String>)> = if cdc_cfg.namespaces.is_empty()
-                {
-                    vec![(
-                        "*".to_string(),
-                        default_contract.business_key_columns.clone(),
-                    )]
-                } else {
-                    cdc_cfg
-                        .namespaces
-                        .iter()
-                        .map(|(namespace, cfg)| {
-                            let keys = if cfg.business_key_columns.is_empty() {
-                                default_contract.business_key_columns.clone()
-                            } else {
-                                cfg.business_key_columns.clone()
-                            };
-                            (namespace.clone(), keys)
-                        })
-                        .collect()
-                };
+                let mut namespace_configs = vec![(
+                    "*".to_string(),
+                    default_contract.business_key_columns.clone(),
+                )];
+                namespace_configs.extend(cdc_cfg.namespaces.iter().map(|(namespace, cfg)| {
+                    let keys = if cfg.business_key_columns.is_empty() {
+                        default_contract.business_key_columns.clone()
+                    } else {
+                        cfg.business_key_columns.clone()
+                    };
+                    (namespace.clone(), keys)
+                }));
                 for (namespace, business_key_columns) in namespace_configs {
                     match derive_and_validate(src, snk, &namespace, &business_key_columns) {
                         CompatibilityResult::Compatible(guarantee) => {

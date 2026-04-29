@@ -1,0 +1,46 @@
+skippr:
+  skippr_s3_bucket: skippr-e2e-sample-data-output
+  tenant: skippr
+  workspace: iceberg-debug-mssql-linux
+
+pipelines:
+  mssql_iceberg_debug_linux:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 60
+    data_source: data_sources.mssql_debug
+    data_sink: data_sinks.iceberg_debug
+
+data_sources:
+  mssql_debug:
+    Mssql:
+      connection_string: "server=tcp:127.0.0.1,1433;database=testdb;user id=sa;password=Skippr!Test123;TrustServerCertificate=true"
+      tables: ["dbo.customers", "dbo.orders", "dbo.order_items"]
+
+data_sinks:
+  iceberg_debug:
+    Iceberg:
+      table_namespace: iceberg_e2e_mssql_debug_linux
+      table_prefix: skippr
+      table_location_prefix: s3://skippr-e2e-sample-data-output/iceberg-e2e-mssql-debug-linux
+      catalog:
+        type: glue
+        warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-mssql-debug-linux
+        database: iceberg_e2e_mssql_debug_linux
+        catalog_id: "353855562591"
+        region: us-east-1
+    schema_sink: schema_sinks.iceberg_glue
+
+schema_sinks:
+  iceberg_glue:
+    Iceberg:
+      table_namespace: iceberg_e2e_mssql_debug_linux
+      table_prefix: skippr
+      table_location_prefix: s3://skippr-e2e-sample-data-output/iceberg-e2e-mssql-debug-linux
+      catalog:
+        type: glue
+        warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-mssql-debug-linux
+        database: iceberg_e2e_mssql_debug_linux
+        catalog_id: "353855562591"
+        region: us-east-1
