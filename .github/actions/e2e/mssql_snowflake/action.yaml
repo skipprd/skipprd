@@ -4,6 +4,10 @@ inputs:
   architecture_name:
     description: 'Artifact architecture name, e.g. windows_x86'
     required: true
+  local_runtime_manifest_dir:
+    description: 'Optional directory containing locally staged runtime plugin manifests.'
+    required: false
+    default: ''
 runs:
   using: "composite"
   steps:
@@ -93,6 +97,41 @@ runs:
           $env:DATA_DIR = Join-Path $workdir "data"
           $env:SKIPPR_STORAGE_MODE = "local"
           $configPath = Join-Path $workdir "skippr.yaml"
+
+          function ConvertTo-YamlSingleQuoted([string] $value) {
+            return "'" + ($value -replace "'", "''") + "'"
+          }
+
+          $runtimePipelineLines = @()
+          $runtimePluginLines = @("runtime_plugins: {}")
+          $runtimeManifestDir = "${{ inputs.local_runtime_manifest_dir }}"
+          if (-not [string]::IsNullOrWhiteSpace($runtimeManifestDir)) {
+            $resolvedRuntimeManifestDir = (Resolve-Path $runtimeManifestDir -ErrorAction Stop).Path
+            $mssqlManifest = (Get-ChildItem -Path $resolvedRuntimeManifestDir -Recurse -Filter "mssql-source.json" | Select-Object -First 1).FullName
+            $snowflakeSinkManifest = (Get-ChildItem -Path $resolvedRuntimeManifestDir -Recurse -Filter "snowflake-sink.json" | Select-Object -First 1).FullName
+            $snowflakeSchemaManifest = (Get-ChildItem -Path $resolvedRuntimeManifestDir -Recurse -Filter "snowflake-schema.json" | Select-Object -First 1).FullName
+
+            if (-not $mssqlManifest -or -not $snowflakeSinkManifest -or -not $snowflakeSchemaManifest) {
+              Write-Error "::error::Local runtime manifest dir is missing mssql-source.json, snowflake-sink.json, or snowflake-schema.json"
+            }
+
+            Write-Host "Using local runtime plugin manifests from $resolvedRuntimeManifestDir"
+            $runtimePipelineLines = @(
+              "    runtime_input: runtime_plugins.runtime_mssql_source",
+              "    runtime_output: runtime_plugins.runtime_snowflake_sink",
+              "    runtime_schema: runtime_plugins.runtime_snowflake_schema"
+            )
+            $runtimePluginLines = @(
+              "runtime_plugins:",
+              "  runtime_mssql_source:",
+              "    manifest: $(ConvertTo-YamlSingleQuoted $mssqlManifest)",
+              "  runtime_snowflake_sink:",
+              "    manifest: $(ConvertTo-YamlSingleQuoted $snowflakeSinkManifest)",
+              "  runtime_snowflake_schema:",
+              "    manifest: $(ConvertTo-YamlSingleQuoted $snowflakeSchemaManifest)"
+            )
+          }
+
           $configLines = @(
             "skippr:",
             "  workspace: $projectName",
@@ -101,7 +140,8 @@ runs:
             "pipelines:",
             "  ${projectName}:",
             "    data_source: data_sources.mssql",
-            "    data_sink: data_sinks.snowflake",
+            "    data_sink: data_sinks.snowflake"
+          ) + $runtimePipelineLines + @(
             "data_sources:",
             "  mssql:",
             "    Mssql:",
@@ -114,8 +154,8 @@ runs:
             "      schema: $env:SNOWFLAKE_SCHEMA",
             "      warehouse: $env:SNOWFLAKE_WAREHOUSE",
             "      role: $env:SNOWFLAKE_ROLE",
-            "schema_sinks: {}",
-            "runtime_plugins: {}",
+            "schema_sinks: {}"
+          ) + $runtimePluginLines + @(
             "react:",
             "  providers:",
             "    warehouse:",

@@ -8,8 +8,13 @@ on:
     paths:
       - '.github/workflows/debug-mssql-snowflake.yml'
       - '.github/actions/e2e/mssql_snowflake/**'
+      - '.github/scripts/runtime_e2e_harness.py'
+      - '.github/scripts/runtime_plugin_catalog.py'
       - 'crates/skippr-cli/**'
       - 'crates/skippr-runtime-sdk/**'
+      - 'plugins/data_sink/snowflake/**'
+      - 'plugins/data_source/mssql/**'
+      - 'plugins/schema_sink/snowflake/**'
       - 'src/runtime_plugins/**'
       - 'src/engine.rs'
       - 'src/lib.rs'
@@ -123,13 +128,35 @@ jobs:
         run: |
           cargo build --release `
             -p skipprd --bin skipprd `
-            -p skippr-cli --bin skippr
+            -p skippr-cli --bin skippr `
+            -p skippr-plugin-data-source-mssql `
+            -p skippr-plugin-data-sink-snowflake `
+            -p skippr-plugin-schema-sink-snowflake
           New-Item -ItemType Directory -Force -Path skipprd-windows_x86
           New-Item -ItemType Directory -Force -Path skippr-windows_x86
           Copy-Item target\release\skipprd.exe skipprd-windows_x86\skipprd.exe
           Copy-Item target\release\skippr.exe skippr-windows_x86\skippr.exe
 
+      - name: Stage local runtime plugin manifests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:CARGO_TARGET_DIR = "target"
+          $manifestDir = Join-Path $env:RUNNER_TEMP "local-runtime-manifests"
+          $stageOutput = python .github/scripts/runtime_e2e_harness.py `
+            stage-local-runtime-release `
+            --skipprd target\release\skipprd.exe `
+            --scenario mssql_snowflake `
+            --output-dir $manifestDir
+          $stageOutput | ForEach-Object { Write-Host $_ }
+          $stagedManifestDir = ($stageOutput | Select-Object -Last 1).Trim()
+          if ([string]::IsNullOrWhiteSpace($stagedManifestDir) -or -not (Test-Path $stagedManifestDir)) {
+            Write-Error "::error::Failed to stage local runtime manifests"
+          }
+          "LOCAL_RUNTIME_MANIFEST_DIR=$stagedManifestDir" >> $env:GITHUB_ENV
+
       - name: Test MSSQL to Snowflake
         uses: ./.github/actions/e2e/mssql_snowflake
         with:
           architecture_name: windows_x86
+          local_runtime_manifest_dir: ${{ env.LOCAL_RUNTIME_MANIFEST_DIR }}

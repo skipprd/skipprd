@@ -54,6 +54,8 @@ LOCAL_SCENARIO_RUNTIME_MANIFESTS = (
     ("runtime_dynamodb_source", "dynamodb-source.json"),
     ("runtime_iceberg_sink", "iceberg-sink.json"),
     ("runtime_iceberg_schema", "iceberg-schema.json"),
+    ("runtime_snowflake_sink", "snowflake-sink.json"),
+    ("runtime_snowflake_schema", "snowflake-schema.json"),
 )
 DEFAULT_LOCAL_SCENARIO_RUNTIME_MANIFESTS = (
     ("runtime_s3_source", "s3-source.json"),
@@ -85,6 +87,11 @@ LOCAL_SCENARIO_RUNTIME_MANIFESTS_BY_SCENARIO = {
         ("runtime_mssql_source", "mssql-source.json"),
         ("runtime_iceberg_sink", "iceberg-sink.json"),
         ("runtime_iceberg_schema", "iceberg-schema.json"),
+    ),
+    "mssql_snowflake": (
+        ("runtime_mssql_source", "mssql-source.json"),
+        ("runtime_snowflake_sink", "snowflake-sink.json"),
+        ("runtime_snowflake_schema", "snowflake-schema.json"),
     ),
 }
 LOCAL_SCENARIO_RUNTIME_PIPELINE_ANCHORS = {
@@ -2585,7 +2592,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     stage_runtime_release_parser.add_argument(
         "--scenario",
-        choices=tuple(SCENARIOS.keys()),
+        choices=tuple(sorted(set(SCENARIOS) | set(LOCAL_SCENARIO_RUNTIME_MANIFESTS_BY_SCENARIO))),
         help="Only stage the local runtime manifests required by this scenario",
     )
     stage_runtime_release_parser.set_defaults(handler=None)
