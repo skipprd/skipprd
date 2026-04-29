@@ -1,0 +1,122 @@
+name: Debug MSSQL Snowflake E2E
+
+on:
+  workflow_dispatch:
+
+env:
+  RUST_BUILD_CACHE_BUCKET: skippr-web-rust-cache-prod
+  RUST_BUILD_CACHE_REGION: us-east-1
+
+jobs:
+  mssql_snowflake_windows:
+    name: MSSQL to Snowflake debug (windows x86)
+    runs-on: depot-windows-2025-16
+    environment: Skippr
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      SCCACHE_BUCKET: skippr-web-rust-cache-prod
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_KEY_PREFIX: skipprd
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_USE_SSL: "true"
+      RUSTFLAGS: "-C debuginfo=0"
+      VCPKGRS_NO_ZLIB: "1"
+      SKIPPR_API_KEY: ${{ secrets.SKIPPR_API_KEY }}
+      SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT || secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER || secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PEM }}
+      SNOWFLAKE_WAREHOUSE: COMPUTE_WH
+      SNOWFLAKE_DATABASE: ANALYTICS
+      SNOWFLAKE_SCHEMA: RAW
+      SNOWFLAKE_ROLE: ACCOUNTADMIN
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Configure CodeArtifact Cargo access
+        shell: bash
+        run: |
+          token="$(aws codeartifact get-authorization-token \
+            --domain skippr \
+            --domain-owner 132355036174 \
+            --region us-east-1 \
+            --query authorizationToken \
+            --output text)"
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install sccache
+        if: env.SCCACHE_BUCKET != ''
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          version: v0.10.0
+
+      - name: Configure sccache
+        if: env.SCCACHE_BUCKET != ''
+        shell: pwsh
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
+          echo "SCCACHE_IDLE_TIMEOUT=0" >> $env:GITHUB_ENV
+          echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> $env:GITHUB_ENV
+
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          $version = "23.4"
+          $archive = Join-Path $env:RUNNER_TEMP "protoc-$version-win64.zip"
+          $installDir = Join-Path $env:RUNNER_TEMP "protoc-$version"
+          Invoke-WebRequest `
+            -Uri "https://github.com/protocolbuffers/protobuf/releases/download/v$version/protoc-$version-win64.zip" `
+            -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath $installDir -Force
+          "$installDir\bin" >> $env:GITHUB_PATH
+          & "$installDir\bin\protoc.exe" --version
+
+      - name: Configure vcpkg cache
+        shell: pwsh
+        run: |
+          $triplet = "x64-windows-static-md"
+          $cacheDir = Join-Path $env:RUNNER_TEMP "vcpkg-binary-cache"
+          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          echo "VCPKG_DEFAULT_TRIPLET=$triplet" >> $env:GITHUB_ENV
+          echo "VCPKG_TARGET_TRIPLET=$triplet" >> $env:GITHUB_ENV
+          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\$triplet" >> $env:GITHUB_ENV
+          echo "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\$triplet" >> $env:GITHUB_ENV
+          echo "VCPKG_BINARY_CACHE_DIR=$cacheDir" >> $env:GITHUB_ENV
+          echo "VCPKG_BINARY_SOURCES=clear;files,$cacheDir,readwrite" >> $env:GITHUB_ENV
+
+      - name: Install native dependencies
+        shell: pwsh
+        run: |
+          vcpkg install curl:x64-windows-static-md openssl:x64-windows-static-md zlib:x64-windows-static-md
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: v2-debug-mssql-snowflake-windows_x86
+          env-vars: "CARGO_INCREMENTAL CARGO_TERM_COLOR CMAKE_PREFIX_PATH CMAKE_TOOLCHAIN_FILE OPENSSL_DIR RUSTFLAGS VCPKGRS_NO_ZLIB VCPKG_DEFAULT_TRIPLET VCPKG_TARGET_TRIPLET"
+
+      - name: Build skipprd and skippr
+        shell: pwsh
+        run: |
+          cargo build --release `
+            -p skipprd --bin skipprd `
+            -p skippr-cli --bin skippr
+          New-Item -ItemType Directory -Force -Path skipprd-windows_x86
+          New-Item -ItemType Directory -Force -Path skippr-windows_x86
+          Copy-Item target\release\skipprd.exe skipprd-windows_x86\skipprd.exe
+          Copy-Item target\release\skippr.exe skippr-windows_x86\skippr.exe
+
+      - name: Test MSSQL to Snowflake
+        uses: ./.github/actions/e2e/mssql_snowflake
+        with:
+          architecture_name: windows_x86
