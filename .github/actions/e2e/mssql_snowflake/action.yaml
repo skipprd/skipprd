@@ -8,6 +8,10 @@ inputs:
     description: 'Optional directory containing locally staged runtime plugin manifests.'
     required: false
     default: ''
+  test_namespace:
+    description: 'Stable suffix used to isolate pipeline names and Snowflake schemas.'
+    required: false
+    default: 'cargo_build'
 runs:
   using: "composite"
   steps:
@@ -59,9 +63,19 @@ runs:
       run: |
         $ErrorActionPreference = "Stop"
 
-        $skipprBin = (Resolve-Path ".\skippr-${{ inputs.architecture_name }}\skippr.exe").Path
-        $skipprdBin = (Resolve-Path ".\skipprd-${{ inputs.architecture_name }}\skipprd.exe").Path
-        $env:PATH = "$(Split-Path $skipprdBin);$(Split-Path $skipprBin);$env:PATH"
+        $skipprArtifact = ".\skippr-${{ inputs.architecture_name }}\skippr.exe"
+        if (Test-Path $skipprArtifact) {
+          $skipprBin = (Resolve-Path $skipprArtifact).Path
+          $env:PATH = "$(Split-Path $skipprBin);$env:PATH"
+        } else {
+          $skipprBin = (Get-Command skippr -ErrorAction Stop).Source
+        }
+
+        $skipprdArtifact = ".\skipprd-${{ inputs.architecture_name }}\skipprd.exe"
+        if (Test-Path $skipprdArtifact) {
+          $skipprdBin = (Resolve-Path $skipprdArtifact).Path
+          $env:PATH = "$(Split-Path $skipprdBin);$env:PATH"
+        }
 
         $workdir = Join-Path $env:RUNNER_TEMP ("mssql-snowflake-" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Force -Path $workdir | Out-Null
@@ -93,7 +107,16 @@ runs:
           $env:SKIPPR_RUNTIME_LOG_LEVEL = "debug"
           $runId = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { "local" }
           $runAttempt = if ($env:GITHUB_RUN_ATTEMPT) { $env:GITHUB_RUN_ATTEMPT } else { "1" }
-          $projectName = "mssql_snowflake_e2e_${runId}_${runAttempt}"
+          $rawNamespace = "${{ inputs.test_namespace }}"
+          if ([string]::IsNullOrWhiteSpace($rawNamespace)) {
+            $rawNamespace = "cargo_build"
+          }
+          $testNamespace = ($rawNamespace.ToLowerInvariant() -replace '[^a-z0-9_]+', '_').Trim('_')
+          if ([string]::IsNullOrWhiteSpace($testNamespace)) {
+            $testNamespace = "cargo_build"
+          }
+          $projectName = "mssql_snowflake_e2e_${testNamespace}_${runId}_${runAttempt}"
+          $targetSchema = "${env:SNOWFLAKE_SCHEMA}_${testNamespace}_${runId}_${runAttempt}".ToUpperInvariant()
           $env:DATA_DIR = Join-Path $workdir "data"
           $env:SKIPPR_STORAGE_MODE = "local"
           $configPath = Join-Path $workdir "skippr.yaml"
@@ -153,7 +176,7 @@ runs:
             "      account: $env:SNOWFLAKE_ACCOUNT",
             "      user: $env:SNOWFLAKE_USER",
             "      database: $env:SNOWFLAKE_DATABASE",
-            "      schema: $env:SNOWFLAKE_SCHEMA",
+              "      schema: $targetSchema",
             "      warehouse: $env:SNOWFLAKE_WAREHOUSE",
             "      role: $env:SNOWFLAKE_ROLE",
             "      private_key_path: $(ConvertTo-YamlSingleQuoted $keyPath)",
@@ -164,7 +187,7 @@ runs:
             "    warehouse:",
             "      kind: snowflake",
             "      database: $env:SNOWFLAKE_DATABASE",
-            "      schema: $env:SNOWFLAKE_SCHEMA",
+            "      schema: $targetSchema",
             "      warehouse: $env:SNOWFLAKE_WAREHOUSE",
             "      role: $env:SNOWFLAKE_ROLE",
             "    catalog:",

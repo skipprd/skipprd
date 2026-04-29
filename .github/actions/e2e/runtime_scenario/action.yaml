@@ -1,4 +1,5 @@
 name: Runtime E2E Scenario
+description: Run a runtime scenario through the skipprd harness.
 inputs:
   scenario:
     description: 'Harness scenario name to run'
@@ -13,6 +14,14 @@ inputs:
     required: true
   runtime_plugin_versions:
     description: 'Optional newline-delimited PLUGIN=VERSION pins passed to the runtime e2e harness'
+    required: false
+    default: ""
+  skipprd_path:
+    description: 'Path to the skipprd binary under test.'
+    required: false
+    default: ""
+  test_namespace:
+    description: 'Optional suffix used to isolate pipeline names and destination databases.'
     required: false
     default: ""
 runs:
@@ -38,4 +47,12 @@ runs:
             "${runtime_plugin_version}"
           )
         done <<< "${{ inputs.runtime_plugin_versions }}"
-        python3 .github/scripts/runtime_e2e_harness.py run "${{ inputs.scenario }}" --mode full --skipprd "./skipprd-${{ inputs.architecture_name }}/skipprd" "${runtime_plugin_args[@]}"
+        skipprd_path="${{ inputs.skipprd_path }}"
+        if [[ -z "${skipprd_path}" ]]; then
+          skipprd_path="./skipprd-${{ inputs.architecture_name }}/skipprd"
+        fi
+        namespace_args=()
+        if [[ -n "${{ inputs.test_namespace }}" ]]; then
+          namespace_args=(--namespace "${{ inputs.test_namespace }}")
+        fi
+        python3 .github/scripts/runtime_e2e_harness.py run "${{ inputs.scenario }}" --mode full --skipprd "${skipprd_path}" "${namespace_args[@]}" "${runtime_plugin_args[@]}"

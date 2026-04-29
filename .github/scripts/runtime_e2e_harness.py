@@ -256,6 +256,7 @@ class ScenarioContext:
     runtime_plugin_dir: Path
     base_env: dict[str, str]
     assertion_output: str
+    namespace: str | None = None
 
 
 @dataclass(frozen=True)
@@ -273,6 +274,20 @@ class LocalStagedRuntimeManifests:
 
 def scenario_config(relative_path: str) -> Path:
     return REPO_ROOT / relative_path
+
+
+def normalize_namespace(namespace: str | None) -> str | None:
+    if namespace is None:
+        return None
+    normalized = "".join(
+        char.lower() if char.isalnum() else "_"
+        for char in namespace.strip()
+    ).strip("_")
+    return normalized or None
+
+
+def namespaced_name(name: str, namespace: str | None) -> str:
+    return f"{name}_{namespace}" if namespace else name
 
 
 BIKE_HIRE_BASE_ENV = (
@@ -626,6 +641,10 @@ def capture_json(command: list[str], *, env: dict[str, str] | None = None) -> di
 def resolve_skipprd(path_arg: str | None) -> Path:
     candidates: list[Path] = []
     if path_arg:
+        if os.sep not in path_arg and (os.altsep is None or os.altsep not in path_arg):
+            resolved = shutil.which(path_arg)
+            if resolved:
+                candidates.append(Path(resolved))
         candidates.append(Path(path_arg))
     env_path = os.environ.get("SKIPPR_E2E_SKIPPRD_BIN")
     if env_path:
@@ -734,6 +753,8 @@ def run_sync(skipprd: Path, sync_run: SyncRun, base_env: dict[str, str]) -> None
     env = base_env.copy()
     for key, value in sync_run.extra_env:
         env[key] = value
+    namespace = normalize_namespace(env.get("SKIPPR_E2E_NAMESPACE"))
+    pipeline = namespaced_name(sync_run.pipeline, namespace)
     if sync_run.command not in {"discover", "sync"}:
         raise HarnessError(f"unsupported skipprd command: {sync_run.command}")
     command = [
@@ -741,7 +762,7 @@ def run_sync(skipprd: Path, sync_run: SyncRun, base_env: dict[str, str]) -> None
         sync_run.command,
         "--log",
         "--pipeline",
-        sync_run.pipeline,
+        pipeline,
     ]
     if sync_run.command == "discover":
         command.extend(["--output", "json"])
@@ -1351,19 +1372,64 @@ def local_runtime_config_text(
     return rewritten + runtime_plugins_block
 
 
+def namespaced_scenario_config_text(
+    config_text: str,
+    scenario: Scenario,
+    namespace: str,
+) -> str:
+    pipeline_names = sorted(
+        {run.pipeline for run in (*scenario.smoke_runs, *scenario.full_runs)},
+        key=len,
+        reverse=True,
+    )
+    rewritten = config_text
+    rewritten = rewritten.replace("  workspace: test\n", f"  workspace: test_{namespace}\n", 1)
+    for pipeline_name in pipeline_names:
+        rewritten = rewritten.replace(
+            f"  {pipeline_name}:\n",
+            f"  {namespaced_name(pipeline_name, namespace)}:\n",
+        )
+    rewritten = rewritten.replace(
+        "      glue_database_name: bikehire\n",
+        f"      glue_database_name: {namespaced_name('bikehire', namespace)}\n",
+    )
+    rewritten = rewritten.replace(
+        "      glue_database_name: deadletters\n",
+        f"      glue_database_name: {namespaced_name('deadletters', namespace)}\n",
+    )
+    output_prefixes = (
+        "bikehire",
+        "bikehire_many",
+        "bikehire_s3_wal_many",
+        "deadletters",
+        "deadletters-archive",
+    )
+    for prefix in output_prefixes:
+        rewritten = rewritten.replace(
+            f"      s3_prefix: {prefix}\n",
+            f"      s3_prefix: {prefix}/{namespace}\n",
+        )
+    return rewritten
+
+
 def materialize_scenario_config(
     scenario: Scenario,
     runtime_plugin_dir: Path,
     runtime_plugin_versions: dict[str, str] | None,
     local_runtime_manifests: LocalStagedRuntimeManifests | None,
+    namespace: str | None,
 ) -> Path:
+    namespace = normalize_namespace(namespace)
     if (
         not runtime_plugin_versions
         and local_runtime_manifests is None
+        and namespace is None
     ):
         return scenario.config_path
 
     config_text = scenario.config_path.read_text(encoding="utf-8")
+    if namespace is not None:
+        config_text = namespaced_scenario_config_text(config_text, scenario, namespace)
     rewritten = runtime_plugin_version_config_text(
         scenario.name,
         config_text,
@@ -1379,6 +1445,8 @@ def materialize_scenario_config(
         suffix_parts.append("pinned-runtime-versions")
     if local_runtime_manifests is not None:
         suffix_parts.append("local-staged-runtime")
+    if namespace is not None:
+        suffix_parts.append(namespace)
     config_path = runtime_plugin_dir / ("-".join(suffix_parts) + ".yml")
     config_path.write_text(rewritten, encoding="utf-8")
     return config_path
@@ -2057,7 +2125,7 @@ def run_soda_scan(scan_file: str, dataset: str, env: dict[str, str]) -> None:
 def verify_bike_hire_rows(context: ScenarioContext) -> None:
     assert_table_has_rows(
         table="bike_hire",
-        database="bikehire",
+        database=namespaced_name("bikehire", context.namespace),
         env=context.base_env,
         output_location=context.assertion_output,
     )
@@ -2437,7 +2505,9 @@ def run_scenario(
     skip_dynamodb: bool,
     runtime_plugin_versions: dict[str, str] | None,
     local_runtime_manifests: LocalStagedRuntimeManifests | None,
+    namespace: str | None,
 ) -> None:
+    namespace = normalize_namespace(namespace)
     runtime_plugin_dir_path = Path(
         tempfile.mkdtemp(prefix=f"skippr_runtime_e2e_{scenario.name}_")
     )
@@ -2458,18 +2528,22 @@ def run_scenario(
             runtime_plugin_dir_path,
             runtime_plugin_versions,
             local_runtime_manifests,
+            namespace,
         )
         base_env = base_environment(
             skipprd=skipprd,
             config_path=config_path,
             runtime_plugin_dir=runtime_plugin_dir_path,
         )
+        if namespace is not None:
+            base_env["SKIPPR_E2E_NAMESPACE"] = namespace
         context = ScenarioContext(
             scenario=scenario,
             skipprd=skipprd,
             runtime_plugin_dir=runtime_plugin_dir_path,
             base_env=base_env,
             assertion_output=DEFAULT_ASSERTION_OUTPUT,
+            namespace=namespace,
         )
 
         sync_runs = scenario.smoke_runs if mode == "smoke" else scenario.full_runs
@@ -2530,6 +2604,10 @@ def add_common_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--local-runtime-manifest-dir",
         help="Use a local staged runtime manifest directory for the S3/Athena/Glue scenario plugins instead of published discovery",
+    )
+    parser.add_argument(
+        "--namespace",
+        help="Optional suffix used to isolate pipeline names and destination databases",
     )
 
 
@@ -2678,6 +2756,7 @@ def main(argv: list[str] | None = None) -> int:
                     skip_dynamodb=args.skip_dynamodb_purge,
                     runtime_plugin_versions=runtime_plugin_versions,
                     local_runtime_manifests=local_runtime_manifests,
+                    namespace=args.namespace,
                 )
             return 0
 

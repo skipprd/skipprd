@@ -27,6 +27,8 @@ env:
 jobs:
   plan_runtime_plugin_release:
     name: plan runtime plugin release
+    needs:
+      - cleanup
     runs-on: depot-ubuntu-22.04-16
     outputs:
       runtime_plugin_packages_json: ${{ steps.plan.outputs.runtime_plugin_packages_json }}
@@ -78,6 +80,8 @@ jobs:
           aws glue delete-database --catalog-id 353855562591 --name deadletters || true
 
   purge_dynamodb:
+    needs:
+      - cleanup
     runs-on: depot-ubuntu-22.04-16
     container:
       image: node:14
@@ -98,6 +102,16 @@ jobs:
     name: cargo build (macos arm64)
     needs:
       - plan_runtime_plugin_release
+      - linux_test_suite
+      - data_engineer_test_suite
+      - skippr_cli_test_suite
+      - skippr_admin_test_suite
+      - macos_arm64_test_compile
+      - postgres_iceberg_types_cdc_test
+      - mysql_iceberg_types_cdc_test
+      - dynamodb_iceberg_types_cdc_test
+      - mssql_iceberg_debug_linux_test
+      - mssql_iceberg_debug_windows_test
     runs-on: depot-macos-15
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
@@ -123,6 +137,15 @@ jobs:
     name: cargo build (linux x86)
     needs:
       - plan_runtime_plugin_release
+      - linux_test_suite
+      - data_engineer_test_suite
+      - skippr_cli_test_suite
+      - skippr_admin_test_suite
+      - postgres_iceberg_types_cdc_test
+      - mysql_iceberg_types_cdc_test
+      - dynamodb_iceberg_types_cdc_test
+      - mssql_iceberg_debug_linux_test
+      - mssql_iceberg_debug_windows_test
     runs-on:
       - depot-ubuntu-22.04-16
     env:
@@ -363,6 +386,16 @@ jobs:
     name: cargo build (windows x86)
     needs:
       - plan_runtime_plugin_release
+      - linux_test_suite
+      - data_engineer_test_suite
+      - skippr_cli_test_suite
+      - skippr_admin_test_suite
+      - windows_x86_test_compile
+      - postgres_iceberg_types_cdc_test
+      - mysql_iceberg_types_cdc_test
+      - dynamodb_iceberg_types_cdc_test
+      - mssql_iceberg_debug_linux_test
+      - mssql_iceberg_debug_windows_test
     runs-on: depot-windows-2025-16
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
@@ -789,9 +822,6 @@ jobs:
       - linux_x86
       - macos_arm64
       - windows_x86
-      - linux_test_suite
-      - macos_arm64_test_compile
-      - windows_x86_test_compile
     runs-on: depot-ubuntu-22.04-16
     steps:
       - uses: actions/checkout@v4
@@ -1045,6 +1075,9 @@ jobs:
   postgres_iceberg_types_cdc_test:
     needs:
       - cleanup
+      - purge_dynamodb
+      - linux_test_suite
+      - data_engineer_test_suite
     name: Postgres to Iceberg Glue Athena e2e
     runs-on: depot-ubuntu-22.04-16
     environment: Skippr
@@ -1182,6 +1215,9 @@ jobs:
   mysql_iceberg_types_cdc_test:
     needs:
       - cleanup
+      - purge_dynamodb
+      - linux_test_suite
+      - data_engineer_test_suite
     name: MySQL to Iceberg Glue Athena e2e
     runs-on: depot-ubuntu-22.04-16
     environment: Skippr
@@ -1299,6 +1335,9 @@ jobs:
   dynamodb_iceberg_types_cdc_test:
     needs:
       - cleanup
+      - purge_dynamodb
+      - linux_test_suite
+      - data_engineer_test_suite
     name: DynamoDB to Iceberg Glue Athena e2e
     runs-on: depot-ubuntu-22.04-16
     environment: Skippr
@@ -1387,6 +1426,9 @@ jobs:
   mssql_iceberg_debug_linux_test:
     needs:
       - cleanup
+      - purge_dynamodb
+      - linux_test_suite
+      - data_engineer_test_suite
     name: MSSQL to Iceberg debug (linux)
     runs-on: depot-ubuntu-22.04-16
     environment: Skippr
@@ -1472,6 +1514,9 @@ jobs:
   mssql_iceberg_debug_windows_test:
     needs:
       - cleanup
+      - purge_dynamodb
+      - linux_test_suite
+      - data_engineer_test_suite
     name: MSSQL to Iceberg debug (windows x86)
     runs-on: depot-windows-2025-16
     environment: Skippr
@@ -1619,6 +1664,8 @@ jobs:
 
   mssql_snowflake_test:
     needs:
+      - publish_runtime_plugins
+      - linux_x86
       - windows_x86
     name: MSSQL to Snowflake (windows x86)
     runs-on: depot-windows-2025-16
@@ -1649,101 +1696,232 @@ jobs:
         uses: ./.github/actions/e2e/mssql_snowflake
         with:
           architecture_name: windows_x86
+          test_namespace: cargo_build
 
 
   publish_skipprd:
-    name: Publish Release
+    name: Publish skipprd Release
     if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
     needs:
-     - chaos_mode_test
-     - s3_wal_test
-     - deadletters_test
-     - mssql_snowflake_test
-     - macos_arm64
-     - macos_arm64_test_compile
-     - windows_x86
-     - windows_x86_test_compile
-     - linux_test_suite
-     - data_engineer_test_suite
-     - skippr_cli_test_suite
-     - skippr_admin_test_suite
+      - bike_hire_test
+      - chaos_mode_test
+      - s3_wal_test
+      - deadletters_test
+      - published_runtime_plugins_smoke_test
+      - linux_x86
+      - macos_arm64
+      - windows_x86
     runs-on: depot-ubuntu-22.04-16
     steps:
-     - name: Check out code
-       uses: actions/checkout@v4
-     - name: Download Artifacts
-       uses: actions/download-artifact@v4
-       with:
-         pattern: "*"
-     - name: Compress Release Artifacts
-       run: |
-         tar -czvf skipprd-linux_x86.tar.gz skipprd-linux_x86/
-         tar -czvf skipprd-macos_arm64.tar.gz skipprd-macos_arm64/
-         tar -czvf skipprd-windows_x86.tar.gz skipprd-windows_x86/
-         tar -czvf skippr-linux_x86.tar.gz skippr-linux_x86/
-         tar -czvf skippr-macos_arm64.tar.gz skippr-macos_arm64/
-         tar -czvf skippr-windows_x86.tar.gz skippr-windows_x86/
-         tar -czvf skippr-admin-linux_x86.tar.gz skippr-admin-linux_x86/
-         tar -czvf skippr-admin-macos_arm64.tar.gz skippr-admin-macos_arm64/
-         tar -czvf skippr-admin-windows_x86.tar.gz skippr-admin-windows_x86/
-     - name: Create or update GitHub Release
-       env:
-         GH_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
-       run: |
-         TAG="${{ github.ref_name }}"
-         # Create release if it doesn't exist; update body if it does
-         if gh release view "$TAG" --repo skipprd/skipprd >/dev/null 2>&1; then
-           gh release edit "$TAG" \
-             --repo skipprd/skipprd \
-             --title "Release $TAG" \
-             --notes-file CHANGELOG.txt
-         else
-           gh release create "$TAG" \
-             --repo skipprd/skipprd \
-             --title "Release $TAG" \
-             --notes-file CHANGELOG.txt
-         fi
-         # Upload assets — --clobber overwrites same-name files
-         gh release upload "$TAG" \
-           install.sh \
-           skipprd-linux_x86.tar.gz \
-           skipprd-macos_arm64.tar.gz \
-           skipprd-windows_x86.tar.gz \
-           skippr-linux_x86.tar.gz \
-           skippr-macos_arm64.tar.gz \
-           skippr-windows_x86.tar.gz \
-           skippr-admin-linux_x86.tar.gz \
-           skippr-admin-macos_arm64.tar.gz \
-           skippr-admin-windows_x86.tar.gz \
-           --repo skipprd/skipprd \
-           --clobber
-     - name: Configure AWS credentials for release upload
-       uses: aws-actions/configure-aws-credentials@v4
-       with:
-         aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-         aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-         aws-region: us-east-1
-     - name: Upload binaries to install releases bucket
-       run: |
-         TAG="${{ github.ref_name }}"
-         BUCKET="${{ env.RELEASES_BUCKET }}"
-         RELEASE_SUBDIR="${{ env.SKIPPRD_RELEASE_SUBDIR }}"
-         LATEST_POINTER="${{ env.SKIPPRD_LATEST_POINTER }}"
-         for f in skipprd-*.tar.gz; do
-           aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
-         done
-         printf '%s' "$TAG" > "$LATEST_POINTER"
-         aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
-         for f in skippr-linux_x86.tar.gz skippr-macos_arm64.tar.gz skippr-windows_x86.tar.gz; do
-           aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPR_RELEASE_SUBDIR }}/${TAG}/${f}"
-         done
-         printf '%s' "$TAG" > "${{ env.SKIPPR_LATEST_POINTER }}"
-         aws s3 cp "${{ env.SKIPPR_LATEST_POINTER }}" "s3://${BUCKET}/releases/${{ env.SKIPPR_LATEST_POINTER }}" --cache-control "no-cache, no-store, must-revalidate"
-         for f in skippr-admin-linux_x86.tar.gz skippr-admin-macos_arm64.tar.gz skippr-admin-windows_x86.tar.gz; do
-           aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPR_ADMIN_RELEASE_SUBDIR }}/${TAG}/${f}"
-         done
-         printf '%s' "$TAG" > "${{ env.SKIPPR_ADMIN_LATEST_POINTER }}"
-         aws s3 cp "${{ env.SKIPPR_ADMIN_LATEST_POINTER }}" "s3://${BUCKET}/releases/${{ env.SKIPPR_ADMIN_LATEST_POINTER }}" --cache-control "no-cache, no-store, must-revalidate"
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Download skipprd artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "skipprd-*"
+      - name: Compress skipprd release artifacts
+        run: |
+          tar -czvf skipprd-linux_x86.tar.gz skipprd-linux_x86/
+          tar -czvf skipprd-macos_arm64.tar.gz skipprd-macos_arm64/
+          tar -czvf skipprd-windows_x86.tar.gz skipprd-windows_x86/
+      - name: Configure AWS credentials for skipprd release upload
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - name: Upload skipprd binaries to install releases bucket
+        run: |
+          TAG="${{ github.ref_name }}"
+          BUCKET="${{ env.RELEASES_BUCKET }}"
+          RELEASE_SUBDIR="${{ env.SKIPPRD_RELEASE_SUBDIR }}"
+          LATEST_POINTER="${{ env.SKIPPRD_LATEST_POINTER }}"
+          for f in skipprd-*.tar.gz; do
+            aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
+          done
+          printf '%s' "$TAG" > "$LATEST_POINTER"
+          aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
+
+  publish_skippr:
+    name: Publish skippr Release
+    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
+    needs:
+      - mssql_snowflake_test
+      - linux_x86
+      - macos_arm64
+      - windows_x86
+      - skippr_cli_test_suite
+      - data_engineer_test_suite
+    runs-on: depot-ubuntu-22.04-16
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Download skippr artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "skippr-*"
+      - name: Compress skippr release artifacts
+        run: |
+          tar -czvf skippr-linux_x86.tar.gz skippr-linux_x86/
+          tar -czvf skippr-macos_arm64.tar.gz skippr-macos_arm64/
+          tar -czvf skippr-windows_x86.tar.gz skippr-windows_x86/
+      - name: Configure AWS credentials for skippr release upload
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - name: Upload skippr binaries to install releases bucket
+        run: |
+          TAG="${{ github.ref_name }}"
+          BUCKET="${{ env.RELEASES_BUCKET }}"
+          RELEASE_SUBDIR="${{ env.SKIPPR_RELEASE_SUBDIR }}"
+          LATEST_POINTER="${{ env.SKIPPR_LATEST_POINTER }}"
+          for f in skippr-linux_x86.tar.gz skippr-macos_arm64.tar.gz skippr-windows_x86.tar.gz; do
+            aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
+          done
+          printf '%s' "$TAG" > "$LATEST_POINTER"
+          aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
+
+  publish_github_release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
+    needs:
+      - publish_skipprd
+      - publish_skippr
+      - skippr_admin_test_suite
+      - linux_x86
+      - macos_arm64
+      - windows_x86
+    runs-on: depot-ubuntu-22.04-16
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+      - name: Compress release artifacts
+        run: |
+          tar -czvf skipprd-linux_x86.tar.gz skipprd-linux_x86/
+          tar -czvf skipprd-macos_arm64.tar.gz skipprd-macos_arm64/
+          tar -czvf skipprd-windows_x86.tar.gz skipprd-windows_x86/
+          tar -czvf skippr-linux_x86.tar.gz skippr-linux_x86/
+          tar -czvf skippr-macos_arm64.tar.gz skippr-macos_arm64/
+          tar -czvf skippr-windows_x86.tar.gz skippr-windows_x86/
+          tar -czvf skippr-admin-linux_x86.tar.gz skippr-admin-linux_x86/
+          tar -czvf skippr-admin-macos_arm64.tar.gz skippr-admin-macos_arm64/
+          tar -czvf skippr-admin-windows_x86.tar.gz skippr-admin-windows_x86/
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          if gh release view "$TAG" --repo skipprd/skipprd >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --repo skipprd/skipprd \
+              --title "Release $TAG" \
+              --notes-file CHANGELOG.txt
+          else
+            gh release create "$TAG" \
+              --repo skipprd/skipprd \
+              --title "Release $TAG" \
+              --notes-file CHANGELOG.txt
+          fi
+          gh release upload "$TAG" \
+            install.sh \
+            skipprd-linux_x86.tar.gz \
+            skipprd-macos_arm64.tar.gz \
+            skipprd-windows_x86.tar.gz \
+            skippr-linux_x86.tar.gz \
+            skippr-macos_arm64.tar.gz \
+            skippr-windows_x86.tar.gz \
+            skippr-admin-linux_x86.tar.gz \
+            skippr-admin-macos_arm64.tar.gz \
+            skippr-admin-windows_x86.tar.gz \
+            --repo skipprd/skipprd \
+            --clobber
+      - name: Configure AWS credentials for skippr-admin release upload
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - name: Upload skippr-admin binaries to install releases bucket
+        run: |
+          TAG="${{ github.ref_name }}"
+          BUCKET="${{ env.RELEASES_BUCKET }}"
+          RELEASE_SUBDIR="${{ env.SKIPPR_ADMIN_RELEASE_SUBDIR }}"
+          LATEST_POINTER="${{ env.SKIPPR_ADMIN_LATEST_POINTER }}"
+          for f in skippr-admin-linux_x86.tar.gz skippr-admin-macos_arm64.tar.gz skippr-admin-windows_x86.tar.gz; do
+            aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
+          done
+          printf '%s' "$TAG" > "$LATEST_POINTER"
+          aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
+
+  skipprd_release_download_test:
+    name: Installed skippr EL smoke test (linux x86)
+    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
+    needs:
+      - publish_skippr
+      - publish_runtime_plugins
+    runs-on:
+      - depot-ubuntu-22.04-16
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install published skippr release
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://install.skippr.io/install.sh | sh
+          command -v skippr
+          skippr --version
+      - name: Test installed skippr EL path
+        uses: ./.github/actions/e2e/runtime_scenario
+        with:
+          scenario: bike_hire
+          architecture_name: linux_x86
+          skipprd_path: skippr
+          test_namespace: release_install
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  skippr_release_download_test:
+    name: Installed skippr MSSQL to Snowflake (windows x86)
+    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
+    needs:
+      - publish_skippr
+      - publish_runtime_plugins
+    runs-on: depot-windows-2025-16
+    environment: Skippr
+    env:
+      SKIPPR_API_KEY: ${{ secrets.SKIPPR_API_KEY }}
+      SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT || secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER || secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PEM }}
+      SNOWFLAKE_WAREHOUSE: COMPUTE_WH
+      SNOWFLAKE_DATABASE: ANALYTICS
+      SNOWFLAKE_SCHEMA: RAW
+      SNOWFLAKE_ROLE: ACCOUNTADMIN
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install published skippr release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          irm https://install.skippr.io/install.ps1 | iex
+          $installDir = Join-Path $env:LOCALAPPDATA "skippr\bin"
+          $skipprExe = Join-Path $installDir "skippr.exe"
+          if (-not (Test-Path $skipprExe)) {
+            throw "install.skippr.io installer did not place skippr.exe at $skipprExe"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $installDir
+          skippr --version
+      - name: Test downloaded skippr release
+        uses: ./.github/actions/e2e/mssql_snowflake
+        with:
+          architecture_name: windows_x86
+          test_namespace: release_install
 
 
 
