@@ -952,7 +952,7 @@ pub fn apply_authenticated_overlay(
     creds: &crate::api_client::CredentialsResponse,
     tokens: std::sync::Arc<react_suite_data_engineer::metering::TokenProvider>,
     initial_balance: f64,
-) {
+) -> Result<(), String> {
     cfg.storage = Some(StorageFile {
         mode: Some("s3".into()),
         bucket: Some(creds.bucket.clone()),
@@ -995,9 +995,12 @@ pub fn apply_authenticated_overlay(
         .filter(|v| !v.trim().is_empty());
     if existing_llm_key.is_none() {
         let server_key = creds.llm_api_key.trim();
-        if !server_key.is_empty() {
-            std::env::set_var("LLM_API_KEY", server_key);
+        if server_key.is_empty() {
+            return Err(
+                "Skippr did not return an LLM token for this authenticated session.".to_string(),
+            );
         }
+        std::env::set_var("LLM_API_KEY", server_key);
     }
 
     let accounting_url = if creds.accounting_url.is_empty() {
@@ -1033,12 +1036,90 @@ pub fn apply_authenticated_overlay(
     react::llm::set_llm_pre_call_guard(Box::new(|| {
         react_suite_data_engineer::metering::check_budget()
     }));
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::public_config::*;
+    use std::sync::Mutex;
+
+    static LLM_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_clean_llm_env<F: FnOnce() + std::panic::UnwindSafe>(body: F) {
+        let _guard = LLM_ENV_LOCK.lock().unwrap();
+        let saved_api_key = std::env::var("LLM_API_KEY").ok();
+        let saved_base_url = std::env::var("LLM_BASE_URL").ok();
+        std::env::remove_var("LLM_API_KEY");
+        std::env::remove_var("LLM_BASE_URL");
+
+        let result = std::panic::catch_unwind(body);
+
+        match saved_api_key {
+            Some(value) => std::env::set_var("LLM_API_KEY", value),
+            None => std::env::remove_var("LLM_API_KEY"),
+        }
+        match saved_base_url {
+            Some(value) => std::env::set_var("LLM_BASE_URL", value),
+            None => std::env::remove_var("LLM_BASE_URL"),
+        }
+
+        if let Err(error) = result {
+            std::panic::resume_unwind(error);
+        }
+    }
+
+    fn mssql_snowflake_config() -> SkipprDbtConfig {
+        SkipprDbtConfig {
+            project: "tes".into(),
+            warehouse: Some(WarehouseConfig::Snowflake {
+                account: None,
+                user: None,
+                password: None,
+                private_key_path: None,
+                stage: None,
+                staging_uri: None,
+                staging_storage_integration: None,
+                staging_azure_sas_token: None,
+                staging_azure_account_key: None,
+                staging_gcs_service_account_key_path: None,
+                database: Some("ANALYTICS".into()),
+                schema: Some("RAW".into()),
+                warehouse: Some("COMPUTE_WH".into()),
+                role: Some("ACCOUNTADMIN".into()),
+            }),
+            source: Some(SourceConfig::Mssql {
+                connection_string: Some("${MSSQL_CONNECTION_STRING}".into()),
+            }),
+            dbt: None,
+            schema_sink: None,
+        }
+    }
+
+    fn credentials_response(llm_api_key: &str) -> crate::api_client::CredentialsResponse {
+        crate::api_client::CredentialsResponse {
+            credentials: crate::api_client::StsCreds {
+                access_key_id: "ak".into(),
+                secret_access_key: "sk".into(),
+                session_token: "st".into(),
+                expiration: "2099-01-01T00:00:00Z".into(),
+            },
+            bucket: "skippr-prod".into(),
+            tenant_id: "c3471188-8965-4c52-b486-7dbbd7a2d329".into(),
+            llm_api_key: llm_api_key.into(),
+            accounting_url: String::new(),
+        }
+    }
+
+    fn token_provider() -> std::sync::Arc<react_suite_data_engineer::metering::TokenProvider> {
+        std::sync::Arc::new(react_suite_data_engineer::metering::TokenProvider::new(
+            Some("token".to_string()),
+            None,
+            None,
+        ))
+    }
 
     #[test]
     fn translate_minimal_snowflake() {
@@ -1517,59 +1598,35 @@ mod tests {
 
     #[test]
     fn authenticated_overlay_sets_scope_tenant_from_credentials() {
-        let cfg = SkipprDbtConfig {
-            project: "tes".into(),
-            warehouse: Some(WarehouseConfig::Snowflake {
-                account: None,
-                user: None,
-                password: None,
-                private_key_path: None,
-                stage: None,
-                staging_uri: None,
-                staging_storage_integration: None,
-                staging_azure_sas_token: None,
-                staging_azure_account_key: None,
-                staging_gcs_service_account_key_path: None,
-                database: Some("ANALYTICS".into()),
-                schema: Some("RAW".into()),
-                warehouse: Some("COMPUTE_WH".into()),
-                role: Some("ACCOUNTADMIN".into()),
-            }),
-            source: Some(SourceConfig::Mssql {
-                connection_string: Some("${MSSQL_CONNECTION_STRING}".into()),
-            }),
-            dbt: None,
-            schema_sink: None,
-        };
+        with_clean_llm_env(|| {
+            let mut internal = to_internal(&mssql_snowflake_config()).unwrap();
+            let creds = credentials_response("server-llm-token");
+            apply_authenticated_overlay(&mut internal, &creds, token_provider(), 0.0).unwrap();
 
-        let mut internal = to_internal(&cfg).unwrap();
-        let creds = crate::api_client::CredentialsResponse {
-            credentials: crate::api_client::StsCreds {
-                access_key_id: "ak".into(),
-                secret_access_key: "sk".into(),
-                session_token: "st".into(),
-                expiration: "2099-01-01T00:00:00Z".into(),
-            },
-            bucket: "skippr-prod".into(),
-            tenant_id: "c3471188-8965-4c52-b486-7dbbd7a2d329".into(),
-            llm_api_key: "server-llm-token".into(),
-            accounting_url: String::new(),
-        };
+            assert_eq!(
+                internal.scope.as_ref().unwrap().tenant.as_deref(),
+                Some("c3471188-8965-4c52-b486-7dbbd7a2d329")
+            );
+            assert_eq!(
+                internal.llm.as_ref().unwrap().base_url.as_deref(),
+                Some(DEFAULT_LLM_BASE_URL)
+            );
+            assert_eq!(
+                std::env::var("LLM_API_KEY").ok().as_deref(),
+                Some("server-llm-token")
+            );
+        });
+    }
 
-        let tokens = std::sync::Arc::new(react_suite_data_engineer::metering::TokenProvider::new(
-            Some("token".to_string()),
-            None,
-            None,
-        ));
-        apply_authenticated_overlay(&mut internal, &creds, tokens, 0.0);
+    #[test]
+    fn authenticated_overlay_requires_server_llm_token_without_env_override() {
+        with_clean_llm_env(|| {
+            let mut internal = to_internal(&mssql_snowflake_config()).unwrap();
+            let creds = credentials_response("");
 
-        assert_eq!(
-            internal.scope.as_ref().unwrap().tenant.as_deref(),
-            Some("c3471188-8965-4c52-b486-7dbbd7a2d329")
-        );
-        assert_eq!(
-            internal.llm.as_ref().unwrap().base_url.as_deref(),
-            Some(DEFAULT_LLM_BASE_URL)
-        );
+            let err = apply_authenticated_overlay(&mut internal, &creds, token_provider(), 0.0)
+                .expect_err("missing server LLM token should fail");
+            assert!(err.contains("did not return an LLM token"));
+        });
     }
 }

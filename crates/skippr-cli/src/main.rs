@@ -2171,9 +2171,9 @@ fn cmd_doctor(explicit_config: &Option<PathBuf>) {
         .filter(|v| !v.trim().is_empty())
         .is_some()
     {
-        check_pass("LLM_API_KEY is set (custom key — overrides server-provided key)");
+        check_pass("Custom LLM key override is set");
     } else {
-        check_pass("LLM_API_KEY not set (will use server-provided key)");
+        check_pass("LLM credentials managed by Skippr");
     }
 
     let cfg_raw = serde_yaml::to_string(&cfg)
@@ -2471,7 +2471,12 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>) {
                 &srv_creds,
                 std::sync::Arc::clone(&tokens),
                 initial_balance,
-            );
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("[skippr] ERROR: {e}");
+                eprintln!("[skippr]   Check your login status and try again.");
+                std::process::exit(1);
+            });
             eprintln!("[skippr] cloud storage + metering active");
         }
         Err(e) => {
@@ -3459,8 +3464,7 @@ fn env_example_template() -> &'static str {
 # CI/CD: set SKIPPR_API_KEY
 SKIPPR_API_KEY=sk_live_...
 
-# Optional: override the server-provided LLM key with your own
-# LLM_API_KEY=sk-...
+# LLM credentials are issued by Skippr at runtime.
 
 # Snowflake (when warehouse is snowflake)
 SNOWFLAKE_ACCOUNT=
