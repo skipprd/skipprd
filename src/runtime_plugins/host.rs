@@ -612,6 +612,7 @@ pub async fn sync_runtime_input_plugin(
 
     let mut control_completed = false;
     let mut data_completed = false;
+    let mut saw_schema_state_update = false;
     let mut saw_unflushed_batches = false;
     let mut pending_source_tasks: JoinSet<io::Result<()>> = JoinSet::new();
     let mut control_reader = BufferedRuntimeFrameReader::new();
@@ -621,6 +622,7 @@ pub async fn sync_runtime_input_plugin(
             if let Some(control_frame) = control_reader.take_frame::<PluginFrame>()? {
                 match control_frame {
                     PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(schema_state)) => {
+                        saw_schema_state_update = true;
                         apply_runtime_source_schema_state(schema_state.clone());
                         for namespace in schema_state.namespaces.keys() {
                             Config::sync_output_schema_namespace(namespace);
@@ -651,6 +653,13 @@ pub async fn sync_runtime_input_plugin(
                 continue;
             }
             if control_reader.is_drained() {
+                if execution_mode == RuntimeExecutionMode::Discover && saw_schema_state_update {
+                    // Discovery may finish after emitting schema state even if older
+                    // append-source runtimes close before the explicit completion frame.
+                    control_completed = true;
+                    drain_runtime_source_tasks(&mut pending_source_tasks).await?;
+                    continue;
+                }
                 pending_source_tasks.abort_all();
                 return Err(io::Error::other(
                     "runtime source closed control channel before sending completion",
@@ -766,6 +775,13 @@ pub async fn sync_runtime_input_plugin(
                         io::Error::other(format!("runtime source control channel read failed: {err}"))
                     })?,
                     Err(err) if is_runtime_channel_eof(&err) => {
+                        if execution_mode == RuntimeExecutionMode::Discover && saw_schema_state_update {
+                            // Discovery may finish after emitting schema state even if older
+                            // append-source runtimes close before the explicit completion frame.
+                            control_completed = true;
+                            drain_runtime_source_tasks(&mut pending_source_tasks).await?;
+                            continue;
+                        }
                         pending_source_tasks.abort_all();
                         return Err(io::Error::other(
                             "runtime source closed control channel before sending completion",
