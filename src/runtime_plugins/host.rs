@@ -604,7 +604,7 @@ async fn drain_runtime_source_tasks(pending_tasks: &mut JoinSet<io::Result<()>>)
     Ok(())
 }
 
-fn runtime_discovery_completed_on_control_eof(
+async fn runtime_discovery_completed_on_control_eof(
     connection: &mut RuntimeChildConnection,
     execution_mode: RuntimeExecutionMode,
 ) -> io::Result<bool> {
@@ -612,8 +612,16 @@ fn runtime_discovery_completed_on_control_eof(
         return Ok(false);
     }
 
-    let Some(status) = connection.try_exit_status()? else {
-        return Ok(false);
+    let status = match connection.try_exit_status()? {
+        Some(status) => status,
+        None => match timeout(Duration::from_secs(2), connection.child.wait()).await {
+            Ok(status) => {
+                let status = status?;
+                unregister_runtime_plugin_child(connection.child.id());
+                status
+            }
+            Err(_) => return Ok(false),
+        },
     };
     if status.success() {
         // Some append-source runtimes perform discovery through the legacy core path
@@ -680,7 +688,9 @@ pub async fn sync_runtime_input_plugin(
                 continue;
             }
             if control_reader.is_drained() {
-                if runtime_discovery_completed_on_control_eof(&mut connection, execution_mode)? {
+                if runtime_discovery_completed_on_control_eof(&mut connection, execution_mode)
+                    .await?
+                {
                     control_completed = true;
                     drain_runtime_source_tasks(&mut pending_source_tasks).await?;
                     continue;
@@ -803,7 +813,9 @@ pub async fn sync_runtime_input_plugin(
                         if runtime_discovery_completed_on_control_eof(
                             &mut connection,
                             execution_mode,
-                        )? {
+                        )
+                        .await?
+                        {
                             control_completed = true;
                             drain_runtime_source_tasks(&mut pending_source_tasks).await?;
                             continue;
