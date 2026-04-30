@@ -11,6 +11,22 @@ on:
         description: Run the Windows MSSQL to Iceberg debug job
         type: boolean
         default: true
+      run_runtime_scenario:
+        description: Run a targeted published-runtime scenario on Linux
+        type: boolean
+        default: false
+      runtime_scenario:
+        description: Published-runtime scenario to run when run_runtime_scenario is true
+        type: choice
+        default: bike_hire
+        options:
+          - bike_hire
+          - bike_hire_s3_wal_many
+          - deadletters_test
+      runtime_scenario_namespace:
+        description: Optional namespace suffix for the targeted runtime scenario
+        type: string
+        default: ""
 
 env:
   AWS_DEFAULT_REGION: us-east-1
@@ -18,6 +34,72 @@ env:
   RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
+  runtime_scenario_linux:
+    name: ${{ inputs.runtime_scenario }} debug (linux x86)
+    if: ${{ inputs.run_runtime_scenario }}
+    runs-on: depot-ubuntu-22.04-16
+    environment: Skippr
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Configure CodeArtifact Cargo access
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          token="$(aws codeartifact get-authorization-token \
+            --domain skippr \
+            --domain-owner 132355036174 \
+            --region us-east-1 \
+            --query authorizationToken \
+            --output text)"
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Prepare build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev libssl-dev pkg-config
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: v2-debug-runtime-scenario-linux_x86
+          env-vars: "CARGO_INCREMENTAL CARGO_TERM_COLOR RUSTFLAGS"
+
+      - name: Build skipprd
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p skipprd --bin skipprd
+          mkdir -p skipprd-linux_x86
+          cp target/release/skipprd skipprd-linux_x86/skipprd
+          ./skipprd-linux_x86/skipprd --version
+
+      - name: Run targeted runtime scenario
+        uses: ./.github/actions/e2e/runtime_scenario
+        with:
+          scenario: ${{ inputs.runtime_scenario }}
+          architecture_name: linux_x86
+          skipprd_path: ./skipprd-linux_x86/skipprd
+          test_namespace: ${{ inputs.runtime_scenario_namespace || github.run_id }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
   linux:
     name: MSSQL to Iceberg debug (linux)
     if: ${{ inputs.run_linux }}
