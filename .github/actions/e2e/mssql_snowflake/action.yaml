@@ -63,6 +63,12 @@ runs:
       run: |
         $ErrorActionPreference = "Stop"
 
+        # Depot/GitHub runners can expose short-lived AWS session-token variables.
+        # This scenario uses explicit long-lived CI access key secrets; an inherited
+        # stale session token makes the AWS SDK fail with ExpiredToken.
+        Remove-Item Env:AWS_SESSION_TOKEN -ErrorAction SilentlyContinue
+        Remove-Item Env:AWS_SECURITY_TOKEN -ErrorAction SilentlyContinue
+
         $skipprArtifact = ".\skippr-${{ inputs.architecture_name }}\skippr.exe"
         if (Test-Path $skipprArtifact) {
           $skipprBin = (Resolve-Path $skipprArtifact).Path
