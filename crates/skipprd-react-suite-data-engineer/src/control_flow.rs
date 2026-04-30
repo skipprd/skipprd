@@ -244,7 +244,12 @@ pub(crate) fn allowed_next_phases(from: Phase) -> &'static [Phase] {
             Phase::Publish,
             Phase::ModelReview,
         ],
-        Phase::Publish => &[Phase::Publish, Phase::Done, Phase::ModelReview],
+        Phase::Publish => &[
+            Phase::Publish,
+            Phase::Done,
+            Phase::ModelReview,
+            Phase::ModelAuthor,
+        ],
         Phase::Done => &[Phase::Done],
     }
 }

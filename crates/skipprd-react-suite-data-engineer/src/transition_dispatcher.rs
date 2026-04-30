@@ -559,6 +559,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_confirmed_failure_can_return_to_model_authoring() {
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let scope = RequestScope::parse("t", "w", "p").expect("valid test scope");
+        let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let tid = "tid-publish-confirmed-fail";
+
+        dispatch_phase_transition(
+            &store,
+            tid,
+            Some("agent".to_string()),
+            Some(Phase::Publish),
+            Phase::ModelAuthor,
+            TransitionIntent::Loopback,
+            Some(PhaseTransition::PublishConfirmedFail),
+        )
+        .await
+        .expect("publish failure repair loopback should be valid");
+
+        let got = state_manager::load_execution_state(&store.control_store(), tid)
+            .await
+            .expect("state should load")
+            .expect("state should exist");
+        assert_eq!(got.phase.current_phase, Phase::ModelAuthor);
+    }
+
+    #[tokio::test]
     async fn dispatch_phase_transition_retries_phase_step_append_until_success() {
         let scope = RequestScope::parse("t", "w", "p").expect("valid test scope");
         let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
