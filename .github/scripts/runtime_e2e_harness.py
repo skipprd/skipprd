@@ -1869,7 +1869,7 @@ def wait_for_athena_query(query_execution_id: str, env: dict[str, str]) -> None:
         if state == "SUCCEEDED":
             return
         if state in {"FAILED", "CANCELLED"}:
-            capture_text(
+            details = capture_text(
                 [
                     ensure_tool("aws"),
                     "athena",
@@ -1879,7 +1879,9 @@ def wait_for_athena_query(query_execution_id: str, env: dict[str, str]) -> None:
                 ],
                 env=env,
             )
-            raise HarnessError(f"Athena query failed: {query_execution_id} state={state}")
+            raise HarnessError(
+                f"Athena query failed: {query_execution_id} state={state}\n{details}"
+            )
         time.sleep(2)
 
 
@@ -2124,7 +2126,7 @@ def run_soda_scan(scan_file: str, dataset: str, env: dict[str, str]) -> None:
 
 def verify_bike_hire_rows(context: ScenarioContext) -> None:
     assert_table_has_rows(
-        table="bike_hire",
+        table=namespaced_name("bike_hire", context.namespace),
         database=namespaced_name("bikehire", context.namespace),
         env=context.base_env,
         output_location=context.assertion_output,
@@ -2133,8 +2135,8 @@ def verify_bike_hire_rows(context: ScenarioContext) -> None:
 
 def verify_bike_hire_many_rows(context: ScenarioContext) -> None:
     assert_table_has_rows(
-        table="bike_hire_many",
-        database="bikehire",
+        table=namespaced_name("bike_hire_many", context.namespace),
+        database=namespaced_name("bikehire", context.namespace),
         env=context.base_env,
         output_location=context.assertion_output,
     )
@@ -2142,8 +2144,8 @@ def verify_bike_hire_many_rows(context: ScenarioContext) -> None:
 
 def verify_bike_hire_s3_wal_many_rows(context: ScenarioContext) -> None:
     assert_table_has_rows(
-        table="bike_hire_s3_wal_many",
-        database="bikehire",
+        table=namespaced_name("bike_hire_s3_wal_many", context.namespace),
+        database=namespaced_name("bikehire", context.namespace),
         env=context.base_env,
         output_location=context.assertion_output,
     )

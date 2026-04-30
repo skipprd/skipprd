@@ -24,6 +24,10 @@ inputs:
     description: 'Optional suffix used to isolate pipeline names and destination databases.'
     required: false
     default: ""
+  mode:
+    description: 'Harness mode to run: smoke or full.'
+    required: false
+    default: "full"
 runs:
   using: "composite"
   steps:
@@ -55,4 +59,4 @@ runs:
         if [[ -n "${{ inputs.test_namespace }}" ]]; then
           namespace_args=(--namespace "${{ inputs.test_namespace }}")
         fi
-        python3 .github/scripts/runtime_e2e_harness.py run "${{ inputs.scenario }}" --mode full --skipprd "${skipprd_path}" "${namespace_args[@]}" "${runtime_plugin_args[@]}"
+        python3 .github/scripts/runtime_e2e_harness.py run "${{ inputs.scenario }}" --mode "${{ inputs.mode }}" --skipprd "${skipprd_path}" "${namespace_args[@]}" "${runtime_plugin_args[@]}"
