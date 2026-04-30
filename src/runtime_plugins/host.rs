@@ -262,6 +262,14 @@ impl RuntimeChildConnection {
         Ok(exited)
     }
 
+    fn try_exit_status(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            unregister_runtime_plugin_child(self.child.id());
+        }
+        Ok(status)
+    }
+
     async fn send(&mut self, frame: &HostFrame) -> io::Result<()> {
         write_frame(&mut self.control, frame).await
     }
@@ -596,6 +604,27 @@ async fn drain_runtime_source_tasks(pending_tasks: &mut JoinSet<io::Result<()>>)
     Ok(())
 }
 
+fn runtime_discovery_completed_on_control_eof(
+    connection: &mut RuntimeChildConnection,
+    execution_mode: RuntimeExecutionMode,
+) -> io::Result<bool> {
+    if execution_mode != RuntimeExecutionMode::Discover {
+        return Ok(false);
+    }
+
+    let Some(status) = connection.try_exit_status()? else {
+        return Ok(false);
+    };
+    if status.success() {
+        // Some append-source runtimes perform discovery through the legacy core path
+        // and exit cleanly after writing metadata instead of emitting Completed.
+        return Ok(true);
+    }
+    Err(io::Error::other(format!(
+        "runtime source exited during discovery before sending completion: {status}"
+    )))
+}
+
 pub async fn sync_runtime_input_plugin(
     resolved: ResolvedRuntimePlugin,
     pipeline_name: String,
@@ -612,7 +641,6 @@ pub async fn sync_runtime_input_plugin(
 
     let mut control_completed = false;
     let mut data_completed = false;
-    let mut saw_schema_state_update = false;
     let mut saw_unflushed_batches = false;
     let mut pending_source_tasks: JoinSet<io::Result<()>> = JoinSet::new();
     let mut control_reader = BufferedRuntimeFrameReader::new();
@@ -622,7 +650,6 @@ pub async fn sync_runtime_input_plugin(
             if let Some(control_frame) = control_reader.take_frame::<PluginFrame>()? {
                 match control_frame {
                     PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(schema_state)) => {
-                        saw_schema_state_update = true;
                         apply_runtime_source_schema_state(schema_state.clone());
                         for namespace in schema_state.namespaces.keys() {
                             Config::sync_output_schema_namespace(namespace);
@@ -653,9 +680,7 @@ pub async fn sync_runtime_input_plugin(
                 continue;
             }
             if control_reader.is_drained() {
-                if execution_mode == RuntimeExecutionMode::Discover && saw_schema_state_update {
-                    // Discovery may finish after emitting schema state even if older
-                    // append-source runtimes close before the explicit completion frame.
+                if runtime_discovery_completed_on_control_eof(&mut connection, execution_mode)? {
                     control_completed = true;
                     drain_runtime_source_tasks(&mut pending_source_tasks).await?;
                     continue;
@@ -775,9 +800,10 @@ pub async fn sync_runtime_input_plugin(
                         io::Error::other(format!("runtime source control channel read failed: {err}"))
                     })?,
                     Err(err) if is_runtime_channel_eof(&err) => {
-                        if execution_mode == RuntimeExecutionMode::Discover && saw_schema_state_update {
-                            // Discovery may finish after emitting schema state even if older
-                            // append-source runtimes close before the explicit completion frame.
+                        if runtime_discovery_completed_on_control_eof(
+                            &mut connection,
+                            execution_mode,
+                        )? {
                             control_completed = true;
                             drain_runtime_source_tasks(&mut pending_source_tasks).await?;
                             continue;
