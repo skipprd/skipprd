@@ -18,7 +18,11 @@ from runtime_plugin_catalog import (
     versioned_manifest_relative_path,
     workspace_runtime_protocol_version,
 )
-from runtime_plugin_targets import published_runtime_plugin_targets, resolve_target_artifact
+from runtime_plugin_targets import (
+    artifact_matches_build_environment,
+    published_runtime_plugin_targets,
+    resolve_target_artifact,
+)
 
 METADATA_REFRESH_QUERY_PARAM = "skippr_metadata_refresh"
 
@@ -110,10 +114,24 @@ def load_latest_published_manifests(index_url: str) -> tuple[dict, dict[str, dic
     return index, manifests
 
 
-def published_manifest_matches_catalog(published: dict, plugin: dict) -> bool:
+def published_artifacts_match_build_environment(
+    published: dict, publish_targets: list
+) -> bool:
+    artifacts = published.get("artifacts", {})
+    for target in publish_targets:
+        artifact = resolve_target_artifact(artifacts, target)
+        if artifact and not artifact_matches_build_environment(artifact, target):
+            return False
+    return True
+
+
+def published_manifest_matches_catalog(
+    published: dict, plugin: dict, publish_targets: list
+) -> bool:
     return (
         published.get("version") == plugin["package_version"]
         and published.get("build_checksum") == plugin["checksum"]
+        and published_artifacts_match_build_environment(published, publish_targets)
     )
 
 
@@ -159,7 +177,11 @@ def main() -> None:
     latest_entries = []
     for entry in catalog_entries:
         published_manifest = published_manifests.get(entry["manifest_filename"])
-        can_reuse_published = published_manifest_matches_catalog(published_manifest or {}, entry)
+        can_reuse_published = published_manifest_matches_catalog(
+            published_manifest or {},
+            entry,
+            publish_targets,
+        )
         artifacts = {}
 
         for target in publish_targets:
@@ -182,6 +204,7 @@ def main() -> None:
                     ),
                     # This is the release/download integrity checksum for the staged binary.
                     "sha256": sha256(source_binary),
+                    "build_environment": target.build_environment,
                 }
                 continue
 

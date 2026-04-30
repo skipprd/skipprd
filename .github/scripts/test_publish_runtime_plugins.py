@@ -7,6 +7,7 @@ from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
+from runtime_plugin_targets import RuntimePluginTarget
 
 MODULE_PATH = SCRIPTS_DIR / "publish_runtime_plugins.py"
 SPEC = importlib.util.spec_from_file_location("publish_runtime_plugins", MODULE_PATH)
@@ -65,20 +66,62 @@ class PublishRuntimePluginsTests(unittest.TestCase):
         )
 
     def test_published_manifest_matches_catalog(self) -> None:
+        target = RuntimePluginTarget(
+            triple="x86_64-unknown-linux-gnu",
+            aliases=("linux-x86_64",),
+            publish_artifact_dir="runtime-plugin-binaries-linux_x86",
+            build_environment={"runner_baseline": "depot-ubuntu-22.04"},
+        )
         published = {
             "version": "0.1.1",
             "build_checksum": "abc123",
+            "artifacts": {
+                "x86_64-unknown-linux-gnu": {
+                    "build_environment": {"runner_baseline": "depot-ubuntu-22.04"}
+                }
+            },
         }
         plugin = {
             "package_version": "0.1.1",
             "checksum": "abc123",
         }
         self.assertTrue(
-            publish_runtime_plugins.published_manifest_matches_catalog(published, plugin)
+            publish_runtime_plugins.published_manifest_matches_catalog(
+                published, plugin, [target]
+            )
         )
         plugin["checksum"] = "def456"
         self.assertFalse(
-            publish_runtime_plugins.published_manifest_matches_catalog(published, plugin)
+            publish_runtime_plugins.published_manifest_matches_catalog(
+                published, plugin, [target]
+            )
+        )
+
+    def test_published_manifest_requires_matching_build_environment(self) -> None:
+        target = RuntimePluginTarget(
+            triple="x86_64-unknown-linux-gnu",
+            aliases=("linux-x86_64",),
+            publish_artifact_dir="runtime-plugin-binaries-linux_x86",
+            build_environment={"runner_baseline": "depot-ubuntu-22.04"},
+        )
+        published = {
+            "version": "0.1.1",
+            "build_checksum": "abc123",
+            "artifacts": {
+                "x86_64-unknown-linux-gnu": {
+                    "build_environment": {"runner_baseline": "depot-ubuntu-24.04"}
+                }
+            },
+        }
+        plugin = {
+            "package_version": "0.1.1",
+            "checksum": "abc123",
+        }
+
+        self.assertFalse(
+            publish_runtime_plugins.published_manifest_matches_catalog(
+                published, plugin, [target]
+            )
         )
 
     def test_latest_manifest_index_url_uses_latest_pointer(self) -> None:

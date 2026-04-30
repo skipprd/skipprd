@@ -10,6 +10,11 @@ import urllib.request
 from pathlib import Path
 
 from runtime_plugin_catalog import load_workspace_plugin_catalog
+from runtime_plugin_targets import (
+    artifact_matches_build_environment,
+    published_runtime_plugin_targets,
+    resolve_target_artifact,
+)
 
 
 DEFAULT_PUBLISHED_INDEX_URL = (
@@ -73,10 +78,27 @@ def load_latest_published_manifests(index_url: str) -> tuple[dict, dict[str, dic
     return index, manifests
 
 
-def published_manifest_matches_catalog(published: dict, plugin: dict) -> bool:
+def published_artifacts_with_stale_build_environment(
+    published: dict, publish_targets: list
+) -> list[str]:
+    artifacts = published.get("artifacts", {})
+    stale_targets = []
+    for target in publish_targets:
+        artifact = resolve_target_artifact(artifacts, target)
+        if artifact and not artifact_matches_build_environment(artifact, target):
+            stale_targets.append(target.triple)
+    return stale_targets
+
+
+def published_manifest_matches_catalog(
+    published: dict, plugin: dict, publish_targets: list
+) -> bool:
     return (
         published.get("version") == plugin["package_version"]
         and published.get("build_checksum") == plugin["checksum"]
+        and not published_artifacts_with_stale_build_environment(
+            published, publish_targets
+        )
     )
 
 
@@ -90,6 +112,7 @@ def main() -> int:
 
     workspace = Path(args.workspace).resolve()
     catalog = load_workspace_plugin_catalog(workspace)
+    publish_targets = published_runtime_plugin_targets(workspace)
     _published_index, published_manifests = load_latest_published_manifests(
         args.published_index_url
     )
@@ -118,6 +141,17 @@ def main() -> int:
             decision_reasons[plugin["package_name"]] = (
                 "build checksum changed for existing plugin version"
             )
+            continue
+
+        stale_build_targets = published_artifacts_with_stale_build_environment(
+            published, publish_targets
+        )
+        if stale_build_targets:
+            selected.append(plugin["package_name"])
+            decision_reasons[plugin["package_name"]] = (
+                "published artifact build environment changed or is missing for "
+                + ", ".join(stale_build_targets)
+            )
 
     selected = sorted(set(selected))
     build_all = len(selected) == len(catalog)
@@ -126,7 +160,10 @@ def main() -> int:
     elif not selected:
         reason = "all runtime plugins already published at matching version and build checksum"
     else:
-        reason = "build runtime plugins whose published version/build checksum is stale"
+        reason = (
+            "build runtime plugins whose published version, build checksum, "
+            "or build environment is stale"
+        )
 
     json.dump(
         {

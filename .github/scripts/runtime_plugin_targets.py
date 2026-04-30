@@ -10,6 +10,7 @@ class RuntimePluginTarget:
     triple: str
     aliases: tuple[str, ...]
     publish_artifact_dir: str | None
+    build_environment: dict[str, str]
 
     @property
     def manifest_keys(self) -> tuple[str, ...]:
@@ -26,6 +27,7 @@ def load_runtime_plugin_targets(workspace: Path) -> list[RuntimePluginTarget]:
             triple=entry["triple"],
             aliases=tuple(entry.get("aliases", [])),
             publish_artifact_dir=entry.get("publish_artifact_dir"),
+            build_environment=dict(entry.get("build_environment", {})),
         )
         for entry in payload["targets"]
     ]
@@ -43,3 +45,12 @@ def resolve_target_artifact(artifacts: dict, target: RuntimePluginTarget) -> dic
         if artifact:
             return dict(artifact)
     return {}
+
+
+def artifact_matches_build_environment(
+    artifact: dict, target: RuntimePluginTarget
+) -> bool:
+    expected = target.build_environment
+    if not expected:
+        return True
+    return artifact.get("build_environment") == expected

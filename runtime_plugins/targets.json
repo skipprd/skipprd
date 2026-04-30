@@ -6,7 +6,10 @@
         "darwin-aarch64",
         "macos-aarch64"
       ],
-      "publish_artifact_dir": "runtime-plugin-binaries-macos_arm64"
+      "publish_artifact_dir": "runtime-plugin-binaries-macos_arm64",
+      "build_environment": {
+        "runner_baseline": "macos-14"
+      }
     },
     {
       "triple": "x86_64-apple-darwin",
@@ -20,7 +23,12 @@
       "aliases": [
         "linux-x86_64"
       ],
-      "publish_artifact_dir": "runtime-plugin-binaries-linux_x86"
+      "publish_artifact_dir": "runtime-plugin-binaries-linux_x86",
+      "build_environment": {
+        "runner_baseline": "depot-ubuntu-22.04",
+        "libc": "glibc",
+        "glibc_floor": "2.35"
+      }
     },
     {
       "triple": "aarch64-unknown-linux-gnu",
@@ -33,7 +41,10 @@
       "aliases": [
         "windows-x86_64"
       ],
-      "publish_artifact_dir": "runtime-plugin-binaries-windows_x86"
+      "publish_artifact_dir": "runtime-plugin-binaries-windows_x86",
+      "build_environment": {
+        "runner_baseline": "depot-windows-2022"
+      }
     }
   ]
 }
