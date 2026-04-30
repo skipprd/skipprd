@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::fmt;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct ApiClient {
     base_url: String,
     http: reqwest::Client,

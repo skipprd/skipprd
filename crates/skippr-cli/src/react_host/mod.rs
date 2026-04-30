@@ -6,6 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use react_core::resolved_config::{ReactResolvedConfig, StorageMode};
 use react_core::suite::{DebugProviderRegistry, SuiteCtx, SuiteRegistry};
+use vector::{lance_storage_options_from_credentials, LanceStorageOptions};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SkipprHost;
@@ -54,7 +55,7 @@ pub async fn run_headless(
     react::run_engine::run_headless_with_host(cfg, &SkipprHost, opts).await
 }
 
-fn lance_storage(cfg: &ReactResolvedConfig) -> Result<(String, Vec<(String, String)>), String> {
+fn lance_storage(cfg: &ReactResolvedConfig) -> Result<(String, LanceStorageOptions), String> {
     match cfg.storage.mode {
         StorageMode::Local => {
             let root = cfg
@@ -62,7 +63,7 @@ fn lance_storage(cfg: &ReactResolvedConfig) -> Result<(String, Vec<(String, Stri
                 .path
                 .clone()
                 .ok_or_else(|| "missing storage.path for local mode".to_string())?;
-            Ok((format!("file://{}", root), Vec::new()))
+            Ok((format!("file://{}", root), LanceStorageOptions::default()))
         }
         StorageMode::S3 => {
             let bucket = cfg
@@ -70,18 +71,22 @@ fn lance_storage(cfg: &ReactResolvedConfig) -> Result<(String, Vec<(String, Stri
                 .bucket
                 .clone()
                 .ok_or_else(|| "missing storage.bucket for s3 mode".to_string())?;
-            let mut options = Vec::new();
-            if let Some(creds) = cfg.storage.s3_credentials.as_ref() {
-                options.push(("aws_access_key_id".into(), creds.access_key_id.clone()));
-                options.push((
-                    "aws_secret_access_key".into(),
-                    creds.secret_access_key.clone(),
-                ));
-                options.push(("aws_region".into(), creds.region.clone()));
-                if let Some(token) = creds.session_token.as_ref() {
-                    options.push(("aws_session_token".into(), token.clone()));
-                }
-            }
+            let options = cfg
+                .storage
+                .s3_credentials
+                .as_ref()
+                .map(|creds| {
+                    creds
+                        .provider
+                        .clone()
+                        .map(LanceStorageOptions::Refreshable)
+                        .unwrap_or_else(|| {
+                            LanceStorageOptions::Static(lance_storage_options_from_credentials(
+                                creds,
+                            ))
+                        })
+                })
+                .unwrap_or_default();
             Ok((format!("s3://{}", bucket), options))
         }
     }

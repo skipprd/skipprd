@@ -15,6 +15,68 @@ use public_config::{DbtConfig, S3Transform, SkipprDbtConfig, SourceConfig, Wareh
 
 const SKIPPR_EULA_VERSION: &str = "skippr-eula-2026-04-29";
 const SKIPPR_EULA_URL: &str = "https://skippr.io/terms/eula";
+const S3_CREDENTIAL_REFRESH_MARGIN_SECONDS: i64 = 300;
+
+#[derive(Clone)]
+struct AuthS3CredentialsProvider {
+    client: api_client::ApiClient,
+    cached: Arc<tokio::sync::Mutex<Option<react_core::resolved_config::S3Credentials>>>,
+}
+
+impl AuthS3CredentialsProvider {
+    fn new(
+        client: api_client::ApiClient,
+        initial: Option<react_core::resolved_config::S3Credentials>,
+    ) -> Self {
+        Self {
+            client,
+            cached: Arc::new(tokio::sync::Mutex::new(initial)),
+        }
+    }
+
+    fn is_fresh(credentials: &react_core::resolved_config::S3Credentials) -> bool {
+        let Some(expires_at) = credentials.expires_at.as_ref() else {
+            return false;
+        };
+        chrono::Utc::now() + chrono::Duration::seconds(S3_CREDENTIAL_REFRESH_MARGIN_SECONDS)
+            < *expires_at
+    }
+}
+
+#[async_trait::async_trait]
+impl react_core::resolved_config::S3CredentialsProvider for AuthS3CredentialsProvider {
+    async fn s3_credentials(&self) -> Result<react_core::resolved_config::S3Credentials, String> {
+        let mut cached = self.cached.lock().await;
+        if let Some(credentials) = cached
+            .as_ref()
+            .filter(|credentials| Self::is_fresh(credentials))
+        {
+            return Ok(credentials.clone());
+        }
+
+        let response = self
+            .client
+            .get_credentials()
+            .await
+            .map_err(|e| format!("failed to refresh hosted S3 credentials: {e}"))?;
+        let credentials = translate::s3_credentials_from_auth(&response);
+        *cached = Some(credentials.clone());
+        Ok(credentials)
+    }
+}
+
+fn attach_s3_credentials_provider(
+    resolved: &mut react_core::resolved_config::ReactResolvedConfig,
+    client: api_client::ApiClient,
+) {
+    if let Some(credentials) = resolved.storage.s3_credentials.as_mut() {
+        let provider = Arc::new(AuthS3CredentialsProvider::new(
+            client,
+            Some(credentials.clone()),
+        ));
+        credentials.provider = Some(provider);
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -1381,12 +1443,7 @@ fn build_remote_reset_target(
         return Err("missing project name for reset".to_string());
     }
 
-    let s3_creds = react_core::resolved_config::S3Credentials {
-        access_key_id: srv_creds.credentials.access_key_id.clone(),
-        secret_access_key: srv_creds.credentials.secret_access_key.clone(),
-        session_token: Some(srv_creds.credentials.session_token.clone()),
-        region: "us-east-1".to_string(),
-    };
+    let s3_creds = translate::s3_credentials_from_auth(srv_creds);
     let prefix = format!("{tenant}/dev/{project}/");
     let remote_desc = format!("s3://{bucket}/{prefix}");
     Ok((bucket, s3_creds, prefix, remote_desc))
@@ -2499,7 +2556,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>) {
         ])
         .await;
 
-    let resolved =
+    let mut resolved =
         match react_host::resolve_config(internal_file, react::config::ServeOverrides::default()) {
             Ok(c) => c,
             Err(e) => {
@@ -2507,6 +2564,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>) {
                 std::process::exit(1);
             }
         };
+    attach_s3_credentials_provider(&mut resolved, client.clone());
 
     let thread_id = match find_latest_thread_for_resolved_config(&resolved).await {
         Ok(thread_id) => thread_id,
@@ -2862,12 +2920,7 @@ fn apply_feedback_storage_overlay(
         mode: Some("s3".into()),
         bucket: Some(creds.bucket.clone()),
         path: None,
-        s3_credentials: Some(react_core::resolved_config::S3Credentials {
-            access_key_id: creds.credentials.access_key_id.clone(),
-            secret_access_key: creds.credentials.secret_access_key.clone(),
-            session_token: Some(creds.credentials.session_token.clone()),
-            region: "us-east-1".to_string(),
-        }),
+        s3_credentials: Some(translate::s3_credentials_from_auth(creds)),
     });
     if let Some(scope) = cfg.scope.as_mut() {
         if !creds.tenant_id.trim().is_empty() {
@@ -2903,14 +2956,7 @@ async fn find_latest_thread_in_s3_storage(
     let keyspace = react_core::keyspace::DefaultKeyspace::new(bucket.clone());
     let prefix = keyspace.threads_prefix(&cfg.scope);
     let adapter = if let Some(creds) = cfg.storage.s3_credentials.as_ref() {
-        react_module_storage_s3::S3StorageAdapter::from_credentials(
-            bucket,
-            &creds.access_key_id,
-            &creds.secret_access_key,
-            creds.session_token.as_deref(),
-            &creds.region,
-        )
-        .await
+        react_module_storage_s3::S3StorageAdapter::from_resolved_credentials(bucket, creds).await
     } else {
         react_module_storage_s3::S3StorageAdapter::from_env(bucket).await
     };

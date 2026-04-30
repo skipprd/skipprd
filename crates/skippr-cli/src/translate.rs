@@ -943,6 +943,20 @@ pub fn set_skippr_binary(cfg: &mut ReactConfigFile, binary_path: &str) {
     }
 }
 
+pub fn s3_credentials_from_auth(creds: &crate::api_client::CredentialsResponse) -> S3Credentials {
+    let expires_at = chrono::DateTime::parse_from_rfc3339(&creds.credentials.expiration)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    S3Credentials {
+        access_key_id: creds.credentials.access_key_id.clone(),
+        secret_access_key: creds.credentials.secret_access_key.clone(),
+        session_token: Some(creds.credentials.session_token.clone()),
+        region: "us-east-1".to_string(),
+        expires_at,
+        provider: None,
+    }
+}
+
 /// Overlay authenticated mode onto an existing config:
 /// - Switch storage to S3 with STS credentials
 /// - Set server-provided LLM API key (if user hasn't set their own)
@@ -957,12 +971,7 @@ pub fn apply_authenticated_overlay(
         mode: Some("s3".into()),
         bucket: Some(creds.bucket.clone()),
         path: None,
-        s3_credentials: Some(S3Credentials {
-            access_key_id: creds.credentials.access_key_id.clone(),
-            secret_access_key: creds.credentials.secret_access_key.clone(),
-            session_token: Some(creds.credentials.session_token.clone()),
-            region: "us-east-1".to_string(),
-        }),
+        s3_credentials: Some(s3_credentials_from_auth(creds)),
     });
 
     if let Some(scope) = cfg.scope.as_mut() {

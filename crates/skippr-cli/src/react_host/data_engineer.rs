@@ -20,7 +20,7 @@ use react_suite_data_engineer::ctx_ext::{
 };
 use react_suite_data_engineer::de_config::{self as de_cfg, WarehouseKind};
 
-use super::vector::LanceVectorStore;
+use super::vector::{LanceStorageOptions, LanceVectorStore};
 
 fn nonempty(s: &str) -> Option<String> {
     let t = s.trim();
@@ -449,7 +449,7 @@ pub(crate) async fn wire_providers(
     sctx: &mut SuiteCtx,
     keyspace: &Arc<dyn Keyspace>,
     lance_uri_prefix: &str,
-    lance_storage_opts: Vec<(String, String)>,
+    lance_storage_opts: LanceStorageOptions,
 ) -> Result<(), String> {
     let cfg = sctx
         .resolved_config()
