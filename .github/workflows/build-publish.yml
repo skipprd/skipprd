@@ -112,7 +112,7 @@ jobs:
       - dynamodb_iceberg_types_cdc_test
       - mssql_iceberg_debug_linux_test
       - mssql_iceberg_debug_windows_test
-    runs-on: depot-macos-15
+    runs-on: macos-14
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -306,7 +306,7 @@ jobs:
     name: cargo test --no-run (macos arm64)
     needs:
       - plan_runtime_plugin_release
-    runs-on: depot-macos-15
+    runs-on: macos-14
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
