@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use clap::Parser;
@@ -38,6 +39,9 @@ use crate::wire::{read_frame_or_eof, write_frame};
 
 #[derive(Debug, Parser)]
 struct AppendSourceCli {}
+
+const DEFAULT_ONCE_IDLE_TIMEOUT_SECONDS: u64 = 60;
+const ONCE_IDLE_TIMEOUT_SECONDS_ENV: &str = "SKIPPR_RUNTIME_ONCE_IDLE_TIMEOUT_SECONDS";
 
 fn configure_runtime_source_data_dir(base_data_dir: &str, plugin_name: &str) {
     let plugin_slug = plugin_name
@@ -74,10 +78,63 @@ fn configure_runtime_source_cli_mode(start: &SourceStartRequest) {
         RuntimeExecutionMode::Sync => Mode::Sync(SyncOptions {
             pipeline,
             output: "json".to_string(),
-            once: false,
+            once: start.once,
         }),
     };
     CLI_MODE.write().clone_from(&mode);
+}
+
+fn runtime_once_idle_timeout() -> Duration {
+    let seconds = std::env::var(ONCE_IDLE_TIMEOUT_SECONDS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ONCE_IDLE_TIMEOUT_SECONDS);
+    Duration::from_secs(seconds)
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeSourceActivity {
+    last_source_data_ms: Arc<AtomicU64>,
+}
+
+impl RuntimeSourceActivity {
+    fn new() -> Self {
+        Self {
+            last_source_data_ms: Arc::new(AtomicU64::new(Self::now_millis())),
+        }
+    }
+
+    fn now_millis() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    fn mark_source_data(&self) {
+        self.last_source_data_ms
+            .store(Self::now_millis(), Ordering::Release);
+    }
+
+    fn source_data_idle_for(&self) -> Duration {
+        Duration::from_millis(
+            Self::now_millis().saturating_sub(self.last_source_data_ms.load(Ordering::Acquire)),
+        )
+    }
+}
+
+async fn wait_for_runtime_source_once_idle(
+    activity: RuntimeSourceActivity,
+    idle_timeout: Duration,
+) -> io::Result<()> {
+    loop {
+        let idle_for = activity.source_data_idle_for();
+        if idle_for >= idle_timeout {
+            return Ok(());
+        }
+        tokio::time::sleep(idle_timeout.saturating_sub(idle_for)).await;
+    }
 }
 
 fn current_runtime_schema_state_from_core() -> RuntimeSchemaState {
@@ -300,6 +357,7 @@ impl CheckpointTransport for RuntimeSourceCheckpointTransport {
 pub struct ArrowRelayToHostSink {
     control_writer: ControlWriter,
     data_writer: DataWriter,
+    activity: RuntimeSourceActivity,
     suppress_data_relay: bool,
     last_sent_schema_version: AtomicU64,
     last_sent_schema_namespace_count: AtomicU64,
@@ -310,11 +368,13 @@ impl ArrowRelayToHostSink {
     fn new(
         control_writer: ControlWriter,
         data_writer: DataWriter,
+        activity: RuntimeSourceActivity,
         suppress_data_relay: bool,
     ) -> Self {
         Self {
             control_writer,
             data_writer,
+            activity,
             suppress_data_relay,
             last_sent_schema_version: AtomicU64::new(0),
             last_sent_schema_namespace_count: AtomicU64::new(0),
@@ -361,6 +421,7 @@ impl DataSink for ArrowRelayToHostSink {
         if self.suppress_data_relay {
             return Ok(());
         }
+        self.activity.mark_source_data();
         self.send_schema_state_if_needed().await?;
         let arrow_stream_bytes = encode_record_batch_stream(stream).await?;
         self.data_writer
@@ -370,7 +431,9 @@ impl DataSink for ArrowRelayToHostSink {
                 arrow_stream_bytes,
                 cdc_ctx: cdc_ctx.cloned(),
             }))
-            .await
+            .await?;
+        self.activity.mark_source_data();
+        Ok(())
     }
 
     fn runtime_ingest_relay(&self) -> Option<&dyn RuntimeIngestRelay> {
@@ -387,10 +450,18 @@ impl RuntimeIngestRelay for ArrowRelayToHostSink {
             if self.suppress_data_relay {
                 return Ok(());
             }
+            let has_source_data = !batches.is_empty();
+            if has_source_data {
+                self.activity.mark_source_data();
+            }
             self.send_schema_state_if_needed().await?;
             self.data_writer
                 .write(&PluginDataFrame::IngestBatches { batches })
-                .await
+                .await?;
+            if has_source_data {
+                self.activity.mark_source_data();
+            }
+            Ok(())
         })
     }
 
@@ -608,6 +679,7 @@ pub async fn run_append_data_source_main(
     Config::build_config();
     Config::init().await;
     let suppress_data_relay = runtime_mode_suppresses_data_relay(start.context.execution_mode);
+    let once_idle_timeout = (start.once && !suppress_data_relay).then(runtime_once_idle_timeout);
 
     let control = RuntimeSourceControl::new();
     let mut shutdown_rx = control.subscribe_shutdown();
@@ -631,10 +703,12 @@ pub async fn run_append_data_source_main(
             ))),
         ))
     };
+    let activity = RuntimeSourceActivity::new();
     let relay: Arc<Box<dyn DataSink + Send + Sync>> =
         Arc::new(Box::new(ArrowRelayToHostSink::new(
             control_writer.clone(),
             data_writer.clone(),
+            activity.clone(),
             suppress_data_relay,
         )));
 
@@ -645,6 +719,17 @@ pub async fn run_append_data_source_main(
             result = &mut sync_fut => Some(result),
             result = wait_for_runtime_source_host_exit(&mut shutdown_rx, control.clone(), parent_pid) => match result {
                 Ok(()) => None,
+                Err(err) => Some(Err(err)),
+            },
+            result = async {
+                match once_idle_timeout {
+                    Some(idle_timeout) => {
+                        wait_for_runtime_source_once_idle(activity.clone(), idle_timeout).await
+                    }
+                    None => std::future::pending::<io::Result<()>>().await,
+                }
+            } => match result {
+                Ok(()) => Some(Ok(())),
                 Err(err) => Some(Err(err)),
             },
         }
@@ -678,4 +763,65 @@ pub async fn run_append_data_source_main(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex, OnceLock};
+
+    use serde_json::json;
+    use skippr_core::cli::Mode;
+
+    use super::*;
+    use crate::protocol::{RuntimeExecutionContext, RuntimeOutputLayout, RuntimeSourceConfig};
+
+    static CLI_MODE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn cli_mode_lock() -> std::sync::MutexGuard<'static, ()> {
+        CLI_MODE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn source_start_request(once: bool) -> SourceStartRequest {
+        SourceStartRequest {
+            context: RuntimeExecutionContext {
+                pipeline_name: "pipeline".to_string(),
+                workspace_name: "workspace".to_string(),
+                data_dir: "/tmp/skippr-runtime-test".to_string(),
+                execution_mode: RuntimeExecutionMode::Sync,
+                output_layout: RuntimeOutputLayout::default(),
+            },
+            config: RuntimeSourceConfig(RuntimePluginConfigEnvelope::new("Test", json!({}))),
+            once,
+        }
+    }
+
+    #[test]
+    fn runtime_source_cli_mode_preserves_once_flag() {
+        let _guard = cli_mode_lock();
+        let previous = CLI_MODE.read().clone();
+
+        configure_runtime_source_cli_mode(&source_start_request(true));
+
+        match CLI_MODE.read().clone() {
+            Mode::Sync(options) => assert!(options.once),
+            _ => panic!("expected sync CLI mode"),
+        }
+
+        CLI_MODE.write().clone_from(&previous);
+    }
+
+    #[test]
+    fn runtime_source_activity_resets_idle_clock_on_source_data() {
+        let activity = RuntimeSourceActivity::new();
+        activity.last_source_data_ms.store(
+            RuntimeSourceActivity::now_millis().saturating_sub(1_000),
+            Ordering::Release,
+        );
+
+        assert!(activity.source_data_idle_for() >= Duration::from_millis(1_000));
+
+        activity.mark_source_data();
+
+        assert!(activity.source_data_idle_for() < Duration::from_millis(1_000));
+    }
 }

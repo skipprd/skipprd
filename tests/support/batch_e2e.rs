@@ -52,7 +52,7 @@ impl BatchE2eHarness {
     pub fn spawn_sync(&self) -> Child {
         let bin = skipprd_bin();
         Command::new(&bin)
-            .args(["sync", "--pipeline", &self.pipeline_name])
+            .args(["sync", "--pipeline", &self.pipeline_name, "--once"])
             .env("SKIPPR_CONFIG_FILE", &self.config_path)
             .env("DATA_DIR", &self.data_dir)
             .env("AWS_ACCESS_KEY_ID", "test")

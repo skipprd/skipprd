@@ -452,6 +452,7 @@ fn build_source_start_request_for_pipeline(
     Ok(SourceStartRequest {
         context: runtime_execution_context(pipeline_name, execution_mode),
         config: source_config,
+        once: runtime_execution_once_enabled(execution_mode),
     })
 }
 
@@ -887,6 +888,16 @@ fn runtime_execution_context(
             order_fields,
             time_partition_granularity,
         },
+    }
+}
+
+fn runtime_execution_once_enabled(execution_mode: RuntimeExecutionMode) -> bool {
+    if execution_mode != RuntimeExecutionMode::Sync {
+        return false;
+    }
+    match crate::cli::CLI_MODE.read().clone() {
+        crate::cli::Mode::Sync(options) => options.once,
+        _ => false,
     }
 }
 

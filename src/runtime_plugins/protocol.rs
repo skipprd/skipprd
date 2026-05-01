@@ -265,6 +265,9 @@ pub struct HandshakeResponse {
 pub struct SourceStartRequest {
     pub context: RuntimeExecutionContext,
     pub config: RuntimeSourceConfig,
+    // Keep this trailing so v7 runtimes can decode RunSource and ignore it.
+    #[serde(default)]
+    pub once: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -384,4 +387,55 @@ pub enum PluginDataFrame {
         hints: Vec<RuntimeOffsetMaterializationHint>,
     },
     SinkWrite(RuntimeSourceSinkWrite),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Deserialize, Serialize)]
+    struct SourceStartRequestV7 {
+        context: RuntimeExecutionContext,
+        config: RuntimeSourceConfig,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    enum HostFrameV7 {
+        Handshake(HandshakeRequest),
+        InstallSink(RuntimeSinkInstallRequest),
+        InstallSchema(RuntimeSchemaInstallRequest),
+        InstallSchemaState(RuntimeSchemaStateInstallRequest),
+        RunSource(SourceStartRequestV7),
+        RunSink(SinkRunRequest),
+        RunSchema(SchemaRunRequest),
+        OffsetResponse(RuntimeOffsetRpcResponse),
+        Shutdown,
+    }
+
+    #[test]
+    fn source_start_once_is_backward_read_compatible() {
+        let frame = HostFrame::RunSource(SourceStartRequest {
+            context: RuntimeExecutionContext {
+                pipeline_name: "pipeline".to_string(),
+                workspace_name: "workspace".to_string(),
+                data_dir: "/tmp/data".to_string(),
+                execution_mode: RuntimeExecutionMode::Sync,
+                output_layout: RuntimeOutputLayout::default(),
+            },
+            config: RuntimeSourceConfig(RuntimePluginConfigEnvelope::new(
+                "Test",
+                serde_json::json!({}),
+            )),
+            once: true,
+        });
+
+        let bytes = bincode::serialize(&frame).unwrap();
+        let decoded: HostFrameV7 = bincode::deserialize(&bytes).unwrap();
+
+        let HostFrameV7::RunSource(decoded) = decoded else {
+            panic!("expected RunSource frame");
+        };
+        assert_eq!(decoded.context.pipeline_name, "pipeline");
+        assert_eq!(decoded.context.execution_mode, RuntimeExecutionMode::Sync);
+    }
 }

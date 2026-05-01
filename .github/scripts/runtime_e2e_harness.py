@@ -1620,6 +1620,7 @@ data_sources:
       password: testpass
       database: skippr_test
       tables: ["runtime_release_people"]
+      cdc_enabled: false
 
 data_sinks:
   postgres_sink:

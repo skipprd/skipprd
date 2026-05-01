@@ -79,6 +79,7 @@ fn run_sync_with_logs(harness: &BatchE2eHarness, timeout: Duration) -> Output {
             "--output",
             "text",
             "--log",
+            "--once",
         ])
         .env("SKIPPR_CONFIG_FILE", &harness.config_path)
         .env("DATA_DIR", &harness.data_dir)
