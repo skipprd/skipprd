@@ -1014,6 +1014,11 @@ mod tests {
                         description: None,
                     }],
                     assumptions: vec![],
+                    evidence_claim_refs: vec![crate::providers::SemanticClaimRef {
+                        claim_id: "candidate_key:test_raw.raw_orders:order_id".to_string(),
+                        kind: crate::providers::SemanticClaimKind::CandidateKey,
+                        status: crate::providers::EvidenceStatus::Observed,
+                    }],
                 }),
                 source_schema: vec![],
                 grounded_inputs: vec![crate::plan_types::GroundedModelInput {

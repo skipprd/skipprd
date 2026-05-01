@@ -124,16 +124,6 @@ pub fn compile_sql_first_draft(
         return Err("authoring_ir: no usable output columns".to_string());
     }
 
-    let mut tests = TestsIntent::default();
-    for c in columns.iter() {
-        let n = c.name.to_ascii_lowercase();
-        if n == "id" || n.ends_with("_id") {
-            tests.not_null.push(c.name.clone());
-        }
-    }
-    tests.not_null.sort();
-    tests.not_null.dedup();
-
     let mut out_notes = notes
         .iter()
         .map(|s| s.trim().to_string())
@@ -145,7 +135,7 @@ pub fn compile_sql_first_draft(
         sql: normalized_sql.to_string(),
         notes: out_notes,
         columns,
-        tests,
+        tests: TestsIntent::default(),
     })
 }
 
@@ -154,7 +144,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compile_sql_first_draft_extracts_columns_and_tests() {
+    fn compile_sql_first_draft_extracts_columns_without_name_based_tests() {
         let ir = compile_sql_first_draft(
             "select\n  order_id,\n  amount\nfrom __SOURCE__\n",
             &["ok".to_string()],
@@ -169,7 +159,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert!(names.contains("order_id"));
         assert!(names.contains("amount"));
-        assert_eq!(ir.tests.not_null, vec!["order_id".to_string()]);
+        assert!(ir.tests.not_null.is_empty());
     }
 
     #[test]

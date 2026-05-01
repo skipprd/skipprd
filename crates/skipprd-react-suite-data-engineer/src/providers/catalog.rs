@@ -45,6 +45,19 @@ pub trait CatalogProvider: Send + Sync {
         semantic: &SemanticModel,
     ) -> Result<(), String>;
 
+    async fn read_semantic_profile(
+        &self,
+        scope: &RequestScope,
+        dataset_id: &str,
+    ) -> Result<Option<SemanticProfile>, String>;
+
+    async fn write_semantic_profile(
+        &self,
+        scope: &RequestScope,
+        dataset_id: &str,
+        profile: &SemanticProfile,
+    ) -> Result<(), String>;
+
     async fn build_all_with_progress(
         &self,
         scope: &RequestScope,

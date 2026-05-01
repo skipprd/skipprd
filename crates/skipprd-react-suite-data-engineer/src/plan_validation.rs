@@ -23,6 +23,7 @@ pub enum PlanSemanticIssueCode {
     UnknownTaskReference,
     MissingWorkGroups,
     MissingWorkGroupCoverage,
+    UnverifiedSemanticEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +104,121 @@ fn validation_result(issues: Vec<PlanSemanticIssue>) -> PlanSemanticValidation {
         issues,
         errors,
     }
+}
+
+fn has_safe_claim(
+    spec: &crate::plan_types::ModelImplementationSpec,
+    kinds: &[crate::providers::SemanticClaimKind],
+) -> bool {
+    spec.evidence_claim_refs
+        .iter()
+        .any(|claim| claim.status.authoring_safe() && kinds.iter().any(|kind| kind == &claim.kind))
+}
+
+fn model_evidence_issues(
+    tid: &str,
+    spec: &crate::plan_types::ModelImplementationSpec,
+) -> Vec<PlanSemanticIssue> {
+    use crate::providers::SemanticClaimKind::{
+        AggregateSafety, CandidateKey, Grain, NumericParse, Relationship, RowPreservation,
+    };
+    use PlanSemanticIssueCode::UnverifiedSemanticEvidence;
+
+    let mut issues = Vec::new();
+    for claim in &spec.evidence_claim_refs {
+        if !claim.status.authoring_safe() {
+            issues.push(sem_task(
+                UnverifiedSemanticEvidence,
+                tid,
+                format!(
+                    "{}: evidence claim '{}' for {:?} is {:?}; model authoring requires observed or user_provided evidence",
+                    tid, claim.claim_id, claim.kind, claim.status
+                ),
+            ));
+        }
+    }
+
+    if !spec.grain.trim().is_empty() && !has_safe_claim(spec, &[Grain, CandidateKey]) {
+        issues.push(sem_task(
+            UnverifiedSemanticEvidence,
+            tid,
+            format!(
+                "{}: implementation_spec.grain requires an observed/user_provided grain or candidate_key evidence_claim_ref",
+                tid
+            ),
+        ));
+    }
+    if spec
+        .joins
+        .iter()
+        .any(|join| join.cardinality.is_some() || !join.on.is_empty())
+        && !has_safe_claim(spec, &[Relationship, CandidateKey])
+    {
+        issues.push(sem_task(
+            UnverifiedSemanticEvidence,
+            tid,
+            format!(
+                "{}: joins/cardinality require observed/user_provided relationship or candidate_key evidence_claim_ref",
+                tid
+            ),
+        ));
+    }
+    if !spec.metrics.is_empty()
+        && !has_safe_claim(spec, &[AggregateSafety, Grain, CandidateKey, NumericParse])
+    {
+        issues.push(sem_task(
+            UnverifiedSemanticEvidence,
+            tid,
+            format!(
+                "{}: metrics require observed/user_provided aggregate_safety, grain, candidate_key, or numeric_parse evidence_claim_ref",
+                tid
+            ),
+        ));
+    }
+    let lower_assumptions = spec.assumptions.join(" ").to_ascii_lowercase();
+    if contains_semantic_risk_word(&lower_assumptions)
+        && !has_safe_claim(
+            spec,
+            &[
+                Grain,
+                CandidateKey,
+                Relationship,
+                NumericParse,
+                RowPreservation,
+                AggregateSafety,
+            ],
+        )
+    {
+        issues.push(sem_task(
+            UnverifiedSemanticEvidence,
+            tid,
+            format!(
+                "{}: semantic assumptions require observed/user_provided evidence_claim_refs",
+                tid
+            ),
+        ));
+    }
+    issues
+}
+
+fn contains_semantic_risk_word(text: &str) -> bool {
+    [
+        "unique",
+        "dedup",
+        "grain",
+        "one row",
+        "many-to-one",
+        "many_to_one",
+        "cardinality",
+        "parse",
+        "numeric",
+        "row preserving",
+        "row-preserving",
+        "preserve rows",
+        "aggregate",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 /// Structural validation shared by all plan types.
@@ -395,6 +511,7 @@ pub fn validate_model_plan_semantics(
                 "{}: implementation_spec must include output_fields and/or metrics (design detail required)", tid
             )));
         }
+        issues.extend(model_evidence_issues(tid, spec));
         let sql_status = checklist_status(&t.checklist, CHECKLIST_SQL_MODEL);
         if is_runnable_checklist_status(sql_status) {
             if t.goal.trim().is_empty() {
@@ -491,4 +608,96 @@ pub fn ensure_model_plan_semantically_valid_or_repaired(
 ) -> PlanSemanticValidation {
     crate::plan_grounding::ensure_expected_model_paths_model(plan);
     validate_model_plan_semantics(plan, Some(allowed_staging_models))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan_progress::canonical_task_checklist;
+    use crate::plan_types::*;
+    use crate::providers::{EvidenceStatus, SemanticClaimKind, SemanticClaimRef};
+    use crate::track_spec::TrackKind;
+
+    fn model_plan_with_claims(claims: Vec<SemanticClaimRef>) -> ModelPlan {
+        let mut plan = ModelPlan {
+            plan_key: "model:test".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: Default::default(),
+            tasks: vec![ModelTask {
+                name: "dim_customers".to_string(),
+                folder: ModelFolder::Marts,
+                goal: "Customer dimension".to_string(),
+                inputs: vec!["stg_customers".to_string()],
+                expected_model_path: Some("models/marts/dim_customers.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: Some(ModelImplementationSpec {
+                    spec_version: 1,
+                    grain: "1 row per customer_id".to_string(),
+                    inputs: vec!["stg_customers".to_string()],
+                    joins: vec![],
+                    metrics: vec![],
+                    output_fields: vec![OutputFieldSpec {
+                        name: "customer_id".to_string(),
+                        kind: FieldKind::Clean,
+                        source_columns: vec!["customer_id".to_string()],
+                        expression: "customer_id passthrough".to_string(),
+                        data_type: None,
+                        nullable: false,
+                        description: None,
+                    }],
+                    assumptions: vec![],
+                    evidence_claim_refs: claims,
+                }),
+                source_schema: vec![SourceColumnDef {
+                    name: "customer_id".to_string(),
+                    data_type: "string".to_string(),
+                }],
+                grounded_inputs: vec![GroundedModelInput {
+                    input_name: "stg_customers".to_string(),
+                    model_rel_path: "models/staging/stg_customers.sql".to_string(),
+                    relation_fqn: "db.schema.stg_customers".to_string(),
+                    source_schema: vec![SourceColumnDef {
+                        name: "customer_id".to_string(),
+                        data_type: "string".to_string(),
+                    }],
+                }],
+                status: TaskStatus::Pending,
+                checklist: canonical_task_checklist(TrackKind::Model),
+            }],
+            batches: vec![vec!["dim_customers".to_string()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: Default::default(),
+        };
+        plan.reconcile_work_groups();
+        plan
+    }
+
+    #[test]
+    fn model_plan_blocks_grain_without_safe_evidence() {
+        let plan = model_plan_with_claims(vec![]);
+        let allowed = ["stg_customers".to_string()].into_iter().collect();
+
+        let result = validate_model_plan_semantics(&plan, Some(&allowed));
+
+        assert!(!result.ok);
+        assert!(result
+            .issues
+            .iter()
+            .any(|issue| issue.code == PlanSemanticIssueCode::UnverifiedSemanticEvidence));
+    }
+
+    #[test]
+    fn model_plan_accepts_grain_with_observed_evidence() {
+        let plan = model_plan_with_claims(vec![SemanticClaimRef {
+            claim_id: "candidate_key:db.schema.customers:customer_id".to_string(),
+            kind: SemanticClaimKind::CandidateKey,
+            status: EvidenceStatus::Observed,
+        }]);
+        let allowed = ["stg_customers".to_string()].into_iter().collect();
+
+        let result = validate_model_plan_semantics(&plan, Some(&allowed));
+
+        assert!(result.ok, "{:?}", result.errors);
+    }
 }

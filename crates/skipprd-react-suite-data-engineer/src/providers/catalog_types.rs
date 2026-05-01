@@ -5,6 +5,122 @@ use serde::{Deserialize, Serialize};
 /// This is NOT a real dataset/table; it is a project-scope semantic summary inferred during preflight.
 pub const GLOBAL_SEMANTIC_DATASET_ID: &str = "__global__";
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceStatus {
+    Observed,
+    UserProvided,
+    Unverified,
+    Contradicted,
+}
+
+impl EvidenceStatus {
+    pub fn authoring_safe(&self) -> bool {
+        matches!(self, Self::Observed | Self::UserProvided)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticClaimKind {
+    CandidateKey,
+    Relationship,
+    Grain,
+    NumericParse,
+    TimeField,
+    RowPreservation,
+    AggregateSafety,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticClaimRef {
+    pub claim_id: String,
+    pub kind: SemanticClaimKind,
+    pub status: EvidenceStatus,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileMetric {
+    pub value: f64,
+    #[serde(default)]
+    pub exact: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FieldProfile {
+    pub field_name: String,
+    pub status: EvidenceStatus,
+    #[serde(default)]
+    pub total_count: Option<u64>,
+    #[serde(default)]
+    pub null_count: Option<u64>,
+    #[serde(default)]
+    pub approx_distinct_count: Option<u64>,
+    #[serde(default)]
+    pub null_ratio: Option<ProfileMetric>,
+    #[serde(default)]
+    pub distinct_ratio: Option<ProfileMetric>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KeyCandidateProfile {
+    pub claim_id: String,
+    #[serde(default)]
+    pub field_names: Vec<String>,
+    pub status: EvidenceStatus,
+    #[serde(default)]
+    pub total_count: Option<u64>,
+    #[serde(default)]
+    pub null_count: Option<u64>,
+    #[serde(default)]
+    pub approx_distinct_count: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RelationshipCandidateProfile {
+    pub claim_id: String,
+    pub left_dataset_id: String,
+    pub right_dataset_id: String,
+    #[serde(default)]
+    pub left_fields: Vec<String>,
+    #[serde(default)]
+    pub right_fields: Vec<String>,
+    pub status: EvidenceStatus,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DatasetProfile {
+    pub dataset_id: String,
+    #[serde(default)]
+    pub row_count: Option<u64>,
+    #[serde(default)]
+    pub fields: Vec<FieldProfile>,
+    #[serde(default)]
+    pub key_candidates: Vec<KeyCandidateProfile>,
+    #[serde(default)]
+    pub relationship_candidates: Vec<RelationshipCandidateProfile>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticProfile {
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built_at_epoch_secs: Option<u64>,
+    #[serde(default)]
+    pub dataset_profiles: Vec<DatasetProfile>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SemanticFieldRole {
     Id,

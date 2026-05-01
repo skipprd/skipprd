@@ -1759,7 +1759,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1896,7 +1896,7 @@ version = "3.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "519bd3116aeeb42d5372c29d982d16d0170d3d4a5ed85fc7dd91642ffff3c67c"
 dependencies = [
- "darling 0.21.3",
+ "darling 0.20.11",
  "ident_case",
  "prettyplease",
  "proc-macro2",
@@ -4481,7 +4481,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4738,7 +4738,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5714,7 +5714,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.4.10",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -5825,7 +5825,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "system-configuration 0.6.1",
  "tokio",
  "tower-service",
@@ -6587,7 +6587,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8149,7 +8149,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9364,7 +9364,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -9384,7 +9384,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -9405,7 +9405,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.110",
@@ -9418,7 +9418,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.110",
@@ -9547,7 +9547,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.35",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
@@ -9584,9 +9584,9 @@ dependencies = [
  "cfg_aliases 0.2.1",
  "libc",
  "once_cell",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9865,9 +9865,9 @@ dependencies = [
 
 [[package]]
 name = "react"
-version = "1.2.1"
+version = "1.2.3"
 source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "31b12d52b4ea874f7e4c23808638ec3483d580390dee8e6952fbc4521c547d07"
+checksum = "7e6209caa3cf58962daa5b58b457b3ce2669b682ddaeb2a099f4f9cf0015400f"
 dependencies = [
  "async-trait",
  "axum",
@@ -9904,9 +9904,9 @@ dependencies = [
 
 [[package]]
 name = "react-core"
-version = "1.2.1"
+version = "1.2.3"
 source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "bf7a8bd8300c93805574edd161c300f520d3c8ec48294f2197beb3d6963851dd"
+checksum = "1694c4b2612ff1353bb7ded2bfac6f799126dd0ef3b4a491335ea4e678e9d9d5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9926,9 +9926,9 @@ dependencies = [
 
 [[package]]
 name = "react-http-protocol"
-version = "1.2.1"
+version = "1.2.3"
 source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "294d54b00725ec3a1857a1a76a6938a4d3d2d8f85abc5f7a395310e2a0f76f9a"
+checksum = "bb7ece8685c7fa9e2ca3b40d9e168e7987b1d0845a9f539c685fde04e21b561b"
 dependencies = [
  "serde",
  "serde_json",
@@ -10106,9 +10106,9 @@ dependencies = [
 
 [[package]]
 name = "react-module-provider-vector-lance"
-version = "1.2.1"
+version = "1.2.3"
 source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "7a887d90653f71d43082a1c8b01f99aa48ec73a1a512566444e481900d6693f9"
+checksum = "aa7f8eaa8b5c520a6e6e93af6502d849588047442709085ddd99bd7d63b00e0d"
 dependencies = [
  "arrow 56.2.0",
  "arrow-buffer 56.2.0",
@@ -10122,9 +10122,9 @@ dependencies = [
 
 [[package]]
 name = "react-module-storage-local"
-version = "1.2.1"
+version = "1.2.3"
 source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "38320d97d6e64483c250a9273fc9ec0261bbf1eb5c5ebda42c137509099dde38"
+checksum = "6e55af281e21a825d17690ce4958c6bbf2adaf0721465d8def282eb2e5591b76"
 dependencies = [
  "async-trait",
  "react-core",
@@ -10135,9 +10135,9 @@ dependencies = [
 
 [[package]]
 name = "react-module-storage-memory"
-version = "1.2.1"
+version = "1.2.3"
 source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "4da278800253ce8ecc56fe8c5794e04cdd74491d6c3347c880f9cbe50b9c94cc"
+checksum = "e844f18af93c2eb59ae5b455c36632290d7f0c6186a37b5467255c291dde1bb3"
 dependencies = [
  "async-trait",
  "react-core",
@@ -10146,9 +10146,9 @@ dependencies = [
 
 [[package]]
 name = "react-module-storage-s3"
-version = "1.2.1"
+version = "1.2.3"
 source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "0de2602e9da8776f842e4c16ade394aff4b464f239733a810e948e4a6502435f"
+checksum = "e167f177decac1074964f143474487a5675c5e6a14abde2aa358ef9cfefbd189"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -10186,9 +10186,9 @@ dependencies = [
 
 [[package]]
 name = "react-suite-debugger"
-version = "1.2.1"
+version = "1.2.3"
 source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "5d06e99b4a5eb0f37e849bc8377fa20c9ba40762e81cae71fd4475426118eef1"
+checksum = "152e94ba1bf470845de86534d54e7238273f5dfc97e7ac1974b19b13733cdfad"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10200,9 +10200,9 @@ dependencies = [
 
 [[package]]
 name = "react-transport"
-version = "1.2.1"
+version = "1.2.3"
 source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "26ef01e3ba0bf1a8ed55b9364b8334896a5058466754348f238f83811a7c20eb"
+checksum = "76d52040404a90a34d66be90ba56edc81e0b2995e59b56b1616151503a6c2ac0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10223,9 +10223,9 @@ dependencies = [
 
 [[package]]
 name = "react-view"
-version = "1.2.1"
+version = "1.2.3"
 source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "2f8045f68b0bedb479f828d9f240b890f35d55b88b03e7fc38d4551efcc68090"
+checksum = "c08c8073ccc3ac5b73bb3b6b22ffeae5095bd1233b722fbc79f3e432f3fd8381"
 dependencies = [
  "chrono",
  "react-core",
@@ -10805,7 +10805,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10946,7 +10946,7 @@ dependencies = [
  "security-framework 3.5.1",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13413,7 +13413,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -14603,7 +14603,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

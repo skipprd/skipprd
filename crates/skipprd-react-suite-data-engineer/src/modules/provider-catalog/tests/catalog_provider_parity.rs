@@ -7,7 +7,8 @@ use react_core::storage::StorageAdapter;
 use react_module_provider_catalog::DefaultCatalogProvider;
 use react_module_storage_memory::InMemoryStorageAdapter;
 use react_suite_data_engineer::providers::{
-    CatalogProvider, DataCatalog, GlobalSemanticContext, SemanticModel,
+    CatalogProvider, DataCatalog, DatasetProfile, EvidenceStatus, GlobalSemanticContext,
+    SemanticModel, SemanticProfile,
 };
 
 #[tokio::test]
@@ -79,6 +80,59 @@ async fn provider_write_catalog_uses_keyspace_key_and_roundtrips() {
     let cat2: DataCatalog = serde_json::from_value(raw).expect("catalog deserializable");
     assert_eq!(cat2.dataset_id, ns);
     assert_eq!(cat2.description.as_deref(), Some("desc"));
+}
+
+#[tokio::test]
+async fn provider_write_semantic_profile_uses_keyspace_key_and_roundtrips() {
+    let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+    let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("bucket".to_string()));
+    let llm: Arc<dyn LargeLanguageModel> = Arc::new(NullModel::new());
+    let provider = DefaultCatalogProvider::new(storage.clone(), keyspace.clone(), llm, 0, 8);
+
+    let scope = RequestScope::parse("t", "w", "p").expect("valid test scope");
+    let ns = "AwsDataCatalog.db.events";
+    let profile = SemanticProfile {
+        version: 1,
+        built_at_epoch_secs: Some(1),
+        dataset_profiles: vec![DatasetProfile {
+            dataset_id: ns.to_string(),
+            row_count: Some(10),
+            fields: vec![],
+            key_candidates: vec![],
+            relationship_candidates: vec![],
+        }],
+        notes: vec!["aggregate-only".to_string()],
+    };
+
+    provider
+        .write_semantic_profile(&scope, ns, &profile)
+        .await
+        .expect("write_semantic_profile");
+
+    let key = keyspace.scoped_key(
+        &scope,
+        &[
+            "semantic_profile",
+            &format!("{}.yaml", encode_key_component(ns)),
+        ],
+    );
+    let raw = storage
+        .get_json(&key)
+        .await
+        .expect("semantic profile stored");
+    let profile2: SemanticProfile = serde_json::from_value(raw).expect("deserializable");
+    assert_eq!(profile2.dataset_profiles[0].dataset_id, ns);
+    assert_eq!(
+        provider
+            .read_semantic_profile(&scope, ns)
+            .await
+            .expect("read_semantic_profile")
+            .expect("profile")
+            .dataset_profiles[0]
+            .row_count,
+        Some(10)
+    );
+    assert!(EvidenceStatus::Observed.authoring_safe());
 }
 
 #[tokio::test]

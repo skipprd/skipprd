@@ -330,6 +330,11 @@ mod tests {
                         description: None,
                     }],
                     assumptions: vec![],
+                    evidence_claim_refs: vec![crate::providers::SemanticClaimRef {
+                        claim_id: "candidate_key:test_raw.raw_customers:customer_id".to_string(),
+                        kind: crate::providers::SemanticClaimKind::CandidateKey,
+                        status: crate::providers::EvidenceStatus::Observed,
+                    }],
                 }),
                 source_schema: vec![crate::plan::SourceColumnDef {
                     name: "customer_id".to_string(),
@@ -1290,7 +1295,7 @@ async fn build_author_prompt(
     }
     q.push_str("\n\nNOTE: In agent mode, validation and publish are handled by the suite phases. Do not call dbt_validate or publish tools; focus on authoring fixes and models.");
     q.push_str("\nIMPORTANT: Tool-call argument shapes are strict. In particular: vect_query uses args.query_text (NOT args.query) and scope must be \"dataset\"|\"field\"|\"doc\"|\"artifact\"|\"metric\"|\"model\".");
-    q.push_str("\nIMPORTANT: sql_stats and sql_sample both require args.field. To sample rows, use run_sql with a LIMIT.");
+    q.push_str("\nIMPORTANT: sql_stats requires args.field. Do not sample rows for semantic evidence; use aggregate run_sql queries only when needed.");
     q.push_str("\nIMPORTANT: This authoring phase is plan-driven. Follow the Plan context below. If it says to patch failing DBT files, do that first; if it provides a next batch, execute it. Do NOT ask for approval; approvals happen in plan phases.");
     q.push_str("\nIMPORTANT: No downstream compensation exists for incomplete plan structure. If execution context is incomplete, return to planning; do not invent fallback execution.");
     q.push_str("\n\nPlan context:\n");

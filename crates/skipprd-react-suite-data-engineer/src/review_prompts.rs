@@ -56,6 +56,7 @@ You will be given:
 - The expected model file paths and their contents (bounded)
 - Any invariants/notes from planning
 - The authoritative schema (columns/types) for each dataset in the batch (when available)
+- Typed semantic evidence references from the implementation_spec (when available)
 
 Output one JSON object matching this JSON schema:
 {schema}
@@ -63,6 +64,8 @@ Output one JSON object matching this JSON schema:
 Rules:
 - CRITICAL: The planning artifacts you receive (invariants/notes and any implementation_spec) are the authoritative design contract for this phase.
   - Your primary job is CONFORMANCE REVIEW: does the SQL/YAML implement the provided implementation_spec and obey prohibited_ops?
+  - For GOLD/model review, also check evidence conformance: grain, key tests, relationships, casts used by metrics, and aggregate safety must be backed by observed or user_provided evidence_claim_refs.
+  - If SQL/YAML relies on unverified/contradicted semantic evidence, prefix the finding with "REQUIRES PLAN CHANGE: ...".
   - Do NOT propose changing the contract as part of review. If you believe the contract itself is wrong/ambiguous, prefix the finding with "REQUIRES PLAN CHANGE: ..." and do NOT propose an implementation change.
 - EVIDENCE-ONLY: every finding in "findings" MUST cite a specific file path, column name, or SQL construct you can see in the provided batch contents. Do NOT speculate about files or code you have not been shown.
 - MATERIALITY THRESHOLD: only flag issues that would cause incorrect query results, broken compilation, or violate an explicit prohibition in the spec. Do NOT flag stylistic preferences, naming conventions, or "nice to have" improvements unless they violate the spec.

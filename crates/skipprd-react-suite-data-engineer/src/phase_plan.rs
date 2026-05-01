@@ -287,11 +287,56 @@ async fn run_plan_bootstrap(
         .get("ok")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let profile_summary = match crate::ctx_ext::sctx_catalog(sctx) {
+        Some(cat) => match cat
+            .read_semantic_profile(sctx.scope(), crate::providers::GLOBAL_SEMANTIC_DATASET_ID)
+            .await
+        {
+            Ok(Some(profile)) => {
+                let dataset_count = profile.dataset_profiles.len();
+                let observed_key_claims: usize = profile
+                    .dataset_profiles
+                    .iter()
+                    .map(|d| {
+                        d.key_candidates
+                            .iter()
+                            .filter(|k| k.status.authoring_safe())
+                            .count()
+                    })
+                    .sum();
+                let mut claim_heads = profile
+                    .dataset_profiles
+                    .iter()
+                    .flat_map(|d| {
+                        d.key_candidates.iter().map(move |k| {
+                            format!(
+                                "{{claim_id:{}, kind:candidate_key, status:{:?}, dataset:{}, fields:{:?}}}",
+                                k.claim_id, k.status, d.dataset_id, k.field_names
+                            )
+                        })
+                    })
+                    .take(20)
+                    .collect::<Vec<_>>();
+                if claim_heads.is_empty() {
+                    claim_heads.push("none".to_string());
+                }
+                format!(
+                    "semantic_profile: available dataset_profiles={} observed_or_user_key_claims={} claim_refs_head=[{}]",
+                    dataset_count,
+                    observed_key_claims,
+                    claim_heads.join("; ")
+                )
+            }
+            Ok(None) => "semantic_profile: missing".to_string(),
+            Err(e) => format!("semantic_profile: unavailable ({e})"),
+        },
+        None => "semantic_profile: catalog provider missing".to_string(),
+    };
     let mut head_tables = tables.clone();
     head_tables.truncate(10);
     let bootstrap_sufficient = models_list_ok && tables_ok;
     let summary = format!(
-        "Deterministic bootstrap (suite-provided):\n- models/ listed: {} item(s)\n- models_list_ok: {}\n- sql_schema_ok: {}\n- tables discovered (head): {:?}\n- probed table for evidence: {:?}\n- probed field: {:?}\n- probe_ok: {}\n- bootstrap_sufficient: {}\n\nIf models/ is empty, that's OK; proceed using sql_schema discovery.",
+        "Deterministic bootstrap (suite-provided):\n- models/ listed: {} item(s)\n- models_list_ok: {}\n- sql_schema_ok: {}\n- tables discovered (head): {:?}\n- probed table for evidence: {:?}\n- probed field: {:?}\n- probe_ok: {}\n- {}\n- bootstrap_sufficient: {}\n\nIf models/ is empty, that's OK; proceed using sql_schema discovery. Use only aggregate semantic_profile statuses/counts/claim refs as semantic evidence; never raw row values.",
         model_count,
         models_list_ok,
         tables_ok,
@@ -299,6 +344,7 @@ async fn run_plan_bootstrap(
         probed,
         probed_field,
         probe_ok,
+        profile_summary,
         bootstrap_sufficient
     );
     if bootstrap_sufficient {
@@ -563,7 +609,7 @@ async fn build_plan_query(
                 "\n\nDETERMINISTIC FALLBACK MODE (manifest lookup unavailable):\n\
                  - Repeated json_file manifest lookup failures were detected in this model_plan phase.\n\
                  - Do NOT call json_file for manifest on this retry.\n\
-                 - Use deterministic fallback evidence only: file list/get + sql_schema + sql_stats/sql_sample/run_sql against concrete relations.\n\
+                 - Use deterministic fallback evidence only: file list/get + sql_schema + sql_stats/run_sql aggregate queries against concrete relations.\n\
                  - Continue plan grounding with available evidence; do not stall on manifest access.\n",
             );
         } else if manifest_retry_signal.noncanonical_attempt_count > 0 {

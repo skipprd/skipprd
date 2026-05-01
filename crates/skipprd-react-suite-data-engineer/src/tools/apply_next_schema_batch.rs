@@ -951,6 +951,14 @@ mod tests {
         }
     }
 
+    fn observed_customer_key_claim() -> Vec<crate::providers::SemanticClaimRef> {
+        vec![crate::providers::SemanticClaimRef {
+            claim_id: "candidate_key:test_raw.raw_customers:customer_id".to_string(),
+            kind: crate::providers::SemanticClaimKind::CandidateKey,
+            status: crate::providers::EvidenceStatus::Observed,
+        }]
+    }
+
     struct InspectingLlm {
         reply: String,
         saw_allowed_columns: Mutex<bool>,
@@ -1463,6 +1471,7 @@ mod tests {
                         description: None,
                     }],
                     assumptions: vec![],
+                    evidence_claim_refs: observed_customer_key_claim(),
                 }),
                 source_schema: vec![],
                 grounded_inputs: vec![],
@@ -1557,6 +1566,7 @@ mod tests {
                         description: None,
                     }],
                     assumptions: vec![],
+                    evidence_claim_refs: observed_customer_key_claim(),
                 }),
                 source_schema: vec![],
                 grounded_inputs: vec![],
@@ -1678,6 +1688,7 @@ mod tests {
                         description: None,
                     }],
                     assumptions: vec![],
+                    evidence_claim_refs: observed_customer_key_claim(),
                 }),
                 source_schema: vec![],
                 grounded_inputs: vec![],
@@ -1797,6 +1808,7 @@ mod tests {
                         description: None,
                     }],
                     assumptions: vec![],
+                    evidence_claim_refs: observed_customer_key_claim(),
                 }),
                 source_schema: vec![],
                 grounded_inputs: vec![],
@@ -1895,6 +1907,7 @@ mod tests {
                         description: None,
                     }],
                     assumptions: vec![],
+                    evidence_claim_refs: observed_customer_key_claim(),
                 }),
                 source_schema: vec![],
                 grounded_inputs: vec![],

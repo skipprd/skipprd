@@ -148,6 +148,7 @@ mod review_batched;
 mod review_persistence;
 mod review_prompts;
 pub(crate) mod schema_policy;
+mod semantic_profile;
 pub(crate) mod sql_first;
 pub(crate) mod state_manager;
 pub(crate) mod thread_cache;
@@ -429,12 +430,12 @@ impl DataEngineerSuite {
         actx: &AgentCtx,
         sql_schema_tool: &tools::sql_schema::SqlSchemaTool,
         sql_stats_tool: &tools::sql_stats::SqlStatsTool,
-        sql_sample_tool: &tools::sql_sample::SqlSampleTool,
+        _sql_sample_tool: &tools::sql_sample::SqlSampleTool,
         run_sql_tool: &tools::sql_run::SqlRunTool,
         table: &str,
         sql_schema_timeout: u64,
         sql_stats_timeout: u64,
-        sql_sample_timeout: u64,
+        _sql_sample_timeout: u64,
         run_sql_timeout: u64,
     ) -> (bool, Option<String>) {
         let schema_obs = control_flow::call_and_record_tool(
@@ -460,23 +461,6 @@ impl DataEngineerSuite {
             )
             .await;
             if stats_obs
-                .get("ok")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                return (true, Some(field.clone()));
-            }
-            let sample_obs = control_flow::call_and_record_tool(
-                thread_store,
-                thread_id,
-                Some(env_util::DEFAULT_AGENT_NAME.to_string()),
-                sql_sample_tool,
-                serde_json::json!({"table": table, "field": field, "k": 10}),
-                actx,
-                sql_sample_timeout,
-            )
-            .await;
-            if sample_obs
                 .get("ok")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)

@@ -12,7 +12,7 @@ pub mod type_parse;
 pub mod types;
 pub mod utils;
 
-pub use types::{DataCatalog, SemanticModel};
+pub use types::{DataCatalog, SemanticModel, SemanticProfile};
 
 use react_core::keyspace::encode_key_component;
 use react_core::keyspace::Keyspace;
@@ -141,6 +141,48 @@ impl CatalogProvider for DefaultCatalogProvider {
             scope,
             dataset_id,
             semantic,
+        )
+        .await
+    }
+
+    async fn read_semantic_profile(
+        &self,
+        scope: &RequestScope,
+        dataset_id: &str,
+    ) -> Result<Option<SemanticProfile>, String> {
+        let canonical =
+            if dataset_id == react_suite_data_engineer::providers::GLOBAL_SEMANTIC_DATASET_ID {
+                dataset_id.to_string()
+            } else {
+                Self::canonical_dataset_id(dataset_id)?
+            };
+        semantic::read_semantic_profile(
+            self.storage.clone(),
+            self.keyspace.clone(),
+            scope,
+            &canonical,
+        )
+        .await
+    }
+
+    async fn write_semantic_profile(
+        &self,
+        scope: &RequestScope,
+        dataset_id: &str,
+        profile: &SemanticProfile,
+    ) -> Result<(), String> {
+        let canonical =
+            if dataset_id == react_suite_data_engineer::providers::GLOBAL_SEMANTIC_DATASET_ID {
+                dataset_id.to_string()
+            } else {
+                Self::canonical_dataset_id(dataset_id)?
+            };
+        semantic::write_semantic_profile(
+            self.storage.clone(),
+            self.keyspace.clone(),
+            scope,
+            &canonical,
+            profile,
         )
         .await
     }

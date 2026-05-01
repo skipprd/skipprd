@@ -386,6 +386,9 @@ pub struct ModelImplementationSpec {
     /// Assumptions that require validation probes before downstream reliance.
     #[serde(default)]
     pub assumptions: Vec<String>,
+    /// Typed evidence references for grain, key, cardinality, parse, and aggregate claims.
+    #[serde(default)]
+    pub evidence_claim_refs: Vec<crate::providers::SemanticClaimRef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

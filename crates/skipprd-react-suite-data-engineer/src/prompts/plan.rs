@@ -15,13 +15,13 @@ Hard rules:
 Discovery checklist (stop when ALL are satisfied):
 1. Listed models/ directory to see existing dbt project files.
 2. Called sql_schema on each raw source table to get column names and types.
-3. Optionally: one sql_stats/sql_sample probe per source table for data quality evidence.
+3. Optionally: one sql_stats probe per source table for aggregate data quality evidence.
 Once you have items 1-2, you have enough evidence. Finish immediately.
 
 Tool rules:
-- IMPORTANT: sql_stats/sql_sample require BOTH args.table and args.field.
-- Never call sql_stats/sql_sample with table-only args.
-- Never use non-contract args like relation/op for sql_stats/sql_sample.
+- IMPORTANT: sql_stats requires BOTH args.table and args.field.
+- Never call sql_stats with table-only args.
+- Never use non-contract args like relation/op for sql_stats.
 - If field is unknown, call sql_schema(args:{table}) first, then pick a concrete field.
 - Prefer bounded reads and targeted probes.
 
@@ -52,7 +52,7 @@ Discovery checklist (stop when ALL are satisfied):
 1. Listed models/ directory to see existing staging models and any existing gold/marts models.
 2. Read each staging model SQL (one call per file) to understand available columns and transformations.
 3. Called sql_schema on each staging model to get column types.
-4. Optionally: one run_sql probe for row counts / data quality if needed.
+4. Optionally: one aggregate-only run_sql probe for row counts / data quality if needed.
 Once you have items 1-3, you have enough evidence. Finish immediately.
 
 Tool contract discipline:
@@ -61,11 +61,11 @@ Tool contract discipline:
 - Use json_file for structured manifest inspection (get_item for pointer reads, query for filtered node lookups).
 - Manifest lookups MUST use: json_file(args:{op:\"query\", path:\"target/manifest.json\", pointer:\"/nodes\", ...filters...}).
 - Do NOT use path:\"manifest.json\" or any storage-key/absolute-like path for manifest reads.
-- IMPORTANT: sql_stats/sql_sample require BOTH args.table and args.field.
-- Never call sql_stats/sql_sample with table-only args.
-- Never use non-contract args like relation/op for sql_stats/sql_sample.
+- IMPORTANT: sql_stats requires BOTH args.table and args.field.
+- Never call sql_stats with table-only args.
+- Never use non-contract args like relation/op for sql_stats.
 - If field is unknown, call sql_schema(args:{table}) first, then pick a concrete field.
-- For run_sql probes in planning: only use concrete relation queries (e.g. SELECT ... FROM <catalog.schema.table> ...).
+- For run_sql probes in planning: only use aggregate concrete relation queries (e.g. SELECT count(*) FROM <catalog.schema.table> ...); do not select row values.
 - Never use metadata pseudo-SQL in run_sql (e.g. SHOW SCHEMAS / SHOW TABLES / DESCRIBE / EXPLAIN / USE).
 
 When finished:
@@ -143,6 +143,8 @@ pub fn model_plan_candidates_system_prompt() -> String {
 Use strict schema fields only: candidates[].{name,insight,observation,value_score}.\n\
 Rules:\n\
 - Propose the canonical, highest-value GOLD models based on grounded evidence.\n\
+- Treat semantic_profile evidence as authoritative. Emit `evidence_claim_refs` for grain, key, relationship, parse, and aggregate claims; use `unverified` instead of guessing when proof is missing.\n\
+- Never use raw row values or examples as evidence; use only schemas, catalog metadata, profile counts/ratios/statuses, and explicit user-provided claims.\n\
 - Focus on one dimension per business entity (dim_*), highest value facts per business process (fct_*), \
 and a small number of the most analytically useful aggregates (agg_*).\n\
 - Do NOT produce every conceivable time-grain or dimensional permutation. \
@@ -207,6 +209,7 @@ implementation_spec MUST contain only these top-level keys:\n\
 - metrics\n\
 - output_fields\n\
 - assumptions\n\
+- evidence_claim_refs\n\
 Do not emit batch_id, dependencies, data_quality, wrappers, commentary, or any non-schema keys.\n\
 Each output_fields item MUST include: name, kind, expression.\n\
 spec_version MUST be an integer number (not a string).\n\
@@ -214,6 +217,7 @@ COLUMN GROUNDING (CRITICAL):\n\
 - output_fields[].source_columns and joins[].on MUST reference ONLY columns from the AUTHORITATIVE SCHEMAS or IMMUTABLE FACTS staging model columns.\n\
 - Do NOT invent, abbreviate, or rename column names.\n\
 - inputs[] MUST use exact staging model names from the IMMUTABLE FACTS section.\n\
+- evidence_claim_refs[] MUST reference only typed profile/user evidence with fields {claim_id, kind, status}. If proof is missing, include an `unverified` claim and keep assumptions explicit; downstream gates will request plan_change rather than speculative authoring.\n\
 Your specs must be complete enough for executable plan completion (author + validate checklist items can be finished without downstream guesswork)."
         .to_string()
 }

@@ -1099,6 +1099,11 @@ mod tests {
                     metrics: vec![],
                     output_fields: vec![],
                     assumptions: vec![],
+                    evidence_claim_refs: vec![crate::providers::SemanticClaimRef {
+                        claim_id: "candidate_key:test_raw.orders:order_id".to_string(),
+                        kind: crate::providers::SemanticClaimKind::CandidateKey,
+                        status: crate::providers::EvidenceStatus::Observed,
+                    }],
                 },
             }],
         );

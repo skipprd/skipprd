@@ -143,6 +143,14 @@ impl DataEngineerSuite {
 
         // Mandatory metadata completion pass.
         let all: std::collections::HashSet<String> = dss.iter().map(|ds| ds.fqn()).collect();
+        crate::semantic_profile::build_and_store_semantic_profiles(
+            cat.as_ref(),
+            sctx.scope(),
+            &all,
+        )
+        .await
+        .map_err(|e| format!("catalog bootstrap failed while building semantic profiles: {e}"))?;
+
         let enrich_report = cat
             .run_llm_enrichment_all(sctx.scope(), &all)
             .await

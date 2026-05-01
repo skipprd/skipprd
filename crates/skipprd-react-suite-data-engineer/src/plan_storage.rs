@@ -449,6 +449,11 @@ mod tests {
                         description: None,
                     }],
                     assumptions: vec![],
+                    evidence_claim_refs: vec![crate::providers::SemanticClaimRef {
+                        claim_id: "candidate_key:test_raw.raw_customers:customer_id".to_string(),
+                        kind: crate::providers::SemanticClaimKind::CandidateKey,
+                        status: crate::providers::EvidenceStatus::Observed,
+                    }],
                 }),
                 source_schema: vec![crate::plan::SourceColumnDef {
                     name: "customer_id".to_string(),
