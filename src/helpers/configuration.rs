@@ -48,7 +48,7 @@ pub struct Skippr {
     pub workspace: Option<String>,
     pub tenant: Option<String>,
     pub skippr_s3_bucket: Option<String>,
-    pub storage_mode: Option<String>,
+    pub skipprd_el_storage_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -321,7 +321,7 @@ impl Config {
                 workspace: None,
                 tenant: None,
                 skippr_s3_bucket: None,
-                storage_mode: None,
+                skipprd_el_storage_mode: None,
             }),
             pipelines: HashMap::new(),
             data_sources: None,
@@ -800,25 +800,25 @@ impl Config {
         }
     }
 
-    /// Returns `"local"` or `"s3"` (default). Controls where pipeline metadata
-    /// and stats are persisted.
+    /// Returns `"local"` or `"s3"` (default). Controls where skipprd
+    /// extract/load metadata and stats are persisted.
     pub fn get_storage_mode() -> String {
-        if Config::get_envcache("SKIPPR_STORAGE_MODE") != "" {
-            return Config::get_envcache("SKIPPR_STORAGE_MODE");
+        if Config::get_envcache("SKIPPRD_EL_STORAGE_MODE") != "" {
+            return Config::get_envcache("SKIPPRD_EL_STORAGE_MODE");
         } else {
             let config = Config::get();
 
-            let default_mode = Config::getenv("SKIPPR_STORAGE_MODE", "s3");
+            let default_mode = Config::getenv("SKIPPRD_EL_STORAGE_MODE", "s3");
 
             let mode = match config.skippr {
-                Some(skippr) => match skippr.storage_mode.as_ref() {
+                Some(skippr) => match skippr.skipprd_el_storage_mode.as_ref() {
                     Some(m) => m.to_string(),
                     None => default_mode,
                 },
                 None => default_mode,
             };
 
-            Config::set_evncache("SKIPPR_STORAGE_MODE", &mode);
+            Config::set_evncache("SKIPPRD_EL_STORAGE_MODE", &mode);
             mode
         }
     }
@@ -2552,6 +2552,33 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn skipprd_el_storage_mode_uses_explicit_name() {
+        let original_config = APP_CONFIG.read().clone();
+        let original_env = std::env::var("SKIPPRD_EL_STORAGE_MODE").ok();
+        ENV_CACHE.write().clear();
+        std::env::remove_var("SKIPPRD_EL_STORAGE_MODE");
+
+        let mut config = Config::new();
+        config.skippr = Some(Skippr {
+            workspace: None,
+            tenant: None,
+            skippr_s3_bucket: None,
+            skipprd_el_storage_mode: Some("local".to_string()),
+        });
+        *APP_CONFIG.write() = Some(config);
+
+        assert_eq!(Config::get_storage_mode(), "local");
+
+        *APP_CONFIG.write() = original_config;
+        match original_env {
+            Some(value) => std::env::set_var("SKIPPRD_EL_STORAGE_MODE", value),
+            None => std::env::remove_var("SKIPPRD_EL_STORAGE_MODE"),
+        }
+        ENV_CACHE.write().clear();
+    }
+
+    #[test]
     fn test_deadletter_config_unset_returns_none() {
         let pipeline = Pipeline {
             r#type: None,
@@ -2581,7 +2608,7 @@ mod tests {
                 workspace: None,
                 tenant: None,
                 skippr_s3_bucket: None,
-                storage_mode: None,
+                skipprd_el_storage_mode: None,
             }),
             pipelines: HashMap::new(),
             data_sources: None,
@@ -2628,7 +2655,7 @@ mod tests {
                 workspace: None,
                 tenant: None,
                 skippr_s3_bucket: None,
-                storage_mode: None,
+                skipprd_el_storage_mode: None,
             }),
             pipelines: HashMap::new(),
             data_sources: None,

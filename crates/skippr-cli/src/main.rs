@@ -1568,7 +1568,7 @@ async fn cmd_init(name: &str, reset: bool, explicit_config: &Option<PathBuf>) {
         r#"skippr:
   workspace: {name}
   tenant: _
-  storage_mode: local
+  skipprd_el_storage_mode: local
 
 pipelines:
   {name}:

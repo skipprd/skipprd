@@ -133,7 +133,7 @@ Returns a JSON object describing the pipeline's current state, including namespa
 }
 ```
 
-When `SKIPPR_STORAGE_MODE=local`, the `metadata_location` field shows the local disk path instead of an S3 URI.
+When `SKIPPRD_EL_STORAGE_MODE=local`, the `metadata_location` field shows the local disk path instead of an S3 URI.
 
 ```sql
 -- Example

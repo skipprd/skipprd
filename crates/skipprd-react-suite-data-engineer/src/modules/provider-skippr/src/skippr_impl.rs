@@ -67,7 +67,7 @@ impl SkipprCliProvider {
             self.skippr_yml_path().to_string_lossy().to_string(),
         );
         if let Some(storage_mode) = self.storage_mode.as_deref().filter(|v| !v.is_empty()) {
-            env.insert("SKIPPR_STORAGE_MODE".into(), storage_mode.to_string());
+            env.insert("SKIPPRD_EL_STORAGE_MODE".into(), storage_mode.to_string());
         }
         if let Some(bucket) = self.storage_bucket.as_deref().filter(|v| !v.is_empty()) {
             env.insert("SKIPPR_S3_BUCKET".into(), bucket.to_string());
@@ -747,7 +747,7 @@ impl SkipprCliProvider {
         let mut skippr_block = serde_json::Map::new();
         if let Some(storage_mode) = self.storage_mode.as_deref().filter(|v| !v.is_empty()) {
             skippr_block.insert(
-                "storage_mode".to_string(),
+                "skipprd_el_storage_mode".to_string(),
                 serde_json::Value::String(storage_mode.to_string()),
             );
         }
@@ -1706,7 +1706,7 @@ mod tests {
 
         let env = provider.env_vars();
         assert_eq!(
-            env.get("SKIPPR_STORAGE_MODE").map(String::as_str),
+            env.get("SKIPPRD_EL_STORAGE_MODE").map(String::as_str),
             Some("s3")
         );
         assert_eq!(
@@ -1732,7 +1732,7 @@ mod tests {
         assert_eq!(
             parsed
                 .get("skippr")
-                .and_then(|v| v.get("storage_mode"))
+                .and_then(|v| v.get("skipprd_el_storage_mode"))
                 .and_then(|v| v.as_str()),
             Some("s3")
         );

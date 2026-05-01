@@ -18,7 +18,7 @@ skipprd discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
 
 ## What it does
 
-1. Loads or creates pipeline metadata (from S3 or local disk, depending on `SKIPPR_STORAGE_MODE`)
+1. Loads or creates pipeline metadata (from S3 or local disk, depending on `SKIPPRD_EL_STORAGE_MODE`)
 2. Initializes the offset database
 3. Connects to the data source configured by `DATA_SOURCE_PLUGIN_NAME`
 4. Samples records and infers the complete nested schema via type inference

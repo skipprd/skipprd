@@ -148,7 +148,7 @@ fn file_csv_to_runtime_file_sink_writes_two_rows() {
     let config = format!(
         r#"skippr:
   workspace: batch-tests
-  storage_mode: local
+  skipprd_el_storage_mode: local
 
 data_sources:
   file_source:
@@ -214,7 +214,7 @@ fn runtime_source_data_channel_checkpoint_is_persisted() {
     let config = format!(
         r#"skippr:
   workspace: batch-tests
-  storage_mode: local
+  skipprd_el_storage_mode: local
 
 data_sources:
   file_source:
@@ -288,7 +288,7 @@ fn runtime_source_handshake_failure_exits_nonzero() {
     let config = format!(
         r#"skippr:
   workspace: batch-tests
-  storage_mode: local
+  skipprd_el_storage_mode: local
 
 data_sources:
   file_source:

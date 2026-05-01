@@ -23,14 +23,14 @@ deadletters/
   {tenant}/{workspace}/{pipeline}/...
 ```
 
-### SKIPPR_STORAGE_MODE
+### SKIPPRD_EL_STORAGE_MODE
 
-Controls where pipeline metadata and namespace stats are persisted.
+Controls where skipprd extract/load metadata and namespace stats are persisted.
 
 | | |
 |---|---|
-| **Environment variable** | `SKIPPR_STORAGE_MODE` |
-| **YAML** | `skippr.storage_mode` |
+| **Environment variable** | `SKIPPRD_EL_STORAGE_MODE` |
+| **YAML** | `skippr.skipprd_el_storage_mode` |
 | **Default** | `s3` |
 | **Values** | `s3`, `local` |
 
@@ -38,7 +38,7 @@ When set to `local`, metadata is read from and written to `{DATA_DIR}/metadata.j
 
 When set to `s3` (default), the existing S3-based persistence is used.
 
-This setting only affects where internal state (metadata, stats) is persisted. All destination operations (schema sync, Glue catalog updates, output writes) continue to work regardless of storage mode.
+This internal development/testing setting only affects where skipprd EL state (metadata, stats) is persisted. It does not control `skippr model` dbt project storage, React thread logs, or vector storage.
 
 Use `local` when running skipprd without an S3 bucket (e.g. in skippr-dbt orchestration on a developer machine).
 

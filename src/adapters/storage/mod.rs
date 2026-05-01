@@ -26,7 +26,7 @@ fn is_not_found_error(e: &str) -> bool {
 /// Storage adapter interface.
 ///
 /// Implementations route to either S3 or local disk based on
-/// `SKIPPR_STORAGE_MODE`.
+/// `SKIPPRD_EL_STORAGE_MODE`.
 #[async_trait]
 pub trait StorageAdapter: Send + Sync {
     async fn get_json(&self, key: &str) -> Result<Value, String>;

@@ -14,7 +14,7 @@ This document covers the new features added to support `skippr-dbt` EL orchestra
 | `SHOW PIPELINE` DDL | `SHOW PIPELINE <name>` | Return structured pipeline status with field details |
 | `--output json` / `--output text` | `skipprd sync --output json` | Structured output for programmatic parsing |
 | `--once` flag | `skipprd sync --once` | Single sync pass (bounded execution) |
-| Local Metadata Persistence | `SKIPPR_STORAGE_MODE=local` | Read/write metadata and stats to local disk |
+| Local Metadata Persistence | `SKIPPRD_EL_STORAGE_MODE=local` | Read/write skipprd EL metadata and stats to local disk |
 | Discover Mode Enhancements | `skipprd discover --output json` | Schema-only mode with structured output, no output plugin |
 
 ---
@@ -221,7 +221,7 @@ The output now includes full field details per namespace (field name, inferred t
 }
 ```
 
-When `SKIPPR_STORAGE_MODE=local`, the `metadata_location` field shows the local disk path.
+When `SKIPPRD_EL_STORAGE_MODE=local`, the `metadata_location` field shows the local disk path.
 
 ### Usage from skippr-dbt
 
@@ -312,7 +312,7 @@ This is the canonical invocation for orchestrated EL: a single bounded pass with
 
 ---
 
-## 7. Local Metadata Persistence (`SKIPPR_STORAGE_MODE`)
+## 7. Local Metadata Persistence (`SKIPPRD_EL_STORAGE_MODE`)
 
 ### Problem
 
@@ -320,21 +320,21 @@ This is the canonical invocation for orchestrated EL: a single bounded pass with
 
 ### Solution
 
-A new config option `SKIPPR_STORAGE_MODE` controls where metadata and stats are persisted:
+A new config option `SKIPPRD_EL_STORAGE_MODE` controls where skipprd EL metadata and stats are persisted:
 
 | | |
 |---|---|
-| **Environment variable** | `SKIPPR_STORAGE_MODE` |
-| **YAML** | `skippr.storage_mode` |
+| **Environment variable** | `SKIPPRD_EL_STORAGE_MODE` |
+| **YAML** | `skippr.skipprd_el_storage_mode` |
 | **Values** | `s3` (default), `local` |
 
-### When `storage_mode=local`
+### When `skipprd_el_storage_mode=local`
 
 - **Metadata**: read from / written to `{DATA_DIR}/metadata.json` (atomic write via temp + rename)
 - **Stats**: read from / written to `{DATA_DIR}/stats/{namespace}.json`
 - **SHOW PIPELINE**: `metadata_location` returns the local disk path
 
-Storage mode only controls where internal state is persisted. All destination operations (schema sync, Glue catalog updates, output writes) continue to work regardless of storage mode.
+Storage mode only controls where skipprd EL internal state is persisted. All destination operations (schema sync, Glue catalog updates, output writes) continue to work regardless of storage mode.
 
 ### Affected code paths
 
@@ -350,7 +350,7 @@ Storage mode only controls where internal state is persisted. All destination op
 ### skippr-dbt usage
 
 ```bash
-SKIPPR_STORAGE_MODE=local \
+SKIPPRD_EL_STORAGE_MODE=local \
 DATA_DIR=./data \
 skipprd discover --pipeline el_mssql --output json
 ```
@@ -359,7 +359,7 @@ Or via YAML:
 
 ```yaml
 skippr:
-  storage_mode: local
+  skipprd_el_storage_mode: local
 ```
 
 ---
@@ -451,7 +451,7 @@ The following illustrates a full EL cycle driven by `skippr-dbt` using local sto
 ### Step 0: Discover source schemas
 
 ```bash
-SKIPPR_STORAGE_MODE=local \
+SKIPPRD_EL_STORAGE_MODE=local \
 DATA_SOURCE_PLUGIN_NAME=Mssql \
 MSSQL_CONNECTION_STRING="Server=tcp:myserver,1433;Database=SalesDB;User Id=sa;Password=pass;" \
 skipprd discover --pipeline el_mssql --output json
