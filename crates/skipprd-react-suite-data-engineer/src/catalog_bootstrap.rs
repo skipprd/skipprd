@@ -151,10 +151,50 @@ impl DataEngineerSuite {
         .await
         .map_err(|e| format!("catalog bootstrap failed while building semantic profiles: {e}"))?;
 
-        let enrich_report = cat
-            .run_llm_enrichment_all(sctx.scope(), &all)
+        let enrich_report = if bootstrap_catalog_llm_enrichment_enabled() {
+            let enrich_timeout_secs = enrichment_timeout_secs(all.len());
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(enrich_timeout_secs),
+                cat.run_llm_enrichment_all(sctx.scope(), &all),
+            )
             .await
-            .map_err(|e| format!("catalog bootstrap failed while enriching metadata: {e}"))?;
+            {
+                Ok(Ok(report)) => report,
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        "data_engineer: catalog LLM enrichment failed; continuing with deterministic metadata repair: {}",
+                        e
+                    );
+                    crate::providers::CatalogEnrichmentReport {
+                        dataset_total: all.len(),
+                        dataset_enriched_failed: all.len(),
+                        global_context_error: Some(e),
+                        ..Default::default()
+                    }
+                }
+                Err(_) => {
+                    let err = format!("timed out after {}s", enrich_timeout_secs);
+                    tracing::warn!(
+                        "data_engineer: catalog LLM enrichment {}; continuing with deterministic metadata repair",
+                        err
+                    );
+                    crate::providers::CatalogEnrichmentReport {
+                        dataset_total: all.len(),
+                        dataset_enriched_failed: all.len(),
+                        global_context_error: Some(err),
+                        ..Default::default()
+                    }
+                }
+            }
+        } else {
+            tracing::info!(
+                "data_engineer: skipping catalog LLM enrichment during bootstrap; deterministic metadata repair remains enabled"
+            );
+            crate::providers::CatalogEnrichmentReport {
+                dataset_total: all.len(),
+                ..Default::default()
+            }
+        };
         tracing::info!(
             "data_engineer: catalog enrichment summary datasets={} ok={} failed={} global_written={}",
             enrich_report.dataset_total,
@@ -338,5 +378,28 @@ impl DataEngineerSuite {
         Ok(CatalogBootstrapOutcome {
             metadata_complete: meta_errors.is_empty(),
         })
+    }
+}
+
+fn enrichment_timeout_secs(dataset_count: usize) -> u64 {
+    ((dataset_count.max(1) as u64) * 15).clamp(30, 120)
+}
+
+fn bootstrap_catalog_llm_enrichment_enabled() -> bool {
+    std::env::var(env_util::env_keys::DE_CATALOG_LLM_ENRICHMENT)
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::enrichment_timeout_secs;
+
+    #[test]
+    fn enrichment_timeout_is_bounded_by_dataset_count() {
+        assert_eq!(enrichment_timeout_secs(0), 30);
+        assert_eq!(enrichment_timeout_secs(2), 30);
+        assert_eq!(enrichment_timeout_secs(4), 60);
+        assert_eq!(enrichment_timeout_secs(100), 120);
     }
 }

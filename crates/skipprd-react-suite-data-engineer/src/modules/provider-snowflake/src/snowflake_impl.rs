@@ -220,7 +220,7 @@ impl SnowflakeProvider {
     }
 
     fn quote_ident_sf(ident: &str) -> String {
-        format!("\"{}\"", ident.to_uppercase().replace('"', "\"\""))
+        format!("\"{}\"", ident.replace('"', "\"\""))
     }
 
     fn quote_table(database: &str, schema: &str, table: &str) -> String {
@@ -256,6 +256,7 @@ impl SnowflakeProvider {
             .rows
             .iter()
             .filter_map(|r| r.first().cloned().filter(|s| !s.trim().is_empty()))
+            .filter(|name| !is_skippr_internal_table(name))
             .collect();
         out.sort();
         out.dedup();
@@ -460,13 +461,36 @@ impl DatasetCatalogProvider for SnowflakeProvider {
             let is_complex = ty_lc.starts_with("variant")
                 || ty_lc.starts_with("object")
                 || ty_lc.starts_with("array");
+            let is_binary = ty_lc.starts_with("binary") || ty_lc.starts_with("varbinary");
             let is_timestamp = ty_lc.contains("timestamp");
             let is_date = ty_lc == "date";
+            let is_numeric = ty_lc.starts_with("number")
+                || ty_lc.starts_with("decimal")
+                || ty_lc.starts_with("numeric")
+                || matches!(
+                    ty_lc.as_str(),
+                    "int"
+                        | "integer"
+                        | "bigint"
+                        | "smallint"
+                        | "tinyint"
+                        | "byteint"
+                        | "float"
+                        | "float4"
+                        | "float8"
+                        | "double"
+                        | "double precision"
+                        | "real"
+                );
 
             let min_expr = if is_timestamp {
                 format!("EXTRACT(EPOCH FROM {})", expr)
             } else if is_date {
                 format!("EXTRACT(EPOCH FROM {}::TIMESTAMP)", expr)
+            } else if is_numeric {
+                expr.clone()
+            } else if is_binary {
+                "NULL".to_string()
             } else {
                 format!("TRY_CAST({} AS DOUBLE)", expr)
             };
@@ -489,7 +513,7 @@ impl DatasetCatalogProvider for SnowflakeProvider {
                     "SELECT \
                         COUNT(1) AS __rows, \
                         SUM(CASE WHEN {c} IS NULL THEN 1 ELSE 0 END) AS __nulls, \
-                        APPROX_COUNT_DISTINCT({c}) AS __distinct, \
+                        COUNT(DISTINCT {c}) AS __distinct, \
                         MIN({min_e}) AS __min_num, \
                         MAX({max_e}) AS __max_num \
                      FROM {tbl}",
@@ -524,6 +548,9 @@ impl DatasetCatalogProvider for SnowflakeProvider {
             fs.nulls = row.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
             if !is_complex {
                 fs.approx_distinct = row.get(2).and_then(|s| s.parse::<u64>().ok());
+                if fs.approx_distinct.is_some() {
+                    ns_stats.exact_distinct_fields.insert(name.clone());
+                }
                 fs.min_numeric = row.get(3).and_then(|s| s.parse::<f64>().ok());
                 fs.max_numeric = row.get(4).and_then(|s| s.parse::<f64>().ok());
             }
@@ -545,4 +572,21 @@ fn getenv_nonempty(key: &str) -> Option<String> {
     std::env::var(key)
         .ok()
         .and_then(|v| if v.trim().is_empty() { None } else { Some(v) })
+}
+
+fn is_skippr_internal_table(table: &str) -> bool {
+    table.trim().to_ascii_lowercase().starts_with("_skippr_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_skippr_internal_table;
+
+    #[test]
+    fn skippr_internal_tables_are_excluded_from_discovery() {
+        assert!(is_skippr_internal_table("_skippr_tombstones_orders"));
+        assert!(is_skippr_internal_table("_SKIPPR_TOMBSTONES_ORDERS"));
+        assert!(!is_skippr_internal_table("TRIP_START"));
+        assert!(!is_skippr_internal_table("orders"));
+    }
 }

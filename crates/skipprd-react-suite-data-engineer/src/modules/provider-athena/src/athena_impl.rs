@@ -702,6 +702,9 @@ impl DatasetCatalogProvider for AthenaProvider {
             fs.nulls = row.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
             if !is_complex {
                 fs.approx_distinct = row.get(2).and_then(|s| s.parse::<u64>().ok());
+                if fs.approx_distinct.is_some() {
+                    ns_stats.exact_distinct_fields.insert(path.clone());
+                }
                 fs.min_numeric = row.get(3).and_then(|s| s.parse::<f64>().ok());
                 fs.max_numeric = row.get(4).and_then(|s| s.parse::<f64>().ok());
             }

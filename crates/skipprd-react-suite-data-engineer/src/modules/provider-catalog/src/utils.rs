@@ -25,7 +25,7 @@ pub fn classify_field(_name: &str, stats: Option<&FieldStats>) -> SemanticFieldR
     SemanticFieldRole::Categorical
 }
 
-pub fn to_stats_lite(s: &FieldStats) -> FieldStatsLite {
+pub fn to_stats_lite(s: &FieldStats, distinct_count_exact: bool) -> FieldStatsLite {
     FieldStatsLite {
         total: s.total,
         nulls: s.nulls,
@@ -34,6 +34,7 @@ pub fn to_stats_lite(s: &FieldStats) -> FieldStatsLite {
         min_len: s.min_len,
         max_len: s.max_len,
         approx_distinct: s.approx_distinct,
+        distinct_count_exact,
         histogram_bins: s.histogram_bins.clone(),
         histogram_min: s.histogram_min,
         histogram_max: s.histogram_max,

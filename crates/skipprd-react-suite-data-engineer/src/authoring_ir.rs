@@ -107,6 +107,11 @@ pub fn compile_sql_first_draft(
         }
     }
 
+    let plan_col_keys: BTreeSet<String> = plan_output_fields
+        .iter()
+        .map(|f| f.name.trim().to_ascii_lowercase())
+        .filter(|n| !n.is_empty())
+        .collect();
     let mut seen = BTreeSet::new();
     let mut columns = Vec::new();
     for c in cols.into_iter() {
@@ -119,6 +124,27 @@ pub fn compile_sql_first_draft(
             return Err(format!("authoring_ir: duplicate output column '{}'", name));
         }
         columns.push(ColumnIntent { name });
+    }
+    if !plan_col_keys.is_empty() {
+        let actual_col_keys = columns
+            .iter()
+            .map(|c| c.name.trim().to_ascii_lowercase())
+            .filter(|n| !n.is_empty())
+            .collect::<BTreeSet<_>>();
+        if actual_col_keys != plan_col_keys {
+            let missing = plan_col_keys
+                .difference(&actual_col_keys)
+                .cloned()
+                .collect::<Vec<_>>();
+            let extra = actual_col_keys
+                .difference(&plan_col_keys)
+                .cloned()
+                .collect::<Vec<_>>();
+            return Err(format!(
+                "authoring_ir: final SELECT columns must exactly match plan_output_fields; missing={:?}; extra={:?}",
+                missing, extra
+            ));
+        }
     }
     if columns.is_empty() && !has_wildcard_projection {
         return Err("authoring_ir: no usable output columns".to_string());
@@ -191,5 +217,26 @@ mod tests {
         .expect("ir");
         let names = ir.columns.into_iter().map(|c| c.name).collect::<Vec<_>>();
         assert_eq!(names, vec!["order_id".to_string(), "user_id".to_string()]);
+    }
+
+    #[test]
+    fn compile_sql_first_draft_rejects_columns_outside_plan_contract() {
+        let err = compile_sql_first_draft(
+            "select\n  order_id,\n  order_id as order_id_raw\nfrom __SOURCE__",
+            &[],
+            &[OutputFieldSpec {
+                name: "order_id".to_string(),
+                kind: crate::plan_types::FieldKind::Clean,
+                source_columns: vec!["order_id".to_string()],
+                expression: "order_id".to_string(),
+                data_type: None,
+                nullable: false,
+                description: None,
+            }],
+        )
+        .expect_err("extra raw columns must not escape the plan contract");
+
+        assert!(err.contains("extra"));
+        assert!(err.contains("order_id_raw"));
     }
 }

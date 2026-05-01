@@ -102,7 +102,10 @@ impl CatalogBuilder {
             for cf in catalog.fields.iter_mut() {
                 if let Some(fs) = ns.fields.get(&cf.name) {
                     nulls_by_field.insert(cf.name.clone(), fs.nulls);
-                    cf.stats = Some(to_stats_lite(fs));
+                    cf.stats = Some(to_stats_lite(
+                        fs,
+                        ns.exact_distinct_fields.contains(&cf.name),
+                    ));
                 }
             }
             if let Some(ds) = catalog.dataset_stats.as_mut() {

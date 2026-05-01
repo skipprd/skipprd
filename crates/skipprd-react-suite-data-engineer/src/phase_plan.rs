@@ -1000,6 +1000,14 @@ async fn compile_and_ground_model_plan(
             &mut plan.tasks,
             gold_prefix.as_deref(),
         );
+        let attached = crate::semantic_profile::attach_semantic_profile_claim_refs_to_model_plan(
+            &pctx.actx, &mut plan,
+        )
+        .await?;
+        tracing::info!(
+            "data_engineer: [model] attached {} semantic_profile evidence claim ref(s)",
+            attached
+        );
     }
 
     tracing::info!("data_engineer: [model] grounding plan against existing staging models");
@@ -1063,6 +1071,15 @@ async fn compile_and_ground_model_plan(
             crate::plan_types::apply_intra_plan_grounded_inputs(
                 &mut plan.tasks,
                 gold_prefix.as_deref(),
+            );
+            let attached =
+                crate::semantic_profile::attach_semantic_profile_claim_refs_to_model_plan(
+                    &pctx.actx, &mut plan,
+                )
+                .await?;
+            tracing::info!(
+                "data_engineer: [model] reattached {} semantic_profile evidence claim ref(s)",
+                attached
             );
             crate::plan::ensure_model_plan_semantically_valid_or_repaired(
                 &mut plan,

@@ -87,6 +87,7 @@ pub mod env_keys {
     // Suite runtime
     pub const REACT_HEADLESS: &str = "REACT_HEADLESS";
     pub const DE_CATALOG_BOOTSTRAP_TIMEOUT_SECS: &str = "DE_CATALOG_BOOTSTRAP_TIMEOUT_SECS";
+    pub const DE_CATALOG_LLM_ENRICHMENT: &str = "DE_CATALOG_LLM_ENRICHMENT";
 
     // Planning LLM tokens
     pub const LLM_PLAN_MAX_TOKENS_CLEANSE: &str = "LLM_PLAN_MAX_TOKENS_CLEANSE";

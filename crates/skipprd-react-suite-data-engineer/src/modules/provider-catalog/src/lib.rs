@@ -246,9 +246,11 @@ impl CatalogProvider for DefaultCatalogProvider {
             }
             Err(e) => {
                 report.global_context_error = Some(e.clone());
-                Err(format!(
-                    "global semantic context enrichment failed after dataset enrichment: {e}"
-                ))
+                tracing::warn!(
+                    "global semantic context enrichment failed after dataset enrichment; continuing with catalog metadata repair path: {}",
+                    e
+                );
+                Ok(report)
             }
         }
     }

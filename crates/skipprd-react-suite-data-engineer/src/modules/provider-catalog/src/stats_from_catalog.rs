@@ -21,6 +21,13 @@ pub fn dataset_field_stats_from_catalog_json(
             fs.min_len = st.get("min_len").and_then(|x| x.as_u64());
             fs.max_len = st.get("max_len").and_then(|x| x.as_u64());
             fs.approx_distinct = st.get("approx_distinct").and_then(|x| x.as_u64());
+            if st
+                .get("distinct_count_exact")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false)
+            {
+                ns.exact_distinct_fields.insert(name.to_string());
+            }
             fs.histogram_bins = st
                 .get("histogram_bins")
                 .and_then(|x| x.as_array())

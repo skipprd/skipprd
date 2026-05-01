@@ -783,7 +783,8 @@ select * from {{ source('test_raw','raw_customers') }}
         )
         .await
         .unwrap_err();
-        assert!(err.contains("exactly ONE source"));
+        assert!(err.contains("exactly one dbt source() call"));
+        assert!(err.contains("found 2"));
     }
 
     #[tokio::test]

@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use react_core::error::CoreError;
 use react_core::keyspace::{encode_key_component, DefaultKeyspace, Keyspace};
 use react_core::llm::{LargeLanguageModel, NullModel};
 use react_core::scope::RequestScope;
-use react_core::storage::StorageAdapter;
+use react_core::storage::{ConditionalWriteStatus, StorageAdapter};
 use react_module_provider_catalog::DefaultCatalogProvider;
 use react_module_storage_memory::InMemoryStorageAdapter;
 use react_suite_data_engineer::providers::{
@@ -250,4 +252,146 @@ async fn global_semantic_context_is_written_under_semantic_global_key() {
         .audiences
         .iter()
         .any(|a| a.audience == "low_conf_should_drop"));
+}
+
+#[tokio::test]
+async fn provider_enrichment_treats_global_context_write_failure_as_best_effort() {
+    #[derive(Default)]
+    struct ScriptedLlm {
+        replies: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl LargeLanguageModel for ScriptedLlm {
+        fn chat(
+            &self,
+            _messages: &[react_core::llm::ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
+            let mut replies = self
+                .replies
+                .lock()
+                .map_err(|_| "mutex poisoned".to_string())?;
+            if replies.is_empty() {
+                return Err("no more replies".to_string());
+            }
+            Ok(replies.remove(0))
+        }
+
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(vec![])
+        }
+    }
+
+    struct FailGlobalSemanticPut {
+        inner: Arc<dyn StorageAdapter>,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for FailGlobalSemanticPut {
+        async fn get_json(&self, key: &str) -> Result<serde_json::Value, CoreError> {
+            self.inner.get_json(key).await
+        }
+
+        async fn put_json(&self, key: &str, value: &serde_json::Value) -> Result<(), CoreError> {
+            if key.ends_with("/semantic/__global__.yaml") {
+                return Err(CoreError::Storage(
+                    "simulated global write failure".to_string(),
+                ));
+            }
+            self.inner.put_json(key, value).await
+        }
+
+        async fn put_json_if_etag_matches(
+            &self,
+            key: &str,
+            value: &serde_json::Value,
+            expected_etag: Option<&str>,
+        ) -> Result<ConditionalWriteStatus, CoreError> {
+            self.inner
+                .put_json_if_etag_matches(key, value, expected_etag)
+                .await
+        }
+
+        async fn get_bytes(&self, key: &str) -> Result<Vec<u8>, CoreError> {
+            self.inner.get_bytes(key).await
+        }
+
+        async fn put_bytes(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            content_type: &str,
+        ) -> Result<(), CoreError> {
+            self.inner.put_bytes(key, bytes, content_type).await
+        }
+
+        async fn delete_object(&self, key: &str) -> Result<(), CoreError> {
+            self.inner.delete_object(key).await
+        }
+
+        async fn head_etag(&self, key: &str) -> Result<Option<String>, CoreError> {
+            self.inner.head_etag(key).await
+        }
+
+        async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, CoreError> {
+            self.inner.list_prefix(prefix).await
+        }
+    }
+
+    let inner: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+    let storage: Arc<dyn StorageAdapter> = Arc::new(FailGlobalSemanticPut {
+        inner: inner.clone(),
+    });
+    let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("bucket".to_string()));
+    let llm: Arc<dyn LargeLanguageModel> = Arc::new(ScriptedLlm {
+        replies: std::sync::Mutex::new(vec![
+            "Likely audience: analytics users.".to_string(),
+            serde_json::json!({
+                "version": 1,
+                "audiences": [{"audience":"analytics","confidence":0.9,"evidence":["dataset_id=AwsDataCatalog.db.events"]}],
+                "context_bullets": [{"text":"Project contains source datasets for analytics modeling.","confidence":0.9,"evidence":["dataset_id=AwsDataCatalog.db.events"]}],
+                "dataset_groups": [],
+                "assumptions_and_gaps": []
+            })
+            .to_string(),
+        ]),
+    });
+    let provider = DefaultCatalogProvider::new(storage.clone(), keyspace.clone(), llm, 0, 8);
+    let scope = RequestScope::parse("t", "w", "p").expect("valid test scope");
+    let dataset_id = "AwsDataCatalog.db.events";
+    let key = keyspace.scoped_key(
+        &scope,
+        &[
+            "catalog",
+            &format!("{}.yaml", encode_key_component(dataset_id)),
+        ],
+    );
+    storage
+        .put_json(
+            &key,
+            &serde_json::json!({
+                "dataset_id": dataset_id,
+                "catalog": "AwsDataCatalog",
+                "database": "db",
+                "table": "events",
+                "description": "Event source records.",
+                "fields": []
+            }),
+        )
+        .await
+        .expect("seed catalog");
+    let ids = std::collections::HashSet::from([dataset_id.to_string()]);
+
+    let report = provider
+        .run_llm_enrichment_all(&scope, &ids)
+        .await
+        .expect("global context write failure should be best-effort");
+
+    assert_eq!(report.dataset_enriched_ok, 1);
+    assert!(!report.global_context_written);
+    assert!(report
+        .global_context_error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("simulated global write failure"));
 }

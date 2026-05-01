@@ -60,6 +60,8 @@ pub struct FieldProfile {
     #[serde(default)]
     pub approx_distinct_count: Option<u64>,
     #[serde(default)]
+    pub distinct_count_exact: bool,
+    #[serde(default)]
     pub null_ratio: Option<ProfileMetric>,
     #[serde(default)]
     pub distinct_ratio: Option<ProfileMetric>,
@@ -78,6 +80,8 @@ pub struct KeyCandidateProfile {
     pub null_count: Option<u64>,
     #[serde(default)]
     pub approx_distinct_count: Option<u64>,
+    #[serde(default)]
+    pub distinct_count_exact: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -151,6 +155,8 @@ pub struct FieldStatsLite {
     pub max_len: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approx_distinct: Option<u64>,
+    #[serde(default)]
+    pub distinct_count_exact: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub histogram_bins: Option<Vec<u64>>,
     #[serde(skip_serializing_if = "Option::is_none")]

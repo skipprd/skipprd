@@ -426,7 +426,6 @@ pub fn generate_profiles_yml(
             } else {
                 providers.dbt.target.trim().to_string()
             };
-            let wh = &providers.warehouse;
             let schema = if providers.dbt.naming.target_schema.trim().is_empty() {
                 derive_scope_db_name(cfg)
             } else {

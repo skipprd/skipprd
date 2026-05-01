@@ -111,6 +111,10 @@ fn build_staging_sys_prompt(
          - Dialect/provider compatibility:\n\
 {provider_rules}\
          - Use the provided schema_columns types to guide casting and cleansing. Do NOT guess types from names.\n\
+         - If plan_implementation_spec is present, it is the approved published schema contract:\n\
+           - The final SELECT MUST output exactly plan_implementation_spec.output_fields, no more and no fewer.\n\
+           - Do NOT add *_raw passthrough columns unless they are explicitly listed in output_fields.\n\
+           - output_fields expressions override general heuristics below, including time handling.\n\
          - CRITICAL: Do NOT select or reference any column that is not present in schema_columns.\n\
            If the desired field is missing, note it and proceed with the closest available alternative.\n\
          - Time-like fields MUST be detected from schema types when possible:\n\
@@ -134,10 +138,9 @@ fn build_staging_sys_prompt(
            - Do NOT enforce grains/primary keys in silver (no deduping, no windowing row_number(), no filtering to non-null IDs).\n\
            - Do NOT add `*_pk` fields that imply enforced uniqueness; if you add canonical IDs, they must be nullable and accompanied by has_* flags.\n\
          - ROW-PRESERVING COLUMN CONTRACT:\n\
-           - The final SELECT MUST include ALL columns from schema_columns (the complete source schema).\n\
-           - Raw columns that need no transformation: include them directly (alias to clean names if helpful).\n\
-           - Columns the implementation_spec transforms: include the clean/derived/quality_flag version from output_fields AND the raw original (aliased with a *_raw suffix if the clean version reuses the base name).\n\
-           - Do NOT drop any source column. Silver is additive: source columns pass through, plus clean/derived columns are added alongside.\n\
+           - Row-preserving means preserving row count and lineage, not publishing every raw source column.\n\
+           - When plan_implementation_spec is present, publish only output_fields; use raw source columns inside CTEs as needed.\n\
+           - When no plan_implementation_spec is present, include all columns from schema_columns with stable clean names.\n\
          - Prefer an explicit column list in the final SELECT; avoid SELECT *. If you use CTEs, expand the final projection rather than using SELECT * FROM cte.\n\
          - IMPORTANT: Do NOT include a dbt config block or alias; the suite enforces canonical config/alias deterministically.\n\
          - Nested fields / dotted columns:\n\
@@ -742,6 +745,10 @@ impl Tool for StagingModelTool {
                 skip_warehouse_validation: false,
             };
             let cols_for_sql_clone = cols_for_sql.clone();
+            let plan_output_fields_for_validation = plan_implementation_spec
+                .as_ref()
+                .map(|s| s.output_fields.clone())
+                .unwrap_or_default();
             let loop_result = engine::sql_first_author_loop(
                 ctx,
                 &loop_config,
@@ -761,6 +768,11 @@ impl Tool for StagingModelTool {
                     ) {
                         d.sql = s;
                     }
+                    crate::authoring_ir::compile_sql_first_draft(
+                        &d.sql,
+                        &d.notes,
+                        &plan_output_fields_for_validation,
+                    )?;
                     Ok(())
                 },
             )
@@ -1296,7 +1308,7 @@ mod tests {
         let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let llm = Arc::new(CapturingLlm {
             resp: serde_json::json!({
-                "sql": "select order_id, created_at from __SOURCE__",
+                "sql": "select order_id as order_id_raw from __SOURCE__",
                 "notes": []
             })
             .to_string(),

@@ -133,7 +133,10 @@ async fn postprocess_schema_yml(
         out
     }
 
-    fn sources_value_from_fqns(fqns: &std::collections::BTreeSet<String>) -> YamlValue {
+    fn sources_value_from_fqns(
+        fqns: &std::collections::BTreeSet<String>,
+        quote_snowflake_sources: bool,
+    ) -> YamlValue {
         let grouped = crate::dataset_truth::group_by_catalog_schema(fqns);
         let mut sources_seq: Vec<YamlValue> = Vec::new();
         for ((cat, db), mut tables) in grouped.into_iter() {
@@ -152,6 +155,25 @@ async fn postprocess_schema_yml(
                 YamlValue::String("schema".to_string()),
                 YamlValue::String(db),
             );
+            if quote_snowflake_sources {
+                let mut quoting = YamlMapping::new();
+                quoting.insert(
+                    YamlValue::String("database".to_string()),
+                    YamlValue::Bool(true),
+                );
+                quoting.insert(
+                    YamlValue::String("schema".to_string()),
+                    YamlValue::Bool(true),
+                );
+                quoting.insert(
+                    YamlValue::String("identifier".to_string()),
+                    YamlValue::Bool(true),
+                );
+                src.insert(
+                    YamlValue::String("quoting".to_string()),
+                    YamlValue::Mapping(quoting),
+                );
+            }
             let mut tables_seq: Vec<YamlValue> = Vec::new();
             for t in tables.into_iter() {
                 let mut tm = YamlMapping::new();
@@ -245,7 +267,10 @@ async fn postprocess_schema_yml(
         }
     }
 
-    let sources_val = sources_value_from_fqns(&proven);
+    let sources_val = sources_value_from_fqns(
+        &proven,
+        providers.warehouse.kind == crate::de_config::WarehouseKind::Snowflake,
+    );
     root.insert(YamlValue::String("sources".to_string()), sources_val);
     serde_yaml::to_string(&YamlValue::Mapping(root)).map_err(|e| e.to_string())
 }
@@ -373,6 +398,13 @@ fn validate_model_sql_identity(rel: &str, content: &str) -> Result<(), String> {
     }
 
     if rel.starts_with("models/staging/") {
+        let source_call_count = source_call_occurrence_count(content);
+        if source_call_count != 1 {
+            return Err(format!(
+                "invalid silver model SQL at '{}': silver models under models/staging/ must contain exactly one dbt source() call, found {}",
+                rel, source_call_count
+            ));
+        }
         let sources = naming::extract_source_calls(content);
         if sources.is_empty() {
             return Err(format!(
@@ -405,6 +437,13 @@ fn validate_model_sql_identity(rel: &str, content: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn source_call_occurrence_count(content: &str) -> usize {
+    content
+        .to_ascii_lowercase()
+        .match_indices("source(")
+        .count()
 }
 
 fn tier_suffix_for_path(rel: &str, pcfg: &crate::de_config::ProvidersResolved) -> Option<String> {
@@ -451,6 +490,63 @@ fn rewrite_config_header(content: &str, _schema_suffix: &str, alias: &str) -> St
 mod tests {
     use super::*;
     use crate::project_fs::test_helpers::*;
+    use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::scope::RequestScope;
+
+    fn snowflake_cfg() -> Arc<react_core::resolved_config::ReactResolvedConfig> {
+        Arc::new(react_core::resolved_config::ReactResolvedConfig {
+            server: react_core::resolved_config::ServerResolved { port: 1 },
+            storage: react_core::resolved_config::StorageResolved {
+                mode: react_core::resolved_config::StorageMode::Local,
+                bucket: None,
+                path: None,
+                s3_credentials: None,
+            },
+            scope: RequestScope::parse("t", "w", "p").expect("valid test scope"),
+            llm: react_core::resolved_config::LlmResolved::default(),
+            suite_config: serde_json::json!({
+                "warehouse": {
+                    "kind": "snowflake",
+                    "container": "ANALYTICS",
+                    "namespace": "RAW_mixed_case",
+                    "extras": {}
+                },
+                "catalog": { "enabled": false, "refresh_secs": 60, "max_concurrency": 8 },
+                "dbt": {
+                    "enabled": true,
+                    "target": "dev",
+                    "naming": { "target_schema": "analytics", "silver_suffix": "silver", "gold_suffix": "gold" },
+                    "runner": "host"
+                },
+                "vector": { "enabled": false }
+            }),
+        })
+    }
+
+    fn make_snowflake_ctx(
+        storage: Arc<dyn react_core::storage::StorageAdapter>,
+        schemas: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<(String, String)>>>>,
+    ) -> react_core::agent::AgentCtx {
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope::parse("t", "w", "p").expect("valid test scope");
+        let mut actx = react_core::agent::AgentCtxBuilder::new(
+            Arc::new(DummyLlm::default()),
+            storage,
+            scope,
+            keyspace,
+            Arc::new(react_core::agent::DefaultPolicy),
+        )
+        .top_k(1)
+        .per_step_timeout_secs(1)
+        .max_steps(1)
+        .agent_name("test".to_string())
+        .resolved_config(Some(snowflake_cfg()))
+        .build();
+        let warehouse: Arc<dyn crate::providers::WarehouseProvider> =
+            Arc::new(MockWarehouse { schemas });
+        actx.set_capability(Arc::new(crate::ctx_ext::WarehouseCap(warehouse)));
+        actx
+    }
 
     #[tokio::test]
     async fn schema_yml_filters_unproven_sources_via_schema_facts() {
@@ -483,5 +579,54 @@ sources:
             .expect("ok");
         assert!(out.contains("raw_customers"));
         assert!(!out.contains("raw_products"));
+    }
+
+    #[tokio::test]
+    async fn schema_yml_quotes_snowflake_sources_so_mixed_case_raw_schemas_resolve() {
+        let storage: Arc<dyn react_core::storage::StorageAdapter> =
+            Arc::new(react_module_storage_memory::InMemoryStorageAdapter::default());
+        let schemas = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([(
+            "ANALYTICS.RAW_mixed_case.CUSTOMERS".to_string(),
+            vec![("CUSTOMER_ID".to_string(), "NUMBER".to_string())],
+        )])));
+        let ctx = make_snowflake_ctx(storage, schemas);
+        let datasets: Arc<dyn DatasetCatalogProvider> = Arc::new(MockDatasets {
+            items: vec![crate::providers::DatasetId {
+                catalog: "ANALYTICS".to_string(),
+                database: "RAW_mixed_case".to_string(),
+                table: "CUSTOMERS".to_string(),
+            }],
+        });
+        let existing = "version: 2\n";
+
+        let out = canonicalize_schema_yml(&ctx, Some(&datasets), existing)
+            .await
+            .expect("ok");
+
+        assert!(out.contains("name: RAW_mixed_case"));
+        assert!(out.contains("database: true"));
+        assert!(out.contains("schema: true"));
+        assert!(out.contains("identifier: true"));
+    }
+
+    #[test]
+    fn staging_sql_rejects_duplicate_source_calls_even_when_same_source() {
+        let content = r#"
+with first_body as (
+    select * from {{ source("RAW_semantic", "ORDERS") }}
+)
+select * from first_body
+
+with second_body as (
+    select * from {{ source("RAW_semantic", "ORDERS") }}
+)
+select * from second_body
+"#;
+
+        let err =
+            validate_model_sql_identity("models/staging/stg_raw_semantic_orders.sql", content)
+                .expect_err("duplicate source calls must be rejected");
+
+        assert!(err.contains("found 2"), "{err}");
     }
 }
