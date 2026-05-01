@@ -91,6 +91,12 @@ pub struct FactsBundle {
     pub tool_contracts: Value,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ManifestIndexes {
+    pub models: BTreeMap<String, (String, String)>,
+    pub sources: BTreeMap<(String, String), String>,
+}
+
 fn file_patch_contract_value() -> Value {
     // Keep this strictly mechanical and JSON-only. This is intended to be pasted into prompts
     // as an immutable contract, and reused in deterministic validators.
@@ -178,9 +184,7 @@ async fn schema_columns_for_fqn(ctx: &AgentCtx, fqn: &str) -> Option<RelationFac
     }
 }
 
-/// Build a minimal manifest index mapping model name -> (fqn, original_file_path).
-pub async fn load_manifest_index(ctx: &AgentCtx) -> BTreeMap<String, (String, String)> {
-    let mut out: BTreeMap<String, (String, String)> = BTreeMap::new();
+async fn load_manifest_value(ctx: &AgentCtx) -> Option<Value> {
     let base = ctx
         .keyspace()
         .scoped_prefix(ctx.scope(), &["dbt"])
@@ -188,12 +192,12 @@ pub async fn load_manifest_index(ctx: &AgentCtx) -> BTreeMap<String, (String, St
         .to_string()
         + "/";
     let key = format!("{}target/manifest.json", base);
-    let Ok(bytes) = retry_get_bytes(ctx.storage().as_ref(), &key).await else {
-        return out;
-    };
-    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
-        return out;
-    };
+    let bytes = retry_get_bytes(ctx.storage().as_ref(), &key).await.ok()?;
+    serde_json::from_slice::<Value>(&bytes).ok()
+}
+
+fn build_manifest_model_index(v: &Value) -> BTreeMap<String, (String, String)> {
+    let mut out: BTreeMap<String, (String, String)> = BTreeMap::new();
     let Some(nodes) = v.get("nodes").and_then(|n| n.as_object()) else {
         return out;
     };
@@ -243,22 +247,8 @@ pub async fn load_manifest_index(ctx: &AgentCtx) -> BTreeMap<String, (String, St
     out
 }
 
-/// Build a minimal manifest index mapping (source_name, table_name) -> fqn.
-pub async fn load_manifest_source_index(ctx: &AgentCtx) -> BTreeMap<(String, String), String> {
+fn build_manifest_source_index(v: &Value) -> BTreeMap<(String, String), String> {
     let mut out: BTreeMap<(String, String), String> = BTreeMap::new();
-    let base = ctx
-        .keyspace()
-        .scoped_prefix(ctx.scope(), &["dbt"])
-        .trim_end_matches('/')
-        .to_string()
-        + "/";
-    let key = format!("{}target/manifest.json", base);
-    let Ok(bytes) = retry_get_bytes(ctx.storage().as_ref(), &key).await else {
-        return out;
-    };
-    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
-        return out;
-    };
     let Some(sources) = v.get("sources").and_then(|n| n.as_object()) else {
         return out;
     };
@@ -300,6 +290,27 @@ pub async fn load_manifest_source_index(ctx: &AgentCtx) -> BTreeMap<(String, Str
         out.insert((source_name.to_string(), table_name.to_string()), fqn);
     }
     out
+}
+
+/// Build minimal manifest indexes from one best-effort manifest read.
+pub async fn load_manifest_indexes(ctx: &AgentCtx) -> ManifestIndexes {
+    let Some(v) = load_manifest_value(ctx).await else {
+        return ManifestIndexes::default();
+    };
+    ManifestIndexes {
+        models: build_manifest_model_index(&v),
+        sources: build_manifest_source_index(&v),
+    }
+}
+
+/// Build a minimal manifest index mapping model name -> (fqn, original_file_path).
+pub async fn load_manifest_index(ctx: &AgentCtx) -> BTreeMap<String, (String, String)> {
+    load_manifest_indexes(ctx).await.models
+}
+
+/// Build a minimal manifest index mapping (source_name, table_name) -> fqn.
+pub async fn load_manifest_source_index(ctx: &AgentCtx) -> BTreeMap<(String, String), String> {
+    load_manifest_indexes(ctx).await.sources
 }
 
 /// Build facts for a deterministic dbt_validate failure observation.
@@ -348,7 +359,14 @@ pub async fn build_facts_bundle_from_relations(
 
 /// Best-effort helper to resolve a list of model names into relation FQNs using manifest.json.
 pub async fn resolve_model_names_to_fqns(ctx: &AgentCtx, model_names: &[String]) -> Vec<String> {
-    let idx = load_manifest_index(ctx).await;
+    let idx = load_manifest_indexes(ctx).await.models;
+    resolve_model_names_to_fqns_from_index(&idx, model_names)
+}
+
+pub fn resolve_model_names_to_fqns_from_index(
+    idx: &BTreeMap<String, (String, String)>,
+    model_names: &[String],
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for n in model_names.iter() {
         if let Some((fqn, _file)) = idx.get(n) {
@@ -406,13 +424,17 @@ mod tests {
     use crate::providers::{DbtProvider, QueryProvider};
     use async_trait::async_trait;
     use react_core::agent::{AgentCtx, DefaultPolicy};
+    use react_core::error::CoreError;
     use react_core::keyspace::{DefaultKeyspace, Keyspace};
     use react_core::llm::NullModel;
     use react_core::resolved_config as config;
     use react_core::scope::RequestScope;
-    use react_core::storage::StorageAdapter;
+    use react_core::storage::{cached, ConditionalWriteStatus, StorageAdapter};
     use react_module_storage_memory::InMemoryStorageAdapter;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     fn minimal_cfg() -> Arc<config::ReactResolvedConfig> {
         Arc::new(config::ReactResolvedConfig {
@@ -543,6 +565,100 @@ mod tests {
         actx
     }
 
+    #[derive(Default)]
+    struct CountingStorageAdapter {
+        bytes: Mutex<HashMap<String, Vec<u8>>>,
+        get_bytes_calls: AtomicUsize,
+    }
+
+    impl CountingStorageAdapter {
+        fn seed_bytes(&self, key: &str, bytes: &[u8]) {
+            self.bytes
+                .lock()
+                .expect("bytes lock")
+                .insert(key.to_string(), bytes.to_vec());
+        }
+
+        fn get_bytes_calls(&self) -> usize {
+            self.get_bytes_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl StorageAdapter for CountingStorageAdapter {
+        async fn get_json(&self, key: &str) -> Result<Value, CoreError> {
+            let bytes = self.get_bytes(key).await?;
+            serde_json::from_slice::<Value>(&bytes)
+                .map_err(|e| CoreError::Storage(format!("get_json('{key}'): {e}")))
+        }
+
+        async fn put_json(&self, key: &str, value: &Value) -> Result<(), CoreError> {
+            let bytes = serde_json::to_vec(value)
+                .map_err(|e| CoreError::Storage(format!("put_json('{key}'): {e}")))?;
+            self.put_bytes(key, &bytes, "application/json").await
+        }
+
+        async fn put_json_if_etag_matches(
+            &self,
+            key: &str,
+            value: &Value,
+            _expected_etag: Option<&str>,
+        ) -> Result<ConditionalWriteStatus, CoreError> {
+            self.put_json(key, value).await?;
+            Ok(ConditionalWriteStatus::Written)
+        }
+
+        async fn get_bytes(&self, key: &str) -> Result<Vec<u8>, CoreError> {
+            self.get_bytes_calls.fetch_add(1, Ordering::SeqCst);
+            self.bytes
+                .lock()
+                .expect("bytes lock")
+                .get(key)
+                .cloned()
+                .ok_or_else(|| CoreError::Storage(format!("get_bytes('{key}'): not found")))
+        }
+
+        async fn put_bytes(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            _content_type: &str,
+        ) -> Result<(), CoreError> {
+            self.bytes
+                .lock()
+                .expect("bytes lock")
+                .insert(key.to_string(), bytes.to_vec());
+            Ok(())
+        }
+
+        async fn delete_object(&self, key: &str) -> Result<(), CoreError> {
+            self.bytes.lock().expect("bytes lock").remove(key);
+            Ok(())
+        }
+
+        async fn head_etag(&self, key: &str) -> Result<Option<String>, CoreError> {
+            Ok(self
+                .bytes
+                .lock()
+                .expect("bytes lock")
+                .contains_key(key)
+                .then(|| "etag".to_string()))
+        }
+
+        async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, CoreError> {
+            let mut keys: Vec<String> = self
+                .bytes
+                .lock()
+                .expect("bytes lock")
+                .keys()
+                .filter(|key| key.starts_with(prefix))
+                .cloned()
+                .collect();
+            keys.sort();
+            Ok(keys)
+        }
+    }
+
     #[test]
     fn extract_source_calls_finds_pairs() {
         let sql = "select 1 from {{ source('raw','events') }} join {{source(\"raw\",\"users\")}} u on 1=1";
@@ -579,5 +695,59 @@ mod tests {
         assert_eq!(facts.dialect.0, "Amazon Athena (engine v3 / Trino SQL)");
         assert!(facts.relations.is_empty());
         assert!(facts.tool_contracts.get("file").is_some());
+    }
+
+    #[tokio::test]
+    async fn manifest_indexes_share_one_cached_storage_read() {
+        let inner = Arc::new(CountingStorageAdapter::default());
+        let manifest_key = "t/w/p/dbt/target/manifest.json";
+        inner.seed_bytes(
+            manifest_key,
+            serde_json::json!({
+                "nodes": {
+                    "model.proj.stg_events": {
+                        "resource_type": "model",
+                        "name": "stg_events",
+                        "database": "AwsDataCatalog",
+                        "schema": "test_silver",
+                        "alias": "stg_events",
+                        "original_file_path": "models/staging/stg_events.sql"
+                    }
+                },
+                "sources": {
+                    "source.proj.raw.events": {
+                        "source_name": "raw",
+                        "name": "events",
+                        "database": "AwsDataCatalog",
+                        "schema": "test_raw",
+                        "identifier": "events"
+                    }
+                }
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let storage = cached(inner.clone());
+        let query: Arc<dyn QueryProvider> = Arc::new(MockQueryProvider);
+        let ctx = make_ctx(storage, query);
+
+        let indexes = load_manifest_indexes(&ctx).await;
+        assert_eq!(
+            indexes.models.get("stg_events"),
+            Some(&(
+                "AwsDataCatalog.test_silver.stg_events".to_string(),
+                "models/staging/stg_events.sql".to_string()
+            ))
+        );
+        assert_eq!(
+            indexes
+                .sources
+                .get(&("raw".to_string(), "events".to_string())),
+            Some(&"AwsDataCatalog.test_raw.events".to_string())
+        );
+
+        let _ = load_manifest_index(&ctx).await;
+        let _ = load_manifest_source_index(&ctx).await;
+        assert_eq!(inner.get_bytes_calls(), 1);
     }
 }

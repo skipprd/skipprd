@@ -4,7 +4,8 @@ use sha2::{Digest, Sha256};
 
 use react_core::agent::AgentCtx;
 use react_core::storage::{
-    retry_delete_object, retry_get_bytes, retry_list_prefix, retry_put_bytes,
+    is_storage_not_found_error, retry_delete_object, retry_get_bytes, retry_list_prefix,
+    retry_put_bytes,
 };
 
 pub mod diff;
@@ -96,9 +97,8 @@ pub async fn get_file(ctx: &AgentCtx, path: &str, max_chars: usize) -> Result<Va
             }))
         }
         Err(e) => {
-            let err_text = e.to_string();
-            let bootstrap_missing = (rel == PACKAGES_YML || rel == MODELS_SCHEMA_YML)
-                && is_missing_storage_error(&err_text);
+            let bootstrap_missing =
+                (rel == PACKAGES_YML || rel == MODELS_SCHEMA_YML) && is_storage_not_found_error(&e);
             if bootstrap_missing {
                 return Ok(serde_json::json!({
                     "ok": true,
@@ -116,7 +116,7 @@ pub async fn get_file(ctx: &AgentCtx, path: &str, max_chars: usize) -> Result<Va
                 "ok": false,
                 "path": rel,
                 "key": key,
-                "error": format!("not found or failed to fetch: {}", err_text),
+                "error": format!("not found or failed to fetch: {}", e),
             }))
         }
     }
@@ -290,14 +290,6 @@ fn is_allowed_rel_path(rel: &str) -> bool {
         return false;
     }
     true
-}
-
-fn is_missing_storage_error(err: &str) -> bool {
-    let e = err.to_ascii_lowercase();
-    e.contains("nosuchkey")
-        || e.contains("no such key")
-        || e.contains("not found")
-        || e.contains("404")
 }
 
 #[cfg(test)]
@@ -505,5 +497,86 @@ pub(crate) mod test_helpers {
             actx.set_capability(Arc::new(crate::ctx_ext::QueryCap(q)));
         }
         actx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use react_core::error::CoreError;
+    use react_core::storage::{cached, ConditionalWriteStatus, StorageAdapter};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct MissingCountingStorage {
+        get_bytes_calls: AtomicUsize,
+    }
+
+    impl MissingCountingStorage {
+        fn get_bytes_calls(&self) -> usize {
+            self.get_bytes_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl StorageAdapter for MissingCountingStorage {
+        async fn get_json(&self, key: &str) -> Result<Value, CoreError> {
+            Err(CoreError::Storage(format!("get_json('{key}'): not found")))
+        }
+
+        async fn put_json(&self, _key: &str, _value: &Value) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn put_json_if_etag_matches(
+            &self,
+            _key: &str,
+            _value: &Value,
+            _expected_etag: Option<&str>,
+        ) -> Result<ConditionalWriteStatus, CoreError> {
+            Ok(ConditionalWriteStatus::Written)
+        }
+
+        async fn get_bytes(&self, key: &str) -> Result<Vec<u8>, CoreError> {
+            self.get_bytes_calls.fetch_add(1, Ordering::SeqCst);
+            Err(CoreError::Storage(format!("get_bytes('{key}'): not found")))
+        }
+
+        async fn put_bytes(
+            &self,
+            _key: &str,
+            _bytes: &[u8],
+            _content_type: &str,
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn delete_object(&self, _key: &str) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn head_etag(&self, _key: &str) -> Result<Option<String>, CoreError> {
+            Ok(None)
+        }
+
+        async fn list_prefix(&self, _prefix: &str) -> Result<Vec<String>, CoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_packages_yml_miss_uses_storage_cache() {
+        let inner = test_helpers::Arc::new(MissingCountingStorage::default());
+        let storage = cached(inner.clone());
+        let ctx = test_helpers::make_ctx(storage, None);
+
+        for _ in 0..2 {
+            let value = get_file(&ctx, PACKAGES_YML, 4000).await.expect("get file");
+            assert_eq!(value.get("ok").and_then(Value::as_bool), Some(true));
+            assert_eq!(value.get("missing").and_then(Value::as_bool), Some(true));
+        }
+
+        assert_eq!(inner.get_bytes_calls(), 1);
     }
 }

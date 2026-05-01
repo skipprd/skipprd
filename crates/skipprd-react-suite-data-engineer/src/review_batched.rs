@@ -630,9 +630,11 @@ async fn dependency_schemas_for_sql(sctx: &SuiteCtx, actx: &AgentCtx, sql: &str)
     ref_names.truncate(20);
 
     let source_calls = naming::extract_source_calls(sql);
+    let manifest_indexes = facts::load_manifest_indexes(actx).await;
 
     // Resolve refs via manifest model index.
-    let ref_fqns = facts::resolve_model_names_to_fqns(actx, &ref_names).await;
+    let ref_fqns =
+        facts::resolve_model_names_to_fqns_from_index(&manifest_indexes.models, &ref_names);
     for (i, fqn) in ref_fqns.iter().enumerate() {
         // Pair with ref name best-effort (same order as ref_names after mapping isn't guaranteed).
         let name = ref_names.get(i).cloned().unwrap_or_else(|| "".to_string());
@@ -649,9 +651,11 @@ async fn dependency_schemas_for_sql(sctx: &SuiteCtx, actx: &AgentCtx, sql: &str)
     }
 
     // Resolve sources via manifest source index (more reliable than guessing catalog/schema).
-    let src_idx = facts::load_manifest_source_index(actx).await;
     for (src_name, table_name) in source_calls.into_iter().take(25) {
-        if let Some(fqn) = src_idx.get(&(src_name.clone(), table_name.clone())) {
+        if let Some(fqn) = manifest_indexes
+            .sources
+            .get(&(src_name.clone(), table_name.clone()))
+        {
             let schema = cap_schema_columns(&schema_for_dataset_fqn(sctx, actx, fqn).await);
             out.push(serde_json::json!({
                 "kind": "source",
