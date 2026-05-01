@@ -1466,7 +1466,7 @@ def run_runtime_file_release_smoke(
         config_path.write_text(
             f"""skippr:
   workspace: {RUNTIME_ACCEPTANCE_WORKSPACE}
-  storage_mode: local
+  skipprd_el_storage_mode: local
 
 data_sources:
   file_source:
@@ -1502,8 +1502,9 @@ pipelines:
         env["DATA_DIR"] = str(data_dir)
         env["DATA_DIR_MIN_FREE_BYTES"] = "0"
         run_command(
-            [str(skipprd), "sync", "--log", "--pipeline", pipeline_name],
+            [str(skipprd), "sync", "--log", "--pipeline", pipeline_name, "--once"],
             env=env,
+            timeout_seconds=600,
         )
         parquet_files = sorted(data_dir.rglob("*.parquet"))
         if not parquet_files:
@@ -1608,7 +1609,7 @@ CREATE SCHEMA public;
         config_path.write_text(
             f"""skippr:
   workspace: {RUNTIME_ACCEPTANCE_WORKSPACE}
-  storage_mode: local
+  skipprd_el_storage_mode: local
 
 data_sources:
   postgres_source:
@@ -1665,8 +1666,9 @@ pipelines:
         env["DATA_DIR"] = str(data_dir)
         env["DATA_DIR_MIN_FREE_BYTES"] = "0"
         run_command(
-            [str(skipprd), "sync", "--log", "--pipeline", pipeline_name],
+            [str(skipprd), "sync", "--log", "--pipeline", pipeline_name, "--once"],
             env=env,
+            timeout_seconds=600,
         )
         table_names = [
             line.strip()
