@@ -23,7 +23,7 @@ data_sources:
     Mysql:
       connection_string: mysql://root:mysql@127.0.0.1:3306/skippr_iceberg_e2e
       tables: ["type_matrix_orders"]
-      cdc_enabled: true
+      cdc_mode: snapshot_then_cdc
       server_id: 4242
       cdc_idle_timeout_seconds: 5
 

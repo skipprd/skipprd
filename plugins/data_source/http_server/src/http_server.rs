@@ -172,4 +172,10 @@ impl DataSource for DataSourceHttpServerPlugin {
         server_handle.abort();
         Ok(())
     }
+
+    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
+        crate::plugins::SourceExecutionContract::stream(
+            crate::plugins::SourceOnceContract::HostIdleBounded,
+        )
+    }
 }

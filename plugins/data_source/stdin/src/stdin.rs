@@ -14,7 +14,7 @@ use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::helpers::Helpers;
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::{DataSink, DataSource};
+use crate::plugins::{DataSink, DataSource, SourceExecutionContract, SourceOnceContract};
 use crate::RUNNING;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -191,5 +191,19 @@ impl DataSource for DataSourceStdinPlugin {
         }
 
         Ok(())
+    }
+
+    fn execution_contract(&self) -> SourceExecutionContract {
+        let stream_mode = self
+            .config
+            .mode
+            .as_deref()
+            .unwrap_or("batch")
+            .eq_ignore_ascii_case("stream");
+        if stream_mode {
+            SourceExecutionContract::stream(SourceOnceContract::HostIdleBounded)
+        } else {
+            SourceExecutionContract::finite()
+        }
     }
 }

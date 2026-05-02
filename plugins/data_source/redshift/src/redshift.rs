@@ -241,4 +241,8 @@ impl DataSource for DataSourceRedshiftPlugin {
 
         Ok(())
     }
+
+    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
+        crate::plugins::SourceExecutionContract::finite()
+    }
 }

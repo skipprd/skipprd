@@ -10,6 +10,8 @@ When making changes to this codebase, follow these principles in order of priori
 
 3. **DRY (Don't Repeat Yourself):** Extract shared logic into functions, traits, or shared modules. Duplicated error messages, validation logic, or serialization patterns are bugs waiting to diverge.
 
+Always favour compile errors over runtime convention
+
 ## Overview
 
 This repository contains **Skippr** — a Rust-based data ingestion and transformation CLI.

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
+use serde_derive::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -22,6 +23,91 @@ pub trait RuntimeIngestRelay: Send + Sync {
     ) -> Result<(), std::io::Error>;
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum SourceCdcContract {
+    None,
+    Configurable {
+        mode: SourceCdcMode,
+        capability: &'static SourceCapability,
+    },
+}
+
+impl SourceCdcContract {
+    pub fn capability(self) -> Option<&'static SourceCapability> {
+        match self {
+            Self::Configurable { mode, capability } if mode.includes_cdc_stream() => {
+                Some(capability)
+            }
+            Self::Configurable { .. } | Self::None => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceCdcMode {
+    /// Bounded read only; do not emit CDC metadata or consume a change stream.
+    #[default]
+    Snapshot,
+    /// Initial snapshot on first run, then resume from CDC checkpoints thereafter.
+    SnapshotThenCdc,
+    /// No initial snapshot; start or resume from the source's CDC stream only.
+    CdcOnly,
+}
+
+impl SourceCdcMode {
+    pub fn includes_cdc_stream(self) -> bool {
+        matches!(self, Self::SnapshotThenCdc | Self::CdcOnly)
+    }
+
+    pub fn includes_initial_snapshot(self) -> bool {
+        matches!(self, Self::Snapshot | Self::SnapshotThenCdc)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceOnceContract {
+    /// `sync()` returns after the current bounded snapshot/read is complete.
+    Finite,
+    /// `sync()` may stream indefinitely; runtime `--once` idle supervision is required.
+    HostIdleBounded,
+    /// The plugin has its own idle/exhaustion condition in addition to host supervision.
+    PluginIdleBounded,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SourceExecutionContract {
+    pub cdc: SourceCdcContract,
+    pub once: SourceOnceContract,
+}
+
+impl SourceExecutionContract {
+    pub fn finite() -> Self {
+        Self {
+            cdc: SourceCdcContract::None,
+            once: SourceOnceContract::Finite,
+        }
+    }
+
+    pub fn stream(once: SourceOnceContract) -> Self {
+        Self {
+            cdc: SourceCdcContract::None,
+            once,
+        }
+    }
+
+    pub fn configurable_cdc(
+        mode: SourceCdcMode,
+        capability: &'static SourceCapability,
+        once: SourceOnceContract,
+    ) -> Self {
+        Self {
+            cdc: SourceCdcContract::Configurable { mode, capability },
+            once,
+        }
+    }
+}
+
 /// Reads records from an external system and feeds them into the pipeline.
 #[async_trait]
 pub trait DataSource: Send + Sync {
@@ -31,11 +117,47 @@ pub trait DataSource: Send + Sync {
         output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> Result<(), std::io::Error>;
 
-    /// Return the compile-time capability descriptor for this source.
-    /// Default returns `None` for backward compatibility with existing
-    /// connectors that have not yet declared capabilities.
+    /// Return this source's typed execution contract.
+    ///
+    /// This is intentionally required for every source connector so new plugins
+    /// must declare CDC semantics and `--once` termination behavior at compile time.
+    fn execution_contract(&self) -> SourceExecutionContract;
+
+    /// Return the active CDC capability descriptor for this source.
     fn capability(&self) -> Option<&'static SourceCapability> {
-        None
+        self.execution_contract().cdc.capability()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::cdc::source_capabilities;
+
+    #[test]
+    fn source_cdc_mode_uses_snake_case_config_strings() {
+        let mode: SourceCdcMode = serde_json::from_str("\"snapshot_then_cdc\"").unwrap();
+        assert_eq!(mode, SourceCdcMode::SnapshotThenCdc);
+
+        let mode: SourceCdcMode = serde_json::from_str("\"cdc_only\"").unwrap();
+        assert_eq!(mode, SourceCdcMode::CdcOnly);
+    }
+
+    #[test]
+    fn source_cdc_contract_exposes_capability_only_for_streaming_modes() {
+        let snapshot = SourceExecutionContract::configurable_cdc(
+            SourceCdcMode::Snapshot,
+            &source_capabilities::POSTGRES,
+            SourceOnceContract::Finite,
+        );
+        assert!(snapshot.cdc.capability().is_none());
+
+        let cdc = SourceExecutionContract::configurable_cdc(
+            SourceCdcMode::SnapshotThenCdc,
+            &source_capabilities::POSTGRES,
+            SourceOnceContract::HostIdleBounded,
+        );
+        assert!(cdc.cdc.capability().is_some());
     }
 }
 

@@ -177,4 +177,8 @@ impl DataSource for DataSourceSftpPlugin {
 
         Ok(())
     }
+
+    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
+        crate::plugins::SourceExecutionContract::finite()
+    }
 }

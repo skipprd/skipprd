@@ -16,9 +16,11 @@ use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use crate::plugins::cdc::{
     source_capabilities, CheckpointAuthority, CheckpointKind, MutationKind, MysqlCheckpoint,
-    SourceCapability, WalRowMeta,
+    WalRowMeta,
 };
-use crate::plugins::{DataSink, DataSource};
+use crate::plugins::{
+    DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
+};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceMysqlPluginConfig {
@@ -27,7 +29,8 @@ pub struct DataSourceMysqlPluginConfig {
     pub format: Option<String>,
     pub batch_size_bytes: Option<i64>,
     pub batch_size_seconds: Option<i64>,
-    pub cdc_enabled: Option<bool>,
+    #[serde(default)]
+    pub cdc_mode: SourceCdcMode,
     pub server_id: Option<u32>,
     #[serde(default)]
     pub cdc_idle_timeout_seconds: Option<u64>,
@@ -58,7 +61,7 @@ impl DataSourceMysqlPlugin {
                     format: Some("row".to_string()),
                     batch_size_bytes: None,
                     batch_size_seconds: None,
-                    cdc_enabled: None,
+                    cdc_mode: SourceCdcMode::Snapshot,
                     server_id: None,
                     cdc_idle_timeout_seconds: None,
                 }
@@ -153,8 +156,8 @@ impl DataSourceMysqlPlugin {
         serde_json::to_string(&Value::Object(map)).unwrap_or_default()
     }
 
-    fn is_cdc_enabled(&self) -> bool {
-        self.config.cdc_enabled.unwrap_or(false)
+    fn cdc_mode(&self) -> SourceCdcMode {
+        self.config.cdc_mode
     }
 
     /// Capture current binlog file and position from the primary.
@@ -217,6 +220,7 @@ impl DataSourceMysqlPlugin {
         &mut self,
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        mode: SourceCdcMode,
     ) -> Result<(), std::io::Error> {
         info!("MySQL CDC: starting binlog replication");
 
@@ -250,16 +254,25 @@ impl DataSourceMysqlPlugin {
         let column_map = Self::fetch_column_names(&mut conn).await?;
 
         // 3. Discover tables
-        let tables = if resume_mode {
-            info!("MySQL CDC: skipping snapshot (resuming from stored binlog position)");
-            Vec::new()
-        } else {
+        let should_run_snapshot = mode.includes_initial_snapshot() && !resume_mode;
+        let tables = if should_run_snapshot {
             match &self.config.tables {
                 Some(t) => t.clone(),
                 None => Self::discover_tables(&mut conn)
                     .await
                     .map_err(|e| std::io::Error::other(format!("Discover tables: {}", e)))?,
             }
+        } else {
+            match (resume_mode, mode) {
+                (true, _) => {
+                    info!("MySQL CDC: skipping snapshot (resuming from stored binlog position)")
+                }
+                (false, SourceCdcMode::CdcOnly) => {
+                    info!("MySQL CDC: cdc_only mode skips initial snapshot")
+                }
+                _ => {}
+            }
+            Vec::new()
         };
 
         // 4. Initial snapshot anchored to binlog position
@@ -344,7 +357,23 @@ impl DataSourceMysqlPlugin {
                 .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
         }
 
-        info!("MySQL CDC: snapshot complete, switching to binlog stream");
+        if should_run_snapshot {
+            let checkpoint = MysqlCheckpoint {
+                binlog_file: binlog_file.clone(),
+                binlog_position: binlog_pos,
+            };
+            offsets
+                .store_checkpoint_payload(
+                    &checkpoint_key,
+                    CheckpointAuthority::WalOwnership,
+                    CheckpointKind::SourceResume,
+                    1,
+                    &checkpoint,
+                )
+                .map_err(std::io::Error::other)?;
+        }
+
+        info!("MySQL CDC: bootstrap complete, switching to binlog stream");
 
         // 5. Open binlog stream from captured position.
         //    get_binlog_stream() consumes the Conn, so acquire a fresh one.
@@ -663,19 +692,37 @@ impl DataSource for DataSourceMysqlPlugin {
         offsets: Arc<Offsets>,
         output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> Result<(), std::io::Error> {
-        if self.is_cdc_enabled() {
-            self.sync_cdc(offsets, output).await
-        } else {
-            self.sync_query(offsets, output, false).await;
-            Ok(())
+        match self.cdc_mode() {
+            SourceCdcMode::Snapshot => {
+                self.sync_query(offsets, output, false).await;
+                Ok(())
+            }
+            mode @ (SourceCdcMode::SnapshotThenCdc | SourceCdcMode::CdcOnly) => {
+                self.sync_cdc(offsets, output, mode).await
+            }
         }
     }
 
-    fn capability(&self) -> Option<&'static SourceCapability> {
-        if self.is_cdc_enabled() {
-            Some(&source_capabilities::MYSQL)
+    fn execution_contract(&self) -> SourceExecutionContract {
+        let mode = self.cdc_mode();
+        if mode.includes_cdc_stream() {
+            let once = if self
+                .config
+                .cdc_idle_timeout_seconds
+                .filter(|s| *s > 0)
+                .is_some()
+            {
+                SourceOnceContract::PluginIdleBounded
+            } else {
+                SourceOnceContract::HostIdleBounded
+            };
+            SourceExecutionContract::configurable_cdc(mode, &source_capabilities::MYSQL, once)
         } else {
-            None
+            SourceExecutionContract::configurable_cdc(
+                mode,
+                &source_capabilities::MYSQL,
+                SourceOnceContract::Finite,
+            )
         }
     }
 }

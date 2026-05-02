@@ -725,4 +725,8 @@ impl DataSource for DataSourceS3Plugin {
     ) -> Result<(), std::io::Error> {
         self.sync(offsets, output).await
     }
+
+    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
+        crate::plugins::SourceExecutionContract::finite()
+    }
 }

@@ -27,6 +27,7 @@ data_sources:
       password: postgres
       database: skippr_iceberg_e2e
       tables: ["type_matrix_orders"]
+      cdc_mode: snapshot_then_cdc
       cdc_idle_timeout_seconds: 5
 
 data_sinks:

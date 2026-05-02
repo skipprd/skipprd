@@ -15,9 +15,11 @@ use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use crate::plugins::cdc::{
     source_capabilities, CheckpointAuthority, CheckpointKind, MongodbCheckpoint, MutationKind,
-    SourceCapability, WalRowMeta,
+    WalRowMeta,
 };
-use crate::plugins::{DataSink, DataSource};
+use crate::plugins::{
+    DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
+};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceMongodbPluginConfig {
@@ -29,7 +31,8 @@ pub struct DataSourceMongodbPluginConfig {
     pub format: Option<String>,
     pub batch_size_bytes: Option<i64>,
     pub batch_size_seconds: Option<i64>,
-    pub cdc_enabled: Option<bool>,
+    #[serde(default)]
+    pub cdc_mode: SourceCdcMode,
 }
 
 impl TryFrom<PluginConfigEntry> for DataSourceMongodbPluginConfig {
@@ -67,7 +70,7 @@ impl DataSourceMongodbPlugin {
                         .parse()
                         .unwrap_or(600),
                 ),
-                cdc_enabled: None,
+                cdc_mode: SourceCdcMode::Snapshot,
             },
         };
         Self {
@@ -83,8 +86,8 @@ impl DataSourceMongodbPlugin {
         }
     }
 
-    fn is_cdc_enabled(&self) -> bool {
-        self.config.cdc_enabled.unwrap_or(false)
+    fn cdc_mode(&self) -> SourceCdcMode {
+        self.config.cdc_mode
     }
 
     async fn sync_query(
@@ -218,6 +221,7 @@ impl DataSourceMongodbPlugin {
         &mut self,
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        mode: SourceCdcMode,
     ) -> Result<(), std::io::Error> {
         let client_options = ClientOptions::parse(&self.config.connection_string)
             .await
@@ -266,47 +270,48 @@ impl DataSourceMongodbPlugin {
                     None
                 }
             }
-        } else {
-            match collection
+        } else if mode.includes_initial_snapshot() {
+            let stream = collection
                 .watch()
                 .full_document(FullDocumentType::UpdateLookup)
                 .await
-            {
-                Ok(stream) => {
-                    let token = stream.resume_token();
-                    info!("MongoDB CDC: captured initial resume token");
-                    token
-                }
-                Err(e) => {
-                    info!(
-                        "MongoDB CDC: change streams unavailable ({}), snapshot-only mode",
-                        e
-                    );
-                    None
-                }
-            }
+                .map_err(|e| {
+                    std::io::Error::other(format!("MongoDB CDC requires change streams: {}", e))
+                })?;
+            stream
+                .resume_token()
+                .ok_or_else(|| {
+                    std::io::Error::other("MongoDB CDC could not capture an initial resume token")
+                })
+                .map(Some)?
+        } else {
+            None
         };
 
         // Phase 1: Anchored snapshot (skipped on resume)
-        if !resume_mode {
+        if mode.includes_initial_snapshot() && !resume_mode {
             info!("MongoDB CDC: running initial snapshot");
             self.sync_query(offsets.clone(), shared_output.clone(), Some(&anchor_bytes))
                 .await?;
+        } else if mode == SourceCdcMode::CdcOnly && !resume_mode {
+            info!("MongoDB CDC: cdc_only mode skips initial snapshot");
         }
 
         // Phase 2: Change stream from resume token
-        let Some(token) = resume_token else {
-            info!("MongoDB CDC: no resume token, snapshot-only mode complete");
-            return Ok(());
-        };
-
-        info!("MongoDB CDC: starting change stream from resume token");
-        let mut stream = collection
+        info!("MongoDB CDC: starting change stream");
+        let watch = collection
             .watch()
-            .full_document(FullDocumentType::UpdateLookup)
-            .resume_after(token)
-            .await
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            .full_document(FullDocumentType::UpdateLookup);
+        let mut stream = if let Some(token) = resume_token {
+            watch
+                .resume_after(token)
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+        } else {
+            watch
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+        };
 
         let namespace = format!(
             "mongodb.{}.{}",
@@ -416,18 +421,28 @@ impl DataSource for DataSourceMongodbPlugin {
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> Result<(), std::io::Error> {
-        if self.is_cdc_enabled() {
-            self.sync_cdc(offsets, shared_output).await
-        } else {
-            self.sync_query(offsets, shared_output, None).await
+        match self.cdc_mode() {
+            SourceCdcMode::Snapshot => self.sync_query(offsets, shared_output, None).await,
+            mode @ (SourceCdcMode::SnapshotThenCdc | SourceCdcMode::CdcOnly) => {
+                self.sync_cdc(offsets, shared_output, mode).await
+            }
         }
     }
 
-    fn capability(&self) -> Option<&'static SourceCapability> {
-        if self.is_cdc_enabled() {
-            Some(&source_capabilities::MONGODB)
+    fn execution_contract(&self) -> SourceExecutionContract {
+        let mode = self.cdc_mode();
+        if mode.includes_cdc_stream() {
+            SourceExecutionContract::configurable_cdc(
+                mode,
+                &source_capabilities::MONGODB,
+                SourceOnceContract::HostIdleBounded,
+            )
         } else {
-            None
+            SourceExecutionContract::configurable_cdc(
+                mode,
+                &source_capabilities::MONGODB,
+                SourceOnceContract::Finite,
+            )
         }
     }
 }

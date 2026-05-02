@@ -15,7 +15,7 @@ use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::{DataSink, DataSource};
+use crate::plugins::{DataSink, DataSource, SourceExecutionContract, SourceOnceContract};
 use crate::RUNNING;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -406,5 +406,13 @@ impl DataSource for DataSourceKinesisPlugin {
     ) -> Result<(), std::io::Error> {
         self.sync(offsets, output).await;
         Ok(())
+    }
+
+    fn execution_contract(&self) -> SourceExecutionContract {
+        if self.config.mode.as_deref().unwrap_or("batch") == "stream" {
+            SourceExecutionContract::stream(SourceOnceContract::HostIdleBounded)
+        } else {
+            SourceExecutionContract::finite()
+        }
     }
 }

@@ -48,4 +48,8 @@ impl DataSource for DataSourcePcapPlugin {
             "pcap support not compiled -- enable the pcap feature",
         ))
     }
+
+    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
+        crate::plugins::SourceExecutionContract::finite()
+    }
 }

@@ -360,4 +360,8 @@ impl DataSource for DataSourceLocalFilePlugin {
         self.sync(offsets, output).await;
         Ok(())
     }
+
+    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
+        crate::plugins::SourceExecutionContract::finite()
+    }
 }

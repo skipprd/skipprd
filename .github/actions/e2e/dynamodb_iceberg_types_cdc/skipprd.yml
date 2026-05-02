@@ -23,7 +23,7 @@ data_sources:
     Dynamodb:
       table_name: skippr_iceberg_dynamodb_types_cdc
       region: us-east-1
-      cdc_enabled: true
+      cdc_mode: snapshot_then_cdc
 
 data_sinks:
   iceberg_types_cdc:

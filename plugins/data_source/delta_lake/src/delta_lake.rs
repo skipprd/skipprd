@@ -191,4 +191,8 @@ impl DataSource for DataSourceDeltaLakePlugin {
         info!("Delta Lake: sync complete for {}", self.config.table_uri);
         Ok(())
     }
+
+    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
+        crate::plugins::SourceExecutionContract::finite()
+    }
 }

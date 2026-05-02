@@ -185,4 +185,10 @@ impl DataSource for DataSourceSocketPlugin {
 
         Ok(())
     }
+
+    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
+        crate::plugins::SourceExecutionContract::stream(
+            crate::plugins::SourceOnceContract::HostIdleBounded,
+        )
+    }
 }

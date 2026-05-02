@@ -196,4 +196,8 @@ impl DataSource for DataSourceMotherduckPlugin {
 
         Ok(())
     }
+
+    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
+        crate::plugins::SourceExecutionContract::finite()
+    }
 }

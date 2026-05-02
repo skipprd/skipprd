@@ -14,8 +14,10 @@ use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::cdc::{source_capabilities, MutationKind, SourceCapability, WalRowMeta};
-use crate::plugins::{DataSink, DataSource};
+use crate::plugins::cdc::{source_capabilities, MutationKind, WalRowMeta};
+use crate::plugins::{
+    DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
+};
 use crate::RUNNING;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -33,7 +35,8 @@ pub struct DataSourceKafkaPluginConfig {
     pub format: Option<String>,
     pub batch_size_bytes: Option<i64>,
     pub batch_size_seconds: Option<i64>,
-    pub cdc_enabled: Option<bool>,
+    #[serde(default)]
+    pub cdc_mode: SourceCdcMode,
     pub debezium_format: Option<bool>,
 }
 
@@ -68,7 +71,7 @@ impl DataSourceKafkaPlugin {
                 format: None,
                 batch_size_bytes: None,
                 batch_size_seconds: None,
-                cdc_enabled: None,
+                cdc_mode: SourceCdcMode::Snapshot,
                 debezium_format: None,
             },
         };
@@ -85,8 +88,8 @@ impl DataSourceKafkaPlugin {
         }
     }
 
-    fn is_cdc_enabled(&self) -> bool {
-        self.config.cdc_enabled.unwrap_or(false)
+    fn cdc_mode(&self) -> SourceCdcMode {
+        self.config.cdc_mode
     }
 
     fn make_event_id(topic: &str, partition: i32, offset: i64) -> Vec<u8> {
@@ -151,7 +154,13 @@ impl DataSource for DataSourceKafkaPlugin {
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> Result<(), std::io::Error> {
-        let cdc = self.is_cdc_enabled();
+        let cdc_mode = self.cdc_mode();
+        if cdc_mode == SourceCdcMode::SnapshotThenCdc {
+            return Err(std::io::Error::other(
+                "Kafka does not support cdc_mode=snapshot_then_cdc because it has no snapshot API; use cdc_mode=cdc_only for CDC metadata",
+            ));
+        }
+        let cdc = cdc_mode.includes_cdc_stream();
         let debezium = self.config.debezium_format.unwrap_or(false);
 
         let group_id = self
@@ -298,11 +307,16 @@ impl DataSource for DataSourceKafkaPlugin {
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static SourceCapability> {
-        if self.is_cdc_enabled() {
-            Some(&source_capabilities::KAFKA)
+    fn execution_contract(&self) -> SourceExecutionContract {
+        let once = if self.config.mode.as_deref() == Some("batch") {
+            SourceOnceContract::PluginIdleBounded
         } else {
-            None
-        }
+            SourceOnceContract::HostIdleBounded
+        };
+        SourceExecutionContract::configurable_cdc(
+            self.cdc_mode(),
+            &source_capabilities::KAFKA,
+            once,
+        )
     }
 }

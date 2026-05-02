@@ -14,7 +14,7 @@ use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::{DataSink, DataSource};
+use crate::plugins::{DataSink, DataSource, SourceExecutionContract, SourceOnceContract};
 use crate::RUNNING;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -253,6 +253,14 @@ impl DataSource for DataSourceHttpClientPlugin {
                 Ok(())
             }
             None => self.fetch_once(&offsets, &shared_output).await,
+        }
+    }
+
+    fn execution_contract(&self) -> SourceExecutionContract {
+        if self.config.scrape_interval_seconds.is_some() {
+            SourceExecutionContract::stream(SourceOnceContract::HostIdleBounded)
+        } else {
+            SourceExecutionContract::finite()
         }
     }
 }

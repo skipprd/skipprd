@@ -11,7 +11,7 @@ use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::{DataSink, DataSource};
+use crate::plugins::{DataSink, DataSource, SourceExecutionContract, SourceOnceContract};
 use crate::RUNNING;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -169,5 +169,13 @@ impl DataSource for DataSourceMqttPlugin {
 
         let _ = client.disconnect().await;
         Ok(())
+    }
+
+    fn execution_contract(&self) -> SourceExecutionContract {
+        if self.config.mode.as_deref() == Some("batch") {
+            SourceExecutionContract::stream(SourceOnceContract::PluginIdleBounded)
+        } else {
+            SourceExecutionContract::stream(SourceOnceContract::HostIdleBounded)
+        }
     }
 }

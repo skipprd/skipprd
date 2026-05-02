@@ -3,6 +3,7 @@ pub mod traits;
 
 pub use traits::{
     DataSink, DataSource, RuntimeIngestRelay, SchemaSink, SchemaSource, SchemaSyncRequest,
+    SourceCdcContract, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
 
 /// No-op output plugin used by `discover` mode to run the input pipeline

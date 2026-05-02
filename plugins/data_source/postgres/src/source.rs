@@ -13,9 +13,11 @@ use skippr_core::helpers::offsets::{OffsetKey, Offsets};
 use skippr_core::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use skippr_core::plugins::cdc::{
     source_capabilities, CheckpointAuthority, CheckpointKind, MutationKind, PostgresCheckpoint,
-    SourceCapability, WalRowMeta,
+    WalRowMeta,
 };
-use skippr_core::plugins::{DataSink, DataSource};
+use skippr_core::plugins::{
+    DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
+};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DataSourcePostgresPluginConfig {
@@ -31,7 +33,8 @@ pub struct DataSourcePostgresPluginConfig {
     pub format: Option<String>,
     pub batch_size_bytes: Option<i64>,
     pub batch_size_seconds: Option<i64>,
-    pub cdc_enabled: Option<bool>,
+    #[serde(default)]
+    pub cdc_mode: SourceCdcMode,
     pub replication_slot_name: Option<String>,
     pub publication_name: Option<String>,
     #[serde(default)]
@@ -121,6 +124,10 @@ impl DataSourcePostgresPlugin {
             .unwrap_or_else(|| "skippr_publication".to_string())
     }
 
+    fn cdc_mode(&self) -> SourceCdcMode {
+        self.config.cdc_mode
+    }
+
     fn checkpoint_key(slot_name: &str) -> String {
         format!("postgres:{slot_name}:lsn")
     }
@@ -197,10 +204,83 @@ impl DataSourcePostgresPlugin {
         )
     }
 
+    async fn sync_snapshot(
+        &mut self,
+        offsets: Arc<Offsets>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+    ) -> io::Result<()> {
+        let conn_str = self.connection_string();
+        let (client, conn) = tokio_postgres::connect(&conn_str, NoTls)
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        tokio::spawn(async move {
+            if let Err(err) = conn.await {
+                tracing::error!("Postgres snapshot connection error: {}", err);
+            }
+        });
+
+        let tables = if let Some(ref configured) = self.config.tables {
+            configured.clone()
+        } else {
+            client
+                .query(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
+                    &[],
+                )
+                .await
+                .map_err(|err| io::Error::other(err.to_string()))?
+                .iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect()
+        };
+
+        let batch_size = self.config.batch_size_rows.unwrap_or(10_000);
+        for table_name in &tables {
+            let namespace = format!("postgres.{}", table_name);
+            let offset_key = OffsetKey::new(namespace.clone(), table_name.clone());
+
+            info!("Runtime Postgres snapshot: reading {}", table_name);
+            let rows = client
+                .query(&format!("SELECT * FROM {}", table_name), &[])
+                .await
+                .map_err(|err| io::Error::other(err.to_string()))?;
+
+            let mut current_batch = Vec::new();
+            for row in &rows {
+                let json_str = Self::row_to_json(row);
+                let bytes = json_str.len();
+                current_batch.push(IngestBatch::new(
+                    offset_key.clone(),
+                    json_str,
+                    bytes,
+                    format!("postgres://{}", table_name),
+                    Some(namespace.clone()),
+                    None,
+                ));
+
+                if current_batch.len() >= batch_size {
+                    self.ingest_batches(
+                        std::mem::take(&mut current_batch),
+                        offsets.clone(),
+                        shared_output.clone(),
+                    );
+                }
+            }
+
+            if !current_batch.is_empty() {
+                self.ingest_batches(current_batch, offsets.clone(), shared_output.clone());
+            }
+        }
+
+        info!("Runtime Postgres snapshot complete; CDC disabled");
+        Ok(())
+    }
+
     async fn sync_cdc(
         &mut self,
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        mode: SourceCdcMode,
     ) -> io::Result<()> {
         let conn_str = self.connection_string();
         let slot_name = self.slot_name();
@@ -282,10 +362,8 @@ impl DataSourcePostgresPlugin {
             }
         };
 
-        let tables: Vec<String> = if resume_mode {
-            info!("Runtime Postgres CDC: skipping snapshot (resuming from stored LSN)");
-            Vec::new()
-        } else {
+        let should_run_snapshot = mode.includes_initial_snapshot() && !resume_mode;
+        let tables: Vec<String> = if should_run_snapshot {
             let table_rows = ddl_client
                 .query(
                     "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
@@ -302,6 +380,17 @@ impl DataSourcePostgresPlugin {
                     .map(|row| row.get::<_, String>(0))
                     .collect()
             }
+        } else {
+            match (resume_mode, mode) {
+                (true, _) => {
+                    info!("Runtime Postgres CDC: skipping snapshot (resuming from stored LSN)")
+                }
+                (false, SourceCdcMode::CdcOnly) => {
+                    info!("Runtime Postgres CDC: cdc_only mode skips initial snapshot")
+                }
+                _ => {}
+            }
+            Vec::new()
         };
 
         let batch_size = self.config.batch_size_rows.unwrap_or(10_000);
@@ -350,11 +439,11 @@ impl DataSourcePostgresPlugin {
             }
         }
 
-        if !resume_mode {
+        if should_run_snapshot {
             self.store_resume_checkpoint(offsets.as_ref(), &slot_name, snapshot_lsn)?;
         }
 
-        info!("Runtime Postgres CDC snapshot complete, starting logical replication");
+        info!("Runtime Postgres CDC bootstrap complete, starting logical replication");
 
         use pgwire_replication::{ReplicationClient, ReplicationConfig, ReplicationEvent};
 
@@ -509,11 +598,35 @@ impl DataSource for DataSourcePostgresPlugin {
         offsets: Arc<Offsets>,
         output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> Result<(), std::io::Error> {
-        self.sync_cdc(offsets, output).await
+        match self.cdc_mode() {
+            SourceCdcMode::Snapshot => self.sync_snapshot(offsets, output).await,
+            mode @ (SourceCdcMode::SnapshotThenCdc | SourceCdcMode::CdcOnly) => {
+                self.sync_cdc(offsets, output, mode).await
+            }
+        }
     }
 
-    fn capability(&self) -> Option<&'static SourceCapability> {
-        Some(&source_capabilities::POSTGRES)
+    fn execution_contract(&self) -> SourceExecutionContract {
+        let mode = self.cdc_mode();
+        if mode.includes_cdc_stream() {
+            let once = if self
+                .config
+                .cdc_idle_timeout_seconds
+                .filter(|s| *s > 0)
+                .is_some()
+            {
+                SourceOnceContract::PluginIdleBounded
+            } else {
+                SourceOnceContract::HostIdleBounded
+            };
+            SourceExecutionContract::configurable_cdc(mode, &source_capabilities::POSTGRES, once)
+        } else {
+            SourceExecutionContract::configurable_cdc(
+                mode,
+                &source_capabilities::POSTGRES,
+                SourceOnceContract::Finite,
+            )
+        }
     }
 }
 
@@ -526,4 +639,51 @@ fn parse_pg_lsn(lsn_str: &str) -> u64 {
     let high = u64::from_str_radix(parts[0], 16).unwrap_or(0);
     let low = u64::from_str_radix(parts[1], 16).unwrap_or(0);
     (high << 32) | low
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plugin(cdc_mode: SourceCdcMode) -> DataSourcePostgresPlugin {
+        DataSourcePostgresPlugin::with_runtime_config(DataSourcePostgresPluginConfig {
+            host: Some("localhost".to_string()),
+            port: Some(5432),
+            user: Some("postgres".to_string()),
+            password: Some("postgres".to_string()),
+            database: Some("postgres".to_string()),
+            connection_string: None,
+            tables: Some(vec!["people".to_string()]),
+            query: None,
+            batch_size_rows: None,
+            format: None,
+            batch_size_bytes: None,
+            batch_size_seconds: None,
+            cdc_mode,
+            replication_slot_name: None,
+            publication_name: None,
+            cdc_idle_timeout_seconds: None,
+        })
+    }
+
+    #[test]
+    fn snapshot_then_cdc_reports_cdc_capability() {
+        let plugin = plugin(SourceCdcMode::SnapshotThenCdc);
+        assert_eq!(plugin.cdc_mode(), SourceCdcMode::SnapshotThenCdc);
+        assert!(plugin.capability().is_some());
+    }
+
+    #[test]
+    fn snapshot_mode_has_no_cdc_capability() {
+        let plugin = plugin(SourceCdcMode::Snapshot);
+        assert_eq!(plugin.cdc_mode(), SourceCdcMode::Snapshot);
+        assert!(plugin.capability().is_none());
+    }
+
+    #[test]
+    fn cdc_only_reports_cdc_capability() {
+        let plugin = plugin(SourceCdcMode::CdcOnly);
+        assert_eq!(plugin.cdc_mode(), SourceCdcMode::CdcOnly);
+        assert!(plugin.capability().is_some());
+    }
 }

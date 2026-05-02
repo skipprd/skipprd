@@ -8,7 +8,7 @@ use aws_sdk_dynamodbstreams::types::{OperationType, ShardIteratorType};
 use aws_sdk_dynamodbstreams::Client as StreamsClient;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use num_cpus;
-use serde_derive::Deserialize;
+use serde_derive::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tracing::{error, info, warn};
 
@@ -18,14 +18,21 @@ use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use crate::plugins::cdc::{
     source_capabilities, CheckpointAuthority, CheckpointKind, DynamodbCheckpoint, MutationKind,
-    SourceCapability, WalRowMeta,
+    WalRowMeta,
 };
-use crate::plugins::{DataSink, DataSource};
+use crate::plugins::{
+    DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
+};
 
 /// CDC scan configuration passed to `sync_scan` when CDC tagging is needed.
 struct CdcScanConfig {
     key_attrs: Vec<String>,
     anchor_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DynamodbSnapshotCheckpoint {
+    stream_arn: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -36,7 +43,8 @@ pub struct DataSourceDynamodbPluginConfig {
     pub format: Option<String>,
     pub batch_size_bytes: Option<i64>,
     pub batch_size_seconds: Option<i64>,
-    pub cdc_enabled: Option<bool>,
+    #[serde(default)]
+    pub cdc_mode: SourceCdcMode,
 }
 
 impl TryFrom<PluginConfigEntry> for DataSourceDynamodbPluginConfig {
@@ -103,7 +111,7 @@ impl DataSourceDynamodbPlugin {
                         format: Some("row".to_string()),
                         batch_size_bytes: None,
                         batch_size_seconds: None,
-                        cdc_enabled: None,
+                        cdc_mode: SourceCdcMode::Snapshot,
                     }
                 }
             };
@@ -164,8 +172,8 @@ impl DataSourceDynamodbPlugin {
         serde_json::to_string(&Value::Object(map)).unwrap_or_default()
     }
 
-    fn is_cdc_enabled(&self) -> bool {
-        self.config.cdc_enabled.unwrap_or(false)
+    fn cdc_mode(&self) -> SourceCdcMode {
+        self.config.cdc_mode
     }
 
     fn item_key_hash(item: &HashMap<String, AttributeValue>, key_attrs: &[String]) -> Vec<u8> {
@@ -320,6 +328,7 @@ impl DataSourceDynamodbPlugin {
         &mut self,
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        mode: SourceCdcMode,
     ) -> Result<(), std::io::Error> {
         let table_name = self.config.table_name.clone();
 
@@ -350,29 +359,58 @@ impl DataSourceDynamodbPlugin {
 
         // --- Phase 1: discover the stream ARN ---
         let stream_arn = self.discover_stream_arn(&table_name).await?;
+        let snapshot_checkpoint_key = format!("dynamodb:{}:snapshot_complete", table_name);
+        let snapshot_done = offsets
+            .load_checkpoint_payload::<DynamodbSnapshotCheckpoint>(&snapshot_checkpoint_key)
+            .is_some();
+        let should_run_snapshot = mode.includes_initial_snapshot() && !snapshot_done;
 
         // --- Phase 2: anchored snapshot ---
         let anchor_bytes = chrono::Utc::now().timestamp_millis().to_be_bytes().to_vec();
 
-        info!(
-            "DynamoDB CDC: anchored snapshot for {} (key_attrs={:?})",
-            &table_name, key_attrs
-        );
+        if should_run_snapshot {
+            info!(
+                "DynamoDB CDC: anchored snapshot for {} (key_attrs={:?})",
+                &table_name, key_attrs
+            );
 
-        let cfg = CdcScanConfig {
-            key_attrs: key_attrs.clone(),
-            anchor_bytes,
-        };
-        self.sync_scan(offsets.clone(), shared_output.clone(), Some(&cfg))
-            .await;
+            let cfg = CdcScanConfig {
+                key_attrs: key_attrs.clone(),
+                anchor_bytes,
+            };
+            self.sync_scan(offsets.clone(), shared_output.clone(), Some(&cfg))
+                .await;
+            offsets
+                .store_checkpoint_payload(
+                    &snapshot_checkpoint_key,
+                    CheckpointAuthority::WalOwnership,
+                    CheckpointKind::BootstrapProgress,
+                    1,
+                    &DynamodbSnapshotCheckpoint {
+                        stream_arn: stream_arn.clone(),
+                    },
+                )
+                .map_err(std::io::Error::other)?;
+        } else if snapshot_done {
+            info!("DynamoDB CDC: skipping snapshot (bootstrap checkpoint exists)");
+        } else if mode == SourceCdcMode::CdcOnly {
+            info!("DynamoDB CDC: cdc_only mode skips initial snapshot");
+        }
 
         // --- Phase 3: consume DynamoDB Streams ---
         info!(
             "DynamoDB CDC: starting stream consumption from {}",
             stream_arn
         );
-        self.consume_stream(&stream_arn, &table_name, &key_attrs, offsets, shared_output)
-            .await
+        self.consume_stream(
+            &stream_arn,
+            &table_name,
+            &key_attrs,
+            offsets,
+            shared_output,
+            mode,
+        )
+        .await
     }
 
     async fn discover_stream_arn(&self, table_name: &str) -> Result<String, std::io::Error> {
@@ -407,6 +445,7 @@ impl DataSourceDynamodbPlugin {
         key_attrs: &[String],
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        mode: SourceCdcMode,
     ) -> Result<(), std::io::Error> {
         let desc = self
             .streams_client
@@ -446,6 +485,7 @@ impl DataSourceDynamodbPlugin {
                 key_attrs,
                 offsets.clone(),
                 shared_output.clone(),
+                mode,
             )
             .await?;
         }
@@ -461,6 +501,7 @@ impl DataSourceDynamodbPlugin {
         _key_attrs: &[String],
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        mode: SourceCdcMode,
     ) -> Result<(), std::io::Error> {
         let namespace = format!("dynamodb.{}", table_name);
         let shard_offset_key = OffsetKey {
@@ -488,7 +529,11 @@ impl DataSourceDynamodbPlugin {
                 .shard_iterator_type(ShardIteratorType::AfterSequenceNumber)
                 .sequence_number(seq_str);
         } else {
-            iter_builder = iter_builder.shard_iterator_type(ShardIteratorType::Latest);
+            iter_builder = iter_builder.shard_iterator_type(if mode == SourceCdcMode::CdcOnly {
+                ShardIteratorType::Latest
+            } else {
+                ShardIteratorType::TrimHorizon
+            });
         }
 
         let iter_resp = iter_builder.send().await.map_err(|e| {
@@ -698,19 +743,31 @@ impl DataSource for DataSourceDynamodbPlugin {
         offsets: Arc<Offsets>,
         output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> Result<(), std::io::Error> {
-        if self.is_cdc_enabled() {
-            self.sync_cdc(offsets, output).await
-        } else {
-            self.sync_scan(offsets, output, None).await;
-            Ok(())
+        match self.cdc_mode() {
+            SourceCdcMode::Snapshot => {
+                self.sync_scan(offsets, output, None).await;
+                Ok(())
+            }
+            mode @ (SourceCdcMode::SnapshotThenCdc | SourceCdcMode::CdcOnly) => {
+                self.sync_cdc(offsets, output, mode).await
+            }
         }
     }
 
-    fn capability(&self) -> Option<&'static SourceCapability> {
-        if self.is_cdc_enabled() {
-            Some(&source_capabilities::DYNAMODB)
+    fn execution_contract(&self) -> SourceExecutionContract {
+        let mode = self.cdc_mode();
+        if mode.includes_cdc_stream() {
+            SourceExecutionContract::configurable_cdc(
+                mode,
+                &source_capabilities::DYNAMODB,
+                SourceOnceContract::PluginIdleBounded,
+            )
         } else {
-            None
+            SourceExecutionContract::configurable_cdc(
+                mode,
+                &source_capabilities::DYNAMODB,
+                SourceOnceContract::Finite,
+            )
         }
     }
 }
