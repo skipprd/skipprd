@@ -101,6 +101,20 @@ This keeps the offsets DB as a host-owned materialized view of committed WAL sta
 
 The host may resend sink or schema work after reconnect, restart, or crash. Stable `compaction_id` values are the semantic idempotency key for that replay.
 
+## Source execution contracts
+
+Every source plugin must implement `DataSource::execution_contract()`. The contract declares both `--once` termination behavior and CDC behavior, so adding a new source without choosing these semantics fails at compile time.
+
+CDC-capable source configs use `cdc_mode`:
+
+| Value | Runtime behavior |
+|---|---|
+| `snapshot` | Bounded snapshot only. The source does not advertise a CDC capability. |
+| `snapshot_then_cdc` | Initial snapshot, checkpoint, then native CDC stream. Later runs resume from checkpoints and skip the snapshot. |
+| `cdc_only` | Native CDC stream only. No initial snapshot is performed. |
+
+Use `SourceCdcMode` in plugin config structs and derive active CDC capability from `SourceExecutionContract`. Do not hand-roll separate config flags and capability branches.
+
 ## Config-level version pins
 
 Plugin config entries support an optional `version` field. That gives maintainers a way to pin one runtime plugin while leaving the rest on latest:
