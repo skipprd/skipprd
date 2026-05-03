@@ -28,6 +28,8 @@ This repository contains **Skippr** — a Rust-based data ingestion and transfor
 - **Test:** `cargo test`
 - **Format check:** `cargo fmt --all -- --check` (existing formatting diffs may exist)
 - **Clippy:** `cargo clippy` (run without `-D warnings` unless explicitly requested)
+- **Runtime e2e harness:** before release/tag work, run the relevant local unit and harness tests plus the targeted runtime e2e path when credentials/services are available. At minimum, validate harness changes with `python3 .github/scripts/test_runtime_e2e_harness.py`.
+- **GitHub release CI:** the release workflow is tag-triggered. Use the scratch tag `0.0.0` for CI validation reruns, then move the intended release tag only after local tests pass and the relevant `0.0.0` GitHub Actions run is healthy.
 
 ## Key gotchas
 

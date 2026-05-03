@@ -757,8 +757,7 @@ def run_sync(skipprd: Path, sync_run: SyncRun, base_env: dict[str, str]) -> None
     pipeline = namespaced_name(sync_run.pipeline, namespace)
     if sync_run.command not in {"discover", "sync"}:
         raise HarnessError(f"unsupported skipprd command: {sync_run.command}")
-    command = [
-        str(skipprd),
+    command = skippr_engine_command_prefix(skipprd, env) + [
         sync_run.command,
         "--log",
         "--pipeline",
@@ -772,6 +771,16 @@ def run_sync(skipprd: Path, sync_run: SyncRun, base_env: dict[str, str]) -> None
         allow_exit_codes=sync_run.allow_exit_codes,
         timeout_seconds=sync_run.timeout_seconds,
     )
+
+
+def skippr_engine_command_prefix(skipprd: Path, env: dict[str, str]) -> list[str]:
+    command = [str(skipprd)]
+    if skipprd.name in {"skippr", "skippr.exe"}:
+        config_path = env.get("SKIPPR_CONFIG_FILE")
+        if not config_path:
+            raise HarnessError("installed skippr CLI run requires SKIPPR_CONFIG_FILE")
+        command.extend(["--config", config_path])
+    return command
 
 
 def sha256(path: Path) -> str:

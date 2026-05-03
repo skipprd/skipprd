@@ -30,6 +30,11 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
                 "bike_hire_many",
                 "bike_hire_s3_wal_many",
                 "deadletters_test",
+                "dynamodb_iceberg_types_cdc",
+                "mssql_iceberg_debug_linux",
+                "mssql_iceberg_debug_windows",
+                "mysql_iceberg_types_cdc",
+                "postgres_iceberg_types_cdc",
             ],
         )
 
@@ -54,6 +59,29 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             resolved = runtime_e2e_harness.resolve_skipprd(str(artifact_dir))
 
             self.assertEqual(resolved, binary.resolve())
+
+    def test_skippr_engine_command_prefix_passes_config_to_installed_cli(self) -> None:
+        command = runtime_e2e_harness.skippr_engine_command_prefix(
+            Path("/usr/local/bin/skippr"),
+            {"SKIPPR_CONFIG_FILE": "/tmp/skippr-runtime-e2e/skippr.yaml"},
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "/usr/local/bin/skippr",
+                "--config",
+                "/tmp/skippr-runtime-e2e/skippr.yaml",
+            ],
+        )
+
+    def test_skippr_engine_command_prefix_leaves_skipprd_artifact_unchanged(self) -> None:
+        command = runtime_e2e_harness.skippr_engine_command_prefix(
+            Path("/tmp/skipprd-linux_x86/skipprd"),
+            {"SKIPPR_CONFIG_FILE": "/tmp/skippr-runtime-e2e/skippr.yaml"},
+        )
+
+        self.assertEqual(command, ["/tmp/skipprd-linux_x86/skipprd"])
 
     def test_find_downloaded_plugins_matches_expected_patterns(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -275,6 +303,46 @@ schema_sinks:
                         "manifest_filename": "glue-schema.json",
                         "manifest_stem": "glue-schema",
                         "package_version": "0.3.0",
+                    },
+                    {
+                        "manifest_filename": "postgres-source.json",
+                        "manifest_stem": "postgres-source",
+                        "package_version": "0.4.0",
+                    },
+                    {
+                        "manifest_filename": "mssql-source.json",
+                        "manifest_stem": "mssql-source",
+                        "package_version": "0.5.0",
+                    },
+                    {
+                        "manifest_filename": "mysql-source.json",
+                        "manifest_stem": "mysql-source",
+                        "package_version": "0.6.0",
+                    },
+                    {
+                        "manifest_filename": "dynamodb-source.json",
+                        "manifest_stem": "dynamodb-source",
+                        "package_version": "0.7.0",
+                    },
+                    {
+                        "manifest_filename": "iceberg-sink.json",
+                        "manifest_stem": "iceberg-sink",
+                        "package_version": "0.8.0",
+                    },
+                    {
+                        "manifest_filename": "iceberg-schema.json",
+                        "manifest_stem": "iceberg-schema",
+                        "package_version": "0.9.0",
+                    },
+                    {
+                        "manifest_filename": "snowflake-sink.json",
+                        "manifest_stem": "snowflake-sink",
+                        "package_version": "0.10.0",
+                    },
+                    {
+                        "manifest_filename": "snowflake-schema.json",
+                        "manifest_stem": "snowflake-schema",
+                        "package_version": "0.11.0",
                     },
                 ],
             ):
