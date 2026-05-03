@@ -140,14 +140,20 @@ fn runtime_compaction_id(filename: &str) -> String {
 
 fn runtime_schema_compaction_id(
     binding: RuntimeBinding,
-    schema_version: u64,
+    schema_fingerprint: &str,
     namespace: &str,
 ) -> String {
     let binding = match binding {
         RuntimeBinding::Primary => "primary",
         RuntimeBinding::Deadletter => "deadletter",
     };
-    format!("schema:{binding}:v{schema_version}:{namespace}")
+    format!("schema:{binding}:v{schema_fingerprint}:{namespace}")
+}
+
+fn runtime_schema_compaction_fingerprint(metadata: &OutputMetadata) -> String {
+    let bytes =
+        serde_json::to_vec(metadata).unwrap_or_else(|_| metadata.lineage_id().as_bytes().to_vec());
+    format!("{:x}", md5::compute(bytes))
 }
 
 impl RuntimeChildConnection {
@@ -1376,14 +1382,15 @@ impl SchemaSink for RuntimeSchemaSinkPlugin {
     async fn sync_schema(
         &self,
         namespace: &str,
-        _metadata: &crate::discover::OutputMetadata,
+        metadata: &crate::discover::OutputMetadata,
     ) -> Result<(), io::Error> {
         let schema_version = current_pipeline_schema_version();
+        let schema_fingerprint = runtime_schema_compaction_fingerprint(metadata);
         let request = SchemaRunRequest {
             request_id: next_runtime_request_id(),
             compaction_id: runtime_schema_compaction_id(
                 self.install_request.binding,
-                schema_version,
+                &schema_fingerprint,
                 namespace,
             ),
             binding: self.install_request.binding,
