@@ -862,11 +862,26 @@ fn iceberg_schema_from_output_metadata(
             Vec::new(),
         )?));
     }
+    append_cdc_encoded_fields(namespace, &mut fields);
     Schema::builder()
         .with_schema_id(0)
         .with_fields(fields)
         .build()
         .map_err(|err| io::Error::other(err.to_string()))
+}
+
+fn append_cdc_encoded_fields(namespace: &str, fields: &mut Vec<Arc<NestedField>>) {
+    for name in ["_skippr_mutation", "_skippr_order_token"] {
+        if fields.iter().any(|field| field.name == name) {
+            continue;
+        }
+        fields.push(Arc::new(NestedField::new(
+            crate::lineage::deterministic_field_id(namespace, &[name.to_string()]),
+            name,
+            Type::Primitive(PrimitiveType::String),
+            true,
+        )));
+    }
 }
 
 fn field_to_nested_field(
