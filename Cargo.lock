@@ -11886,7 +11886,6 @@ dependencies = [
  "arrow 56.2.0",
  "async-trait",
  "aws-config",
- "aws-sdk-glue",
  "aws-sdk-s3",
  "bytes",
  "clap",
@@ -11904,7 +11903,6 @@ dependencies = [
  "skippr-runtime-sdk",
  "tokio",
  "tracing",
- "uuid 1.18.1",
 ]
 
 [[package]]

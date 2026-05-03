@@ -900,11 +900,11 @@ pub mod sink_capabilities {
 
     pub const ICEBERG: SinkCapability = SinkCapability {
         name: "Iceberg",
-        guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
+        guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
         can_manage_skippr_columns: true,
-        can_maintain_tombstone_tables: true,
-        can_compare_order_tokens: true,
-        supports_transactions: true,
+        can_maintain_tombstone_tables: false,
+        can_compare_order_tokens: false,
+        supports_transactions: false,
     };
 
     pub const S3: SinkCapability = SinkCapability {
@@ -1128,17 +1128,17 @@ mod tests {
     }
 
     #[test]
-    fn test_dynamodb_to_iceberg_derives_exact_once() {
+    fn test_dynamodb_to_iceberg_derives_cdc_encoded() {
         let source = source_capabilities::DYNAMODB;
         let sink = sink_capabilities::ICEBERG;
         let keys = vec!["pk".to_string()];
         match derive_and_validate(&source, &sink, "events", &keys) {
             CompatibilityResult::Compatible(g) => {
-                assert_eq!(g, EffectiveGuarantee::ExactOnceFinalState);
+                assert_eq!(g, EffectiveGuarantee::CdcEncoded);
             }
             CompatibilityResult::Incompatible(reasons) => {
                 panic!(
-                    "dynamodb->Iceberg should derive ExactOnceFinalState, got: {:?}",
+                    "dynamodb->Iceberg should derive CdcEncoded, got: {:?}",
                     reasons
                 );
             }

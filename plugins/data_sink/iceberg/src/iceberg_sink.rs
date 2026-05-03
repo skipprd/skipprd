@@ -1,17 +1,15 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::pin::Pin;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll as TaskPoll};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use arrow::array::{Array, BooleanArray, RecordBatch, StringArray};
 use arrow::compute::filter_record_batch;
 use arrow::datatypes::SchemaRef;
 use arrow::util::display::array_value_to_string;
 use async_trait::async_trait;
-use aws_sdk_glue::types::TableInput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use datafusion::error::DataFusionError;
@@ -20,21 +18,16 @@ use datafusion::physical_plan::RecordBatchStream;
 use futures::Stream;
 use futures::StreamExt;
 use iceberg::spec::{
-    DataContentType, DataFileBuilder, DataFileFormat, FormatVersion, ListType, ManifestContentType,
-    ManifestListWriter, ManifestWriterBuilder, MapType, NestedField, Operation, PrimitiveType,
-    Schema, Snapshot, SnapshotReference, SnapshotRetention, Struct, Summary, Type, MAIN_BRANCH,
+    DataContentType, DataFileBuilder, DataFileFormat, ListType, MapType, NestedField,
+    PrimitiveType, Schema, Struct, Type,
 };
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
-use iceberg::{
-    Catalog, CatalogBuilder, MetadataLocation, NamespaceIdent, TableCreation, TableIdent,
-    TableUpdate,
-};
+use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent};
 use iceberg_catalog_glue::{GlueCatalog, GlueCatalogBuilder, GLUE_CATALOG_PROP_CATALOG_ID};
 use iceberg_catalog_glue::{AWS_REGION_NAME, GLUE_CATALOG_PROP_WAREHOUSE};
 use serde_derive::Deserialize;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 use crate::buffer::BufferChunker;
 use crate::discover::{OutputMetadata, SkipprDataType};
@@ -113,12 +106,6 @@ pub enum IcebergQueryEngineConfig {
 struct InstalledIcebergSchemaState {
     version: u64,
     namespaces: BTreeMap<String, OutputMetadata>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IcebergCommitMode {
-    FastAppend,
-    RowDelta,
 }
 
 pub struct DataSinkIcebergPlugin {
@@ -273,7 +260,7 @@ impl DataSinkIcebergPlugin {
         }
 
         let committed = self
-            .commit_files_with_retries(&catalog, table.identifier().clone(), commit_files)
+            .commit_append_with_retries(&catalog, table.identifier().clone(), commit_files)
             .await?;
         if !state_updates.is_empty() {
             self.persist_cdc_state(&namespace, state_updates).await?;
@@ -313,24 +300,6 @@ impl DataSinkIcebergPlugin {
             .map_err(|err| io::Error::other(err.to_string()))
     }
 
-    async fn commit_files_with_retries(
-        &self,
-        catalog: &GlueCatalog,
-        table_ident: TableIdent,
-        files: Vec<iceberg::spec::DataFile>,
-    ) -> Result<iceberg::table::Table, io::Error> {
-        match commit_mode_for_files(&files) {
-            IcebergCommitMode::FastAppend => {
-                self.commit_append_with_retries(catalog, table_ident, files)
-                    .await
-            }
-            IcebergCommitMode::RowDelta => {
-                self.commit_row_delta_with_retries(catalog, table_ident, files)
-                    .await
-            }
-        }
-    }
-
     async fn commit_append_with_retries(
         &self,
         catalog: &GlueCatalog,
@@ -366,282 +335,6 @@ impl DataSinkIcebergPlugin {
             table_ident,
             last_err.unwrap_or_else(|| "unknown error".to_string())
         )))
-    }
-
-    async fn commit_row_delta_with_retries(
-        &self,
-        catalog: &GlueCatalog,
-        table_ident: TableIdent,
-        files: Vec<iceberg::spec::DataFile>,
-    ) -> Result<iceberg::table::Table, io::Error> {
-        let mut last_err: Option<String> = None;
-        for attempt in 1..=3 {
-            let table = catalog
-                .load_table(&table_ident)
-                .await
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            match self.commit_row_delta_once(catalog, &table, &files).await {
-                Ok(table) => return Ok(table),
-                Err(err) => {
-                    let err = err.to_string();
-                    warn!(
-                        "Iceberg row-delta commit attempt {} failed for {}: {}",
-                        attempt, table_ident, err
-                    );
-                    last_err = Some(err);
-                }
-            }
-        }
-        Err(io::Error::other(format!(
-            "Iceberg row-delta commit failed after retries for {}: {}",
-            table_ident,
-            last_err.unwrap_or_else(|| "unknown error".to_string())
-        )))
-    }
-
-    async fn commit_row_delta_once(
-        &self,
-        catalog: &GlueCatalog,
-        table: &iceberg::table::Table,
-        files: &[iceberg::spec::DataFile],
-    ) -> Result<iceberg::table::Table, io::Error> {
-        if table.metadata().format_version() != FormatVersion::V2 {
-            return Err(io::Error::other(
-                "Iceberg CDC equality deletes require table format v2",
-            ));
-        }
-
-        let snapshot_id = generate_snapshot_id(table);
-        let commit_uuid = Uuid::new_v4();
-        let next_sequence_number = table.metadata().next_sequence_number();
-        let data_files: Vec<_> = files
-            .iter()
-            .filter(|file| file.content_type() == DataContentType::Data)
-            .cloned()
-            .collect();
-        let delete_files: Vec<_> = files
-            .iter()
-            .filter(|file| file.content_type() != DataContentType::Data)
-            .cloned()
-            .collect();
-
-        let mut manifests = Vec::new();
-        if !data_files.is_empty() {
-            manifests.push(
-                self.write_added_manifest(
-                    table,
-                    snapshot_id,
-                    commit_uuid,
-                    0,
-                    next_sequence_number,
-                    ManifestContentType::Data,
-                    data_files,
-                )
-                .await?,
-            );
-        }
-        if !delete_files.is_empty() {
-            manifests.push(
-                self.write_added_manifest(
-                    table,
-                    snapshot_id,
-                    commit_uuid,
-                    1,
-                    next_sequence_number,
-                    ManifestContentType::Deletes,
-                    delete_files,
-                )
-                .await?,
-            );
-        }
-
-        let manifest_list_path = format!(
-            "{}/metadata/snap-{}-0-{}.{}",
-            table.metadata().location(),
-            snapshot_id,
-            commit_uuid,
-            DataFileFormat::Avro
-        );
-        let mut manifest_list_writer = ManifestListWriter::v2(
-            table
-                .file_io()
-                .new_output(manifest_list_path.clone())
-                .map_err(|err| io::Error::other(err.to_string()))?,
-            snapshot_id,
-            table.metadata().current_snapshot_id(),
-            next_sequence_number,
-        );
-        manifest_list_writer
-            .add_manifests(manifests.into_iter())
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        manifest_list_writer
-            .close()
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))?;
-
-        let snapshot = Snapshot::builder()
-            .with_manifest_list(manifest_list_path)
-            .with_snapshot_id(snapshot_id)
-            .with_parent_snapshot_id(table.metadata().current_snapshot_id())
-            .with_sequence_number(next_sequence_number)
-            .with_summary(snapshot_summary_for_files(files))
-            .with_schema_id(table.metadata().current_schema_id())
-            .with_timestamp_ms(current_time_millis())
-            .build();
-        let updates = vec![
-            TableUpdate::AddSnapshot { snapshot },
-            TableUpdate::SetSnapshotRef {
-                ref_name: MAIN_BRANCH.to_string(),
-                reference: SnapshotReference::new(
-                    snapshot_id,
-                    SnapshotRetention::branch(None, None, None),
-                ),
-            },
-        ];
-
-        let current_metadata_location = table
-            .metadata_location_result()
-            .map_err(|err| io::Error::other(err.to_string()))?
-            .to_string();
-        let staged_metadata_location = MetadataLocation::from_str(&current_metadata_location)
-            .map_err(|err| io::Error::other(err.to_string()))?
-            .with_next_version()
-            .to_string();
-        let mut metadata_builder = table
-            .metadata()
-            .clone()
-            .into_builder(Some(current_metadata_location.clone()));
-        for update in updates {
-            metadata_builder = update
-                .apply(metadata_builder)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-        }
-        let staged_metadata = metadata_builder
-            .build()
-            .map_err(|err| io::Error::other(err.to_string()))?
-            .metadata;
-        staged_metadata
-            .write_to(table.file_io(), &staged_metadata_location)
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))?;
-
-        self.update_glue_metadata_location(
-            table.identifier(),
-            &current_metadata_location,
-            &staged_metadata_location,
-        )
-        .await?;
-        catalog
-            .load_table(table.identifier())
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))
-    }
-
-    async fn write_added_manifest(
-        &self,
-        table: &iceberg::table::Table,
-        snapshot_id: i64,
-        commit_uuid: Uuid,
-        manifest_idx: u64,
-        sequence_number: i64,
-        content: ManifestContentType,
-        files: Vec<iceberg::spec::DataFile>,
-    ) -> Result<iceberg::spec::ManifestFile, io::Error> {
-        let manifest_path = format!(
-            "{}/metadata/{}-m{}.{}",
-            table.metadata().location(),
-            commit_uuid,
-            manifest_idx,
-            DataFileFormat::Avro
-        );
-        let output = table
-            .file_io()
-            .new_output(manifest_path)
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        let builder = ManifestWriterBuilder::new(
-            output,
-            Some(snapshot_id),
-            None,
-            table.metadata().current_schema().clone(),
-            table.metadata().default_partition_spec().as_ref().clone(),
-        );
-        let mut writer = match content {
-            ManifestContentType::Data => builder.build_v2_data(),
-            ManifestContentType::Deletes => builder.build_v2_deletes(),
-        };
-        for file in files {
-            writer
-                .add_file(file, sequence_number)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-        }
-        writer
-            .write_manifest_file()
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))
-    }
-
-    async fn update_glue_metadata_location(
-        &self,
-        table_ident: &TableIdent,
-        current_metadata_location: &str,
-        staged_metadata_location: &str,
-    ) -> Result<(), io::Error> {
-        let catalog_namespace = self.catalog_namespace()?;
-        let glue_client = self.glue_client().await;
-        let mut get_table = glue_client
-            .get_table()
-            .database_name(&catalog_namespace)
-            .name(table_ident.name());
-        if let Some(catalog_id) = self.glue_catalog_id() {
-            get_table = get_table.catalog_id(catalog_id);
-        }
-        let glue_table = get_table
-            .send()
-            .await
-            .map_err(|err| io::Error::other(format!("failed to load Glue table: {err}")))?
-            .table
-            .ok_or_else(|| io::Error::other("Glue get_table response did not include a table"))?;
-
-        let mut parameters = glue_table.parameters().cloned().unwrap_or_default();
-        parameters.insert("table_type".to_string(), "ICEBERG".to_string());
-        parameters.insert(
-            "metadata_location".to_string(),
-            staged_metadata_location.to_string(),
-        );
-        parameters.insert(
-            "previous_metadata_location".to_string(),
-            current_metadata_location.to_string(),
-        );
-
-        let mut table_input = TableInput::builder()
-            .name(table_ident.name())
-            .set_parameters(Some(parameters))
-            .set_storage_descriptor(glue_table.storage_descriptor().cloned())
-            .set_partition_keys(Some(glue_table.partition_keys().to_vec()))
-            .table_type(glue_table.table_type().unwrap_or("EXTERNAL_TABLE"));
-        if let Some(description) = glue_table.description() {
-            table_input = table_input.description(description);
-        }
-        if let Some(owner) = glue_table.owner() {
-            table_input = table_input.owner(owner);
-        }
-        let table_input = table_input
-            .build()
-            .map_err(|err| io::Error::other(format!("failed to build Glue table input: {err}")))?;
-
-        let mut update_table = glue_client
-            .update_table()
-            .database_name(catalog_namespace)
-            .set_skip_archive(Some(true))
-            .table_input(table_input);
-        if let Some(catalog_id) = self.glue_catalog_id() {
-            update_table = update_table.catalog_id(catalog_id);
-        }
-        update_table
-            .send()
-            .await
-            .map_err(|err| io::Error::other(format!("failed to update Glue table: {err}")))?;
-        Ok(())
     }
 
     async fn prepare_cdc_stream(
@@ -916,33 +609,6 @@ impl DataSinkIcebergPlugin {
             .map_err(|err| io::Error::other(err.to_string()))
     }
 
-    async fn glue_client(&self) -> aws_sdk_glue::Client {
-        let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
-        if let Some(region) = self.glue_region() {
-            loader = loader.region(aws_sdk_glue::config::Region::new(region.to_string()));
-        }
-        let config = loader.load().await;
-        aws_sdk_glue::Client::new(&config)
-    }
-
-    fn glue_catalog_id(&self) -> Option<&str> {
-        match &self.config.catalog {
-            IcebergCatalogConfig::Glue { catalog_id, .. } => catalog_id.as_deref(),
-            IcebergCatalogConfig::Rest { .. }
-            | IcebergCatalogConfig::Unity { .. }
-            | IcebergCatalogConfig::Polaris { .. } => None,
-        }
-    }
-
-    fn glue_region(&self) -> Option<&str> {
-        match &self.config.catalog {
-            IcebergCatalogConfig::Glue { region, .. } => region.as_deref(),
-            IcebergCatalogConfig::Rest { .. }
-            | IcebergCatalogConfig::Unity { .. }
-            | IcebergCatalogConfig::Polaris { .. } => None,
-        }
-    }
-
     async fn ensure_table(
         &self,
         catalog: &GlueCatalog,
@@ -1107,89 +773,6 @@ fn iceberg_table_suffix(namespace: &str) -> String {
         "table".to_string()
     } else {
         trimmed
-    }
-}
-
-fn commit_mode_for_files(files: &[iceberg::spec::DataFile]) -> IcebergCommitMode {
-    commit_mode_for_content_types(files.iter().map(|file| file.content_type()))
-}
-
-fn commit_mode_for_content_types(
-    content_types: impl IntoIterator<Item = DataContentType>,
-) -> IcebergCommitMode {
-    if content_types
-        .into_iter()
-        .any(|content_type| content_type != DataContentType::Data)
-    {
-        IcebergCommitMode::RowDelta
-    } else {
-        IcebergCommitMode::FastAppend
-    }
-}
-
-fn generate_snapshot_id(table: &iceberg::table::Table) -> i64 {
-    loop {
-        let (lhs, rhs) = Uuid::new_v4().as_u64_pair();
-        let snapshot_id = (lhs ^ rhs) as i64;
-        let snapshot_id = if snapshot_id < 0 {
-            -snapshot_id
-        } else {
-            snapshot_id
-        };
-        if !table
-            .metadata()
-            .snapshots()
-            .any(|snapshot| snapshot.snapshot_id() == snapshot_id)
-        {
-            return snapshot_id;
-        }
-    }
-}
-
-fn current_time_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
-fn snapshot_summary_for_files(files: &[iceberg::spec::DataFile]) -> Summary {
-    let data_files = files
-        .iter()
-        .filter(|file| file.content_type() == DataContentType::Data)
-        .count();
-    let delete_files = files
-        .iter()
-        .filter(|file| file.content_type() != DataContentType::Data)
-        .count();
-    let added_records: u64 = files
-        .iter()
-        .filter(|file| file.content_type() == DataContentType::Data)
-        .map(|file| file.record_count())
-        .sum();
-    let deleted_records: u64 = files
-        .iter()
-        .filter(|file| file.content_type() != DataContentType::Data)
-        .map(|file| file.record_count())
-        .sum();
-    let mut additional_properties = HashMap::new();
-    if data_files > 0 {
-        additional_properties.insert("added-data-files".to_string(), data_files.to_string());
-        additional_properties.insert("added-records".to_string(), added_records.to_string());
-    }
-    if delete_files > 0 {
-        additional_properties.insert("added-delete-files".to_string(), delete_files.to_string());
-        additional_properties.insert("deleted-records".to_string(), deleted_records.to_string());
-    }
-    let operation = match (data_files > 0, delete_files > 0) {
-        (true, false) => Operation::Append,
-        (false, true) => Operation::Delete,
-        (true, true) => Operation::Overwrite,
-        (false, false) => Operation::Append,
-    };
-    Summary {
-        operation,
-        additional_properties,
     }
 }
 
@@ -1475,20 +1058,5 @@ mod tests {
             "type_matrix_orders"
         );
         assert_eq!(iceberg_table_suffix("S3.Raw-Orders"), "raw_orders");
-    }
-
-    #[test]
-    fn equality_delete_files_use_row_delta_commit_mode() {
-        assert_eq!(
-            commit_mode_for_content_types([DataContentType::Data]),
-            IcebergCommitMode::FastAppend
-        );
-        assert_eq!(
-            commit_mode_for_content_types([
-                DataContentType::Data,
-                DataContentType::EqualityDeletes
-            ]),
-            IcebergCommitMode::RowDelta
-        );
     }
 }
